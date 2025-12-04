@@ -25,16 +25,33 @@ void scheduler_create_task(void (*entry)()) {
     // Allocate stack (4KB)
     // We use malloc for simplicity, but ideally we should use PMM/VMM for guard pages
     new_process->stack_base = (uint64_t*)malloc(4096);
-    uint64_t* stack_top = (uint64_t*)((uint8_t*)new_process->stack_base + 4096);
+    if (!new_process->stack_base) {
+        // Handle allocation failure (e.g., panic or return)
+        return; 
+    }
+    
+    // Align stack top to 16 bytes
+    uint64_t stack_addr = (uint64_t)new_process->stack_base + 4096;
+    stack_addr &= ~0xF; 
+    uint64_t* stack_top = (uint64_t*)stack_addr;
     
     // Set up initial stack for switch_to_task
     // We need to emulate what switch_to_task expects to pop
     
+    // 0. Dummy return address (for when 'entry' starts, it looks like it was called)
+    // This ensures stack is 16-byte aligned - 8 when entry starts.
+    stack_top--;
+    *stack_top = 0;
+
     // 1. Return address (RIP) - this is where switch_to_task will "return" to
     stack_top--;
     *stack_top = (uint64_t)entry;
     
-    // 2. Callee-saved registers (R15, R14, R13, R12, RBP, RBX)
+    // 2. RFLAGS (0x202 = Interrupts Enabled | Reserved Bit)
+    stack_top--;
+    *stack_top = 0x202;
+
+    // 3. Callee-saved registers (R15, R14, R13, R12, RBP, RBX)
     // Initialize to 0
     for (int i = 0; i < 6; i++) {
         stack_top--;

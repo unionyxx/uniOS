@@ -7,6 +7,7 @@ section .text
 ; RSI = next process pointer
 switch_to_task:
     ; Save current context
+    pushfq              ; Save RFLAGS
     push rbx
     push rbp
     push r12
@@ -28,5 +29,6 @@ switch_to_task:
     pop r12
     pop rbp
     pop rbx
+    popfq               ; Restore RFLAGS
     
     ret

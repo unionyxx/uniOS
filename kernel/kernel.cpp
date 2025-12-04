@@ -18,6 +18,12 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".requests")))
+static volatile struct limine_module_request module_request = {
+    .id = LIMINE_MODULE_REQUEST,
+    .revision = 0
+};
+
 // Define the start and end markers for the Limine requests.
 // These can also be omitted if you don't need them, but they are good practice.
 __attribute__((used, section(".requests_start")))
@@ -45,7 +51,7 @@ static void put_pixel(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uin
     fb_ptr[y * (fb->pitch / 4) + x] = color;
 }
 
-static void draw_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, char c, uint32_t color) {
+void draw_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, char c, uint32_t color) {
     if (c < 0 || c > 127) return;
     
     const uint8_t *glyph = font8x8[(int)c];
@@ -59,7 +65,7 @@ static void draw_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, cha
     }
 }
 
-static void clear_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t bg_color) {
+void clear_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t bg_color) {
     // Fill the entire 8x8 character cell with background color
     for (int row = 0; row < 8; row++) {
         for (int col = 0; col < 9; col++) { // 9 to include padding
@@ -68,7 +74,7 @@ static void clear_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, ui
     }
 }
 
-static void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, const char *str, uint32_t color) {
+void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, const char *str, uint32_t color) {
     uint64_t cursor_x = x;
     uint64_t cursor_y = y;
     
@@ -93,6 +99,8 @@ static void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, c
 #include "vmm.h"
 #include "heap.h"
 #include "scheduler.h"
+#include "unifs.h"
+#include "shell.h"
 
 // Global framebuffer pointer for use in handlers
 static struct limine_framebuffer* g_framebuffer = nullptr;
@@ -101,9 +109,53 @@ static uint64_t cursor_y = 210;
 
 // Exception handler called from assembly
 extern "C" void exception_handler(void* stack_frame) {
-    (void)stack_frame;
+    uint64_t* regs = (uint64_t*)stack_frame;
+    // Stack layout from isr_common_stub:
+    // [0-14] Pushed regs (R15...RAX)
+    // [15] Int No
+    // [16] Err Code
+    // [17] RIP
+    // [18] CS
+    // [19] RFLAGS
+    
+    uint64_t int_no = regs[15];
+    uint64_t err_code = regs[16];
+    uint64_t rip = regs[17];
+
     if (g_framebuffer) {
         draw_string(g_framebuffer, 50, 400, "EXCEPTION CAUGHT!", 0xFF0000);
+        
+        char buf[32];
+        
+        // Print Int No
+        buf[0] = 'I'; buf[1] = 'N'; buf[2] = 'T'; buf[3] = ':'; buf[4] = ' ';
+        uint64_t val = int_no;
+        for (int i = 0; i < 16; i++) {
+            int nibble = (val >> (60 - i*4)) & 0xF;
+            buf[5+i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
+        }
+        buf[21] = 0;
+        draw_string(g_framebuffer, 50, 420, buf, 0xFFFFFF);
+        
+        // Print Err Code
+        buf[0] = 'E'; buf[1] = 'R'; buf[2] = 'R'; buf[3] = ':'; buf[4] = ' ';
+        val = err_code;
+        for (int i = 0; i < 16; i++) {
+            int nibble = (val >> (60 - i*4)) & 0xF;
+            buf[5+i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
+        }
+        buf[21] = 0;
+        draw_string(g_framebuffer, 50, 440, buf, 0xFFFFFF);
+        
+        // Print RIP
+        buf[0] = 'R'; buf[1] = 'I'; buf[2] = 'P'; buf[3] = ':'; buf[4] = ' ';
+        val = rip;
+        for (int i = 0; i < 16; i++) {
+            int nibble = (val >> (60 - i*4)) & 0xF;
+            buf[5+i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
+        }
+        buf[21] = 0;
+        draw_string(g_framebuffer, 50, 460, buf, 0xFFFFFF);
     }
     hcf();
 }
@@ -183,23 +235,34 @@ extern "C" void _start(void) {
     vmm_init();
     draw_string(framebuffer, 50, 270, "VMM Initialized.   ", 0x00FF00);
     
-    // Initialize Heap (1MB)
-    // We need a free memory region. For now, let's grab a frame from PMM
-    // In a real OS, we'd map pages. Here we just grab 1MB contiguous if possible
-    // or just use a single page for demo.
-    // Let's alloc 1 page (4KB) for the heap for now to be safe with PMM
-    void* heap_phys = pmm_alloc_frame();
-    if (heap_phys) {
-        void* heap_virt = (void*)vmm_phys_to_virt((uint64_t)heap_phys);
-        heap_init(heap_virt, 4096);
-        draw_string(framebuffer, 50, 290, "Heap Initialized.  ", 0x00FF00);
-        
-        // Test allocation
-        char* test_str = (char*)malloc(16);
-        if (test_str) {
-            test_str[0] = 'H'; test_str[1] = 'e'; test_str[2] = 'a'; test_str[3] = 'p'; test_str[4] = 0;
-            draw_string(framebuffer, 250, 290, test_str, 0x00FFFF);
-            free(test_str);
+    // Initialize Heap (64KB)
+    void* heap_start_phys = pmm_alloc_frame();
+    if (heap_start_phys) {
+        // Try to allocate 15 more contiguous frames
+        bool contiguous = true;
+        void* current_phys = heap_start_phys;
+        for (int i = 0; i < 15; i++) {
+            void* next_phys = pmm_alloc_frame();
+            if ((uint64_t)next_phys != (uint64_t)current_phys + 4096) {
+                contiguous = false;
+            }
+            current_phys = next_phys;
+        }
+
+        if (contiguous) {
+            void* heap_virt = (void*)vmm_phys_to_virt((uint64_t)heap_start_phys);
+            heap_init(heap_virt, 64 * 1024); // 64KB
+            draw_string(framebuffer, 50, 290, "Heap Initialized (64KB).", 0x00FF00);
+            
+            // Test allocation
+            char* test_str = (char*)malloc(16);
+            if (test_str) {
+                test_str[0] = 'H'; test_str[1] = 'e'; test_str[2] = 'a'; test_str[3] = 'p'; test_str[4] = 0;
+                draw_string(framebuffer, 300, 290, test_str, 0x00FFFF);
+                free(test_str);
+            }
+        } else {
+            draw_string(framebuffer, 50, 290, "Heap Init Failed (Frag).", 0xFF0000);
         }
     }
     
@@ -233,6 +296,31 @@ extern "C" void _start(void) {
     
     // Initialize Scheduler
     scheduler_init();
+    
+    // Initialize Filesystem
+    if (module_request.response && module_request.response->module_count > 0) {
+        struct limine_file* module = module_request.response->modules[0];
+        unifs_init(module->address);
+        draw_string(framebuffer, 50, 310, "uniFS Initialized.", 0x00FF00);
+        
+        // Read hello.txt
+        const UniFSFile* file = unifs_open("hello.txt");
+        if (file) {
+            char buf[64];
+            // Copy content to buffer to ensure null termination for printing
+            for (uint64_t i = 0; i < file->size && i < 63; i++) {
+                buf[i] = file->data[i];
+            }
+            buf[file->size < 63 ? file->size : 63] = 0;
+            
+            draw_string(framebuffer, 300, 310, "Read: ", 0xFFFF00);
+            draw_string(framebuffer, 350, 310, buf, 0xFFFFFF);
+        } else {
+            draw_string(framebuffer, 300, 310, "File not found.", 0xFF0000);
+        }
+    } else {
+        draw_string(framebuffer, 50, 310, "No FS Module.", 0xFF0000);
+    }
     
     // Create a test task
     scheduler_create_task([]() {
@@ -269,9 +357,10 @@ extern "C" void _start(void) {
     });
     
     draw_string(framebuffer, 50, 330, "Scheduler Initialized.", 0x00FF00);
+    
+    // Initialize Shell
+    shell_init(framebuffer);
     draw_string(framebuffer, 50, 370, "> ", 0x00FFFF);
-    cursor_x = 68;
-    cursor_y = 370;
 
     // Enable interrupts
     asm("sti");
@@ -280,20 +369,7 @@ extern "C" void _start(void) {
     while (true) {
         if (keyboard_has_char()) {
             char c = keyboard_get_char();
-            if (c == '\n') {
-                cursor_x = 50;
-                cursor_y += 10;
-                draw_string(framebuffer, cursor_x, cursor_y, "> ", 0x00FFFF);
-                cursor_x = 68;
-            } else if (c == '\b') {
-                if (cursor_x > 68) {
-                    cursor_x -= 9;
-                    clear_char(framebuffer, cursor_x, cursor_y, 0x000022);
-                }
-            } else {
-                draw_char(framebuffer, cursor_x, cursor_y, c, 0xFFFFFF);
-                cursor_x += 9;
-            }
+            shell_process_char(c);
         }
         
         // Yield to other tasks
