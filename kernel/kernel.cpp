@@ -59,6 +59,15 @@ static void draw_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, cha
     }
 }
 
+static void clear_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t bg_color) {
+    // Fill the entire 8x8 character cell with background color
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 9; col++) { // 9 to include padding
+            put_pixel(fb, x + col, y + row, bg_color);
+        }
+    }
+}
+
 static void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, const char *str, uint32_t color) {
     uint64_t cursor_x = x;
     uint64_t cursor_y = y;
@@ -77,20 +86,37 @@ static void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, c
 
 #include "gdt.h"
 #include "idt.h"
+#include "pic.h"
+#include "keyboard.h"
+
+// Global framebuffer pointer for use in handlers
+static struct limine_framebuffer* g_framebuffer = nullptr;
+static uint64_t cursor_x = 50;
+static uint64_t cursor_y = 210;
 
 // Exception handler called from assembly
 extern "C" void exception_handler(void* stack_frame) {
     (void)stack_frame;
-    // For now, just print a message and hang
-    // In a real OS, we would print register state
-    struct limine_framebuffer *framebuffer = framebuffer_request.response->framebuffers[0];
-    draw_string(framebuffer, 50, 110, "EXCEPTION CAUGHT!", 0xFF0000);
+    if (g_framebuffer) {
+        draw_string(g_framebuffer, 50, 110, "EXCEPTION CAUGHT!", 0xFF0000);
+    }
     hcf();
 }
 
+// IRQ handler called from assembly
+extern "C" void irq_handler(void* stack_frame) {
+    uint64_t* regs = (uint64_t*)stack_frame;
+    uint64_t int_no = regs[15];
+    uint8_t irq = int_no - 32;
+    
+    if (irq == 1) {
+        keyboard_handler();
+    }
+    
+    pic_send_eoi(irq);
+}
+
 // The following will be our kernel's entry point.
-// If renaming _start() to something else, make sure to change the
-// linker script accordingly.
 extern "C" void _start(void) {
     // Ensure the bootloader actually understands our base revision (see spec).
     if (LIMINE_BASE_REVISION_SUPPORTED == false) {
@@ -105,6 +131,7 @@ extern "C" void _start(void) {
 
     // Fetch the first framebuffer.
     struct limine_framebuffer *framebuffer = framebuffer_request.response->framebuffers[0];
+    g_framebuffer = framebuffer;
 
     // Clear screen to a deep blue (uniOS aesthetic)
     for (uint64_t y = 0; y < framebuffer->height; y++) {
@@ -127,9 +154,43 @@ extern "C" void _start(void) {
     idt_init();
     draw_string(framebuffer, 50, 170, "IDT Loaded.", 0x00FF00);
 
-    // Test interrupt (Breakpoint exception)
-    // asm("int $3");
+    // Initialize PIC (do this before drawing, to avoid spurious interrupts)
+    pic_remap(32, 40); // Remap IRQs to vectors 32-47
+    
+    // Mask all IRQs first
+    for (int i = 0; i < 16; i++) {
+        pic_set_mask(i);
+    }
+    
+    draw_string(framebuffer, 50, 190, "PIC & Keyboard Init...", 0xFFFF00);
+    keyboard_init(); // Unmasks IRQ1
+    draw_string(framebuffer, 50, 190, "PIC & Keyboard Ready. ", 0x00FF00);
 
-    // We're done, just hang...
-    hcf();
+    draw_string(framebuffer, 50, 210, "> ", 0x00FFFF);
+    cursor_x = 68;
+
+    // Enable interrupts
+    asm("sti");
+
+    // Main loop - process keyboard input
+    while (true) {
+        if (keyboard_has_char()) {
+            char c = keyboard_get_char();
+            if (c == '\n') {
+                cursor_x = 50;
+                cursor_y += 10;
+                draw_char(framebuffer, cursor_x, cursor_y, '>', 0x00FFFF);
+                cursor_x = 60;
+            } else if (c == '\b') {
+                if (cursor_x > 68) {
+                    cursor_x -= 9;
+                    clear_char(framebuffer, cursor_x, cursor_y, 0x000022);
+                }
+            } else {
+                draw_char(framebuffer, cursor_x, cursor_y, c, 0xFFFFFF);
+                cursor_x += 9;
+            }
+        }
+        asm("hlt"); // Wait for next interrupt
+    }
 }

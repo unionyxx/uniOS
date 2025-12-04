@@ -5,6 +5,7 @@ static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_descriptor idtr;
 
 extern "C" void* isr_stub_table[];
+extern "C" void* irq_stub_table[];
 
 void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags) {
     struct idt_entry* descriptor = &idt[vector];
@@ -24,12 +25,15 @@ void idt_init() {
     idtr.size = sizeof(idt) - 1;
     idtr.offset = (uint64_t)&idt;
 
+    // CPU exceptions (0-31)
     for (uint8_t vector = 0; vector < 32; vector++) {
-        idt_set_descriptor(vector, isr_stub_table[vector], 0x8E); // 0x8E = Present, Ring0, Interrupt Gate
+        idt_set_descriptor(vector, isr_stub_table[vector], 0x8E);
+    }
+
+    // IRQs (32-47)
+    for (uint8_t vector = 0; vector < 16; vector++) {
+        idt_set_descriptor(vector + 32, irq_stub_table[vector], 0x8E);
     }
 
     load_idt(&idtr);
-    
-    // Do not enable interrupts yet! We haven't remapped the PIC.
-    // asm("sti");
 }

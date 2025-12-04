@@ -9,7 +9,7 @@ CXXFLAGS = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -mno-red-zone -Wa
 LDFLAGS = -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
 
 # Files
-KERNEL_SRC = kernel/kernel.cpp kernel/gdt.cpp kernel/idt.cpp
+KERNEL_SRC = kernel/kernel.cpp kernel/gdt.cpp kernel/idt.cpp kernel/pic.cpp kernel/keyboard.cpp
 KERNEL_ASM = kernel/gdt_asm.asm kernel/interrupts.asm
 KERNEL_OBJ = $(KERNEL_SRC:.cpp=.o) $(KERNEL_ASM:.asm=.o)
 KERNEL_BIN = kernel.elf
