@@ -92,6 +92,7 @@ static void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, c
 #include "pmm.h"
 #include "vmm.h"
 #include "heap.h"
+#include "scheduler.h"
 
 // Global framebuffer pointer for use in handlers
 static struct limine_framebuffer* g_framebuffer = nullptr;
@@ -113,13 +114,14 @@ extern "C" void irq_handler(void* stack_frame) {
     uint64_t int_no = regs[15];
     uint8_t irq = int_no - 32;
     
+    pic_send_eoi(irq);
+
     if (irq == 0) {
         timer_handler();
+        scheduler_schedule();
     } else if (irq == 1) {
         keyboard_handler();
     }
-    
-    pic_send_eoi(irq);
 }
 
 // The following will be our kernel's entry point.
@@ -229,16 +231,52 @@ extern "C" void _start(void) {
     }
     mem_str[i++] = 'M'; mem_str[i++] = 'B'; mem_str[i] = 0;
     
-    draw_string(framebuffer, 50, 310, mem_str, 0x00FF00);
-
-    draw_string(framebuffer, 50, 330, "> ", 0x00FFFF);
+    // Initialize Scheduler
+    scheduler_init();
+    
+    // Create a test task
+    scheduler_create_task([]() {
+        while (true) {
+            if (g_framebuffer) {
+                // Draw 'A' at a specific location
+                static int x = 50;
+                draw_char(g_framebuffer, x, 350, 'A', 0xFF00FF);
+                x += 9;
+                if (x > 200) x = 50;
+                
+                // Delay loop
+                for (volatile int i = 0; i < 1000000; i++);
+            }
+            scheduler_yield();
+        }
+    });
+    
+    // Create another test task
+    scheduler_create_task([]() {
+        while (true) {
+            if (g_framebuffer) {
+                // Draw 'B' at a specific location
+                static int x = 250;
+                draw_char(g_framebuffer, x, 350, 'B', 0x00FFFF);
+                x += 9;
+                if (x > 400) x = 250;
+                
+                // Delay loop
+                for (volatile int i = 0; i < 1000000; i++);
+            }
+            scheduler_yield();
+        }
+    });
+    
+    draw_string(framebuffer, 50, 330, "Scheduler Initialized.", 0x00FF00);
+    draw_string(framebuffer, 50, 370, "> ", 0x00FFFF);
     cursor_x = 68;
-    cursor_y = 330;
+    cursor_y = 370;
 
     // Enable interrupts
     asm("sti");
 
-    // Main loop - process keyboard input
+    // Main loop (Idle task)
     while (true) {
         if (keyboard_has_char()) {
             char c = keyboard_get_char();
@@ -257,6 +295,9 @@ extern "C" void _start(void) {
                 cursor_x += 9;
             }
         }
-        asm("hlt"); // Wait for next interrupt
+        
+        // Yield to other tasks
+        scheduler_yield();
+        asm("hlt");
     }
 }
