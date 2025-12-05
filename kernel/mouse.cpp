@@ -78,6 +78,10 @@ void mouse_init() {
         state.x = g_framebuffer->width / 2;
         state.y = g_framebuffer->height / 2;
     }
+    
+    // Unmask IRQ2 (cascade) and IRQ12 (mouse) in PIC
+    pic_clear_mask(2);   // Enable cascade from slave PIC
+    pic_clear_mask(12);  // Enable mouse IRQ
 }
 
 void mouse_handler() {
