@@ -228,6 +228,52 @@ void run_user_test() {
 #include "mouse.h"
 #include "graphics.h"
 
+// Back-buffer for cursor (save what's under cursor before drawing)
+static uint32_t cursor_backup[12 * 19];
+static int32_t backup_x = -1, backup_y = -1;
+
+static void save_cursor_area(int32_t x, int32_t y) {
+    uint32_t* fb = (uint32_t*)g_framebuffer->address;
+    uint32_t pitch = g_framebuffer->pitch / 4;
+    int idx = 0;
+    
+    for (int row = 0; row < 19; row++) {
+        for (int col = 0; col < 12; col++) {
+            int32_t px = x + col;
+            int32_t py = y + row;
+            if (px >= 0 && py >= 0 && 
+                px < (int32_t)g_framebuffer->width && 
+                py < (int32_t)g_framebuffer->height) {
+                cursor_backup[idx] = fb[py * pitch + px];
+            }
+            idx++;
+        }
+    }
+    backup_x = x;
+    backup_y = y;
+}
+
+static void restore_cursor_area() {
+    if (backup_x < 0) return;
+    
+    uint32_t* fb = (uint32_t*)g_framebuffer->address;
+    uint32_t pitch = g_framebuffer->pitch / 4;
+    int idx = 0;
+    
+    for (int row = 0; row < 19; row++) {
+        for (int col = 0; col < 12; col++) {
+            int32_t px = backup_x + col;
+            int32_t py = backup_y + row;
+            if (px >= 0 && py >= 0 && 
+                px < (int32_t)g_framebuffer->width && 
+                py < (int32_t)g_framebuffer->height) {
+                fb[py * pitch + px] = cursor_backup[idx];
+            }
+            idx++;
+        }
+    }
+}
+
 void gui_start() {
     // Initialize mouse
     mouse_init();
@@ -240,39 +286,49 @@ void gui_start() {
     
     // Draw taskbar
     gfx_fill_rect(0, g_framebuffer->height - 30, g_framebuffer->width, 30, COLOR_DARK_GRAY);
-    draw_string(g_framebuffer, 10, g_framebuffer->height - 22, "uniOS Desktop", 0xFFFFFF);
-    
-    // Save last cursor position for redrawing
-    int32_t last_x = -1, last_y = -1;
+    draw_string(g_framebuffer, 10, g_framebuffer->height - 22, "uniOS Desktop - Press Q to exit", 0xFFFFFF);
     
     // Main GUI loop
     bool running = true;
+    backup_x = -1;
+    
     while (running) {
         const MouseState* mouse = mouse_get_state();
         
-        // Redraw area under old cursor
-        if (last_x >= 0) {
-            // Simple restore - just draw desktop color
-            gfx_fill_rect(last_x, last_y, 12, 19, 
-                last_y < (int32_t)(g_framebuffer->height - 30) ? COLOR_DESKTOP : COLOR_DARK_GRAY);
+        // Only update if position changed
+        if (mouse->x != backup_x || mouse->y != backup_y) {
+            // Restore previous cursor area
+            restore_cursor_area();
+            
+            // Save new area before drawing cursor
+            save_cursor_area(mouse->x, mouse->y);
+            
+            // Draw cursor
+            gfx_draw_cursor(mouse->x, mouse->y);
         }
-        
-        // Draw cursor at new position
-        gfx_draw_cursor(mouse->x, mouse->y);
-        last_x = mouse->x;
-        last_y = mouse->y;
         
         // Check for keyboard input to exit
         if (keyboard_has_char()) {
             char c = keyboard_get_char();
-            if (c == 'q' || c == 27) {  // 'q' or ESC
+            if (c == 'q' || c == 'Q' || c == 27) {
                 running = false;
             }
         }
         
-        // Small delay
-        for (volatile int i = 0; i < 100000; i++);
+        // Small delay to reduce CPU usage
+        for (volatile int i = 0; i < 50000; i++);
     }
+    
+    // Restore screen before exiting - redraw shell background
+    for (uint64_t y = 0; y < g_framebuffer->height; y++) {
+        for (uint64_t x = 0; x < g_framebuffer->width; x++) {
+            uint32_t* fb = (uint32_t*)g_framebuffer->address;
+            fb[y * (g_framebuffer->pitch / 4) + x] = 0x000022;
+        }
+    }
+    
+    // Reinitialize shell display
+    draw_string(g_framebuffer, 50, 50, "uniOS Shell (uniSH)", 0xFFFFFF);
 }
 
 extern "C" void _start(void) {
