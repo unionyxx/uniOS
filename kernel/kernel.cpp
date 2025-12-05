@@ -2,15 +2,9 @@
 #include <stddef.h>
 #include "limine.h"
 
-// Set the base revision to 2, this is recommended as it is the latest
-// base revision described by the Limine boot protocol specification.
-// See specification for further info.
-
+// Limine base revision
 __attribute__((used, section(".requests")))
 static volatile LIMINE_BASE_REVISION(2);
-
-// The Limine requests can be placed anywhere, but it is good practice
-// to place them in the same section, e.g. .requests.
 
 __attribute__((used, section(".requests")))
 static volatile struct limine_framebuffer_request framebuffer_request = {
@@ -24,8 +18,6 @@ static volatile struct limine_module_request module_request = {
     .revision = 0
 };
 
-// Define the start and end markers for the Limine requests.
-// These can also be omitted if you don't need them, but they are good practice.
 __attribute__((used, section(".requests_start")))
 static volatile LIMINE_REQUESTS_START_MARKER;
 
@@ -34,28 +26,20 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 
 #include "font.h"
 
-// Halt and catch fire function.
 static void hcf(void) {
     asm("cli");
-    for (;;) {
-        asm("hlt");
-    }
+    for (;;) asm("hlt");
 }
 
 static void put_pixel(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t color) {
     if (x >= fb->width || y >= fb->height) return;
-    
-    // Assuming 32-bit color (4 bytes per pixel)
-    // We should check fb->bpp, but for now we assume 32.
     uint32_t *fb_ptr = (uint32_t*)fb->address;
     fb_ptr[y * (fb->pitch / 4) + x] = color;
 }
 
 void draw_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, char c, uint32_t color) {
     if (c < 0 || c > 127) return;
-    
     const uint8_t *glyph = font8x8[(int)c];
-    
     for (int row = 0; row < 8; row++) {
         for (int col = 0; col < 8; col++) {
             if ((glyph[row] >> (7 - col)) & 1) {
@@ -66,9 +50,8 @@ void draw_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, char c, ui
 }
 
 void clear_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t bg_color) {
-    // Fill the entire 8x8 character cell with background color
     for (int row = 0; row < 8; row++) {
-        for (int col = 0; col < 9; col++) { // 9 to include padding
+        for (int col = 0; col < 9; col++) {
             put_pixel(fb, x + col, y + row, bg_color);
         }
     }
@@ -77,14 +60,13 @@ void clear_char(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t 
 void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, const char *str, uint32_t color) {
     uint64_t cursor_x = x;
     uint64_t cursor_y = y;
-    
     while (*str) {
         if (*str == '\n') {
             cursor_x = x;
-            cursor_y += 10; // 8px height + 2px padding
+            cursor_y += 10;
         } else {
             draw_char(fb, cursor_x, cursor_y, *str, color);
-            cursor_x += 9; // 8px width + 1px padding
+            cursor_x += 9;
         }
         str++;
     }
@@ -104,56 +86,39 @@ void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, const ch
 #include "mouse.h"
 #include "debug.h"
 
-// Global framebuffer pointer for use in handlers
+// Global framebuffer pointer
 struct limine_framebuffer* g_framebuffer = nullptr;
-static uint64_t cursor_x = 50;
-static uint64_t cursor_y = 210;
 
-// Exception handler called from assembly
+// Exception handler
 extern "C" void exception_handler(void* stack_frame) {
     uint64_t* regs = (uint64_t*)stack_frame;
-    // Stack layout from isr_common_stub:
-    // [0-14] Pushed regs (R15...RAX)
-    // [15] Int No
-    // [16] Err Code
-    // [17] RIP
-    // [18] CS
-    // [19] RFLAGS
-    
     uint64_t int_no = regs[15];
     uint64_t err_code = regs[16];
     uint64_t rip = regs[17];
 
     if (g_framebuffer) {
-        draw_string(g_framebuffer, 50, 400, "EXCEPTION CAUGHT!", 0xFF0000);
-        
+        draw_string(g_framebuffer, 50, 400, "EXCEPTION!", 0xFF0000);
         char buf[32];
         
-        // Print Int No
         buf[0] = 'I'; buf[1] = 'N'; buf[2] = 'T'; buf[3] = ':'; buf[4] = ' ';
-        uint64_t val = int_no;
         for (int i = 0; i < 16; i++) {
-            int nibble = (val >> (60 - i*4)) & 0xF;
+            int nibble = (int_no >> (60 - i*4)) & 0xF;
             buf[5+i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
         }
         buf[21] = 0;
         draw_string(g_framebuffer, 50, 420, buf, 0xFFFFFF);
         
-        // Print Err Code
         buf[0] = 'E'; buf[1] = 'R'; buf[2] = 'R'; buf[3] = ':'; buf[4] = ' ';
-        val = err_code;
         for (int i = 0; i < 16; i++) {
-            int nibble = (val >> (60 - i*4)) & 0xF;
+            int nibble = (err_code >> (60 - i*4)) & 0xF;
             buf[5+i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
         }
         buf[21] = 0;
         draw_string(g_framebuffer, 50, 440, buf, 0xFFFFFF);
         
-        // Print RIP
         buf[0] = 'R'; buf[1] = 'I'; buf[2] = 'P'; buf[3] = ':'; buf[4] = ' ';
-        val = rip;
         for (int i = 0; i < 16; i++) {
-            int nibble = (val >> (60 - i*4)) & 0xF;
+            int nibble = (rip >> (60 - i*4)) & 0xF;
             buf[5+i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
         }
         buf[21] = 0;
@@ -162,7 +127,7 @@ extern "C" void exception_handler(void* stack_frame) {
     hcf();
 }
 
-// IRQ handler called from assembly
+// IRQ handler
 extern "C" void irq_handler(void* stack_frame) {
     uint64_t* regs = (uint64_t*)stack_frame;
     uint64_t int_no = regs[15];
@@ -176,60 +141,35 @@ extern "C" void irq_handler(void* stack_frame) {
     } else if (irq == 1) {
         keyboard_handler();
     } else if (irq == 12) {
-        extern void mouse_handler();
         mouse_handler();
     }
 }
 
-// The following will be our kernel's entry point.
-
-// User mode test program (very simple inline machine code or a function)
+// User mode test program
 static void user_program() __attribute__((section(".user_code")));
 static void user_program() {
-    // Syscall: write(1, "Hello from User Mode!\n", 22)
-    // RAX = syscall number (1 = SYS_WRITE)
-    // RBX = string pointer, RCX = length
     const char* msg = "Hello from User Mode!\n";
     asm volatile(
-        "mov $1, %%rax\n"      // SYS_WRITE
-        "mov %0, %%rbx\n"      // arg1 = msg
-        "mov $22, %%rcx\n"     // arg2 = len
-        "int $0x80\n"          // Syscall
-        :
-        : "r"(msg)
-        : "rax", "rbx", "rcx"
-    );
-    
-    // Syscall: exit(0)
-    asm volatile(
-        "mov $60, %%rax\n"     // SYS_EXIT
+        "mov $1, %%rax\n"
+        "mov %0, %%rbx\n"
+        "mov $22, %%rcx\n"
         "int $0x80\n"
-        :
-        :
-        : "rax"
+        : : "r"(msg) : "rax", "rbx", "rcx"
     );
-    
-    // Should never reach here
+    asm volatile("mov $60, %%rax\n" "int $0x80\n" : : : "rax");
     for(;;);
 }
 
-// Stack for user mode
 static uint8_t user_stack[4096] __attribute__((aligned(16)));
-
 extern "C" void jump_to_user_mode(uint64_t code_sel, uint64_t stack, uint64_t entry);
 
 void run_user_test() {
-    // For now, we'll just run the user program directly in Ring 0 to test syscall
-    // Actual Ring 3 transition requires proper page mapping for user code
-    // This is a simplified test
     user_program();
 }
 
 // GUI Mode
-#include "mouse.h"
 #include "graphics.h"
 
-// Back-buffer for cursor (save what's under cursor before drawing)
 static uint32_t cursor_backup[12 * 19];
 static int32_t backup_x = -1, backup_y = -1;
 
@@ -237,37 +177,27 @@ static void save_cursor_area(int32_t x, int32_t y) {
     uint32_t* fb = (uint32_t*)g_framebuffer->address;
     uint32_t pitch = g_framebuffer->pitch / 4;
     int idx = 0;
-    
     for (int row = 0; row < 19; row++) {
         for (int col = 0; col < 12; col++) {
-            int32_t px = x + col;
-            int32_t py = y + row;
-            if (px >= 0 && py >= 0 && 
-                px < (int32_t)g_framebuffer->width && 
-                py < (int32_t)g_framebuffer->height) {
+            int32_t px = x + col, py = y + row;
+            if (px >= 0 && py >= 0 && px < (int32_t)g_framebuffer->width && py < (int32_t)g_framebuffer->height) {
                 cursor_backup[idx] = fb[py * pitch + px];
             }
             idx++;
         }
     }
-    backup_x = x;
-    backup_y = y;
+    backup_x = x; backup_y = y;
 }
 
 static void restore_cursor_area() {
     if (backup_x < 0) return;
-    
     uint32_t* fb = (uint32_t*)g_framebuffer->address;
     uint32_t pitch = g_framebuffer->pitch / 4;
     int idx = 0;
-    
     for (int row = 0; row < 19; row++) {
         for (int col = 0; col < 12; col++) {
-            int32_t px = backup_x + col;
-            int32_t py = backup_y + row;
-            if (px >= 0 && py >= 0 && 
-                px < (int32_t)g_framebuffer->width && 
-                py < (int32_t)g_framebuffer->height) {
+            int32_t px = backup_x + col, py = backup_y + row;
+            if (px >= 0 && py >= 0 && px < (int32_t)g_framebuffer->width && py < (int32_t)g_framebuffer->height) {
                 fb[py * pitch + px] = cursor_backup[idx];
             }
             idx++;
@@ -276,258 +206,101 @@ static void restore_cursor_area() {
 }
 
 void gui_start() {
-    // Initialize mouse
     mouse_init();
-    
-    // Initialize graphics
     gfx_init(g_framebuffer);
-    
-    // Draw desktop
     gfx_clear(COLOR_DESKTOP);
-    
-    // Draw taskbar
     gfx_fill_rect(0, g_framebuffer->height - 30, g_framebuffer->width, 30, COLOR_DARK_GRAY);
     draw_string(g_framebuffer, 10, g_framebuffer->height - 22, "uniOS Desktop - Press Q to exit", 0xFFFFFF);
     
-    // Main GUI loop
     bool running = true;
     backup_x = -1;
     
     while (running) {
         const MouseState* mouse = mouse_get_state();
-        
-        // Only update if position changed
         if (mouse->x != backup_x || mouse->y != backup_y) {
-            // Restore previous cursor area
             restore_cursor_area();
-            
-            // Save new area before drawing cursor
             save_cursor_area(mouse->x, mouse->y);
-            
-            // Draw cursor
             gfx_draw_cursor(mouse->x, mouse->y);
         }
-        
-        // Check for keyboard input to exit
         if (keyboard_has_char()) {
             char c = keyboard_get_char();
-            if (c == 'q' || c == 'Q' || c == 27) {
-                running = false;
-            }
+            if (c == 'q' || c == 'Q' || c == 27) running = false;
         }
-        
-        // Small delay to reduce CPU usage
         for (volatile int i = 0; i < 50000; i++);
     }
     
-    // Restore screen before exiting - redraw shell background
+    // Restore shell screen
+    uint32_t* fb = (uint32_t*)g_framebuffer->address;
     for (uint64_t y = 0; y < g_framebuffer->height; y++) {
         for (uint64_t x = 0; x < g_framebuffer->width; x++) {
-            uint32_t* fb = (uint32_t*)g_framebuffer->address;
             fb[y * (g_framebuffer->pitch / 4) + x] = 0x000022;
         }
     }
-    
-    // Reinitialize shell display
     draw_string(g_framebuffer, 50, 50, "uniOS Shell (uniSH)", 0xFFFFFF);
 }
 
+// Kernel entry point
 extern "C" void _start(void) {
-    // Ensure the bootloader actually understands our base revision (see spec).
-    if (LIMINE_BASE_REVISION_SUPPORTED == false) {
-        hcf();
-    }
+    if (!LIMINE_BASE_REVISION_SUPPORTED) hcf();
+    if (!framebuffer_request.response || framebuffer_request.response->framebuffer_count < 1) hcf();
 
-    // Ensure we got a framebuffer.
-    if (framebuffer_request.response == NULL
-     || framebuffer_request.response->framebuffer_count < 1) {
-        hcf();
-    }
+    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    g_framebuffer = fb;
 
-    // Fetch the first framebuffer.
-    struct limine_framebuffer *framebuffer = framebuffer_request.response->framebuffers[0];
-    g_framebuffer = framebuffer;
-
-    // Clear screen to a deep blue (uniOS aesthetic)
-    for (uint64_t y = 0; y < framebuffer->height; y++) {
-        for (uint64_t x = 0; x < framebuffer->width; x++) {
-            put_pixel(framebuffer, x, y, 0x000022); // Deep Blue
+    // Clear screen
+    for (uint64_t y = 0; y < fb->height; y++) {
+        for (uint64_t x = 0; x < fb->width; x++) {
+            put_pixel(fb, x, y, 0x000022);
         }
     }
 
-    // Draw welcome text
-    draw_string(framebuffer, 50, 50, "Welcome to uniOS", 0xFFFFFF);
-    draw_string(framebuffer, 50, 70, "System Initialized.", 0xAAAAAA);
-    draw_string(framebuffer, 50, 90, "Kernel: C++ Bare Bones", 0x888888);
+    // Welcome message
+    draw_string(fb, 50, 50, "uniOS v0.1", 0xFFFFFF);
 
-    // Initialize GDT and IDT
-    draw_string(framebuffer, 50, 110, "Initializing GDT...", 0xFFFF00);
+    // Initialize core systems
     gdt_init();
-    draw_string(framebuffer, 50, 130, "GDT Loaded.", 0x00FF00);
-    
-    draw_string(framebuffer, 50, 150, "Initializing IDT...", 0xFFFF00);
     idt_init();
-    draw_string(framebuffer, 50, 170, "IDT Loaded.", 0x00FF00);
-
-    // Initialize PIC (do this before drawing, to avoid spurious interrupts)
-    pic_remap(32, 40); // Remap IRQs to vectors 32-47
-    
-    // Mask all IRQs first
-    for (int i = 0; i < 16; i++) {
-        pic_set_mask(i);
-    }
-    
-    keyboard_init(); // Unmasks IRQ1
-    timer_init(100); // 100Hz timer (10ms per tick)
-    
-    draw_string(framebuffer, 50, 190, "Hardware Ready.", 0x00FF00);
-    
-    draw_string(framebuffer, 50, 210, "Initializing PMM...", 0xFFFF00);
+    pic_remap(32, 40);
+    for (int i = 0; i < 16; i++) pic_set_mask(i);
+    keyboard_init();
+    timer_init(100);
     pmm_init();
-    draw_string(framebuffer, 50, 230, "PMM Initialized.   ", 0x00FF00);
-    
-    draw_string(framebuffer, 50, 250, "Initializing VMM...", 0xFFFF00);
     vmm_init();
-    draw_string(framebuffer, 50, 270, "VMM Initialized.   ", 0x00FF00);
     
-    // Initialize Heap (64KB)
-    void* heap_start_phys = pmm_alloc_frame();
-    if (heap_start_phys) {
-        // Try to allocate 15 more contiguous frames
+    // Initialize heap
+    void* heap_start = pmm_alloc_frame();
+    if (heap_start) {
         bool contiguous = true;
-        void* current_phys = heap_start_phys;
+        void* current = heap_start;
         for (int i = 0; i < 15; i++) {
-            void* next_phys = pmm_alloc_frame();
-            if ((uint64_t)next_phys != (uint64_t)current_phys + 4096) {
-                contiguous = false;
-            }
-            current_phys = next_phys;
+            void* next = pmm_alloc_frame();
+            if ((uint64_t)next != (uint64_t)current + 4096) contiguous = false;
+            current = next;
         }
-
         if (contiguous) {
-            void* heap_virt = (void*)vmm_phys_to_virt((uint64_t)heap_start_phys);
-            heap_init(heap_virt, 64 * 1024); // 64KB
-            draw_string(framebuffer, 50, 290, "Heap Initialized (64KB).", 0x00FF00);
-            
-            // Test allocation
-            char* test_str = (char*)malloc(16);
-            if (test_str) {
-                test_str[0] = 'H'; test_str[1] = 'e'; test_str[2] = 'a'; test_str[3] = 'p'; test_str[4] = 0;
-                draw_string(framebuffer, 300, 290, test_str, 0x00FFFF);
-                free(test_str);
-            }
-        } else {
-            draw_string(framebuffer, 50, 290, "Heap Init Failed (Frag).", 0xFF0000);
+            heap_init((void*)vmm_phys_to_virt((uint64_t)heap_start), 64 * 1024);
         }
     }
     
-    // Display memory stats
-    uint64_t free_mem = pmm_get_free_memory() / 1024 / 1024;
-    uint64_t total_mem = pmm_get_total_memory() / 1024 / 1024;
-    
-    // Simple integer to string conversion for display
-    char mem_str[64] = "Memory: ";
-    // Append free_mem
-    uint64_t n = free_mem;
-    int i = 8;
-    if (n == 0) mem_str[i++] = '0';
-    else {
-        char buf[20];
-        int j = 0;
-        while (n > 0) { buf[j++] = '0' + (n % 10); n /= 10; }
-        while (j > 0) mem_str[i++] = buf[--j];
-    }
-    mem_str[i++] = 'M'; mem_str[i++] = 'B'; mem_str[i++] = '/';
-    // Append total_mem
-    n = total_mem;
-    if (n == 0) mem_str[i++] = '0';
-    else {
-        char buf[20];
-        int j = 0;
-        while (n > 0) { buf[j++] = '0' + (n % 10); n /= 10; }
-        while (j > 0) mem_str[i++] = buf[--j];
-    }
-    mem_str[i++] = 'M'; mem_str[i++] = 'B'; mem_str[i] = 0;
-    
-    // Initialize Scheduler
     scheduler_init();
     
-    // Initialize Filesystem
+    // Initialize filesystem
     if (module_request.response && module_request.response->module_count > 0) {
-        struct limine_file* module = module_request.response->modules[0];
-        unifs_init(module->address);
-        draw_string(framebuffer, 50, 310, "uniFS Initialized.", 0x00FF00);
-        
-        // Read hello.txt
-        const UniFSFile* file = unifs_open("hello.txt");
-        if (file) {
-            char buf[64];
-            // Copy content to buffer to ensure null termination for printing
-            for (uint64_t i = 0; i < file->size && i < 63; i++) {
-                buf[i] = file->data[i];
-            }
-            buf[file->size < 63 ? file->size : 63] = 0;
-            
-            draw_string(framebuffer, 300, 310, "Read: ", 0xFFFF00);
-            draw_string(framebuffer, 350, 310, buf, 0xFFFFFF);
-        } else {
-            draw_string(framebuffer, 300, 310, "File not found.", 0xFF0000);
-        }
-    } else {
-        draw_string(framebuffer, 50, 310, "No FS Module.", 0xFF0000);
+        unifs_init(module_request.response->modules[0]->address);
     }
     
-    // Create a test task
-    scheduler_create_task([]() {
-        while (true) {
-            if (g_framebuffer) {
-                // Draw 'A' at a specific location
-                static int x = 50;
-                draw_char(g_framebuffer, x, 350, 'A', 0xFF00FF);
-                x += 9;
-                if (x > 200) x = 50;
-                
-                // Delay loop
-                for (volatile int i = 0; i < 1000000; i++);
-            }
-            scheduler_yield();
-        }
-    });
-    
-    // Create another test task
-    scheduler_create_task([]() {
-        while (true) {
-            if (g_framebuffer) {
-                // Draw 'B' at a specific location
-                static int x = 250;
-                draw_char(g_framebuffer, x, 350, 'B', 0x00FFFF);
-                x += 9;
-                if (x > 400) x = 250;
-                
-                // Delay loop
-                for (volatile int i = 0; i < 1000000; i++);
-            }
-            scheduler_yield();
-        }
-    });
-    
-    draw_string(framebuffer, 50, 330, "Scheduler Initialized.", 0x00FF00);
-    
-    // Initialize Shell
-    shell_init(framebuffer);
-    draw_string(framebuffer, 50, 370, "> ", 0x00FFFF);
+    // Initialize shell
+    shell_init(fb);
+    draw_string(fb, 50, 70, "Type 'help' for commands.", 0x888888);
+    draw_string(fb, 50, 90, "> ", 0x00FFFF);
 
-    // Enable interrupts
     asm("sti");
 
-    // Main loop (Idle task)
+    // Main loop
     while (true) {
         if (keyboard_has_char()) {
-            char c = keyboard_get_char();
-            shell_process_char(c);
+            shell_process_char(keyboard_get_char());
         }
-        
-        // Yield to other tasks
         scheduler_yield();
         asm("hlt");
     }
