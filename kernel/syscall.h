@@ -8,7 +8,9 @@
 #define SYS_CLOSE  3
 #define SYS_PIPE   22
 #define SYS_GETPID 39
+#define SYS_FORK   57
 #define SYS_EXIT   60
+#define SYS_WAIT4  61
 
 // File descriptor constants
 #define STDIN_FD   0

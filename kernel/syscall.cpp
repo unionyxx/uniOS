@@ -2,6 +2,7 @@
 #include "limine.h"
 #include "unifs.h"
 #include "pipe.h"
+#include "process.h"
 #include <stddef.h>
 
 extern struct limine_framebuffer* g_framebuffer;
@@ -120,11 +121,24 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_close((int)arg1);
         case SYS_PIPE:
             return pipe_create();
-        case SYS_GETPID:
-            return current_pid;
-        case SYS_EXIT:
-            asm("cli; hlt");
-            return 0;
+        case SYS_GETPID: {
+            extern Process* process_get_current();
+            Process* p = process_get_current();
+            return p ? p->pid : 1;
+        }
+        case SYS_FORK: {
+            extern uint64_t process_fork();
+            return process_fork();
+        }
+        case SYS_EXIT: {
+            extern void process_exit(int32_t status);
+            process_exit((int32_t)arg1);
+            return 0; // Never reached
+        }
+        case SYS_WAIT4: {
+            extern int64_t process_waitpid(int64_t pid, int32_t* status);
+            return process_waitpid((int64_t)arg1, (int32_t*)arg2);
+        }
         default:
             return (uint64_t)-1;
     }
