@@ -6,6 +6,8 @@ This project is an exploration of low-level systems programming, focusing on cle
 
 Current Version: **v0.1**
 
+![uniOS Screenshot](docs/screenshot.png)
+
 ## Overview
 
 uniOS targets the x86-64 architecture, utilizing the Limine bootloader for a modern boot protocol.
