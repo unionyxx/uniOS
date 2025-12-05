@@ -11,7 +11,7 @@ LDFLAGS = -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
 # Files
 # Files
 # Files
-KERNEL_SRC = kernel/kernel.cpp kernel/gdt.cpp kernel/idt.cpp kernel/pic.cpp kernel/keyboard.cpp kernel/timer.cpp kernel/pmm.cpp kernel/vmm.cpp kernel/heap.cpp kernel/scheduler.cpp kernel/unifs.cpp kernel/shell.cpp kernel/syscall.cpp kernel/elf.cpp kernel/pipe.cpp kernel/mouse.cpp kernel/graphics.cpp
+KERNEL_SRC = kernel/kernel.cpp kernel/gdt.cpp kernel/idt.cpp kernel/pic.cpp kernel/keyboard.cpp kernel/timer.cpp kernel/pmm.cpp kernel/vmm.cpp kernel/heap.cpp kernel/scheduler.cpp kernel/unifs.cpp kernel/shell.cpp kernel/syscall.cpp kernel/elf.cpp kernel/pipe.cpp kernel/mouse.cpp kernel/graphics.cpp kernel/debug.cpp
 KERNEL_ASM = kernel/gdt_asm.asm kernel/interrupts.asm kernel/process.asm
 KERNEL_OBJ = $(KERNEL_SRC:.cpp=.o) $(KERNEL_ASM:.asm=.o)
 KERNEL_BIN = kernel.elf

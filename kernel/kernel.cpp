@@ -102,6 +102,7 @@ void draw_string(struct limine_framebuffer *fb, uint64_t x, uint64_t y, const ch
 #include "unifs.h"
 #include "shell.h"
 #include "mouse.h"
+#include "debug.h"
 
 // Global framebuffer pointer for use in handlers
 struct limine_framebuffer* g_framebuffer = nullptr;
