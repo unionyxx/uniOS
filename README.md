@@ -1,12 +1,12 @@
 # uniOS
 
+![uniOS Screenshot](docs/screenshot.png)
+
 A minimal, 64-bit operating system kernel built from scratch.
 
 This project is an exploration of low-level systems programming, focusing on clean architecture and modern C++ implementation. It is not intended to replace your daily driver, but to serve as a transparent, hackable educational resource.
 
 Current Version: **v0.1**
-
-![uniOS Screenshot](docs/screenshot.png)
 
 ## Overview
 
