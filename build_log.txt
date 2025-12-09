@@ -1,6 +1,0 @@
-ld -nostdlib -T kernel/linker.ld -z max-page-size=0x1000 -o kernel.elf kernel/kernel.o kernel/gdt.o kernel/idt.o kernel/pic.o kernel/keyboard.o kernel/timer.o kernel/pmm.o kernel/vmm.o kernel/heap.o kernel/scheduler.o kernel/unifs.o kernel/shell.o kernel/syscall.o kernel/elf.o kernel/pipe.o kernel/mouse.o kernel/graphics.o kernel/debug.o kernel/pci.o kernel/xhci.o kernel/usb.o kernel/usb_hid.o kernel/gdt_asm.o kernel/interrupts.o kernel/process.o
-ld: warning: kernel/process.o: missing .note.GNU-stack section implies executable stack
-ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
-ld: kernel/syscall.o: in function `sys_write(int, char const*, unsigned long)':
-syscall.cpp:(.text+0x391): undefined reference to `draw_char(limine_framebuffer*, unsigned long, unsigned long, char, unsigned int)'
-make: *** [Makefile:25: kernel.elf] Error 1

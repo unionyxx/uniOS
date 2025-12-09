@@ -14,8 +14,9 @@ uniOS targets the x86-64 architecture, utilizing the Limine bootloader for a mod
 
 **Core Features:**
 *   **Kernel:** Custom C++ kernel with minimal assembly stubs.
-*   **Boot:** Limine bootloader (v8.x).
-*   **Graphics:** Direct framebuffer access with custom font rendering.
+*   **Boot:** Limine bootloader (v8.x) with quiet boot and splash screen.
+*   **USB Stack:** Full xHCI driver with HID support (Keyboard & Mouse).
+*   **Graphics:** Direct framebuffer access with custom font rendering and black theme.
 *   **Interrupts:** Full GDT and IDT setup.
 
 ## Getting Started

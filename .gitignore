@@ -17,3 +17,11 @@ limine/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Logs and temporary files
+*.txt
+*.log
+build_log.txt
+
+# Disk images
+*.img
