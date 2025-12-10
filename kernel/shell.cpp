@@ -290,7 +290,7 @@ static void cmd_echo(const char* text) {
 }
 
 static void cmd_version() {
-    g_terminal.write_line("uniOS Kernel v0.2.3");
+    g_terminal.write_line("uniOS Kernel v0.2.4");
     g_terminal.write_line("Built with GCC for x86_64-elf");
     
     // Display actual bootloader info if available
