@@ -165,10 +165,18 @@ static bool usb_parse_config(uint8_t slot_id, UsbDeviceInfo* dev, uint8_t* confi
                 uint8_t xhci_ep = ep_num * 2 + ep_dir;
                 
                 // Check if this is the interface we're using for keyboard or mouse
+                // For composite devices: keyboard uses hid_interface, mouse uses hid_interface2
+                // For standalone devices: keyboard OR mouse uses hid_interface
                 bool is_kbd_iface = dev->is_keyboard && 
                                    current_iface->bInterfaceNumber == dev->hid_interface;
-                bool is_mouse_iface = dev->is_mouse && 
-                                     current_iface->bInterfaceNumber == dev->hid_interface2;
+                
+                // Mouse interface detection:
+                // - Composite device: mouse is on hid_interface2
+                // - Standalone mouse: mouse is on hid_interface (no keyboard)
+                bool is_mouse_iface = dev->is_mouse && (
+                    (dev->hid_interface2 != 0 && current_iface->bInterfaceNumber == dev->hid_interface2) ||
+                    (!dev->is_keyboard && current_iface->bInterfaceNumber == dev->hid_interface)
+                );
                 
                 if (is_kbd_iface && dev->hid_endpoint == 0) {
                     dev->hid_max_packet = ep->wMaxPacketSize;
@@ -176,20 +184,22 @@ static bool usb_parse_config(uint8_t slot_id, UsbDeviceInfo* dev, uint8_t* confi
                     dev->hid_endpoint = xhci_ep;
                     usb_log("    -> KBD Endpoint: Addr 0x%x, DCI %d", 
                         ep->bEndpointAddress, xhci_ep);
-                } else if (is_mouse_iface && dev->hid_endpoint2 == 0) {
-                    dev->hid_max_packet2 = ep->wMaxPacketSize;
-                    dev->hid_interval2 = ep->bInterval;
-                    dev->hid_endpoint2 = xhci_ep;
-                    usb_log("    -> Mouse Endpoint: Addr 0x%x, DCI %d", 
-                        ep->bEndpointAddress, xhci_ep);
-                } else if (current_iface->bInterfaceNumber == dev->hid_interface && 
-                          dev->hid_endpoint == 0) {
-                    // Fallback: store first HID endpoint we find for primary interface
-                    dev->hid_max_packet = ep->wMaxPacketSize;
-                    dev->hid_interval = ep->bInterval;
-                    dev->hid_endpoint = xhci_ep;
-                    usb_log("    -> HID Endpoint: Addr 0x%x, DCI %d", 
-                        ep->bEndpointAddress, xhci_ep);
+                } else if (is_mouse_iface) {
+                    // For composite devices, store in endpoint2
+                    // For standalone mice, store in primary endpoint
+                    if (dev->is_keyboard && dev->hid_endpoint2 == 0) {
+                        dev->hid_max_packet2 = ep->wMaxPacketSize;
+                        dev->hid_interval2 = ep->bInterval;
+                        dev->hid_endpoint2 = xhci_ep;
+                        usb_log("    -> Mouse Endpoint2: Addr 0x%x, DCI %d", 
+                            ep->bEndpointAddress, xhci_ep);
+                    } else if (!dev->is_keyboard && dev->hid_endpoint == 0) {
+                        dev->hid_max_packet = ep->wMaxPacketSize;
+                        dev->hid_interval = ep->bInterval;
+                        dev->hid_endpoint = xhci_ep;
+                        usb_log("    -> Mouse Endpoint: Addr 0x%x, DCI %d", 
+                            ep->bEndpointAddress, xhci_ep);
+                    }
                 }
             }
         }
