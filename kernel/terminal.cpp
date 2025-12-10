@@ -46,8 +46,10 @@ void Terminal::set_color(uint32_t fg, uint32_t bg) {
 }
 
 void Terminal::set_cursor_pos(int col, int row) {
-    // Erase old cursor
-    draw_cursor(false);
+    // Only manage cursor drawing if cursor is visible
+    if (cursor_visible) {
+        draw_cursor(false);  // Erase old cursor
+    }
     
     cursor_col = col;
     cursor_row = row;
@@ -58,8 +60,10 @@ void Terminal::set_cursor_pos(int col, int row) {
     if (cursor_row < 0) cursor_row = 0;
     if (cursor_row >= height_chars) cursor_row = height_chars - 1;
     
-    // Draw new cursor
-    draw_cursor(true);
+    // Only draw new cursor if visible
+    if (cursor_visible) {
+        draw_cursor(true);
+    }
 }
 
 void Terminal::get_cursor_pos(int* col, int* row) {
@@ -68,8 +72,10 @@ void Terminal::get_cursor_pos(int* col, int* row) {
 }
 
 void Terminal::put_char(char c) {
-    // Hide cursor before drawing
-    draw_cursor(false);
+    // Only hide cursor if it's visible
+    if (cursor_visible) {
+        draw_cursor(false);
+    }
     
     if (c == '\n') {
         new_line();
@@ -92,12 +98,12 @@ void Terminal::put_char(char c) {
         }
     }
     
-    // Show cursor after drawing
-    draw_cursor(true);
-    
-    // Reset blink timer so cursor stays visible while typing
-    cursor_state = true;
-    last_blink_tick = timer_get_ticks();
+    // Only show cursor if it's visible
+    if (cursor_visible) {
+        draw_cursor(true);
+        cursor_state = true;
+        last_blink_tick = timer_get_ticks();
+    }
 }
 
 void Terminal::write(const char* str) {
@@ -133,19 +139,16 @@ void Terminal::draw_cursor(bool visible) {
     int x = MARGIN_LEFT + cursor_col * CHAR_WIDTH;
     int y = MARGIN_TOP + cursor_row * CHAR_HEIGHT;
     
+    // Draw cursor as a solid line at bottom of character cell
+    int cursor_height = 2;
+    int cursor_y = y + CHAR_HEIGHT - cursor_height;
+    
     if (visible) {
-        gfx_draw_char(x, y, '_', fg_color);
+        // Draw bright white cursor line
+        gfx_fill_rect(x, cursor_y, CHAR_WIDTH, cursor_height, 0xFFFFFFFF);
     } else {
-        // Clear cursor position (but don't erase character if we are blinking on top of one? 
-        // Standard terminals usually are block or underline. 
-        // If we are just an append-only terminal, we are usually at an empty spot.
-        // But if we move cursor back, we might be on a char.
-        // For now, assume we are at end of line or we just clear the underline.
-        // To be safe, we should redraw the character under the cursor if there is one.
-        // But we don't store the buffer!
-        // So we can only clear. This means 'backspace' logic in shell needs to handle redrawing.
-        // For the blinking cursor at the END of text, clearing is fine.
-        gfx_clear_char(x, y, bg_color); 
+        // Clear cursor line with background color
+        gfx_fill_rect(x, cursor_y, CHAR_WIDTH, cursor_height, bg_color);
     }
 }
 
@@ -153,6 +156,7 @@ void Terminal::set_cursor_visible(bool visible) {
     cursor_visible = visible;
     if (visible) {
         cursor_state = true;
+        last_blink_tick = timer_get_ticks();
         draw_cursor(true);
     } else {
         draw_cursor(false);
@@ -163,9 +167,27 @@ void Terminal::update_cursor() {
     if (!cursor_visible) return;
     
     uint64_t now = timer_get_ticks();
-    if (now - last_blink_tick > 50) { // ~500ms
+    // Blink every 30 ticks (~300ms at 100Hz) for more visible blinking
+    if (now - last_blink_tick > 30) {
         last_blink_tick = now;
         cursor_state = !cursor_state;
         draw_cursor(cursor_state);
     }
+}
+
+void Terminal::clear_chars(int col, int row, int count) {
+    // Clear characters AND cursor area without affecting cursor state
+    int x = MARGIN_LEFT + col * CHAR_WIDTH;
+    int y = MARGIN_TOP + row * CHAR_HEIGHT;
+    
+    // Clear entire character cells including cursor area
+    // Use fill_rect to clear the full cell height
+    gfx_fill_rect(x, y, count * CHAR_WIDTH, CHAR_HEIGHT, bg_color);
+}
+
+void Terminal::write_char_at(int col, int row, char c) {
+    // Write character without affecting cursor state
+    int x = MARGIN_LEFT + col * CHAR_WIDTH;
+    int y = MARGIN_TOP + row * CHAR_HEIGHT;
+    gfx_draw_char(x, y, c, fg_color);
 }

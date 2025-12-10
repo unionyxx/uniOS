@@ -22,6 +22,10 @@ public:
     // Cursor blinking
     void set_cursor_visible(bool visible);
     void update_cursor(); // Call periodically
+    
+    // Direct character operations (no cursor logic)
+    void clear_chars(int col, int row, int count);
+    void write_char_at(int col, int row, char c);
 
 private:
     void scroll_up();

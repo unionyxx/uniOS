@@ -10,7 +10,7 @@
 
 **uniOS** is a Minimalist x86 OS in C++20. It serves as a clean, modern, and hackable educational resource for understanding operating system internals, featuring a custom kernel, native drivers, and a transparent design philosophy.
 
-Current Version: **v0.2.1**
+Current Version: **v0.2.2**
 
 ---
 
@@ -22,6 +22,7 @@ Current Version: **v0.2.1**
 *   **Boot Protocol**: Powered by **Limine** (v8.x) for a seamless, quiet boot experience.
 *   **Visuals**: Direct framebuffer access with custom font rendering and a sleek dark theme.
 *   **Architecture**: Full GDT, IDT, and interrupt handling setup.
+*   **Interactive Shell**: Command history (up/down arrows), cursor movement (left/right arrows), clean line editing.
 
 ## Known Issues (Real Hardware)
 

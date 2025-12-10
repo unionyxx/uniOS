@@ -18,6 +18,12 @@ static volatile struct limine_module_request module_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".requests")))
+static volatile struct limine_bootloader_info_request bootloader_info_request = {
+    .id = LIMINE_BOOTLOADER_INFO_REQUEST,
+    .revision = 0
+};
+
 __attribute__((used, section(".requests_start")))
 static volatile LIMINE_REQUESTS_START_MARKER;
 
@@ -45,9 +51,14 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 #include "input.h"
 #include "acpi.h"
 #include "rtc.h"
+#include "serial.h"
 
 // Global framebuffer pointer
 struct limine_framebuffer* g_framebuffer = nullptr;
+
+// Global bootloader info (for version command)
+const char* g_bootloader_name = nullptr;
+const char* g_bootloader_version = nullptr;
 
 #include "panic.h"
 
@@ -181,7 +192,18 @@ extern "C" void _start(void) {
     // Clear screen
     gfx_clear(COLOR_BLACK);
     
-    DEBUG_INFO("uniOS Kernel v0.2.1 Starting...");
+    // Initialize serial console for debug output
+    serial_init();
+    serial_puts("\r\n=== uniOS Kernel v0.2.2 ===\r\n");
+    
+    // Get bootloader info if available
+    if (bootloader_info_request.response) {
+        g_bootloader_name = bootloader_info_request.response->name;
+        g_bootloader_version = bootloader_info_request.response->version;
+        serial_printf("Bootloader: %s %s\r\n", g_bootloader_name, g_bootloader_version);
+    }
+    
+    DEBUG_INFO("uniOS Kernel v0.2.2 Starting...");
     DEBUG_INFO("Framebuffer: %dx%d bpp=%d", fb->width, fb->height, fb->bpp);
 
     // Initialize core systems
@@ -235,32 +257,32 @@ extern "C" void _start(void) {
     
     input_set_screen_size(fb->width, fb->height);
     
-    // Debug pause - wait for keypress so user can read USB/HID logs
-    DEBUG_WARN("Press any key to continue boot process...");
-    
-    // Enable interrupts so keyboard works
+    // Enable interrupts
     asm("sti");
     DEBUG_INFO("Interrupts Enabled");
-    
-    // Wait for any keypress
-    while (!input_keyboard_has_char()) {
-        input_poll();
-        for (volatile int i = 0; i < 10000; i++);  // Small delay
-    }
-    input_keyboard_get_char();  // Consume the keypress
     
     // Initialize filesystem
     if (module_request.response && module_request.response->module_count > 0) {
         unifs_init(module_request.response->modules[0]->address);
-        DEBUG_INFO("Filesystem Initialized (Module found)");
+        DEBUG_INFO("Filesystem Ready");
     } else {
-        DEBUG_WARN("Filesystem: No modules found");
+        DEBUG_WARN("Filesystem: No modules");
     }
     
-    // Splash screen - quick display
+    // Pretty boot screen - wait for user
+    DEBUG_INFO("Boot complete!");
+    gfx_draw_string(50, fb->height - 40, "Press any key to continue...", 0x00AAAAAA);
+    
+    while (!input_keyboard_has_char()) {
+        input_poll();
+        for (volatile int i = 0; i < 10000; i++);
+    }
+    input_keyboard_get_char();  // Consume keypress
+    
+    // Splash screen
     gfx_clear(COLOR_BLACK);
     gfx_draw_centered_text("uniOS", COLOR_WHITE);
-    for (volatile int i = 0; i < 100000000; i++) { }  // ~1 second delay
+    for (volatile int i = 0; i < 50000000; i++) { }
     
     // Clear screen again
     gfx_clear(COLOR_BLACK);

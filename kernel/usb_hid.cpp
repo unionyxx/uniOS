@@ -36,7 +36,12 @@ static bool hid_debug = false;
 
 // HID keycode to ASCII conversion table (US keyboard layout)
 // Index = HID keycode, value = ASCII (lowercase)
-// Special codes: 1=Right, 2=Left, 3=Down, 4=Up (unused ASCII control chars)
+// Arrow keys use special codes matching PS/2 keyboard: 0x80=Up, 0x81=Down, 0x82=Left, 0x83=Right
+#define KEY_UP_ARROW    0x80
+#define KEY_DOWN_ARROW  0x81
+#define KEY_LEFT_ARROW  0x82
+#define KEY_RIGHT_ARROW 0x83
+
 static const char hid_to_ascii[128] = {
     0,    0,    0,    0,   'a',  'b',  'c',  'd',   // 0x00-0x07
     'e',  'f',  'g',  'h',  'i',  'j',  'k',  'l',   // 0x08-0x0F
@@ -47,10 +52,10 @@ static const char hid_to_ascii[128] = {
     ']',  '\\', '#',  ';',  '\'', '`',  ',',  '.',   // 0x30-0x37
     '/',  0,    0,    0,    0,    0,    0,    0,     // 0x38-0x3F (CapsLock, F1-F6)
     0,    0,    0,    0,    0,    0,    0,    0,     // 0x40-0x47 (F7-F12, PrintScreen, ScrollLock)
-    0,    0,    0,    0,    127,  0,    0,    1,     // 0x48-0x4F (Pause, Insert, Home, PageUp, Delete, End, PageDown, Right=1)
-    2,    3,    4,    0,    '/',  '*',  '-',  '+',   // 0x50-0x57 (Left=2, Down=3, Up=4, NumLock, Keypad /,*,-,+)
+    0,    0,    0,    0,    127,  0,    0,    (char)0x83,  // 0x48-0x4F (Pause, Insert, Home, PageUp, Delete, End, PageDown, Right=0x83)
+    (char)0x82, (char)0x81, (char)0x80, 0, '/',  '*',  '-',  '+',   // 0x50-0x57 (Left=0x82, Down=0x81, Up=0x80, NumLock, Keypad...)
     '\n', '1',  '2',  '3',  '4',  '5',  '6',  '7',   // 0x58-0x5F (Keypad Enter, 1-7)
-    '8',  '9',  '0',  '.',  0,    0,    0,    '=',   // 0x60-0x67 (Keypad 8-0, ., International, App, Power, Keypad =)
+    '8',  '9',  '0',  '.',  0,    0,    0,    '=',   // 0x60-0x67
     0,    0,    0,    0,    0,    0,    0,    0,     // 0x68-0x6F
     0,    0,    0,    0,    0,    0,    0,    0,     // 0x70-0x77
     0,    0,    0,    0,    0,    0,    0,    0      // 0x78-0x7F

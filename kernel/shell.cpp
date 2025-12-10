@@ -24,6 +24,12 @@ static int history_index = -1;  // Current browsing position (-1 = not browsing)
 // Special key codes (sent by input layer via escape sequences)
 #define KEY_UP_ARROW    0x80
 #define KEY_DOWN_ARROW  0x81
+#define KEY_LEFT_ARROW  0x82
+#define KEY_RIGHT_ARROW 0x83
+
+// Bootloader info (set by kmain.cpp from Limine request)
+extern const char* g_bootloader_name;
+extern const char* g_bootloader_version;
 
 extern "C" void jump_to_user_mode(uint64_t code_sel, uint64_t stack, uint64_t entry);
 
@@ -60,21 +66,73 @@ static void add_to_history(const char* cmd) {
     history_count++;
 }
 
-static void clear_line() {
-    // Clear current input from display
-    while (cursor_pos > 0) {
-        g_terminal.put_char('\b');
-        cursor_pos--;
+static int last_displayed_len = 0;  // Track last displayed line length for proper clearing
+
+// Helper to redraw entire command line without ANY cursor glitches
+// Uses ONLY direct drawing methods - never put_char
+static void redraw_line_at(int row, int new_cursor_pos) {
+    // 1. Hide cursor completely - sync position first so it clears at right spot
+    g_terminal.set_cursor_pos(2 + cursor_pos, row);
+    g_terminal.set_cursor_visible(false);
+    
+    // 2. Calculate how much to clear (max of current and previous length + extra margin)
+    int clear_count = last_displayed_len + 2;
+    if (cmd_len + 2 > clear_count) clear_count = cmd_len + 2;
+    
+    // 3. Clear entire line area using direct method
+    g_terminal.clear_chars(2, row, clear_count);
+    
+    // 4. Draw new content using direct method
+    for (int i = 0; i < cmd_len; i++) {
+        g_terminal.write_char_at(2 + i, row, cmd_buffer[i]);
     }
-    cmd_len = 0;
+    
+    // 5. Update tracking variables
+    last_displayed_len = cmd_len;
+    cursor_pos = new_cursor_pos;
+    
+    // 6. Position and show cursor at new location
+    g_terminal.set_cursor_pos(2 + cursor_pos, row);
+    g_terminal.set_cursor_visible(true);
 }
 
+// Clear line - does NOT show cursor at end (called before display_line)
+static void clear_line() {
+    int col, row;
+    g_terminal.get_cursor_pos(&col, &row);
+    
+    g_terminal.set_cursor_visible(false);
+    
+    // Clear entire area with direct method
+    int clear_count = last_displayed_len + 2;
+    if (cmd_len + 2 > clear_count) clear_count = cmd_len + 2;
+    g_terminal.clear_chars(2, row, clear_count);
+    
+    cmd_len = 0;
+    cursor_pos = 0;
+    last_displayed_len = 0;
+    
+    g_terminal.set_cursor_pos(2, row);
+    // NOTE: Do NOT show cursor here - display_line will show it at the right position
+}
+
+// Display line for history - shows cursor at end
 static void display_line() {
-    // Display current buffer
+    int col, row;
+    g_terminal.get_cursor_pos(&col, &row);
+    
+    // Cursor should already be hidden from clear_line
+    g_terminal.set_cursor_visible(false);
+    
     for (int i = 0; i < cmd_len; i++) {
-        g_terminal.put_char(cmd_buffer[i]);
+        g_terminal.write_char_at(2 + i, row, cmd_buffer[i]);
     }
+    
     cursor_pos = cmd_len;
+    last_displayed_len = cmd_len;
+    
+    g_terminal.set_cursor_pos(2 + cursor_pos, row);
+    g_terminal.set_cursor_visible(true);
 }
 
 static void cmd_help() {
@@ -232,13 +290,22 @@ static void cmd_echo(const char* text) {
 }
 
 static void cmd_version() {
-    g_terminal.write_line("uniOS Kernel v0.2.1");
+    g_terminal.write_line("uniOS Kernel v0.2.2");
     g_terminal.write_line("Built with GCC for x86_64-elf");
-    g_terminal.write_line("Bootloader: Limine v8.x");
+    
+    // Display actual bootloader info if available
+    if (g_bootloader_name && g_bootloader_version) {
+        g_terminal.write("Bootloader: ");
+        g_terminal.write(g_bootloader_name);
+        g_terminal.write(" ");
+        g_terminal.write_line(g_bootloader_version);
+    } else {
+        g_terminal.write_line("Bootloader: Limine (version unknown)");
+    }
 }
 
 static void cmd_uname() {
-    g_terminal.write_line("uniOS 0.2.1 x86_64");
+    g_terminal.write_line("uniOS 0.2.2 x86_64");
 }
 
 static void cmd_cpuinfo() {
@@ -456,22 +523,30 @@ void shell_init(struct limine_framebuffer* fb) {
     
     cmd_len = 0;
     cursor_pos = 0;
+    
+    // Ensure cursor is visible and blinking
+    g_terminal.set_cursor_visible(true);
 }
 
 void shell_process_char(char c) {
+    uint8_t uc = (uint8_t)c;  // Cast to unsigned for special key comparison
+    
     if (c == '\n') {
         execute_command();
     } else if (c == '\b') {
         if (cursor_pos > 0) {
-            // Remove char at cursor position
+            // Remove char at cursor position - 1
             for (int i = cursor_pos - 1; i < cmd_len - 1; i++) {
                 cmd_buffer[i] = cmd_buffer[i + 1];
             }
             cmd_len--;
-            cursor_pos--;
-            g_terminal.put_char('\b');
+            
+            // Get current row and redraw
+            int col, row;
+            g_terminal.get_cursor_pos(&col, &row);
+            redraw_line_at(row, cursor_pos - 1);
         }
-    } else if (c == KEY_UP_ARROW) {
+    } else if (uc == KEY_UP_ARROW) {
         // Navigate history up
         if (history_count > 0) {
             int max_idx = (history_count < HISTORY_SIZE) ? history_count : HISTORY_SIZE;
@@ -485,7 +560,7 @@ void shell_process_char(char c) {
                 display_line();
             }
         }
-    } else if (c == KEY_DOWN_ARROW) {
+    } else if (uc == KEY_DOWN_ARROW) {
         // Navigate history down
         if (history_index > 0) {
             history_index--;
@@ -499,6 +574,22 @@ void shell_process_char(char c) {
             history_index = -1;
             clear_line();
         }
+    } else if (uc == KEY_LEFT_ARROW) {
+        // Move cursor left within command
+        if (cursor_pos > 0) {
+            cursor_pos--;
+            int col, row;
+            g_terminal.get_cursor_pos(&col, &row);
+            g_terminal.set_cursor_pos(col - 1, row);
+        }
+    } else if (uc == KEY_RIGHT_ARROW) {
+        // Move cursor right within command
+        if (cursor_pos < cmd_len) {
+            cursor_pos++;
+            int col, row;
+            g_terminal.get_cursor_pos(&col, &row);
+            g_terminal.set_cursor_pos(col + 1, row);
+        }
     } else if (c >= 32 && cmd_len < 255) {
         cmd_buffer[cmd_len++] = c;
         cursor_pos++;
@@ -509,3 +600,4 @@ void shell_process_char(char c) {
 void shell_tick() {
     g_terminal.update_cursor();
 }
+
