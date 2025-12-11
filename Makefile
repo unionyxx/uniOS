@@ -5,14 +5,16 @@ CXX = g++
 LD = ld
 
 # Flags
-CXXFLAGS = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 -Wall -Wextra -I.
+# Directories
+KERNEL_DIRS = kernel/core kernel/arch kernel/mem kernel/drivers kernel/drivers/net kernel/drivers/usb kernel/net kernel/fs kernel/shell
+
+# Flags
+CXXFLAGS = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 -Wall -Wextra -Wno-volatile -I. -Ikernel $(foreach dir,$(KERNEL_DIRS),-I$(dir))
 LDFLAGS = -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
 
 # Files
-# Files
-# Files
-KERNEL_SRC = $(wildcard kernel/*.cpp)
-KERNEL_ASM = $(wildcard kernel/*.asm)
+KERNEL_SRC = $(foreach dir,$(KERNEL_DIRS),$(wildcard $(dir)/*.cpp))
+KERNEL_ASM = $(foreach dir,$(KERNEL_DIRS),$(wildcard $(dir)/*.asm))
 KERNEL_OBJ = $(KERNEL_SRC:.cpp=.o) $(KERNEL_ASM:.asm=.o)
 KERNEL_BIN = kernel.elf
 ISO_IMAGE = uniOS.iso

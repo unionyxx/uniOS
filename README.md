@@ -10,19 +10,22 @@
 
 **uniOS** is a Minimalist x86 OS in C++20. It serves as a clean, modern, and hackable educational resource for understanding operating system internals, featuring a custom kernel, native drivers, and a transparent design philosophy.
 
-Current Version: **v0.2.4**
+Current Version: **v0.3.0**
 
 ---
 
 ## Features
 
 *   **Modern Core**: Custom C++20 kernel with minimal assembly stubs.
+*   **Networking**: Full TCP/IP stack (Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS).
+*   **Driver Support**:
+    *   **Network**: Intel e1000/I217/I218/I219/I225, Realtek RTL8139.
+    *   **USB**: Native xHCI driver with HID support (Keyboard & Mouse).
+    *   **Input**: PS/2 Keyboard & Mouse.
 *   **Memory Management**: Robust PMM (Bitmap), VMM (Page Tables), and Kernel Heap (Bucket Allocator).
-*   **USB Stack**: Native xHCI driver with support for HID devices (Keyboard & Mouse) and DMA-safe memory.
 *   **Boot Protocol**: Powered by **Limine** (v8.x) for a seamless, quiet boot experience.
 *   **Visuals**: Direct framebuffer access with custom font rendering and a sleek dark theme.
-*   **Architecture**: Full GDT, IDT, and interrupt handling setup.
-*   **Interactive Shell**: Command history (up/down arrows), cursor movement (left/right arrows), clean line editing.
+*   **Interactive Shell**: Command history, line editing, and network commands (`ping`, `dhcp`, `ifconfig`).
 
 ## Known Issues (Real Hardware)
 
@@ -58,7 +61,13 @@ make run
 
 | Directory | Description |
 |-----------|-------------|
-| `kernel/` | Core kernel source code (C++). |
+| `kernel/core` | Core kernel logic (kmain, debug, scheduler). |
+| `kernel/arch` | Architecture-specific code (GDT, IDT, interrupts). |
+| `kernel/mem` | Memory management (PMM, VMM, Heap). |
+| `kernel/drivers` | Device drivers (PCI, Timer, Graphics, Input). |
+| `kernel/net` | Network stack implementation. |
+| `kernel/fs` | Filesystem support. |
+| `kernel/shell` | Kernel shell implementation. |
 | `boot/` | Bootloader configuration files. |
 | `libc/` | Custom C standard library implementation. |
 | `userspace/` | User-mode applications and shells. |

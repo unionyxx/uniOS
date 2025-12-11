@@ -1,9 +1,10 @@
 :root {
-    --bg-color: #0a0a0a;
+    --bg-color: #050505;
     --text-color: #e0e0e0;
     --accent-color: #ffffff;
     --secondary-text: #888888;
-    --card-bg: #111111;
+    --card-bg: rgba(20, 20, 20, 0.6);
+    --card-border: rgba(255, 255, 255, 0.1);
     --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
@@ -16,6 +17,9 @@
 
 body {
     background-color: var(--bg-color);
+    background-image: 
+        radial-gradient(circle at 50% 0%, rgba(120, 120, 120, 0.15) 0%, transparent 50%),
+        radial-gradient(circle at 100% 0%, rgba(255, 255, 255, 0.05) 0%, transparent 30%);
     color: var(--text-color);
     font-family: var(--font-main);
     line-height: 1.6;
@@ -37,13 +41,19 @@ body {
 
 header {
     padding: 2rem 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 .logo {
     font-size: 1.5rem;
-    font-weight: 600;
+    font-weight: 700;
     letter-spacing: -0.05em;
     color: var(--accent-color);
+    background: linear-gradient(135deg, #fff 0%, #888 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
 
 main {
@@ -51,109 +61,107 @@ main {
     display: flex;
     flex-direction: column;
     justify-content: center;
-    /* Centers hero vertically if content is short */
     align-items: flex-start;
-    padding-top: 4rem;
-    /* Add some space */
-    padding-bottom: 4rem;
+    padding-top: 6rem;
+    padding-bottom: 6rem;
 }
 
 .hero-title {
-    font-size: 5rem;
-    font-weight: 600;
-    line-height: 1.1;
-    letter-spacing: -0.03em;
+    font-size: 6rem;
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.04em;
     margin-bottom: 1.5rem;
-    background: linear-gradient(to right, #fff, #666);
+    background: linear-gradient(180deg, #ffffff 0%, #666666 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: fadeIn 1.5s ease-out;
+    animation: fadeIn 1s ease-out;
 }
 
 .hero-subtitle {
-    font-size: 1.25rem;
+    font-size: 1.5rem;
     color: var(--secondary-text);
     max-width: 600px;
     margin-bottom: 3rem;
-    font-weight: 300;
-    animation: fadeIn 1.5s ease-out 0.2s backwards;
+    font-weight: 400;
+    line-height: 1.5;
+    animation: fadeIn 1s ease-out 0.2s backwards;
 }
 
 .actions {
     display: flex;
     gap: 1.5rem;
     margin-bottom: 8rem;
-    /* Space between hero and features */
-    animation: fadeIn 1.5s ease-out 0.4s backwards;
+    animation: fadeIn 1s ease-out 0.4s backwards;
 }
 
 .btn {
     text-decoration: none;
-    padding: 1rem 2rem;
+    padding: 1rem 2.5rem;
     border-radius: 50px;
-    font-weight: 500;
-    transition: all 0.3s ease;
-    font-size: 1rem;
+    font-weight: 600;
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    font-size: 1.1rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .btn.primary {
     background-color: var(--accent-color);
-    color: var(--bg-color);
+    color: #000;
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
 }
 
 .btn.primary:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 10px 20px rgba(255, 255, 255, 0.1);
-}
-
-.btn.secondary {
-    border: 1px solid var(--secondary-text);
-    color: var(--text-color);
-}
-
-.btn.secondary:hover {
-    border-color: var(--accent-color);
-    color: var(--accent-color);
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 0 30px rgba(255, 255, 255, 0.3);
 }
 
 /* Features Section */
 .features-section {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     gap: 2rem;
     width: 100%;
-    animation: fadeIn 1.5s ease-out 0.6s backwards;
+    animation: fadeIn 1s ease-out 0.6s backwards;
 }
 
 .feature-card {
     background: var(--card-bg);
-    padding: 2rem;
-    border-radius: 12px;
-    border: 1px solid #222;
-    transition: transform 0.3s ease, border-color 0.3s ease;
+    padding: 2.5rem;
+    border-radius: 16px;
+    border: 1px solid var(--card-border);
+    backdrop-filter: blur(10px);
+    transition: all 0.3s ease;
 }
 
 .feature-card:hover {
     transform: translateY(-5px);
-    border-color: #333;
+    border-color: rgba(255, 255, 255, 0.3);
+    background: rgba(30, 30, 30, 0.8);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
 }
 
 .feature-card h3 {
     font-size: 1.25rem;
-    margin-bottom: 1rem;
+    margin-bottom: 0.75rem;
     color: var(--accent-color);
+    font-weight: 600;
 }
 
 .feature-card p {
     color: var(--secondary-text);
-    font-size: 0.95rem;
+    font-size: 1rem;
+    line-height: 1.6;
 }
 
 footer {
-    padding: 2rem 0;
+    padding: 3rem 0;
     color: var(--secondary-text);
     font-size: 0.875rem;
     margin-top: auto;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 @keyframes fadeIn {
@@ -161,7 +169,6 @@ footer {
         opacity: 0;
         transform: translateY(20px);
     }
-
     to {
         opacity: 1;
         transform: translateY(0);
@@ -170,13 +177,13 @@ footer {
 
 @media (max-width: 768px) {
     .hero-title {
-        font-size: 3rem;
+        font-size: 3.5rem;
     }
-
+    
     .container {
         padding: 1.5rem;
     }
-
+    
     .actions {
         margin-bottom: 4rem;
     }
