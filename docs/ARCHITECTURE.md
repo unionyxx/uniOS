@@ -4,7 +4,9 @@
 
 ## Overview
 
-**uniOS** is a scratch-built x86-64 operating system kernel written in C++20. It boots via Limine and provides a simple shell interface with networking, USB support, and a RAM-based filesystem.
+**uniOS** is a scratch-built x86-64 operating system kernel written in C++20. It boots via Limine and provides a shell interface with networking, USB support, and a RAM-based filesystem.
+
+Development is primarily done in **QEMU** for rapid iteration with debugging support. The OS targets **real x86_64 hardware** but hardware-specific issues may not be supportable due to project scope.
 
 ```
 ┌─────────────────────────────────────────┐
@@ -25,6 +27,17 @@
 │       (GDT, IDT, PIC, I/O Ports)        │
 └─────────────────────────────────────────┘
 ```
+
+## Versioning
+
+uniOS follows semantic versioning with a pre-1.0 adaptation:
+
+| Phase | Format | Description |
+|-------|--------|-------------|
+| **Pre-1.0** | `0.MAJOR.MINOR` | Active development. MAJOR for new subsystems, MINOR for features/fixes. |
+| **Post-1.0** | `MAJOR.MINOR.PATCH` | Stable. MAJOR for breaking changes, MINOR for features, PATCH for fixes. |
+
+The canonical version is defined in `kernel/core/version.h`. See that file for detailed increment rules.
 
 ## Memory Layout
 
@@ -87,7 +100,7 @@ make run-gdb  # Run with GDB stub
 
 ```
 kernel/
-├── core/       # Entry point, debug, scheduler
+├── core/       # Entry point, version, debug, scheduler
 ├── arch/       # GDT, IDT, interrupts, I/O
 ├── mem/        # PMM, VMM, heap
 ├── drivers/    # Hardware drivers
@@ -111,7 +124,9 @@ kernel/
 | File | Purpose |
 |------|---------|
 | `kernel/core/kmain.cpp` | Kernel entry point |
+| `kernel/core/version.h` | Version info and policy |
 | `kernel/core/kstring.h` | Shared string utilities |
 | `kernel/mem/heap.cpp` | Dynamic memory allocator |
 | `kernel/net/tcp.cpp` | TCP implementation |
 | `kernel/drivers/usb/xhci.cpp` | USB 3.0 driver |
+

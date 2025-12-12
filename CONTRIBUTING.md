@@ -27,17 +27,28 @@ Thank you for your interest in contributing to uniOS!
 
 ## Testing
 
-Always test your changes in QEMU before submitting:
+**Testing is done in QEMU.** The OS targets real hardware, but hardware-specific issues may not be supportable.
 
 ```bash
 make clean && make debug  # Build with logging
 make run                  # Test in QEMU
+make run-gdb              # Debug with GDB on localhost:1234
 ```
 
 Verify:
 - Kernel boots without errors
 - Your feature works as expected
 - Existing features still work (regression testing)
+
+## Versioning
+
+When your changes warrant a version bump (see `kernel/core/version.h` for rules):
+
+1. Update `UNIOS_VERSION_*` macros in `kernel/core/version.h`
+2. Update `UNIOS_VERSION_STRING` and `UNIOS_VERSION_FULL`
+3. Update `Current Version:` line in `README.md`
+
+**Don't bump for**: docs, refactoring, build changes, or minor cleanup.
 
 ## Pull Request Process
 
@@ -48,12 +59,13 @@ Verify:
 
 ## Areas for Contribution
 
-- **Drivers**: New hardware support
-- **Network**: Protocol implementations
-- **Filesystem**: Persistent storage
-- **Shell**: New commands
+- **Network**: Protocol implementations (TCP improvements, new protocols)
+- **Shell**: New commands and shell features
+- **Filesystem**: uniFS enhancements
 - **Documentation**: Improve docs and comments
+- **Drivers**: QEMU-compatible device support
 
 ## Questions?
 
 Open an issue for questions or feature discussions.
+

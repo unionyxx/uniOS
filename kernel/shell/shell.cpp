@@ -26,6 +26,15 @@ using kstring::strncmp;
 using kstring::strlen;
 using kstring::strcpy;
 
+// Piping support
+#define PIPE_BUFFER_SIZE 4096
+static char pipe_buffer_a[PIPE_BUFFER_SIZE];
+static char pipe_buffer_b[PIPE_BUFFER_SIZE];
+
+// Forward declaration for piped command execution
+static bool execute_single_command(const char* cmd, const char* piped_input);
+
+
 static char cmd_buffer[256];
 static int cmd_len = 0;
 static int cursor_pos = 0; // Position within cmd_buffer
@@ -182,6 +191,12 @@ static void cmd_help() {
     g_terminal.write_line("  dhcp      - Request IP via DHCP");
     g_terminal.write_line("  ping <ip> - Ping an IP address");
     g_terminal.write_line("");
+    g_terminal.write_line("Text Processing (pipe-friendly):");
+    g_terminal.write_line("  wc [f]    - Count lines/words/chars");
+    g_terminal.write_line("  head [n] [f] - First n lines (default 10)");
+    g_terminal.write_line("  tail [n] [f] - Last n lines (default 10)");
+    g_terminal.write_line("  grep <p> [f] - Search for pattern");
+    g_terminal.write_line("");
     g_terminal.write_line("Other:");
     g_terminal.write_line("  clear     - Clear screen");
     g_terminal.write_line("  gui       - Start GUI mode");
@@ -189,6 +204,7 @@ static void cmd_help() {
     g_terminal.write_line("  reboot    - Reboot system");
     g_terminal.write_line("  poweroff  - Shutdown system");
     g_terminal.write_line("");
+    g_terminal.write_line("Piping: cmd1 | cmd2 - Pass output as input");
     g_terminal.write_line("Shortcuts:");
     g_terminal.write_line("  Tab       - Command/filename completion");
     g_terminal.write_line("  Ctrl+A/E  - Move to start/end");
@@ -668,6 +684,291 @@ static void cmd_echo(const char* text) {
     g_terminal.write_line(text);
 }
 
+// =============================================================================
+// Enhanced Text Processing Commands
+// Better than Unix: cleaner output, smarter defaults, works with pipes
+// =============================================================================
+
+// wc - Word/line/character count with formatted output
+// Usage: wc [file] or pipe: ls | wc
+static void cmd_wc(const char* filename, const char* piped_input) {
+    const char* data = nullptr;
+    uint64_t data_len = 0;
+    
+    // Get data from file or piped input
+    if (filename && filename[0]) {
+        const UniFSFile* file = unifs_open(filename);
+        if (!file) {
+            g_terminal.write_line("File not found.");
+            return;
+        }
+        data = (const char*)file->data;
+        data_len = file->size;
+    } else if (piped_input) {
+        data = piped_input;
+        data_len = strlen(piped_input);
+    } else {
+        g_terminal.write_line("Usage: wc <file> or pipe input");
+        return;
+    }
+    
+    // Count statistics
+    uint64_t lines = 0, words = 0, chars = 0;
+    bool in_word = false;
+    
+    for (uint64_t i = 0; i < data_len; i++) {
+        char c = data[i];
+        chars++;
+        
+        if (c == '\n') lines++;
+        
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            in_word = false;
+        } else if (!in_word) {
+            in_word = true;
+            words++;
+        }
+    }
+    
+    // Add 1 to lines if data doesn't end with newline
+    if (data_len > 0 && data[data_len - 1] != '\n') lines++;
+    
+    // Output in clean format
+    char buf[128];
+    int i = 0;
+    auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
+    auto append_num = [&](uint64_t n) {
+        if (n == 0) { buf[i++] = '0'; return; }
+        char tmp[20]; int j = 0;
+        while (n > 0) { tmp[j++] = '0' + (n % 10); n /= 10; }
+        while (j > 0) buf[i++] = tmp[--j];
+    };
+    
+    append_str("  Lines: "); append_num(lines); append_str("\n");
+    append_str("  Words: "); append_num(words); append_str("\n");
+    append_str("  Chars: "); append_num(chars);
+    buf[i] = 0;
+    g_terminal.write_line(buf);
+}
+
+// head - Show first N lines (default 10)
+// Usage: head [n] [file] or pipe: ls | head 5
+static void cmd_head(const char* args, const char* piped_input) {
+    int n = 10;  // Smart default
+    const char* filename = nullptr;
+    
+    // Parse args: could be "5", "5 file.txt", "file.txt", or empty
+    if (args && args[0]) {
+        if (args[0] >= '0' && args[0] <= '9') {
+            n = 0;
+            const char* p = args;
+            while (*p >= '0' && *p <= '9') {
+                n = n * 10 + (*p - '0');
+                p++;
+            }
+            while (*p == ' ') p++;
+            if (*p) filename = p;
+        } else {
+            filename = args;
+        }
+    }
+    
+    const char* data = nullptr;
+    uint64_t data_len = 0;
+    
+    if (filename && filename[0]) {
+        const UniFSFile* file = unifs_open(filename);
+        if (!file) {
+            g_terminal.write_line("File not found.");
+            return;
+        }
+        data = (const char*)file->data;
+        data_len = file->size;
+    } else if (piped_input) {
+        data = piped_input;
+        data_len = strlen(piped_input);
+    } else {
+        g_terminal.write_line("Usage: head [n] <file> or pipe input");
+        return;
+    }
+    
+    // Output first n lines
+    int line_count = 0;
+    for (uint64_t i = 0; i < data_len && line_count < n; i++) {
+        g_terminal.put_char(data[i]);
+        if (data[i] == '\n') line_count++;
+    }
+    
+    // Add newline if last line didn't have one
+    if (data_len > 0 && data[data_len - 1] != '\n' && line_count < n) {
+        g_terminal.put_char('\n');
+    }
+}
+
+// tail - Show last N lines (default 10)
+// Usage: tail [n] [file] or pipe: ls | tail 3
+static void cmd_tail(const char* args, const char* piped_input) {
+    int n = 10;  // Smart default
+    const char* filename = nullptr;
+    
+    // Parse args: could be "5", "5 file.txt", "file.txt", or empty
+    if (args && args[0]) {
+        if (args[0] >= '0' && args[0] <= '9') {
+            n = 0;
+            const char* p = args;
+            while (*p >= '0' && *p <= '9') {
+                n = n * 10 + (*p - '0');
+                p++;
+            }
+            while (*p == ' ') p++;
+            if (*p) filename = p;
+        } else {
+            filename = args;
+        }
+    }
+    
+    const char* data = nullptr;
+    uint64_t data_len = 0;
+    
+    if (filename && filename[0]) {
+        const UniFSFile* file = unifs_open(filename);
+        if (!file) {
+            g_terminal.write_line("File not found.");
+            return;
+        }
+        data = (const char*)file->data;
+        data_len = file->size;
+    } else if (piped_input) {
+        data = piped_input;
+        data_len = strlen(piped_input);
+    } else {
+        g_terminal.write_line("Usage: tail [n] <file> or pipe input");
+        return;
+    }
+    
+    // Count total lines
+    int total_lines = 0;
+    for (uint64_t i = 0; i < data_len; i++) {
+        if (data[i] == '\n') total_lines++;
+    }
+    if (data_len > 0 && data[data_len - 1] != '\n') total_lines++;
+    
+    // Find start position for last n lines
+    int skip_lines = (total_lines > n) ? (total_lines - n) : 0;
+    int line_count = 0;
+    uint64_t start = 0;
+    
+    for (uint64_t i = 0; i < data_len && line_count < skip_lines; i++) {
+        if (data[i] == '\n') {
+            line_count++;
+            start = i + 1;
+        }
+    }
+    
+    // Output from start position
+    for (uint64_t i = start; i < data_len; i++) {
+        g_terminal.put_char(data[i]);
+    }
+    
+    // Add newline if needed
+    if (data_len > 0 && data[data_len - 1] != '\n') {
+        g_terminal.put_char('\n');
+    }
+}
+
+// Helper: case-insensitive character comparison
+static char to_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+}
+
+// grep - Search for pattern in text
+// Usage: grep pattern [file] or pipe: ls | grep elf
+// Case-insensitive by default (modern approach)
+static void cmd_grep(const char* args, const char* piped_input) {
+    if (!args || !args[0]) {
+        g_terminal.write_line("Usage: grep <pattern> [file]");
+        return;
+    }
+    
+    // Parse pattern and optional filename
+    char pattern[64];
+    const char* filename = nullptr;
+    int pi = 0;
+    const char* p = args;
+    
+    // Get pattern (first word)
+    while (*p && *p != ' ' && pi < 63) {
+        pattern[pi++] = *p++;
+    }
+    pattern[pi] = '\0';
+    
+    // Skip space and get filename if present
+    while (*p == ' ') p++;
+    if (*p) filename = p;
+    
+    const char* data = nullptr;
+    uint64_t data_len = 0;
+    
+    if (filename && filename[0]) {
+        const UniFSFile* file = unifs_open(filename);
+        if (!file) {
+            g_terminal.write_line("File not found.");
+            return;
+        }
+        data = (const char*)file->data;
+        data_len = file->size;
+    } else if (piped_input) {
+        data = piped_input;
+        data_len = strlen(piped_input);
+    } else {
+        g_terminal.write_line("Usage: grep <pattern> <file> or pipe input");
+        return;
+    }
+    
+    int pattern_len = strlen(pattern);
+    if (pattern_len == 0) return;
+    
+    // Process line by line
+    uint64_t line_start = 0;
+    int matches = 0;
+    
+    for (uint64_t i = 0; i <= data_len; i++) {
+        bool is_end = (i == data_len) || (data[i] == '\n');
+        
+        if (is_end) {
+            // Check if this line contains the pattern (case-insensitive)
+            bool found = false;
+            uint64_t line_len = i - line_start;
+            
+            for (uint64_t j = line_start; j + pattern_len <= i && !found; j++) {
+                bool match = true;
+                for (int k = 0; k < pattern_len && match; k++) {
+                    if (to_lower(data[j + k]) != to_lower(pattern[k])) {
+                        match = false;
+                    }
+                }
+                if (match) found = true;
+            }
+            
+            // Output matching line
+            if (found) {
+                matches++;
+                for (uint64_t j = line_start; j < i; j++) {
+                    g_terminal.put_char(data[j]);
+                }
+                g_terminal.put_char('\n');
+            }
+            
+            line_start = i + 1;
+        }
+    }
+    
+    if (matches == 0) {
+        g_terminal.write_line("No matches found.");
+    }
+}
+
+
 static void cmd_version() {
     g_terminal.write("uniOS Kernel v");
     g_terminal.write_line(UNIOS_VERSION_STRING);
@@ -1020,6 +1321,137 @@ static void cmd_ping(const char* target) {
     g_terminal.write_line(summary);
 }
 
+// Helper: output piped input (used by cat when no file argument given)
+static void cmd_cat_piped(const char* input) {
+    if (input) {
+        g_terminal.write(input);
+    }
+}
+
+// Execute a single command, optionally with piped input
+// Returns true if command was recognized, false otherwise
+static bool execute_single_command(const char* cmd, const char* piped_input) {
+    // Skip leading whitespace
+    while (*cmd == ' ') cmd++;
+    
+    // Get command length (excluding trailing spaces)
+    int len = strlen(cmd);
+    while (len > 0 && cmd[len - 1] == ' ') len--;
+    
+    if (len == 0) return true;  // Empty command is OK
+    
+    // Make a local copy for parsing
+    char local_cmd[256];
+    if (len > 255) len = 255;
+    for (int i = 0; i < len; i++) local_cmd[i] = cmd[i];
+    local_cmd[len] = '\0';
+    
+    // Command dispatch
+    if (strcmp(local_cmd, "help") == 0) {
+        cmd_help();
+    } else if (strcmp(local_cmd, "ls") == 0) {
+        cmd_ls();
+    } else if (strncmp(local_cmd, "cat ", 4) == 0) {
+        cmd_cat(local_cmd + 4);
+    } else if (strcmp(local_cmd, "cat") == 0) {
+        // cat with no args: output piped input
+        cmd_cat_piped(piped_input);
+    } else if (strncmp(local_cmd, "stat ", 5) == 0) {
+        cmd_stat(local_cmd + 5);
+    } else if (strncmp(local_cmd, "hexdump ", 8) == 0) {
+        cmd_hexdump(local_cmd + 8);
+    } else if (strncmp(local_cmd, "touch ", 6) == 0) {
+        cmd_touch(local_cmd + 6);
+    } else if (strncmp(local_cmd, "rm ", 3) == 0) {
+        cmd_rm(local_cmd + 3);
+    } else if (strncmp(local_cmd, "write ", 6) == 0) {
+        cmd_write(local_cmd + 6);
+    } else if (strncmp(local_cmd, "append ", 7) == 0) {
+        cmd_append(local_cmd + 7);
+    } else if (strcmp(local_cmd, "df") == 0) {
+        cmd_df();
+    } else if (strcmp(local_cmd, "mem") == 0) {
+        cmd_mem();
+    } else if (strcmp(local_cmd, "date") == 0) {
+        cmd_date();
+    } else if (strcmp(local_cmd, "uptime") == 0) {
+        cmd_uptime();
+    // Text processing commands (work with piping)
+    } else if (strncmp(local_cmd, "wc ", 3) == 0) {
+        cmd_wc(local_cmd + 3, piped_input);
+    } else if (strcmp(local_cmd, "wc") == 0) {
+        cmd_wc(nullptr, piped_input);
+    } else if (strncmp(local_cmd, "head ", 5) == 0) {
+        cmd_head(local_cmd + 5, piped_input);
+    } else if (strcmp(local_cmd, "head") == 0) {
+        cmd_head(nullptr, piped_input);
+    } else if (strncmp(local_cmd, "tail ", 5) == 0) {
+        cmd_tail(local_cmd + 5, piped_input);
+    } else if (strcmp(local_cmd, "tail") == 0) {
+        cmd_tail(nullptr, piped_input);
+    } else if (strncmp(local_cmd, "grep ", 5) == 0) {
+        cmd_grep(local_cmd + 5, piped_input);
+    } else if (strncmp(local_cmd, "echo ", 5) == 0) {
+        // echo with piped input: output piped input + args (or just args)
+        cmd_echo(local_cmd + 5);
+    } else if (strcmp(local_cmd, "echo") == 0) {
+        // echo with no args: output piped input if present, else newline
+        if (piped_input && piped_input[0]) {
+            g_terminal.write(piped_input);
+        } else {
+            g_terminal.write("\n");
+        }
+    } else if (strcmp(local_cmd, "version") == 0) {
+        cmd_version();
+    } else if (strcmp(local_cmd, "uname") == 0) {
+        cmd_uname();
+    } else if (strcmp(local_cmd, "cpuinfo") == 0) {
+        cmd_cpuinfo();
+    } else if (strcmp(local_cmd, "lspci") == 0) {
+        cmd_lspci();
+    } else if (strcmp(local_cmd, "ifconfig") == 0) {
+        cmd_ifconfig();
+    } else if (strcmp(local_cmd, "dhcp") == 0) {
+        cmd_dhcp_request();
+    } else if (strncmp(local_cmd, "ping ", 5) == 0) {
+        cmd_ping(local_cmd + 5);
+    } else if (strcmp(local_cmd, "clear") == 0) {
+        g_terminal.clear();
+        g_terminal.write("uniOS Shell (uniSH)\n\n");
+    } else if (strcmp(local_cmd, "gui") == 0) {
+        extern void gui_start();
+        gui_start();
+        g_terminal.clear();
+        g_terminal.write("uniOS Shell (uniSH)\n\n");
+    } else if (strcmp(local_cmd, "reboot") == 0) {
+        g_terminal.write_line("Rebooting...");
+        outb(0x64, 0xFE);
+        for (volatile int i = 0; i < 1000000; i++);
+        outb(0xCF9, 0x06);
+        for (volatile int i = 0; i < 1000000; i++);
+        struct {
+            uint16_t limit;
+            uint64_t base;
+        } __attribute__((packed)) invalid_idt = { 0, 0 };
+        asm volatile("lidt %0; int3" :: "m"(invalid_idt));
+        asm volatile("cli; hlt");
+    } else if (strcmp(local_cmd, "poweroff") == 0) {
+        if (acpi_is_available()) {
+            g_terminal.write_line("ACPI available, attempting shutdown...");
+        } else {
+            g_terminal.write_line("ACPI not available.");
+        }
+        acpi_poweroff();
+        g_terminal.write_line("Shutdown failed.");
+    } else {
+        g_terminal.write("Unknown command: ");
+        g_terminal.write_line(local_cmd);
+        return false;
+    }
+    
+    return true;
+}
+
 static void execute_command() {
     cmd_buffer[cmd_len] = 0;
     
@@ -1040,93 +1472,61 @@ static void execute_command() {
     
     g_terminal.write("\n"); // Move to next line after command input
     
-    if (strcmp(cmd_buffer, "help") == 0) {
-        cmd_help();
-    } else if (strcmp(cmd_buffer, "ls") == 0) {
-        cmd_ls();
-    } else if (strncmp(cmd_buffer, "cat ", 4) == 0) {
-        cmd_cat(cmd_buffer + 4);
-    } else if (strncmp(cmd_buffer, "stat ", 5) == 0) {
-        cmd_stat(cmd_buffer + 5);
-    } else if (strncmp(cmd_buffer, "hexdump ", 8) == 0) {
-        cmd_hexdump(cmd_buffer + 8);
-    } else if (strncmp(cmd_buffer, "touch ", 6) == 0) {
-        cmd_touch(cmd_buffer + 6);
-    } else if (strncmp(cmd_buffer, "rm ", 3) == 0) {
-        cmd_rm(cmd_buffer + 3);
-    } else if (strncmp(cmd_buffer, "write ", 6) == 0) {
-        cmd_write(cmd_buffer + 6);
-    } else if (strncmp(cmd_buffer, "append ", 7) == 0) {
-        cmd_append(cmd_buffer + 7);
-    } else if (strcmp(cmd_buffer, "df") == 0) {
-        cmd_df();
-    } else if (strcmp(cmd_buffer, "mem") == 0) {
-        cmd_mem();
-    } else if (strcmp(cmd_buffer, "date") == 0) {
-        cmd_date();
-    } else if (strcmp(cmd_buffer, "uptime") == 0) {
-        cmd_uptime();
-    } else if (strncmp(cmd_buffer, "echo ", 5) == 0) {
-        cmd_echo(cmd_buffer + 5);
-    } else if (strcmp(cmd_buffer, "echo") == 0) {
-        g_terminal.write("\n");  // Just echo newline
-    } else if (strcmp(cmd_buffer, "version") == 0) {
-        cmd_version();
-    } else if (strcmp(cmd_buffer, "uname") == 0) {
-        cmd_uname();
-    } else if (strcmp(cmd_buffer, "cpuinfo") == 0) {
-        cmd_cpuinfo();
-    } else if (strcmp(cmd_buffer, "lspci") == 0) {
-        cmd_lspci();
-    } else if (strcmp(cmd_buffer, "ifconfig") == 0) {
-        cmd_ifconfig();
-    } else if (strcmp(cmd_buffer, "dhcp") == 0) {
-        cmd_dhcp_request();
-    } else if (strncmp(cmd_buffer, "ping ", 5) == 0) {
-        cmd_ping(cmd_buffer + 5);
-    } else if (strcmp(cmd_buffer, "clear") == 0) {
-        g_terminal.clear();
-        g_terminal.write("uniOS Shell (uniSH)\n\n");
-        cmd_len = 0;
-        cursor_pos = 0;
-        g_terminal.write("> ");
-        return;
-    } else if (strcmp(cmd_buffer, "gui") == 0) {
-        extern void gui_start();
-        gui_start();
-        // After GUI, clear and reset
-        g_terminal.clear();
-        g_terminal.write("uniOS Shell (uniSH)\n\n");
-    } else if (strcmp(cmd_buffer, "reboot") == 0) {
-        g_terminal.write_line("Rebooting...");
-        
-        // 1. Keyboard Controller Reset (0x64 = 0xFE)
-        outb(0x64, 0xFE);
-        for (volatile int i = 0; i < 1000000; i++);
-        
-        // 2. PCI Reset (0xCF9 = 0x06) - Reset + System Reset
-        outb(0xCF9, 0x06);
-        for (volatile int i = 0; i < 1000000; i++);
-        
-        // 3. Triple Fault (load invalid IDT)
-        struct {
-            uint16_t limit;
-            uint64_t base;
-        } __attribute__((packed)) invalid_idt = { 0, 0 };
-        asm volatile("lidt %0; int3" :: "m"(invalid_idt));
-        
-        asm volatile("cli; hlt");
-    } else if (strcmp(cmd_buffer, "poweroff") == 0) {
-        if (acpi_is_available()) {
-            g_terminal.write_line("ACPI available, attempting shutdown...");
-        } else {
-            g_terminal.write_line("ACPI not available.");
+    // Check for pipes
+    bool has_pipe = false;
+    for (int i = 0; i < cmd_len; i++) {
+        if (cmd_buffer[i] == '|') {
+            has_pipe = true;
+            break;
         }
-        acpi_poweroff();
-        g_terminal.write_line("Shutdown failed.");
+    }
+    
+    if (!has_pipe) {
+        // Simple case: no pipes, execute directly
+        execute_single_command(cmd_buffer, nullptr);
     } else {
-        g_terminal.write("Unknown command: ");
-        g_terminal.write_line(cmd_buffer);
+        // Parse and execute pipeline
+        // Commands: cmd1 | cmd2 | cmd3 ...
+        // We alternate between pipe_buffer_a and pipe_buffer_b
+        
+        // Clear pipe buffers to prevent stale data
+        pipe_buffer_a[0] = '\0';
+        pipe_buffer_b[0] = '\0';
+        
+        char* current_input = nullptr;
+        char* current_output = pipe_buffer_a;
+        char* commands[16];  // Max 16 commands in pipeline
+        int cmd_count = 0;
+        
+        // Split by pipe character
+        char* start = cmd_buffer;
+        for (int i = 0; i <= cmd_len && cmd_count < 16; i++) {
+            if (cmd_buffer[i] == '|' || cmd_buffer[i] == '\0') {
+                cmd_buffer[i] = '\0';
+                commands[cmd_count++] = start;
+                start = cmd_buffer + i + 1;
+            }
+        }
+        
+        // Execute each command in the pipeline
+        for (int i = 0; i < cmd_count; i++) {
+            bool is_last = (i == cmd_count - 1);
+            
+            if (is_last) {
+                // Last command: output to screen normally
+                execute_single_command(commands[i], current_input);
+            } else {
+                // Not last: capture output to buffer
+                current_output[0] = '\0';  // Clear destination buffer
+                g_terminal.start_capture(current_output, PIPE_BUFFER_SIZE - 1);
+                execute_single_command(commands[i], current_input);
+                g_terminal.stop_capture();
+                
+                // Swap buffers for next iteration
+                current_input = current_output;
+                current_output = (current_output == pipe_buffer_a) ? pipe_buffer_b : pipe_buffer_a;
+            }
+        }
     }
     
     cmd_len = 0;

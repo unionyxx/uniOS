@@ -13,7 +13,8 @@ static const int MARGIN_BOTTOM = 30;
 Terminal::Terminal() 
     : cursor_col(0), cursor_row(0), 
       fg_color(COLOR_WHITE), bg_color(COLOR_BLACK),
-      cursor_visible(true), cursor_state(true), last_blink_tick(0) {
+      cursor_visible(true), cursor_state(true), last_blink_tick(0),
+      capturing(false), capture_buffer(nullptr), capture_len(0), capture_max(0) {
 }
 
 void Terminal::init(uint32_t fg, uint32_t bg) {
@@ -72,6 +73,14 @@ void Terminal::get_cursor_pos(int* col, int* row) {
 }
 
 void Terminal::put_char(char c) {
+    // If capturing, route to buffer instead of screen
+    if (capturing) {
+        if (capture_buffer && capture_len < capture_max) {
+            capture_buffer[capture_len++] = c;
+        }
+        return;
+    }
+    
     // Only hide cursor if it's visible
     if (cursor_visible) {
         draw_cursor(false);
@@ -199,3 +208,27 @@ void Terminal::write_char_at_color(int col, int row, char c, uint32_t fg, uint32
     gfx_fill_rect(x, y, CHAR_WIDTH, CHAR_HEIGHT, bg);  // Clear with bg color
     gfx_draw_char(x, y, c, fg);
 }
+
+void Terminal::start_capture(char* buffer, size_t max_len) {
+    capture_buffer = buffer;
+    capture_max = max_len;
+    capture_len = 0;
+    capturing = true;
+}
+
+size_t Terminal::stop_capture() {
+    capturing = false;
+    size_t len = capture_len;
+    
+    // Null-terminate if there's room
+    if (capture_buffer && capture_len < capture_max) {
+        capture_buffer[capture_len] = '\0';
+    }
+    
+    capture_buffer = nullptr;
+    capture_len = 0;
+    capture_max = 0;
+    
+    return len;
+}
+

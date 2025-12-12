@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 class Terminal {
 public:
@@ -27,6 +28,11 @@ public:
     void clear_chars(int col, int row, int count);
     void write_char_at(int col, int row, char c);
     void write_char_at_color(int col, int row, char c, uint32_t fg, uint32_t bg);
+    
+    // Output capture for piping
+    void start_capture(char* buffer, size_t max_len);
+    size_t stop_capture();  // Returns bytes captured
+    bool is_capturing() const { return capturing; }
 
 private:
     void scroll_up();
@@ -44,7 +50,14 @@ private:
     bool cursor_visible;
     bool cursor_state; // For blinking
     uint64_t last_blink_tick;
+    
+    // Capture mode for piping
+    bool capturing;
+    char* capture_buffer;
+    size_t capture_len;
+    size_t capture_max;
 };
 
 // Global terminal instance
 extern Terminal g_terminal;
+

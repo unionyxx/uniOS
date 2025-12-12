@@ -10,7 +10,7 @@
 
 **uniOS** is a Minimalist x86 OS in C++20. It serves as a clean, modern, and hackable educational resource for understanding operating system internals, featuring a custom kernel, native drivers, and a transparent design philosophy.
 
-Current Version: **v0.3.1**
+Current Version: **v0.4.0**
 
 ---
 
@@ -40,9 +40,9 @@ Current Version: **v0.3.1**
 
 ## Development & Testing
 
-uniOS is written to be **portable across all x86_64 machines**, but is primarily tested on **QEMU/KVM**. This allows for rapid development with full debugging support (GDB, snapshots, device inspection).
+uniOS is designed to run on **real x86_64 hardware** and is primarily tested on **QEMU/KVM**. QEMU enables rapid development with full debugging support (GDB, snapshots, device inspection).
 
-> **Note**: Real hardware support is a future goal. The OS *may* work on physical machines, but stability is not guaranteed until dedicated hardware testing is implemented.
+> **Note**: While targeting most machines, hardware support is provided on a best-effort basis. Issues on specific hardware may not be fixable due to the scope of one-person development.
 
 ## Getting Started
 
