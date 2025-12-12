@@ -190,7 +190,7 @@ static void cmd_help() {
     g_terminal.write_line("  poweroff  - Shutdown system");
     g_terminal.write_line("");
     g_terminal.write_line("Shortcuts:");
-    g_terminal.write_line("  Tab       - Command completion");
+    g_terminal.write_line("  Tab       - Command/filename completion");
     g_terminal.write_line("  Ctrl+A/E  - Move to start/end");
     g_terminal.write_line("  Ctrl+U/K  - Cut before/after cursor");
     g_terminal.write_line("  Ctrl+W    - Delete word");
@@ -1406,16 +1406,79 @@ void shell_process_char(char c) {
             g_terminal.get_cursor_pos(&col, &row);
             redraw_line_at(row, cursor_pos);  // Redraw with selection highlighting
         }
-    } else if (c == '\t') {  // Tab - command completion
-        // Find matching commands
-        static const char* commands[] = {
-            "help", "ls", "cat", "stat", "hexdump", "touch", "rm", "write", "append", "df",
-            "mem", "date", "uptime", "version", "uname", "cpuinfo", "lspci",
-            "ifconfig", "dhcp", "ping", "clear", "gui", "reboot", "poweroff", "echo", nullptr
-        };
+    } else if (c == '\t') {  // Tab - command or filename completion
+        cmd_buffer[cmd_len] = 0;
         
-        if (cmd_len > 0) {
-            cmd_buffer[cmd_len] = 0;
+        // Check if there's a space - if so, complete filename, otherwise command
+        int space_pos = -1;
+        for (int i = 0; i < cmd_len; i++) {
+            if (cmd_buffer[i] == ' ') {
+                space_pos = i;
+                break;
+            }
+        }
+        
+        if (space_pos >= 0) {
+            // Filename completion - get partial filename after last space
+            int last_space = space_pos;
+            for (int i = cmd_len - 1; i > space_pos; i--) {
+                if (cmd_buffer[i] == ' ') {
+                    last_space = i;
+                    break;
+                }
+            }
+            
+            const char* partial = cmd_buffer + last_space + 1;
+            int partial_len = cmd_len - last_space - 1;
+            
+            // Search uniFS for matching files
+            int matches = 0;
+            const char* last_match = nullptr;
+            uint64_t file_count = unifs_get_file_count();
+            
+            for (uint64_t i = 0; i < file_count; i++) {
+                const char* fname = unifs_get_file_name(i);
+                if (fname && strncmp(partial, fname, partial_len) == 0) {
+                    matches++;
+                    last_match = fname;
+                }
+            }
+            
+            if (matches == 1 && last_match) {
+                // Complete the filename
+                int fname_len = strlen(last_match);
+                // Replace partial with full filename
+                for (int i = 0; i < fname_len; i++) {
+                    cmd_buffer[last_space + 1 + i] = last_match[i];
+                }
+                cmd_len = last_space + 1 + fname_len;
+                cursor_pos = cmd_len;
+                int col, row;
+                g_terminal.get_cursor_pos(&col, &row);
+                redraw_line_at(row, cursor_pos);
+            } else if (matches > 1) {
+                // Show matching files
+                g_terminal.write("\n");
+                for (uint64_t i = 0; i < file_count; i++) {
+                    const char* fname = unifs_get_file_name(i);
+                    if (fname && strncmp(partial, fname, partial_len) == 0) {
+                        g_terminal.write(fname);
+                        g_terminal.write("  ");
+                    }
+                }
+                g_terminal.write("\n> ");
+                for (int i = 0; i < cmd_len; i++) {
+                    g_terminal.put_char(cmd_buffer[i]);
+                }
+            }
+        } else if (cmd_len > 0) {
+            // Command completion
+            static const char* commands[] = {
+                "help", "ls", "cat", "stat", "hexdump", "touch", "rm", "write", "append", "df",
+                "mem", "date", "uptime", "version", "uname", "cpuinfo", "lspci",
+                "ifconfig", "dhcp", "ping", "clear", "gui", "reboot", "poweroff", "echo", nullptr
+            };
+            
             int matches = 0;
             const char* last_match = nullptr;
             

@@ -4,56 +4,81 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>uniOS</title>
+    <title>uniOS - Minimal x86 Operating System</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
 </head>
 
 <body>
-    <div class="container">
-        <header>
+    <div class="wrapper">
+        <nav>
             <div class="logo">uniOS</div>
-        </header>
-
-        <main>
-            <h1 class="hero-title">Simplicity in <br> Operating Systems.</h1>
-            <p class="hero-subtitle">A minimal, modern, and educational operating system built from scratch.</p>
-
-            <div class="actions">
-                <a href="https://github.com/unionyxx/uniOS" class="btn primary">
-                    <svg height="24" viewBox="0 0 16 16" version="1.1" width="24" aria-hidden="true">
-                        <path fill="currentColor"
-                            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z">
-                        </path>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="https://github.com/unionyxx/uniOS" class="btn-github">
+                    <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
+                        <path
+                            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
                     </svg>
-                    View on GitHub
+                    GitHub
                 </a>
             </div>
+        </nav>
 
-            <section id="features" class="features-section">
-                <div class="feature-card">
-                    <h3>Robust Kernel</h3>
-                    <p>Advanced memory management, native xHCI USB stack, and unified driver model.</p>
+        <main>
+            <section class="hero">
+                <span class="badge">v0.3.1</span>
+                <h1>A minimal operating system</h1>
+                <p>Educational x86-64 kernel in C++20. <br>USB drivers, networking, interactive shell.</p>
+                <div class="hero-buttons">
+                    <a href="https://github.com/unionyxx/uniOS" class="btn btn-primary">View Source</a>
+                    <a href="https://github.com/unionyxx/uniOS/blob/main/docs/ARCHITECTURE.md"
+                        class="btn btn-secondary">Documentation</a>
                 </div>
-                <div class="feature-card">
-                    <h3>Full Networking</h3>
-                    <p>Complete TCP/IP stack (DHCP, DNS, TCP/UDP) with support for Intel & Realtek NICs.</p>
+            </section>
+
+            <section class="screenshot-container">
+                <div class="terminal-window">
+                    <div class="terminal-header">
+                        <div class="terminal-buttons">
+                            <span class="close"></span>
+                            <span class="minimize"></span>
+                            <span class="maximize"></span>
+                        </div>
+                        <div class="terminal-title">uniOS Shell</div>
+                    </div>
+                    <img src="screenshot.png" alt="uniOS Terminal">
                 </div>
-                <div class="feature-card">
-                    <h3>Modern Core</h3>
-                    <p>Built with C++20, featuring a custom bucket allocator and clean abstractions.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Open Source</h3>
-                    <p>Fully open source and available on GitHub for everyone.</p>
+            </section>
+
+            <section id="features" class="features">
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h3>Kernel</h3>
+                        <p>64-bit memory management, heap allocator, scheduler.</p>
+                    </div>
+                    <div class="feature-card">
+                        <h3>Shell</h3>
+                        <p>Tab completion, clipboard, selection, history.</p>
+                    </div>
+                    <div class="feature-card">
+                        <h3>USB</h3>
+                        <p>Native xHCI 3.0 with HID keyboard and mouse.</p>
+                    </div>
+                    <div class="feature-card">
+                        <h3>Network</h3>
+                        <p>TCP/IP, DHCP, DNS, ICMP. E1000 driver.</p>
+                    </div>
                 </div>
             </section>
         </main>
 
         <footer>
-            <p>&copy; 2025 uniOS Project. Open Source.</p>
+            <p>MIT License · 2025</p>
         </footer>
     </div>
 </body>
