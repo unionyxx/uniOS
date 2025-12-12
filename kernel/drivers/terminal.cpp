@@ -191,3 +191,11 @@ void Terminal::write_char_at(int col, int row, char c) {
     int y = MARGIN_TOP + row * CHAR_HEIGHT;
     gfx_draw_char(x, y, c, fg_color);
 }
+
+void Terminal::write_char_at_color(int col, int row, char c, uint32_t fg, uint32_t bg) {
+    // Write character with specific colors (for selection highlighting)
+    int x = MARGIN_LEFT + col * CHAR_WIDTH;
+    int y = MARGIN_TOP + row * CHAR_HEIGHT;
+    gfx_fill_rect(x, y, CHAR_WIDTH, CHAR_HEIGHT, bg);  // Clear with bg color
+    gfx_draw_char(x, y, c, fg);
+}

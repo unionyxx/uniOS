@@ -26,6 +26,7 @@ public:
     // Direct character operations (no cursor logic)
     void clear_chars(int col, int row, int count);
     void write_char_at(int col, int row, char c);
+    void write_char_at_color(int col, int row, char c, uint32_t fg, uint32_t bg);
 
 private:
     void scroll_up();

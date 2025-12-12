@@ -91,9 +91,21 @@ static void redraw_line_at(int row, int new_cursor_pos) {
     // 3. Clear entire line area using direct method
     g_terminal.clear_chars(2, row, clear_count);
     
-    // 4. Draw new content using direct method
+    // 4. Draw new content - highlight selected text if selection active
+    int sel_min = -1, sel_max = -1;
+    if (selection_start >= 0) {
+        sel_min = (selection_start < cursor_pos) ? selection_start : cursor_pos;
+        sel_max = (selection_start > cursor_pos) ? selection_start : cursor_pos;
+    }
+    
     for (int i = 0; i < cmd_len; i++) {
-        g_terminal.write_char_at(2 + i, row, cmd_buffer[i]);
+        bool is_selected = (sel_min >= 0 && i >= sel_min && i < sel_max);
+        if (is_selected) {
+            // Draw with inverted colors for selection
+            g_terminal.write_char_at_color(2 + i, row, cmd_buffer[i], 0xFF000000, 0xFFFFFFFF);
+        } else {
+            g_terminal.write_char_at(2 + i, row, cmd_buffer[i]);
+        }
     }
     
     // 5. Update tracking variables
@@ -1343,7 +1355,7 @@ void shell_process_char(char c) {
             cursor_pos--;
             int col, row;
             g_terminal.get_cursor_pos(&col, &row);
-            g_terminal.set_cursor_pos(col - 1, row);
+            redraw_line_at(row, cursor_pos);  // Redraw with selection highlighting
         }
     } else if (uc == KEY_SHIFT_RIGHT) {  // Shift+Right - extend selection right
         if (cursor_pos < cmd_len) {
@@ -1353,7 +1365,7 @@ void shell_process_char(char c) {
             cursor_pos++;
             int col, row;
             g_terminal.get_cursor_pos(&col, &row);
-            g_terminal.set_cursor_pos(col + 1, row);
+            redraw_line_at(row, cursor_pos);  // Redraw with selection highlighting
         }
     } else if (c == '\t') {  // Tab - command completion
         // Find matching commands
