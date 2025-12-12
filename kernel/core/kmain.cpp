@@ -263,7 +263,7 @@ void gui_start() {
     
     // Restore shell screen
     gfx_clear(COLOR_BLACK);
-    gfx_draw_string(50, 50, "uniOS Shell (uniSH)", COLOR_WHITE);
+    gfx_draw_string(50, 50, "uniOS Shell", COLOR_WHITE);
 }
 
 // Kernel entry point

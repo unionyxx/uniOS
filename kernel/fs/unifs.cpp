@@ -409,3 +409,8 @@ uint64_t unifs_get_free_slots() {
     }
     return UNIFS_MAX_FILES - used;
 }
+
+uint64_t unifs_get_boot_file_count() {
+    return mounted ? boot_header->file_count : 0;
+}
+

@@ -111,3 +111,5 @@ int unifs_delete(const char* name);
 uint64_t unifs_get_total_size();
 uint64_t unifs_get_used_size();
 uint64_t unifs_get_free_slots();
+uint64_t unifs_get_boot_file_count();
+

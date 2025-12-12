@@ -19,7 +19,7 @@ void gfx_swap_buffers();
 uint64_t gfx_get_width();
 uint64_t gfx_get_height();
 
-// Colors
+// Colors - Core palette
 #define COLOR_BLACK       0x000000
 #define COLOR_WHITE       0xFFFFFF
 #define COLOR_GRAY        0x808080
@@ -32,11 +32,22 @@ uint64_t gfx_get_height();
 #define COLOR_RED         0xAA0000
 #define COLOR_DESKTOP     0x008080
 
+// Website-unified colors (from style.css)
+#define COLOR_BG          0x000000  // Pure black background
+#define COLOR_TEXT        0xededed  // --text: #ededed
+#define COLOR_MUTED       0x888888  // --muted: #888
+#define COLOR_ACCENT      0x3b82f6  // --accent: #3b82f6
+
+// Prompt colors (rich terminal prompt)
+#define COLOR_PROMPT_USER 0x3b82f6  // Blue for "user"
+#define COLOR_PROMPT_HOST 0x27c93f  // Green for "@unios"
+#define COLOR_PROMPT_PATH 0x888888  // Gray for ":~$"
+
 // Modern UI Colors
 #define COLOR_DESKTOP_TOP     0x1a1a2e  // Dark purple-blue gradient top
 #define COLOR_DESKTOP_BOTTOM  0x16213e  // Dark blue gradient bottom
 #define COLOR_TASKBAR         0x0f0f1a  // Very dark taskbar
 #define COLOR_TASKBAR_HOVER   0x2a2a4a  // Hover highlight
-#define COLOR_ACCENT          0x4a90d9  // Blue accent
 #define COLOR_SUCCESS         0x4ade80  // Green success
 #define COLOR_WARNING         0xfbbf24  // Yellow warning
+#define COLOR_ERROR           0xef4444  // Red error

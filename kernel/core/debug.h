@@ -24,10 +24,11 @@ void kprintf_color(uint32_t color, const char* fmt, ...);
 
 #ifdef DEBUG
     // Debug build: all logging enabled
-    #define DEBUG_INFO(fmt, ...)  kprintf_color(DEBUG_COLOR_INFO, "[INFO] " fmt "\n", ##__VA_ARGS__)
-    #define DEBUG_WARN(fmt, ...)  kprintf_color(DEBUG_COLOR_WARN, "[WARN] " fmt "\n", ##__VA_ARGS__)
-    #define DEBUG_ERROR(fmt, ...) kprintf_color(DEBUG_COLOR_ERROR, "[ERROR] " fmt "\n", ##__VA_ARGS__)
-    #define DEBUG_LOG(fmt, ...)   kprintf_color(DEBUG_COLOR_DEBUG, "[DEBUG] " fmt "\n", ##__VA_ARGS__)
+    // Tags are colored, messages are white
+    #define DEBUG_INFO(fmt, ...)  do { kprintf_color(DEBUG_COLOR_INFO, "[INFO] "); kprintf(fmt "\n", ##__VA_ARGS__); } while(0)
+    #define DEBUG_WARN(fmt, ...)  do { kprintf_color(DEBUG_COLOR_WARN, "[WARN] "); kprintf(fmt "\n", ##__VA_ARGS__); } while(0)
+    #define DEBUG_ERROR(fmt, ...) do { kprintf_color(DEBUG_COLOR_ERROR, "[ERROR] "); kprintf(fmt "\n", ##__VA_ARGS__); } while(0)
+    #define DEBUG_LOG(fmt, ...)   do { kprintf_color(DEBUG_COLOR_DEBUG, "[DEBUG] "); kprintf(fmt "\n", ##__VA_ARGS__); } while(0)
 #else
     // Release build: no debug output (compiled away to nothing)
     #define DEBUG_INFO(fmt, ...)  ((void)0)

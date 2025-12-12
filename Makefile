@@ -19,13 +19,15 @@ BUILD ?= release
 # Base flags (always applied)
 CXXFLAGS_BASE = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti \
                 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+                -march=x86-64 -mtune=generic \
+                -ffunction-sections -fdata-sections \
                 -Wall -Wextra -Wno-volatile \
                 -I. -Ikernel $(foreach dir,$(KERNEL_DIRS),-I$(dir))
 
 # Debug-specific flags
 CXXFLAGS_DEBUG = $(CXXFLAGS_BASE) -DDEBUG -g -O0
 
-# Release-specific flags (no debug output, optimized)
+# Release-specific flags (optimized, smaller binary)
 CXXFLAGS_RELEASE = $(CXXFLAGS_BASE) -DNDEBUG -O2
 
 # Select flags based on build type
@@ -35,7 +37,15 @@ else
     CXXFLAGS = $(CXXFLAGS_RELEASE)
 endif
 
-LDFLAGS = -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
+LDFLAGS_BASE = -nostdlib -T kernel/linker.ld -z max-page-size=0x1000 --gc-sections
+LDFLAGS_DEBUG = $(LDFLAGS_BASE)
+LDFLAGS_RELEASE = $(LDFLAGS_BASE)
+
+ifeq ($(BUILD),debug)
+    LDFLAGS = $(LDFLAGS_DEBUG)
+else
+    LDFLAGS = $(LDFLAGS_RELEASE)
+endif
 
 # Files
 KERNEL_SRC = $(foreach dir,$(KERNEL_DIRS),$(wildcard $(dir)/*.cpp))

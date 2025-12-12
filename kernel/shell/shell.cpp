@@ -86,19 +86,57 @@ static void add_to_history(const char* cmd) {
 
 static int last_displayed_len = 0;  // Track last displayed line length for proper clearing
 
+// =============================================================================
+// Rich Prompt: user@unios:~$
+// =============================================================================
+// Prompt segments:
+//   "user"   (4 chars) - blue
+//   "@unios" (6 chars) - green  
+//   ":~$ "   (4 chars) - gray
+// Total: 14 characters
+#define PROMPT_LEN 14
+
+static void print_prompt() {
+    int col, row;
+    g_terminal.get_cursor_pos(&col, &row);
+    
+    // Draw colored prompt segments
+    // "user" in blue
+    g_terminal.write_char_at_color(0, row, 'u', COLOR_PROMPT_USER, COLOR_BG);
+    g_terminal.write_char_at_color(1, row, 's', COLOR_PROMPT_USER, COLOR_BG);
+    g_terminal.write_char_at_color(2, row, 'e', COLOR_PROMPT_USER, COLOR_BG);
+    g_terminal.write_char_at_color(3, row, 'r', COLOR_PROMPT_USER, COLOR_BG);
+    
+    // "@unios" in green
+    g_terminal.write_char_at_color(4, row, '@', COLOR_PROMPT_HOST, COLOR_BG);
+    g_terminal.write_char_at_color(5, row, 'u', COLOR_PROMPT_HOST, COLOR_BG);
+    g_terminal.write_char_at_color(6, row, 'n', COLOR_PROMPT_HOST, COLOR_BG);
+    g_terminal.write_char_at_color(7, row, 'i', COLOR_PROMPT_HOST, COLOR_BG);
+    g_terminal.write_char_at_color(8, row, 'o', COLOR_PROMPT_HOST, COLOR_BG);
+    g_terminal.write_char_at_color(9, row, 's', COLOR_PROMPT_HOST, COLOR_BG);
+    
+    // ":~$ " in gray
+    g_terminal.write_char_at_color(10, row, ':', COLOR_PROMPT_PATH, COLOR_BG);
+    g_terminal.write_char_at_color(11, row, '~', COLOR_PROMPT_PATH, COLOR_BG);
+    g_terminal.write_char_at_color(12, row, '$', COLOR_PROMPT_PATH, COLOR_BG);
+    g_terminal.write_char_at_color(13, row, ' ', COLOR_TEXT, COLOR_BG);
+    
+    g_terminal.set_cursor_pos(PROMPT_LEN, row);
+}
+
 // Helper to redraw entire command line without ANY cursor glitches
 // Uses ONLY direct drawing methods - never put_char
 static void redraw_line_at(int row, int new_cursor_pos) {
     // 1. Hide cursor completely - sync position first so it clears at right spot
-    g_terminal.set_cursor_pos(2 + cursor_pos, row);
+    g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
     g_terminal.set_cursor_visible(false);
     
     // 2. Calculate how much to clear (max of current and previous length + extra margin)
-    int clear_count = last_displayed_len + 2;
-    if (cmd_len + 2 > clear_count) clear_count = cmd_len + 2;
+    int clear_count = last_displayed_len + PROMPT_LEN;
+    if (cmd_len + PROMPT_LEN > clear_count) clear_count = cmd_len + PROMPT_LEN;
     
-    // 3. Clear entire line area using direct method
-    g_terminal.clear_chars(2, row, clear_count);
+    // 3. Clear entire line area using direct method (after prompt)
+    g_terminal.clear_chars(PROMPT_LEN, row, clear_count);
     
     // 4. Draw new content - highlight selected text if selection active
     int sel_min = -1, sel_max = -1;
@@ -111,9 +149,9 @@ static void redraw_line_at(int row, int new_cursor_pos) {
         bool is_selected = (sel_min >= 0 && i >= sel_min && i < sel_max);
         if (is_selected) {
             // Draw with inverted colors for selection
-            g_terminal.write_char_at_color(2 + i, row, cmd_buffer[i], 0xFF000000, 0xFFFFFFFF);
+            g_terminal.write_char_at_color(PROMPT_LEN + i, row, cmd_buffer[i], 0xFF000000, 0xFFFFFFFF);
         } else {
-            g_terminal.write_char_at(2 + i, row, cmd_buffer[i]);
+            g_terminal.write_char_at(PROMPT_LEN + i, row, cmd_buffer[i]);
         }
     }
     
@@ -122,7 +160,7 @@ static void redraw_line_at(int row, int new_cursor_pos) {
     cursor_pos = new_cursor_pos;
     
     // 6. Position and show cursor at new location
-    g_terminal.set_cursor_pos(2 + cursor_pos, row);
+    g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
     g_terminal.set_cursor_visible(true);
 }
 
@@ -134,15 +172,15 @@ static void clear_line() {
     g_terminal.set_cursor_visible(false);
     
     // Clear entire area with direct method
-    int clear_count = last_displayed_len + 2;
-    if (cmd_len + 2 > clear_count) clear_count = cmd_len + 2;
-    g_terminal.clear_chars(2, row, clear_count);
+    int clear_count = last_displayed_len + PROMPT_LEN;
+    if (cmd_len + PROMPT_LEN > clear_count) clear_count = cmd_len + PROMPT_LEN;
+    g_terminal.clear_chars(PROMPT_LEN, row, clear_count);
     
     cmd_len = 0;
     cursor_pos = 0;
     last_displayed_len = 0;
     
-    g_terminal.set_cursor_pos(2, row);
+    g_terminal.set_cursor_pos(PROMPT_LEN, row);
     // NOTE: Do NOT show cursor here - display_line will show it at the right position
 }
 
@@ -155,13 +193,13 @@ static void display_line() {
     g_terminal.set_cursor_visible(false);
     
     for (int i = 0; i < cmd_len; i++) {
-        g_terminal.write_char_at(2 + i, row, cmd_buffer[i]);
+        g_terminal.write_char_at(PROMPT_LEN + i, row, cmd_buffer[i]);
     }
     
     cursor_pos = cmd_len;
     last_displayed_len = cmd_len;
     
-    g_terminal.set_cursor_pos(2 + cursor_pos, row);
+    g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
     g_terminal.set_cursor_visible(true);
 }
 
@@ -215,6 +253,8 @@ static void cmd_help() {
     g_terminal.write_line("  uniq [f]  - Remove duplicate lines");
     g_terminal.write_line("  rev [f]   - Reverse characters in each line");
     g_terminal.write_line("  tac [f]   - Print lines in reverse order");
+    g_terminal.write_line("  nl [f]    - Number lines");
+    g_terminal.write_line("  tr <a> <b> - Translate char a to b (pipe)");
     g_terminal.write_line("  echo <text> - Print text");
     g_terminal.write_line("");
     g_terminal.write_line("Other:");
@@ -560,9 +600,9 @@ static void cmd_df() {
         while (j-- > 0) buf[i++] = tmp[j];
     };
     
-    // Calculate boot vs RAM files
-    uint64_t ram_file_count = file_count > 3 ? file_count - 3 : 0;  // Boot files are first 3
-    uint64_t boot_file_count = file_count - ram_file_count;
+    // Calculate boot vs RAM files (boot files have is_boot flag in uniFS)
+    uint64_t boot_file_count = unifs_get_boot_file_count();
+    uint64_t ram_file_count = file_count > boot_file_count ? file_count - boot_file_count : 0;
     
     // Filesystem summary
     g_terminal.write_line("uniFS Status:");
@@ -958,7 +998,6 @@ static void cmd_grep(const char* args, const char* piped_input) {
         if (is_end) {
             // Check if this line contains the pattern (case-insensitive)
             bool found = false;
-            uint64_t line_len = i - line_start;
             
             for (uint64_t j = line_start; j + pattern_len <= i && !found; j++) {
                 bool match = true;
@@ -1206,6 +1245,90 @@ static void cmd_tac(const char* filename, const char* piped_input) {
             g_terminal.put_char(data[j]);
         }
         g_terminal.put_char('\n');
+    }
+}
+
+// nl - Number lines
+// Usage: nl [file] or pipe: cat file.txt | nl
+static void cmd_nl(const char* filename, const char* piped_input) {
+    const char* data = nullptr;
+    uint64_t data_len = 0;
+    
+    if (filename && filename[0]) {
+        const UniFSFile* file = unifs_open(filename);
+        if (!file) {
+            error_file_not_found(filename);
+            return;
+        }
+        data = (const char*)file->data;
+        data_len = file->size;
+    } else if (piped_input) {
+        data = piped_input;
+        data_len = strlen(piped_input);
+    } else {
+        g_terminal.write_line("Usage: nl <file> or pipe input");
+        return;
+    }
+    
+    if (data_len == 0) return;
+    
+    int line_num = 1;
+    uint64_t line_start = 0;
+    
+    for (uint64_t i = 0; i <= data_len; i++) {
+        if (i == data_len || data[i] == '\n') {
+            // Print line number (right-aligned in 6 chars)
+            char num_buf[8];
+            int n = line_num;
+            int pos = 5;
+            num_buf[6] = ' ';
+            num_buf[7] = '\0';
+            while (pos >= 0) {
+                if (n > 0) {
+                    num_buf[pos--] = '0' + (n % 10);
+                    n /= 10;
+                } else {
+                    num_buf[pos--] = ' ';
+                }
+            }
+            g_terminal.write(num_buf);
+            
+            // Print line content
+            for (uint64_t j = line_start; j < i; j++) {
+                g_terminal.put_char(data[j]);
+            }
+            g_terminal.put_char('\n');
+            
+            line_num++;
+            line_start = i + 1;
+        }
+    }
+}
+
+// tr - Translate characters (simple version: tr <from> <to>)
+// Usage: echo hello | tr e a → hallo
+static void cmd_tr(const char* args, const char* piped_input) {
+    if (!args || !args[0]) {
+        g_terminal.write_line("Usage: tr <from_char> <to_char>");
+        return;
+    }
+    
+    char from_char = args[0];
+    char to_char = ' ';
+    
+    // Parse: "e a" or "ea"
+    const char* p = args + 1;
+    while (*p == ' ') p++;
+    if (*p) to_char = *p;
+    
+    if (!piped_input) {
+        g_terminal.write_line("tr requires piped input");
+        return;
+    }
+    
+    // Translate and output
+    for (const char* s = piped_input; *s; s++) {
+        g_terminal.put_char(*s == from_char ? to_char : *s);
     }
 }
 
@@ -1648,6 +1771,12 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
         cmd_tac(local_cmd + 4, piped_input);
     } else if (strcmp(local_cmd, "tac") == 0) {
         cmd_tac(nullptr, piped_input);
+    } else if (strncmp(local_cmd, "nl ", 3) == 0) {
+        cmd_nl(local_cmd + 3, piped_input);
+    } else if (strcmp(local_cmd, "nl") == 0) {
+        cmd_nl(nullptr, piped_input);
+    } else if (strncmp(local_cmd, "tr ", 3) == 0) {
+        cmd_tr(local_cmd + 3, piped_input);
     } else if (strncmp(local_cmd, "echo ", 5) == 0) {
         // echo with piped input: output piped input + args (or just args)
         cmd_echo(local_cmd + 5);
@@ -1674,12 +1803,14 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
         cmd_ping(local_cmd + 5);
     } else if (strcmp(local_cmd, "clear") == 0) {
         g_terminal.clear();
-        g_terminal.write("uniOS Shell (uniSH)\n\n");
+        g_terminal.write("uniOS Shell\n\n");
+        // Don't call print_prompt here - execute_command handles it
     } else if (strcmp(local_cmd, "gui") == 0) {
         extern void gui_start();
         gui_start();
         g_terminal.clear();
-        g_terminal.write("uniOS Shell (uniSH)\n\n");
+        g_terminal.write("uniOS Shell\n\n");
+        // Don't call print_prompt here - execute_command handles it
     } else if (strcmp(local_cmd, "reboot") == 0) {
         g_terminal.write_line("Rebooting...");
         outb(0x64, 0xFE);
@@ -1711,6 +1842,7 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
 
 static void execute_command() {
     cmd_buffer[cmd_len] = 0;
+    selection_start = -1;  // Clear any text selection
     
     // Trim trailing spaces (from tab completion)
     while (cmd_len > 0 && cmd_buffer[cmd_len - 1] == ' ') {
@@ -1723,9 +1855,15 @@ static void execute_command() {
     history_index = -1;  // Reset history browsing
     
     if (cmd_len == 0) {
-        g_terminal.write("\n> ");
+        g_terminal.write("\n");
+        print_prompt();
         return;
     }
+    
+    // Clear selection highlighting by redrawing line with normal colors
+    int col, row;
+    g_terminal.get_cursor_pos(&col, &row);
+    redraw_line_at(row, cursor_pos);
     
     g_terminal.write("\n"); // Move to next line after command input
     
@@ -1788,15 +1926,21 @@ static void execute_command() {
     
     cmd_len = 0;
     cursor_pos = 0;
-    g_terminal.write("> ");
+    
+    // Only add newline if not at start of line (e.g., after clear command)
+    g_terminal.get_cursor_pos(&col, &row);
+    if (col > 0) {
+        g_terminal.write("\n");
+    }
+    print_prompt();
 }
 
 void shell_init(struct limine_framebuffer* fb) {
     (void)fb; // Not used directly anymore
-    g_terminal.init(COLOR_WHITE, COLOR_BLACK);
-    g_terminal.write("uniOS Shell (uniSH)\n");
+    g_terminal.init(COLOR_TEXT, COLOR_BG);
+    g_terminal.write("uniOS Shell\n");
     g_terminal.write("Type 'help' for commands.\n\n");
-    g_terminal.write("> ");
+    print_prompt();
     
     cmd_len = 0;
     cursor_pos = 0;
@@ -1889,7 +2033,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(2, row);
+                g_terminal.set_cursor_pos(PROMPT_LEN, row);
             }
         }
     } else if (c == 5) {  // Ctrl+E - move to end - clear selection
@@ -1902,7 +2046,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(2 + cmd_len, row);
+                g_terminal.set_cursor_pos(PROMPT_LEN + cmd_len, row);
             }
         }
     } else if (c == 3) {  // Ctrl+C - copy selection OR cancel line
@@ -1925,7 +2069,7 @@ void shell_process_char(char c) {
             g_terminal.write("^C\n");
             cmd_len = 0;
             cursor_pos = 0;
-            g_terminal.write("> ");
+            print_prompt();
         }
     } else if (c == 21) {  // Ctrl+U - clear line before cursor (cut to clipboard)
         if (cursor_pos > 0) {
@@ -2000,12 +2144,18 @@ void shell_process_char(char c) {
             g_terminal.get_cursor_pos(&col, &row);
             redraw_line_at(row, cursor_pos);
         }
-    } else if (c == 12) {  // Ctrl+L - clear screen
+    } else if (c == 12) {  // Ctrl+L - clear screen (preserves current input)
         g_terminal.clear();
-        g_terminal.write("uniOS Shell (uniSH)\n\n> ");
+        g_terminal.write("uniOS Shell\n\n");
+        print_prompt();
+        // Redraw current command buffer
         for (int i = 0; i < cmd_len; i++) {
             g_terminal.put_char(cmd_buffer[i]);
         }
+        // Position cursor correctly
+        int col, row;
+        g_terminal.get_cursor_pos(&col, &row);
+        g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
     } else if (uc == KEY_HOME) {  // Home key - move to start - clear selection
         bool had_selection = (selection_start >= 0);
         selection_start = -1;
@@ -2016,7 +2166,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(2, row);
+                g_terminal.set_cursor_pos(PROMPT_LEN, row);
             }
         }
     } else if (uc == KEY_END) {  // End key - move to end - clear selection
@@ -2029,7 +2179,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(2 + cmd_len, row);
+                g_terminal.set_cursor_pos(PROMPT_LEN + cmd_len, row);
             }
         }
     } else if (uc == KEY_DELETE) {  // Delete key - delete char at cursor
@@ -2123,7 +2273,8 @@ void shell_process_char(char c) {
                         g_terminal.write("  ");
                     }
                 }
-                g_terminal.write("\n> ");
+                g_terminal.write("\n");
+                print_prompt();
                 for (int i = 0; i < cmd_len; i++) {
                     g_terminal.put_char(cmd_buffer[i]);
                 }
@@ -2134,7 +2285,7 @@ void shell_process_char(char c) {
                 "help", "ls", "cat", "stat", "hexdump", "touch", "rm", "write", "append", "df",
                 "mem", "date", "uptime", "version", "uname", "cpuinfo", "lspci",
                 "ifconfig", "dhcp", "ping", "clear", "gui", "reboot", "poweroff", "echo",
-                "wc", "head", "tail", "grep", "sort", "uniq", "rev", "tac", nullptr
+                "wc", "head", "tail", "grep", "sort", "uniq", "rev", "tac", "nl", "tr", nullptr
             };
             
             int matches = 0;
@@ -2166,7 +2317,8 @@ void shell_process_char(char c) {
                         g_terminal.write("  ");
                     }
                 }
-                g_terminal.write("\n> ");
+                g_terminal.write("\n");
+                print_prompt();
                 for (int i = 0; i < cmd_len; i++) {
                     g_terminal.put_char(cmd_buffer[i]);
                 }
