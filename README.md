@@ -6,6 +6,8 @@
 ![Platform](https://img.shields.io/badge/platform-x86__64-lightgrey.svg?style=for-the-badge&logo=intel)
 ![Language](https://img.shields.io/badge/language-C%2B%2B20-orange.svg?style=for-the-badge&logo=c%2B%2B)
 
+![uniOS Screenshot](docs/screenshot.png)
+
 **uniOS** is a Minimalist x86 OS in C++20. It serves as a clean, modern, and hackable educational resource for understanding operating system internals, featuring a custom kernel, native drivers, and a transparent design philosophy.
 
 Current Version: **v0.3.1**
