@@ -165,6 +165,21 @@ static void display_line() {
     g_terminal.set_cursor_visible(true);
 }
 
+// =============================================================================
+// Error message helpers for better UX
+// =============================================================================
+
+static void error_file_not_found(const char* filename) {
+    g_terminal.write("Error: '");
+    g_terminal.write(filename);
+    g_terminal.write_line("' not found");
+}
+
+static void error_usage(const char* usage) {
+    g_terminal.write("Usage: ");
+    g_terminal.write_line(usage);
+}
+
 static void cmd_help() {
     g_terminal.write_line("File Commands:");
     g_terminal.write_line("  ls        - List files with sizes");
@@ -273,7 +288,7 @@ static void cmd_ls() {
 
 static void cmd_stat(const char* filename) {
     if (!unifs_file_exists(filename)) {
-        g_terminal.write_line("File not found.");
+        error_file_not_found(filename);
         return;
     }
     
@@ -312,7 +327,7 @@ static void cmd_stat(const char* filename) {
 static void cmd_hexdump(const char* filename) {
     const UniFSFile* file = unifs_open(filename);
     if (!file) {
-        g_terminal.write_line("File not found.");
+        error_file_not_found(filename);
         return;
     }
     
@@ -378,7 +393,7 @@ static void cmd_cat(const char* filename) {
         }
         g_terminal.write("\n");
     } else {
-        g_terminal.write_line("File not found.");
+        error_file_not_found(filename);
     }
 }
 
@@ -411,7 +426,7 @@ static void cmd_rm(const char* filename) {
             g_terminal.write_line(filename);
             break;
         case UNIFS_ERR_NOT_FOUND:
-            g_terminal.write_line("File not found.");
+            error_file_not_found(filename);
             break;
         case UNIFS_ERR_READONLY:
             g_terminal.write_line("Cannot delete boot file (read-only).");
@@ -699,7 +714,7 @@ static void cmd_wc(const char* filename, const char* piped_input) {
     if (filename && filename[0]) {
         const UniFSFile* file = unifs_open(filename);
         if (!file) {
-            g_terminal.write_line("File not found.");
+            error_file_not_found(filename);
             return;
         }
         data = (const char*)file->data;
@@ -779,7 +794,7 @@ static void cmd_head(const char* args, const char* piped_input) {
     if (filename && filename[0]) {
         const UniFSFile* file = unifs_open(filename);
         if (!file) {
-            g_terminal.write_line("File not found.");
+            error_file_not_found(filename);
             return;
         }
         data = (const char*)file->data;
@@ -833,7 +848,7 @@ static void cmd_tail(const char* args, const char* piped_input) {
     if (filename && filename[0]) {
         const UniFSFile* file = unifs_open(filename);
         if (!file) {
-            g_terminal.write_line("File not found.");
+            error_file_not_found(filename);
             return;
         }
         data = (const char*)file->data;
@@ -912,7 +927,7 @@ static void cmd_grep(const char* args, const char* piped_input) {
     if (filename && filename[0]) {
         const UniFSFile* file = unifs_open(filename);
         if (!file) {
-            g_terminal.write_line("File not found.");
+            error_file_not_found(filename);
             return;
         }
         data = (const char*)file->data;

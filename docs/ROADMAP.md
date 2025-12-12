@@ -2,12 +2,13 @@
 
 > One focused feature per version. Ship a working OS at 1.0.
 
-## Current: v0.4.0 ✓
-**Shell Piping & Text Processing**
+## Current: v0.4.1 ✓
+**Shell Piping & Text Processing + Polish**
 - [x] Command piping (`cmd1 | cmd2 | cmd3`)
 - [x] `wc` - line/word/char count
 - [x] `head` / `tail` - first/last N lines
 - [x] `grep` - pattern search (case-insensitive)
+- [x] Improved error messages with context
 
 ---
 
