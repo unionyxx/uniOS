@@ -53,6 +53,7 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 #include "rtc.h"
 #include "serial.h"
 #include "net.h"
+#include "version.h"
 
 // Global framebuffer pointer
 struct limine_framebuffer* g_framebuffer = nullptr;
@@ -282,7 +283,9 @@ extern "C" void _start(void) {
     
     // Initialize serial console for debug output
     serial_init();
-    serial_puts("\r\n=== uniOS Kernel v0.3.0 ===\r\n");
+    serial_puts("\r\n=== uniOS Kernel v");
+    serial_puts(UNIOS_VERSION_STRING);
+    serial_puts(" ===\r\n");
     
     // Get bootloader info if available
     if (bootloader_info_request.response) {
@@ -291,7 +294,7 @@ extern "C" void _start(void) {
         serial_printf("Bootloader: %s %s\r\n", g_bootloader_name, g_bootloader_version);
     }
     
-    DEBUG_INFO("uniOS Kernel v0.3.0 Starting...");
+    DEBUG_INFO("uniOS Kernel v%s Starting...", UNIOS_VERSION_STRING);
     DEBUG_INFO("Framebuffer: %dx%d bpp=%d", fb->width, fb->height, fb->bpp);
 
     // Initialize core systems

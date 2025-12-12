@@ -23,6 +23,9 @@ static uint8_t extended_scancode = 0;  // For 0xE0 prefixed scancodes
 #define KEY_HOME        0x84
 #define KEY_END         0x85
 #define KEY_DELETE      0x86
+// Shift+Arrow for text selection
+#define KEY_SHIFT_LEFT  0x90
+#define KEY_SHIFT_RIGHT 0x91
 
 // US keyboard layout (lowercase)
 static const char scancode_to_ascii[128] = {
@@ -91,8 +94,12 @@ void ps2_keyboard_handler() {
             case 0x1D: ctrl_held = 1; return;            // Right Ctrl
             case 0x48: push_char(KEY_UP_ARROW); return;   // Up arrow
             case 0x50: push_char(KEY_DOWN_ARROW); return; // Down arrow
-            case 0x4B: push_char(KEY_LEFT_ARROW); return; // Left arrow
-            case 0x4D: push_char(KEY_RIGHT_ARROW); return; // Right arrow
+            case 0x4B:  // Left arrow
+                push_char(shift_held ? KEY_SHIFT_LEFT : KEY_LEFT_ARROW);
+                return;
+            case 0x4D:  // Right arrow
+                push_char(shift_held ? KEY_SHIFT_RIGHT : KEY_RIGHT_ARROW);
+                return;
             case 0x47: push_char(KEY_HOME); return;       // Home
             case 0x4F: push_char(KEY_END); return;        // End
             case 0x53: push_char(KEY_DELETE); return;     // Delete

@@ -17,6 +17,7 @@
 #include "dns.h"
 #include "kstring.h"
 #include "heap.h"
+#include "version.h"
 #include <stddef.h>
 
 // Use shared string utilities
@@ -39,6 +40,9 @@ static int history_index = -1;  // Current browsing position (-1 = not browsing)
 static char clipboard[256];
 static int clipboard_len = 0;
 
+// Text selection state (-1 = no selection)
+static int selection_start = -1;  // Position where selection began
+
 // Special key codes (sent by input layer via escape sequences)
 #define KEY_UP_ARROW    0x80
 #define KEY_DOWN_ARROW  0x81
@@ -47,6 +51,9 @@ static int clipboard_len = 0;
 #define KEY_HOME        0x84
 #define KEY_END         0x85
 #define KEY_DELETE      0x86
+// Shift+Arrow for text selection
+#define KEY_SHIFT_LEFT  0x90
+#define KEY_SHIFT_RIGHT 0x91
 
 // Bootloader info (set by kmain.cpp from Limine request)
 extern const char* g_bootloader_name;
@@ -176,8 +183,9 @@ static void cmd_help() {
     g_terminal.write_line("  Ctrl+U/K  - Cut before/after cursor");
     g_terminal.write_line("  Ctrl+W    - Delete word");
     g_terminal.write_line("  Ctrl+Y    - Paste");
-    g_terminal.write_line("  Ctrl+C    - Cancel line");
+    g_terminal.write_line("  Ctrl+C    - Copy selection / cancel");
     g_terminal.write_line("  Ctrl+L    - Clear screen");
+    g_terminal.write_line("  Shift+Arrows - Select text");
 }
 
 static void cmd_ls() {
@@ -649,7 +657,8 @@ static void cmd_echo(const char* text) {
 }
 
 static void cmd_version() {
-    g_terminal.write_line("uniOS Kernel v0.3.0");
+    g_terminal.write("uniOS Kernel v");
+    g_terminal.write_line(UNIOS_VERSION_STRING);
     g_terminal.write_line("Built with GCC for x86_64-elf");
     
     // Display actual bootloader info if available
@@ -664,7 +673,9 @@ static void cmd_version() {
 }
 
 static void cmd_uname() {
-    g_terminal.write_line("uniOS 0.3.0 x86_64");
+    g_terminal.write("uniOS ");
+    g_terminal.write(UNIOS_VERSION_STRING);
+    g_terminal.write_line(" x86_64");
 }
 
 static void cmd_cpuinfo() {
@@ -1000,6 +1011,12 @@ static void cmd_ping(const char* target) {
 static void execute_command() {
     cmd_buffer[cmd_len] = 0;
     
+    // Trim trailing spaces (from tab completion)
+    while (cmd_len > 0 && cmd_buffer[cmd_len - 1] == ' ') {
+        cmd_len--;
+        cmd_buffer[cmd_len] = 0;
+    }
+    
     // Add to history before execution
     add_to_history(cmd_buffer);
     history_index = -1;  // Reset history browsing
@@ -1195,11 +1212,25 @@ void shell_process_char(char c) {
             g_terminal.set_cursor_pos(2 + cmd_len, row);  // After "> " + cmd_len
             cursor_pos = cmd_len;
         }
-    } else if (c == 3) {  // Ctrl+C - cancel current line
-        g_terminal.write("^C\n");
-        cmd_len = 0;
-        cursor_pos = 0;
-        g_terminal.write("> ");
+    } else if (c == 3) {  // Ctrl+C - copy selection OR cancel line
+        if (selection_start >= 0) {
+            // Copy selected text to clipboard
+            int sel_min = (selection_start < cursor_pos) ? selection_start : cursor_pos;
+            int sel_max = (selection_start > cursor_pos) ? selection_start : cursor_pos;
+            clipboard_len = sel_max - sel_min;
+            for (int i = 0; i < clipboard_len; i++) {
+                clipboard[i] = cmd_buffer[sel_min + i];
+            }
+            clipboard[clipboard_len] = 0;
+            selection_start = -1;  // Clear selection
+            // Don't cancel line - just copied
+        } else {
+            // No selection - cancel line
+            g_terminal.write("^C\n");
+            cmd_len = 0;
+            cursor_pos = 0;
+            g_terminal.write("> ");
+        }
     } else if (c == 21) {  // Ctrl+U - clear line before cursor (cut to clipboard)
         if (cursor_pos > 0) {
             // Copy to clipboard
@@ -1303,6 +1334,26 @@ void shell_process_char(char c) {
             int col, row;
             g_terminal.get_cursor_pos(&col, &row);
             redraw_line_at(row, cursor_pos);
+        }
+    } else if (uc == KEY_SHIFT_LEFT) {  // Shift+Left - extend selection left
+        if (cursor_pos > 0) {
+            if (selection_start < 0) {
+                selection_start = cursor_pos;  // Start new selection
+            }
+            cursor_pos--;
+            int col, row;
+            g_terminal.get_cursor_pos(&col, &row);
+            g_terminal.set_cursor_pos(col - 1, row);
+        }
+    } else if (uc == KEY_SHIFT_RIGHT) {  // Shift+Right - extend selection right
+        if (cursor_pos < cmd_len) {
+            if (selection_start < 0) {
+                selection_start = cursor_pos;  // Start new selection
+            }
+            cursor_pos++;
+            int col, row;
+            g_terminal.get_cursor_pos(&col, &row);
+            g_terminal.set_cursor_pos(col + 1, row);
         }
     } else if (c == '\t') {  // Tab - command completion
         // Find matching commands

@@ -10,7 +10,7 @@
 
 **uniOS** is a Minimalist x86 OS in C++20. It serves as a clean, modern, and hackable educational resource for understanding operating system internals, featuring a custom kernel, native drivers, and a transparent design philosophy.
 
-Current Version: **v0.3.0**
+Current Version: **v0.3.1**
 
 ---
 
@@ -112,8 +112,9 @@ make debug && make run
 | `Ctrl+K` | Cut text after cursor |
 | `Ctrl+W` | Delete word before cursor |
 | `Ctrl+Y` | Paste from clipboard |
-| `Ctrl+C` | Cancel current line |
+| `Ctrl+C` | Copy selection / cancel line |
 | `Ctrl+L` | Clear screen |
+| `Shift+←/→` | Select text |
 | `↑/↓` | Navigate command history |
 | `←/→` | Move cursor in line |
 

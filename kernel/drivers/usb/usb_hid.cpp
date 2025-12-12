@@ -45,6 +45,12 @@ static bool hid_debug = false;
 #define KEY_DOWN_ARROW  0x81
 #define KEY_LEFT_ARROW  0x82
 #define KEY_RIGHT_ARROW 0x83
+#define KEY_HOME        0x84
+#define KEY_END         0x85
+#define KEY_DELETE      0x86
+// Shift+Arrow for text selection
+#define KEY_SHIFT_LEFT  0x90
+#define KEY_SHIFT_RIGHT 0x91
 
 static const char hid_to_ascii[128] = {
     0,    0,    0,    0,   'a',  'b',  'c',  'd',   // 0x00-0x07
@@ -56,8 +62,8 @@ static const char hid_to_ascii[128] = {
     ']',  '\\', '#',  ';',  '\'', '`',  ',',  '.',   // 0x30-0x37
     '/',  0,    0,    0,    0,    0,    0,    0,     // 0x38-0x3F (CapsLock, F1-F6)
     0,    0,    0,    0,    0,    0,    0,    0,     // 0x40-0x47 (F7-F12, PrintScreen, ScrollLock)
-    0,    0,    0,    0,    127,  0,    0,    (char)0x83,  // 0x48-0x4F (Pause, Insert, Home, PageUp, Delete, End, PageDown, Right=0x83)
-    (char)0x82, (char)0x81, (char)0x80, 0, '/',  '*',  '-',  '+',   // 0x50-0x57 (Left=0x82, Down=0x81, Up=0x80, NumLock, Keypad...)
+    0,    0,    (char)0x84, 0, (char)0x86, (char)0x85, 0, (char)0x83,  // 0x48-0x4F (Pause, Insert, Home, PageUp, Delete, End, PageDown, Right)
+    (char)0x82, (char)0x81, (char)0x80, 0, '/',  '*',  '-',  '+',   // 0x50-0x57 (Left, Down, Up, NumLock, Keypad...)
     '\n', '1',  '2',  '3',  '4',  '5',  '6',  '7',   // 0x58-0x5F (Keypad Enter, 1-7)
     '8',  '9',  '0',  '.',  0,    0,    0,    '=',   // 0x60-0x67
     0,    0,    0,    0,    0,    0,    0,    0,     // 0x68-0x6F
@@ -140,6 +146,7 @@ static void handle_key_repeat() {
 // Process a keyboard report - only called when new data arrives
 static void process_keyboard_report(HidKeyboardReport* report) {
     bool shift = (report->modifiers & (HID_MOD_LEFT_SHIFT | HID_MOD_RIGHT_SHIFT)) != 0;
+    bool ctrl = (report->modifiers & (HID_MOD_LEFT_CTRL | HID_MOD_RIGHT_CTRL)) != 0;
     
     // Find first currently pressed key
     uint8_t current_key = 0;
@@ -159,11 +166,47 @@ static void process_keyboard_report(HidKeyboardReport* report) {
         
         // Only process if this is a new key press
         if (!key_was_pressed(keycode)) {
+            // Handle Shift+Arrow for text selection (HID: 0x50=Left, 0x4F=Right)
+            if (shift && keycode == 0x50) {  // Shift+Left
+                kb_buffer_push(KEY_SHIFT_LEFT);
+                continue;
+            }
+            if (shift && keycode == 0x4F) {  // Shift+Right
+                kb_buffer_push(KEY_SHIFT_RIGHT);
+                continue;
+            }
+            
             char c;
             if (shift) {
                 c = hid_to_ascii_shift[keycode];
             } else {
                 c = hid_to_ascii[keycode];
+            }
+            
+            // Handle Ctrl key combinations - generate control codes
+            if (ctrl && c != 0) {
+                // Convert letter to control code (a=1, b=2, ..., z=26)
+                if (c >= 'a' && c <= 'z') {
+                    kb_buffer_push(c - 'a' + 1);
+                    // Start repeat for Ctrl combo
+                    repeat_keycode = keycode;
+                    repeat_shift = shift;
+                    repeat_start_tick = timer_get_ticks();
+                    repeat_last_tick = repeat_start_tick;
+                    continue;
+                }
+                if (c >= 'A' && c <= 'Z') {
+                    kb_buffer_push(c - 'A' + 1);
+                    repeat_keycode = keycode;
+                    repeat_shift = shift;
+                    repeat_start_tick = timer_get_ticks();
+                    repeat_last_tick = repeat_start_tick;
+                    continue;
+                }
+                // Special cases
+                if (c == '[' || c == '{') { kb_buffer_push(27); continue; }  // Ctrl+[ = Escape
+                if (c == '\\' || c == '|') { kb_buffer_push(28); continue; } // Ctrl+\
+                if (c == ']' || c == '}') { kb_buffer_push(29); continue; }  // Ctrl+]
             }
             
             if (c != 0) {
