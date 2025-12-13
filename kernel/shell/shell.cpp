@@ -1027,6 +1027,38 @@ static void cmd_rm(const char* filename) {
     }
 }
 
+// Process escape sequences in a string (\n -> newline, \t -> tab, \\ -> backslash)
+// Returns allocated string that must be freed
+static char* process_escapes(const char* input) {
+    uint64_t input_len = strlen(input);
+    char* output = (char*)malloc(input_len + 1);
+    if (!output) return nullptr;
+    
+    int out_idx = 0;
+    for (uint64_t i = 0; i < input_len; i++) {
+        if (input[i] == '\\' && i + 1 < input_len) {
+            char next = input[i + 1];
+            if (next == 'n') {
+                output[out_idx++] = '\n';
+                i++;  // Skip the 'n'
+            } else if (next == 't') {
+                output[out_idx++] = '\t';
+                i++;
+            } else if (next == '\\') {
+                output[out_idx++] = '\\';
+                i++;
+            } else {
+                // Unknown escape, keep as-is
+                output[out_idx++] = input[i];
+            }
+        } else {
+            output[out_idx++] = input[i];
+        }
+    }
+    output[out_idx] = '\0';
+    return output;
+}
+
 static void cmd_write(const char* args) {
     // Parse "filename text to write"
     const char* space = args;
@@ -1046,20 +1078,37 @@ static void cmd_write(const char* args) {
     
     // Skip space to get text
     const char* text = space + 1;
-    uint64_t text_len = strlen(text);
     
-    // Add newline
-    char* text_with_newline = (char*)malloc(text_len + 2);
-    if (!text_with_newline) {
+    // Process escape sequences (\n, \t, \\)
+    char* processed = process_escapes(text);
+    if (!processed) {
         g_terminal.write_line("Out of memory.");
         return;
     }
-    strcpy(text_with_newline, text);
-    text_with_newline[text_len] = '\n';
-    text_with_newline[text_len + 1] = 0;
     
-    int result = unifs_write(filename, text_with_newline, text_len + 1);
-    free(text_with_newline);
+    uint64_t processed_len = strlen(processed);
+    
+    // Add trailing newline if not already present
+    char* final_text;
+    if (processed_len == 0 || processed[processed_len - 1] != '\n') {
+        final_text = (char*)malloc(processed_len + 2);
+        if (!final_text) {
+            free(processed);
+            g_terminal.write_line("Out of memory.");
+            return;
+        }
+        strcpy(final_text, processed);
+        final_text[processed_len] = '\n';
+        final_text[processed_len + 1] = '\0';
+        processed_len++;
+    } else {
+        final_text = processed;
+        processed = nullptr;  // Don't double-free
+    }
+    
+    int result = unifs_write(filename, final_text, processed_len);
+    free(final_text);
+    if (processed) free(processed);
     
     switch (result) {
         case UNIFS_OK:
@@ -1099,20 +1148,37 @@ static void cmd_append(const char* args) {
     
     // Skip space to get text
     const char* text = space + 1;
-    uint64_t text_len = strlen(text);
     
-    // Add newline
-    char* text_with_newline = (char*)malloc(text_len + 2);
-    if (!text_with_newline) {
+    // Process escape sequences (\n, \t, \\)
+    char* processed = process_escapes(text);
+    if (!processed) {
         g_terminal.write_line("Out of memory.");
         return;
     }
-    strcpy(text_with_newline, text);
-    text_with_newline[text_len] = '\n';
-    text_with_newline[text_len + 1] = 0;
     
-    int result = unifs_append(filename, text_with_newline, text_len + 1);
-    free(text_with_newline);
+    uint64_t processed_len = strlen(processed);
+    
+    // Add trailing newline if not already present
+    char* final_text;
+    if (processed_len == 0 || processed[processed_len - 1] != '\n') {
+        final_text = (char*)malloc(processed_len + 2);
+        if (!final_text) {
+            free(processed);
+            g_terminal.write_line("Out of memory.");
+            return;
+        }
+        strcpy(final_text, processed);
+        final_text[processed_len] = '\n';
+        final_text[processed_len + 1] = '\0';
+        processed_len++;
+    } else {
+        final_text = processed;
+        processed = nullptr;  // Don't double-free
+    }
+    
+    int result = unifs_append(filename, final_text, processed_len);
+    free(final_text);
+    if (processed) free(processed);
     
     switch (result) {
         case UNIFS_OK:

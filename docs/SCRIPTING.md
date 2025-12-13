@@ -5,13 +5,22 @@ uniOS v0.5.0 introduces shell scripting capabilities, allowing you to automate t
 ## Quick Start
 
 ```bash
-# Create a script
-write hello.sh "# My first script
-set NAME=World
-echo Hello, $NAME!"
+# Create a script using \n for newlines
+write hello.sh "# My first script\nset NAME=World\necho Hello, $NAME!"
 
 # Run it
 run hello.sh
+```
+
+**Creating scripts line by line:**
+```bash
+touch myscript.sh
+append myscript.sh "set N=3"
+append myscript.sh "while $N > 0"
+append myscript.sh "  echo $N"
+append myscript.sh "  set N=$N-1"
+append myscript.sh "end"
+run myscript.sh
 ```
 
 ## Variables
