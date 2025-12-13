@@ -1,6 +1,6 @@
 # uniOS Shell Scripting Guide
 
-uniOS v0.5.0 introduces shell scripting capabilities, allowing you to automate tasks with variables, control flow, and reusable script files.
+uniOS v0.5.1 introduces shell scripting capabilities, allowing you to automate tasks with variables, control flow, and reusable script files.
 
 ## Quick Start
 

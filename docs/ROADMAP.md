@@ -9,12 +9,13 @@
 
 ---
 
-## Current: v0.5.0 ✓
-**Shell Scripting**
+## Current: v0.5.x ✓
+**Shell Scripting & Polish**
 - [x] `run <script>` command
 - [x] Variables (`set NAME=value`, `$NAME`)
 - [x] Control flow (`if/else/endif`, `while/end`)
 - [x] Script comments (`#`)
+- [x] Utility commands (`env`, `time`, `sleep`, `test`, `expr`, `read`)
 
 ---
 

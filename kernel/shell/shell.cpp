@@ -783,12 +783,23 @@ static void cmd_help() {
     g_terminal.write_line("");
     g_terminal.write_line("Scripting:");
     g_terminal.write_line("  run <f>   - Execute script file");
+    g_terminal.write_line("  source <f> - Run script (same as run)");
     g_terminal.write_line("  set N=V   - Set variable (or list all)");
     g_terminal.write_line("  unset N   - Remove variable");
+    g_terminal.write_line("  env       - List all variables");
     g_terminal.write_line("  $NAME     - Variable expansion");
     g_terminal.write_line("  # comment - Script comments");
     g_terminal.write_line("  if/else/endif - Conditionals");
     g_terminal.write_line("  while/end - Loops");
+    g_terminal.write_line("  test <expr> - Evaluate condition");
+    g_terminal.write_line("  expr <n> <op> <n> - Arithmetic");
+    g_terminal.write_line("  read <var> - Read input to variable");
+    g_terminal.write_line("");
+    g_terminal.write_line("Utilities:");
+    g_terminal.write_line("  true/false - Exit with 0/1");
+    g_terminal.write_line("  sleep <ms> - Wait milliseconds");
+    g_terminal.write_line("  time <cmd> - Measure execution time");
+    g_terminal.write_line("  exit      - Shutdown (alias for poweroff)");
     g_terminal.write_line("");
     g_terminal.write_line("Text Processing (pipe-friendly):");
     g_terminal.write_line("  wc [f]    - Count lines/words/chars");
@@ -1354,6 +1365,253 @@ static void cmd_uptime() {
 
 static void cmd_echo(const char* text) {
     g_terminal.write_line(text);
+}
+
+// =============================================================================
+// Shell Polish Commands (v0.5.1-v0.5.9)
+// =============================================================================
+
+// env - List all variables in a nice format
+static void cmd_env() {
+    bool any = false;
+    for (int i = 0; i < MAX_VARS; i++) {
+        if (shell_vars[i].in_use) {
+            any = true;
+            g_terminal.write(shell_vars[i].name);
+            g_terminal.write("=");
+            g_terminal.write_line(shell_vars[i].value);
+        }
+    }
+    if (!any) g_terminal.write_line("No environment variables set.");
+}
+
+// true - Always succeeds (exit status 0)
+static void cmd_true() {
+    last_exit_status = 0;
+}
+
+// false - Always fails (exit status 1)
+static void cmd_false() {
+    last_exit_status = 1;
+}
+
+// sleep <ms> - Sleep for specified milliseconds
+static void cmd_sleep(const char* args) {
+    while (*args == ' ') args++;
+    int ms = str_to_int(args);
+    if (ms <= 0) {
+        g_terminal.write_line("Usage: sleep <milliseconds>");
+        return;
+    }
+    if (ms > 60000) ms = 60000;  // Cap at 60 seconds
+    
+    uint64_t start = timer_get_ticks();
+    uint64_t target = (ms * timer_get_frequency()) / 1000;
+    while ((timer_get_ticks() - start) < target) {
+        // Busy wait - could add input polling here for Ctrl+C
+        for (volatile int i = 0; i < 100; i++);
+    }
+}
+
+// time <cmd> - Measure command execution time
+static void cmd_time(const char* cmd) {
+    while (*cmd == ' ') cmd++;
+    if (*cmd == '\0') {
+        g_terminal.write_line("Usage: time <command>");
+        return;
+    }
+    
+    uint64_t start = timer_get_ticks();
+    execute_single_command(cmd, nullptr);
+    uint64_t end = timer_get_ticks();
+    
+    uint64_t elapsed_ticks = end - start;
+    uint64_t elapsed_ms = (elapsed_ticks * 1000) / timer_get_frequency();
+    
+    char buf[64];
+    int i = 0;
+    const char* prefix = "\nTime: ";
+    while (*prefix) buf[i++] = *prefix++;
+    
+    if (elapsed_ms == 0) {
+        buf[i++] = '<'; buf[i++] = '1';
+    } else {
+        char tmp[16]; int j = 0;
+        uint64_t n = elapsed_ms;
+        if (n == 0) tmp[j++] = '0';
+        while (n > 0) { tmp[j++] = '0' + (n % 10); n /= 10; }
+        while (j > 0) buf[i++] = tmp[--j];
+    }
+    buf[i++] = 'm'; buf[i++] = 's'; buf[i++] = '\0';
+    g_terminal.write_line(buf);
+}
+
+// expr - Evaluate arithmetic expression
+// Usage: expr 5 + 3, expr $X * 2
+static void cmd_expr(const char* args) {
+    while (*args == ' ') args++;
+    
+    // Parse: operand1 operator operand2
+    char op1_str[64], op2_str[64];
+    char op = 0;
+    int i = 0, j = 0;
+    
+    // First operand
+    while (args[i] && args[i] != ' ' && j < 63) op1_str[j++] = args[i++];
+    op1_str[j] = '\0';
+    
+    // Skip space
+    while (args[i] == ' ') i++;
+    
+    // Operator
+    if (args[i] == '+' || args[i] == '-' || args[i] == '*' || args[i] == '/' || args[i] == '%') {
+        op = args[i++];
+    }
+    
+    // Skip space
+    while (args[i] == ' ') i++;
+    
+    // Second operand
+    j = 0;
+    while (args[i] && args[i] != ' ' && j < 63) op2_str[j++] = args[i++];
+    op2_str[j] = '\0';
+    
+    if (op == 0 || op2_str[0] == '\0') {
+        g_terminal.write_line("Usage: expr <n1> <op> <n2>  (op: + - * / %)");
+        return;
+    }
+    
+    // Expand variables
+    char exp1[64], exp2[64];
+    expand_variables(op1_str, exp1, 64);
+    expand_variables(op2_str, exp2, 64);
+    
+    int a = str_to_int(exp1);
+    int b = str_to_int(exp2);
+    int result = 0;
+    
+    switch (op) {
+        case '+': result = a + b; break;
+        case '-': result = a - b; break;
+        case '*': result = a * b; break;
+        case '/': result = (b != 0) ? a / b : 0; break;
+        case '%': result = (b != 0) ? a % b : 0; break;
+    }
+    
+    // Print result
+    char buf[32];
+    i = 0;
+    if (result < 0) { buf[i++] = '-'; result = -result; }
+    if (result == 0) {
+        buf[i++] = '0';
+    } else {
+        char tmp[16]; j = 0;
+        while (result > 0) { tmp[j++] = '0' + (result % 10); result /= 10; }
+        while (j > 0) buf[i++] = tmp[--j];
+    }
+    buf[i] = '\0';
+    g_terminal.write_line(buf);
+}
+
+// test - Evaluate test expression (for scripting)
+// Usage: test -f file, test $X == hello, test $N -gt 5
+static void cmd_test(const char* args) {
+    while (*args == ' ') args++;
+    
+    // test -f <file> - file exists
+    if (strncmp(args, "-f ", 3) == 0) {
+        const char* fname = args + 3;
+        while (*fname == ' ') fname++;
+        char expanded[64];
+        expand_variables(fname, expanded, 64);
+        last_exit_status = unifs_file_exists(expanded) ? 0 : 1;
+        return;
+    }
+    
+    // test -z <str> - string is empty
+    if (strncmp(args, "-z ", 3) == 0) {
+        const char* str = args + 3;
+        while (*str == ' ') str++;
+        char expanded[256];
+        expand_variables(str, expanded, 256);
+        last_exit_status = (expanded[0] == '\0') ? 0 : 1;
+        return;
+    }
+    
+    // test -n <str> - string is not empty
+    if (strncmp(args, "-n ", 3) == 0) {
+        const char* str = args + 3;
+        while (*str == ' ') str++;
+        char expanded[256];
+        expand_variables(str, expanded, 256);
+        last_exit_status = (expanded[0] != '\0') ? 0 : 1;
+        return;
+    }
+    
+    // test <val1> <op> <val2> - comparison
+    last_exit_status = evaluate_condition(args) ? 0 : 1;
+}
+
+// read VAR - Read user input into a variable
+static void cmd_read(const char* varname) {
+    while (*varname == ' ') varname++;
+    
+    if (*varname == '\0') {
+        g_terminal.write_line("Usage: read <varname>");
+        return;
+    }
+    
+    // Extract variable name (first word only)
+    char name[MAX_VAR_NAME];
+    int i = 0;
+    while (varname[i] && varname[i] != ' ' && i < MAX_VAR_NAME - 1) {
+        name[i] = varname[i];
+        i++;
+    }
+    name[i] = '\0';
+    
+    // Show prompt
+    g_terminal.write(name);
+    g_terminal.write("? ");
+    
+    // Read input character by character
+    char input_buf[MAX_VAR_VALUE];
+    int input_len = 0;
+    
+    while (input_len < MAX_VAR_VALUE - 1) {
+        char c = input_keyboard_get_char();
+        if (c == 0) {
+            // No input yet, poll
+            for (volatile int j = 0; j < 1000; j++);
+            continue;
+        }
+        
+        if (c == '\n' || c == '\r') {
+            g_terminal.write("\n");
+            break;
+        }
+        
+        if (c == '\b' && input_len > 0) {
+            input_len--;
+            g_terminal.write("\b \b");
+            continue;
+        }
+        
+        if (c >= 32 && c < 127) {  // Printable
+            input_buf[input_len++] = c;
+            g_terminal.put_char(c);
+        }
+    }
+    input_buf[input_len] = '\0';
+    
+    shell_set_var(name, input_buf);
+}
+
+// source <file> - Execute script in current context (variables persist)
+// Same as run but shares variable space
+static void cmd_source(const char* filename) {
+    // source is essentially the same as run since we share global vars
+    cmd_run(filename);
 }
 
 // =============================================================================
@@ -2431,6 +2689,34 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
         cmd_set("");  // List all variables
     } else if (strncmp(local_cmd, "unset ", 6) == 0) {
         cmd_unset(local_cmd + 6);
+    // v0.5.x shell polish commands
+    } else if (strcmp(local_cmd, "env") == 0) {
+        cmd_env();
+    } else if (strcmp(local_cmd, "exit") == 0) {
+        // exit is an alias for poweroff
+        if (acpi_is_available()) {
+            g_terminal.write_line("Shutting down...");
+        }
+        acpi_poweroff();
+        g_terminal.write_line("Shutdown failed.");
+    } else if (strncmp(local_cmd, "time ", 5) == 0) {
+        cmd_time(local_cmd + 5);
+    } else if (strcmp(local_cmd, "true") == 0) {
+        cmd_true();
+    } else if (strcmp(local_cmd, "false") == 0) {
+        cmd_false();
+    } else if (strncmp(local_cmd, "sleep ", 6) == 0) {
+        cmd_sleep(local_cmd + 6);
+    } else if (strncmp(local_cmd, "read ", 5) == 0) {
+        cmd_read(local_cmd + 5);
+    } else if (strncmp(local_cmd, "test ", 5) == 0) {
+        cmd_test(local_cmd + 5);
+    } else if (strncmp(local_cmd, "expr ", 5) == 0) {
+        cmd_expr(local_cmd + 5);
+    } else if (strncmp(local_cmd, "source ", 7) == 0) {
+        cmd_source(local_cmd + 7);
+    } else if (strncmp(local_cmd, ". ", 2) == 0) {
+        cmd_source(local_cmd + 2);  // . is alias for source
     } else if (strcmp(local_cmd, "clear") == 0) {
         g_terminal.clear();
         g_terminal.write("uniOS Shell\n\n");
@@ -2915,7 +3201,12 @@ void shell_process_char(char c) {
                 "help", "ls", "cat", "stat", "hexdump", "touch", "rm", "write", "append", "df",
                 "mem", "date", "uptime", "version", "uname", "cpuinfo", "lspci",
                 "ifconfig", "dhcp", "ping", "clear", "gui", "reboot", "poweroff", "echo",
-                "wc", "head", "tail", "grep", "sort", "uniq", "rev", "tac", "nl", "tr", nullptr
+                "wc", "head", "tail", "grep", "sort", "uniq", "rev", "tac", "nl", "tr",
+                // Scripting commands (v0.5.0+)
+                "run", "set", "unset", "env",
+                // v0.5.x additions
+                "exit", "time", "true", "false", "sleep", "read", "test", "expr", "source",
+                nullptr
             };
             
             int matches = 0;
