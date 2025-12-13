@@ -674,12 +674,29 @@ static bool execute_script_line(const char* line) {
     // Normal command - check if we should execute
     if (should_skip_execution()) return true;
     
-    // Expand variables and execute
+    // Don't expand variables for 'set' command - it handles its own expansion
+    // This is needed for arithmetic like set I=$I+1 to work correctly
+    bool is_set_cmd = (strncmp(trimmed, "set ", 4) == 0);
+    
     char expanded[256];
-    expand_variables(trimmed, expanded, sizeof(expanded));
+    if (is_set_cmd) {
+        // Copy without expansion
+        int i = 0;
+        while (trimmed[i] && i < 255) {
+            expanded[i] = trimmed[i];
+            i++;
+        }
+        expanded[i] = '\0';
+    } else {
+        expand_variables(trimmed, expanded, sizeof(expanded));
+    }
     
     bool result = execute_single_command(expanded, nullptr);
-    last_exit_status = result ? 0 : 1;
+    // Only set exit status to 1 if command wasn't recognized
+    // Commands like true, false, test set their own exit status
+    if (!result) {
+        last_exit_status = 1;
+    }
     return true;
 }
 
@@ -2580,13 +2597,18 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
     for (int i = 0; i < len; i++) local_cmd[i] = cmd[i];
     local_cmd[len] = '\0';
     
-    // Expand variables in command
-    char expanded_cmd[256];
-    expand_variables(local_cmd, expanded_cmd, sizeof(expanded_cmd));
-    // Use expanded_cmd from here on
-    for (int i = 0; expanded_cmd[i] && i < 255; i++) {
-        local_cmd[i] = expanded_cmd[i];
-        local_cmd[i + 1] = '\0';
+    // Expand variables in command (except for 'set' which handles its own)
+    // This is needed for arithmetic like set I=$I+1 to work correctly
+    bool is_set_command = (strncmp(local_cmd, "set ", 4) == 0 || strcmp(local_cmd, "set") == 0);
+    
+    if (!is_set_command) {
+        char expanded_cmd[256];
+        expand_variables(local_cmd, expanded_cmd, sizeof(expanded_cmd));
+        // Use expanded_cmd from here on
+        for (int i = 0; expanded_cmd[i] && i < 255; i++) {
+            local_cmd[i] = expanded_cmd[i];
+            local_cmd[i + 1] = '\0';
+        }
     }
     
     // Command dispatch
