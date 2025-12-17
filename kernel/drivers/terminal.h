@@ -2,9 +2,17 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// Cell structure for text buffer (character + colors)
+struct Cell {
+    char ch;
+    uint32_t fg;
+    uint32_t bg;
+};
+
 class Terminal {
 public:
     Terminal();
+    ~Terminal();
     
     // Initialize with screen dimensions and colors
     void init(uint32_t fg_color, uint32_t bg_color);
@@ -38,6 +46,9 @@ private:
     void scroll_up();
     void new_line();
     void draw_cursor(bool visible);
+    void redraw_screen();           // Redraw entire screen from text buffer
+    void redraw_row(int row);       // Redraw single row from text buffer
+    Cell* get_cell(int col, int row); // Get cell pointer
 
     int width_chars;
     int height_chars;
@@ -50,6 +61,10 @@ private:
     bool cursor_visible;
     bool cursor_state; // For blinking
     uint64_t last_blink_tick;
+    
+    // Text buffer for fast scrolling
+    Cell* text_buffer;
+    int buffer_size;
     
     // Capture mode for piping
     bool capturing;

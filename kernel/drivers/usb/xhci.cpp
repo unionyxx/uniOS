@@ -908,9 +908,9 @@ bool xhci_control_transfer(uint8_t slot_id, uint8_t request_type, uint8_t reques
     // Ring doorbell (EP0 = target 1)
     xhci_ring_doorbell(slot_id, 1);
     
-    // Wait for completion
+    // Wait for completion - increased timeout for real hardware (some need 24000+)
     Trb result;
-    if (!xhci_wait_transfer_event(slot_id, &result, 500)) {
+    if (!xhci_wait_transfer_event(slot_id, &result, 5000)) {
         return false;
     }
     
@@ -932,7 +932,16 @@ static DMAAllocation intr_buffer_dma[32][32] = {{{0}}};
 // Interrupt transfer - non-blocking with pending state tracking
 bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data, 
                              uint16_t length, uint16_t* transferred) {
-    if (!xhci.transfer_rings[slot_id][ep_num]) return false;
+    if (!xhci.transfer_rings[slot_id][ep_num]) {
+        return false;  // No transfer ring for this endpoint
+    }
+    
+    // Allocate buffer once per endpoint (reuse on subsequent calls)
+    if (intr_buffer_dma[slot_id][ep_num].phys == 0) {
+        DMAAllocation dma = vmm_alloc_dma(1); // 4KB is enough for interrupt
+        if (!dma.phys) return false;
+        intr_buffer_dma[slot_id][ep_num] = dma;
+    }
     
     // Check if a transfer just completed
     if (xhci.intr_complete[slot_id][ep_num]) {
@@ -940,11 +949,31 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
         xhci.intr_complete[slot_id][ep_num] = false;
         
         uint8_t comp_code = (result.status >> 24) & 0xFF;
+        
+        // CRITICAL: Always queue a new transfer immediately after completion
+        // This ensures continuous polling of the endpoint
+        uint64_t data_phys = intr_buffer_dma[slot_id][ep_num].phys;
+        Trb trb = {0, 0, 0};
+        trb.parameter = data_phys;
+        trb.status = length;
+        trb.control = TRB_TYPE(TRB_TYPE_NORMAL) | TRB_IOC | TRB_ISP;
+        xhci_enqueue_transfer(slot_id, ep_num, &trb);
+        
+        asm volatile("mfence" ::: "memory");
+        xhci_ring_doorbell(slot_id, ep_num);
+        xhci.intr_pending[slot_id][ep_num] = true;
+        xhci.intr_start_time[slot_id][ep_num] = timer_get_ticks();
+        
         if (comp_code != TRB_COMP_SUCCESS && comp_code != TRB_COMP_SHORT_PACKET) {
+            // Track failures but still queue new transfer
+            endpoint_failures[slot_id][ep_num]++;
             return false;
         }
         
-        // Copy data
+        // Reset failure count on success
+        endpoint_failures[slot_id][ep_num] = 0;
+        
+        // Copy data from DMA buffer
         if (intr_buffer_dma[slot_id][ep_num].virt) {
             uint8_t* src = (uint8_t*)intr_buffer_dma[slot_id][ep_num].virt;
             uint8_t* dst = (uint8_t*)data;
@@ -960,10 +989,10 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
     
     // Check if transfer is still pending
     if (xhci.intr_pending[slot_id][ep_num]) {
-        // Check for timeout (e.g. 500ms)
+        // Check for timeout (e.g. 1000ms for real hardware)
         uint64_t now = timer_get_ticks();
-        // 100Hz timer = 10ms per tick. 50 ticks = 500ms.
-        if (now - xhci.intr_start_time[slot_id][ep_num] > 50) {
+        // 100Hz timer = 10ms per tick. 100 ticks = 1000ms.
+        if (now - xhci.intr_start_time[slot_id][ep_num] > 100) {
             if (xhci_debug) DEBUG_LOG("EP %d.%d timed out, resetting pending state", slot_id, ep_num);
             xhci.intr_pending[slot_id][ep_num] = false;
             // Fall through to queue new transfer
@@ -972,13 +1001,7 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
         }
     }
     
-    // Start new transfer
-    // Allocate buffer once per endpoint (reuse on subsequent calls)
-    if (intr_buffer_dma[slot_id][ep_num].phys == 0) {
-        DMAAllocation dma = vmm_alloc_dma(1); // 4KB is enough for interrupt
-        if (!dma.phys) return false;
-        intr_buffer_dma[slot_id][ep_num] = dma;
-    }
+    // Start new transfer (first time or after timeout)
     uint64_t data_phys = intr_buffer_dma[slot_id][ep_num].phys;
     
     Trb trb = {0, 0, 0};
@@ -986,9 +1009,6 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
     trb.status = length;
     trb.control = TRB_TYPE(TRB_TYPE_NORMAL) | TRB_IOC | TRB_ISP;
     xhci_enqueue_transfer(slot_id, ep_num, &trb);
-    
-    // Removed spam log - was printing thousands of times per second
-    // usb_log("Queuing Int Transfer: Slot %d EP %d", slot_id, ep_num);
     
     asm volatile("mfence" ::: "memory");
     xhci_ring_doorbell(slot_id, ep_num);
@@ -1025,22 +1045,17 @@ void xhci_poll_events() {
             uint8_t ep_num = (control >> 16) & 0x1F;
             uint8_t comp_code = (event->status >> 24) & 0xFF;
             
-            // Debug log for mouse endpoint (DCI 5) or any error
-            if (ep_num == 5 || comp_code != TRB_COMP_SUCCESS) {
-                // DEBUG_LOG("Event: Slot %d EP %d Code %d", slot_id, ep_num, comp_code);
-            }
-            
             // If we are waiting for an interrupt transfer on this endpoint
             if (xhci.intr_pending[slot_id][ep_num]) {
                 xhci.transfer_result[slot_id][ep_num] = *event;
                 xhci.intr_complete[slot_id][ep_num] = true;
                 xhci.intr_pending[slot_id][ep_num] = false;
                 
+                // Track endpoint failures (BABBLE, STALL, etc.)
                 if (comp_code != TRB_COMP_SUCCESS && comp_code != TRB_COMP_SHORT_PACKET) {
                     endpoint_failures[slot_id][ep_num]++;
                     if (endpoint_failures[slot_id][ep_num] >= MAX_ENDPOINT_FAILURES) {
-                        // Mark endpoint as potentially stuck - stop polling
-                        if (xhci_debug) DEBUG_LOG("EP %d.%d stuck (code %d)", slot_id, ep_num, comp_code);
+                        // Endpoint has too many errors - stop polling to avoid spam
                         xhci.intr_pending[slot_id][ep_num] = false;
                     }
                 } else {

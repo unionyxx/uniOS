@@ -35,25 +35,20 @@ static void usb_print_device_info(UsbDeviceInfo* dev) {
     }
 }
 
-// Helper to handle HID interface
+// Helper to handle HID interface - temporarily mark as unknown, will be refined by endpoint
 static void usb_handle_hid_interface(UsbDeviceInfo* dev, UsbInterfaceDescriptor* iface) {
-    if (usb_debug) DEBUG_LOG("  Interface %d: Class %d Sub %d Proto %d", 
-        iface->bInterfaceNumber, iface->bInterfaceClass, 
-        iface->bInterfaceSubClass, iface->bInterfaceProtocol);
-    
     if (iface->bInterfaceClass != USB_CLASS_HID) return;
 
-    // Boot Keyboard
+    // Boot Keyboard (Subclass=1, Protocol=1) - unambiguous
     if (iface->bInterfaceSubClass == USB_SUBCLASS_BOOT && 
         iface->bInterfaceProtocol == USB_PROTOCOL_KEYBOARD) {
         if (!dev->is_keyboard) {
             dev->is_keyboard = true;
             dev->is_boot_interface = true;
             dev->hid_interface = iface->bInterfaceNumber;
-            if (usb_debug) DEBUG_LOG("    -> Found Boot Keyboard!");
         }
     } 
-    // Boot Mouse
+    // Boot Mouse (Subclass=1, Protocol=2) - unambiguous
     else if (iface->bInterfaceSubClass == USB_SUBCLASS_BOOT && 
              iface->bInterfaceProtocol == USB_PROTOCOL_MOUSE) {
         if (!dev->is_mouse) {
@@ -64,22 +59,16 @@ static void usb_handle_hid_interface(UsbDeviceInfo* dev, UsbInterfaceDescriptor*
             } else {
                 dev->hid_interface = iface->bInterfaceNumber;
             }
-            if (usb_debug) DEBUG_LOG("    -> Found Boot Mouse!");
         }
     }
-    // Generic HID
+    // Generic HID - will be classified in usb_handle_hid_endpoint based on packet size
     else if (iface->bInterfaceSubClass == 0 && iface->bInterfaceProtocol == 0) {
-        if (dev->is_keyboard && !dev->is_mouse) {
-            dev->is_mouse = true;
-            dev->is_boot_interface = false;
-            dev->hid_interface2 = iface->bInterfaceNumber;
-            if (usb_debug) DEBUG_LOG("    -> Found Generic HID (assuming Mouse)");
-        } 
-        else if (!dev->is_keyboard && !dev->is_mouse) {
-            dev->is_keyboard = true;
-            dev->is_boot_interface = false;
+        // Mark interface for later - endpoint handler will classify by max packet size
+        if (!dev->is_keyboard && !dev->is_mouse) {
+            // Tentatively mark, will be refined when we see the endpoint
             dev->hid_interface = iface->bInterfaceNumber;
-            if (usb_debug) DEBUG_LOG("    -> Found Generic HID (assuming Keyboard)");
+        } else if (dev->is_keyboard && !dev->is_mouse) {
+            dev->hid_interface2 = iface->bInterfaceNumber;
         }
     }
 }
@@ -93,35 +82,27 @@ static void usb_handle_hid_endpoint(UsbDeviceInfo* dev, UsbInterfaceDescriptor* 
     uint8_t ep_num = ep->bEndpointAddress & 0x0F;
     uint8_t ep_dir = (ep->bEndpointAddress & USB_ENDPOINT_DIR_IN) ? 1 : 0;
     uint8_t xhci_ep = ep_num * 2 + ep_dir;
+    uint16_t max_packet = ep->wMaxPacketSize;
 
-    bool matches_kbd = dev->is_keyboard && iface->bInterfaceNumber == dev->hid_interface;
-    bool matches_mouse_composite = dev->is_mouse && dev->hid_interface2 != 0 && iface->bInterfaceNumber == dev->hid_interface2;
-    bool matches_mouse_standalone = dev->is_mouse && !dev->is_keyboard && iface->bInterfaceNumber == dev->hid_interface;
+    // For Generic HID (no is_keyboard or is_mouse set yet), assume MOUSE
+    // Keyboards almost always use Boot Protocol. Mice often use Generic HID.
+    if (!dev->is_keyboard && !dev->is_mouse && iface->bInterfaceNumber == dev->hid_interface) {
+        dev->is_mouse = true;
+        dev->is_boot_interface = false;
+    }
 
-    if (matches_kbd && dev->hid_endpoint == 0) {
-        dev->hid_max_packet = ep->wMaxPacketSize;
+    // Assign endpoint for primary interface
+    if (iface->bInterfaceNumber == dev->hid_interface && dev->hid_endpoint == 0) {
+        dev->hid_max_packet = max_packet;
         dev->hid_interval = ep->bInterval;
         dev->hid_endpoint = xhci_ep;
-        if (usb_debug) DEBUG_LOG("    -> KBD Endpoint: Addr 0x%x, DCI %d, MaxP %d, Int %d", 
-            ep->bEndpointAddress, xhci_ep, ep->wMaxPacketSize, ep->bInterval);
-    } else if (matches_mouse_composite && dev->hid_endpoint2 == 0) {
-        dev->hid_max_packet2 = ep->wMaxPacketSize;
+    }
+    
+    // Assign endpoint for secondary interface (composite device)
+    if (dev->hid_interface2 != 0 && iface->bInterfaceNumber == dev->hid_interface2 && dev->hid_endpoint2 == 0) {
+        dev->hid_max_packet2 = max_packet;
         dev->hid_interval2 = ep->bInterval;
         dev->hid_endpoint2 = xhci_ep;
-        if (usb_debug) DEBUG_LOG("    -> Mouse Endpoint2: Addr 0x%x, DCI %d, MaxP %d, Int %d", 
-            ep->bEndpointAddress, xhci_ep, ep->wMaxPacketSize, ep->bInterval);
-    } else if (matches_mouse_standalone && dev->hid_endpoint == 0) {
-        dev->hid_max_packet = ep->wMaxPacketSize;
-        dev->hid_interval = ep->bInterval;
-        dev->hid_endpoint = xhci_ep;
-        if (usb_debug) DEBUG_LOG("    -> Mouse Endpoint: Addr 0x%x, DCI %d, MaxP %d, Int %d", 
-            ep->bEndpointAddress, xhci_ep, ep->wMaxPacketSize, ep->bInterval);
-    } else if (dev->is_keyboard && iface->bInterfaceNumber == dev->hid_interface && dev->hid_endpoint == 0) {
-        dev->hid_max_packet = ep->wMaxPacketSize;
-        dev->hid_interval = ep->bInterval;
-        dev->hid_endpoint = xhci_ep;
-        if (usb_debug) DEBUG_LOG("    -> HID Endpoint: Addr 0x%x, DCI %d, MaxP %d, Int %d", 
-            ep->bEndpointAddress, xhci_ep, ep->wMaxPacketSize, ep->bInterval);
     }
 }
 

@@ -37,6 +37,7 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 #include "timer.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "pat.h"
 #include "heap.h"
 #include "scheduler.h"
 #include "unifs.h"
@@ -322,6 +323,16 @@ extern "C" void _start(void) {
     
     vmm_init();
     DEBUG_INFO("VMM Initialized");
+    
+    // Initialize PAT for Write-Combining support (improves graphics performance on AMD)
+    pat_init();
+    
+    // Remap framebuffer with Write-Combining for faster graphics
+    if (fb) {
+        uint64_t fb_size = fb->pitch * fb->height;
+        vmm_remap_framebuffer((uint64_t)fb->address, fb_size);
+        DEBUG_INFO("Framebuffer remapped with Write-Combining");
+    }
     
     // Initialize heap
     heap_init(nullptr, 0);

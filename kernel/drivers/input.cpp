@@ -111,15 +111,13 @@ void input_mouse_get_state(InputMouseState* state) {
         bool left, right, middle;
         usb_hid_mouse_get_state(&usb_x, &usb_y, &left, &right, &middle);
         
-        // Use USB mouse if it has moved from origin
-        if (usb_x != 0 || usb_y != 0) {
-            state->x = usb_x;
-            state->y = usb_y;
-            state->left = left;
-            state->right = right;
-            state->middle = middle;
-            state->scroll_delta = usb_hid_mouse_get_scroll();
-        }
+        // Always use USB mouse when available (don't require moved from origin)
+        state->x = usb_x;
+        state->y = usb_y;
+        state->left = left;
+        state->right = right;
+        state->middle = middle;
+        state->scroll_delta = usb_hid_mouse_get_scroll();
     }
 }
 

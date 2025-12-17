@@ -8,10 +8,14 @@
 #define PTE_USER      (1ull << 2)
 #define PTE_PWT       (1ull << 3)  // Page Write-Through
 #define PTE_PCD       (1ull << 4)  // Page Cache Disable
+#define PTE_PAT       (1ull << 7)  // PAT bit (for 4KB pages)
 #define PTE_NX        (1ull << 63)
 
 // Combined flags for MMIO (uncacheable)
 #define PTE_MMIO      (PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT)
+
+// Write-Combining: PCD=1, PWT=0, PAT=0 -> PAT index 2 (configured to WC in pat_init)
+#define PTE_WC        (PTE_PRESENT | PTE_WRITABLE | PTE_PCD)
 
 void vmm_init();
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
@@ -24,6 +28,9 @@ uint64_t* vmm_get_kernel_pml4();
 
 // Map MMIO region (allocates virtual address, maps with uncacheable flags)
 uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size);
+
+// Remap framebuffer with Write-Combining for improved graphics performance
+void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size);
 
 struct DMAAllocation {
     uint64_t virt;

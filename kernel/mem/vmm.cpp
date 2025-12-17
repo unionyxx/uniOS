@@ -212,3 +212,23 @@ DMAAllocation vmm_alloc_dma(size_t pages) {
     return alloc;
 }
 
+void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size) {
+    if (size == 0) return;
+    
+    // Align to page boundaries
+    uint64_t virt_start = virt_addr & ~0xFFFULL;
+    uint64_t virt_end = (virt_addr + size + 0xFFF) & ~0xFFFULL;
+    uint64_t pages = (virt_end - virt_start) / 0x1000;
+    
+    // Remap each page with Write-Combining flags
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t virt = virt_start + i * 0x1000;
+        
+        // Get current physical address
+        uint64_t phys = vmm_virt_to_phys(virt);
+        if (phys == 0) continue;  // Skip unmapped pages
+        
+        // Remap with WC flags (this overwrites the existing mapping)
+        vmm_map_page(virt, phys & ~0xFFFULL, PTE_WC);
+    }
+}

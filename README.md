@@ -10,7 +10,7 @@
 
 **uniOS** is a hobby operating system built from scratch in C++20. It features a working shell with command piping, TCP/IP networking, USB support, and runs on real x86-64 hardware.
 
-Current Version: **v0.5.2**
+Current Version: **v0.5.3**
 
 ---
 

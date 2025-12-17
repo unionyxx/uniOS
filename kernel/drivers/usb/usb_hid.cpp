@@ -235,24 +235,89 @@ static void process_keyboard_report(HidKeyboardReport* report) {
     last_keyboard_report = *report;
 }
 
-// Process a mouse report
+// Process a mouse report - supports both 8-bit and 16-bit formats
 static void process_mouse_report(HidMouseReport* report, uint16_t transferred) {
-    // Mark that we've received actual mouse data
+    uint8_t* raw = (uint8_t*)report;
+    
     mouse_data_received = true;
     
-    // Update button states
-    mouse_left = (report->buttons & HID_MOUSE_LEFT) != 0;
-    mouse_right = (report->buttons & HID_MOUSE_RIGHT) != 0;
-    mouse_middle = (report->buttons & HID_MOUSE_MIDDLE) != 0;
+    uint8_t buttons = 0;
+    int32_t dx = 0;
+    int32_t dy = 0;
+    int8_t dwheel = 0;
     
-    // Update position
-    mouse_x += report->x;
-    mouse_y += report->y;
+    // Safety check
+    if (transferred < 3) return;
+
+    // --- DETECT FORMAT ---
+    // If packet is 5 or more bytes, it is almost certainly 16-bit (Gaming/High-Res Mouse)
+    // Structure: [Buttons, X_Low, X_High, Y_Low, Y_High, Wheel]
+    bool is_16bit = (transferred >= 5);
     
-    // Update scroll wheel (if present in report - typically byte 4)
-    if (transferred >= 4) {
-        mouse_scroll += report->wheel;
+    // Check for Report ID prefix (rare but possible: ID, Btn, X, Y)
+    bool is_report_id = (transferred == 4 && raw[0] >= 1 && raw[0] <= 3 && raw[1] <= 7);
+
+    if (is_16bit) {
+        // --- 16-BIT FORMAT ---
+        buttons = raw[0];
+        
+        // Reconstruct 16-bit values properly
+        uint16_t raw_x = (uint16_t)raw[1] | ((uint16_t)raw[2] << 8);
+        uint16_t raw_y = (uint16_t)raw[3] | ((uint16_t)raw[4] << 8);
+        
+        // Cast to signed 16-bit to handle negative movement
+        dx = (int16_t)raw_x;
+        dy = (int16_t)raw_y;
+        
+        // Wheel is usually at byte 5 in this format
+        if (transferred >= 6) {
+            dwheel = (int8_t)raw[5];
+        }
+    } 
+    else if (is_report_id) {
+        // --- REPORT ID FORMAT ---
+        buttons = raw[1];
+        dx = (int8_t)raw[2];
+        dy = (int8_t)raw[3];
+    } 
+    else {
+        // --- STANDARD 8-BIT FORMAT ---
+        // Structure: [Buttons, X, Y, Wheel]
+        buttons = raw[0];
+        dx = (int8_t)raw[1];
+        dy = (int8_t)raw[2];
+        
+        if (transferred >= 4) {
+            dwheel = (int8_t)raw[3];
+        }
     }
+    
+    // Update button states
+    mouse_left = (buttons & HID_MOUSE_LEFT) != 0;
+    mouse_right = (buttons & HID_MOUSE_RIGHT) != 0;
+    mouse_middle = (buttons & HID_MOUSE_MIDDLE) != 0;
+    
+    // --- SENSITIVITY ---
+    static int32_t accum_x = 0;
+    static int32_t accum_y = 0;
+    
+    accum_x += dx;
+    accum_y += dy;
+    
+    // 16-bit mice often have very high DPI (2000+), so raw values are huge.
+    // We increase the divisor to 3 or 4 to make it controllable.
+    const int32_t MOUSE_DIVISOR = 3; 
+    
+    int32_t move_x = accum_x / MOUSE_DIVISOR;
+    int32_t move_y = accum_y / MOUSE_DIVISOR;
+    
+    accum_x %= MOUSE_DIVISOR;
+    accum_y %= MOUSE_DIVISOR;
+
+    // Apply movement
+    mouse_x += move_x;
+    mouse_y += move_y;
+    mouse_scroll += dwheel;
     
     // Clamp to screen bounds
     if (mouse_x < 0) mouse_x = 0;
@@ -359,8 +424,9 @@ void usb_hid_init() {
                 }
             }
             
-            // Set idle rate for mouse - report only on change
-            if (mouse_ep != 0) {
+            // Set idle rate ONLY for boot-capable mice
+            // Generic HID mice may stop responding if sent SET_IDLE!
+            if (dev->is_boot_interface && mouse_ep != 0) {
                 uint16_t transferred;
                 xhci_control_transfer(
                     dev->slot_id,
@@ -388,61 +454,77 @@ void usb_hid_init() {
 
 void usb_hid_poll() {
     int count = usb_get_device_count();
+    if (count <= 0) return;
+    
     uint64_t now = timer_get_ticks();
     
     for (int i = 0; i < count; i++) {
         UsbDeviceInfo* dev = usb_get_device(i);
-        if (!dev || !dev->configured) continue;
+        if (!dev || !dev->configured || dev->slot_id == 0) continue;
         
-        // Poll keyboard (primary endpoint) - with interval checking
-        if (dev->is_keyboard && dev->hid_endpoint != 0) {
-            // Convert bInterval to ticks (timer runs at 100Hz, interval is in ms)
-            // bInterval for USB 1.x/2.0 in low/full speed = 1-255ms
-            // For high speed, it's 2^(interval-1) * 125us frames
-            uint64_t keyboard_interval = dev->hid_interval;
-            if (keyboard_interval < 1) keyboard_interval = 10;  // Default 10ms
-            // Convert ms to ticks (100Hz = 10ms per tick)
-            uint64_t keyboard_ticks = (keyboard_interval + 9) / 10;
-            if (keyboard_ticks < 1) keyboard_ticks = 1;
+        // Check if combo device (keyboard + mouse on same endpoint)
+        bool is_combo = dev->is_keyboard && dev->is_mouse && dev->hid_endpoint2 == 0;
+        
+        if (is_combo && dev->hid_endpoint != 0) {
+            // --- COMBO DEVICE: Poll once, route by size ---
+            uint8_t buffer[16];
+            uint16_t transferred = 0;
             
-            if (now - last_keyboard_poll >= keyboard_ticks) {
-                HidKeyboardReport report;
-                uint16_t transferred;
-                
-                if (xhci_interrupt_transfer(dev->slot_id, dev->hid_endpoint, 
-                                            &report, sizeof(report), &transferred)) {
-                    if (transferred >= 3) {
-                        process_keyboard_report(&report);
+            if (xhci_interrupt_transfer(dev->slot_id, dev->hid_endpoint,
+                                        buffer, sizeof(buffer), &transferred)) {
+                if (transferred >= 3) {
+                    // Keyboard = 8 bytes with byte[1] = 0 (reserved)
+                    if (transferred == 8 && buffer[1] == 0) {
+                        process_keyboard_report((HidKeyboardReport*)buffer);
+                    } else {
+                        // Mouse = any other size
+                        process_mouse_report((HidMouseReport*)buffer, transferred);
                     }
-                    last_keyboard_poll = now;
                 }
+                last_keyboard_poll = now;
+                last_mouse_poll = now;
             }
         }
-        
-        // Poll mouse - with interval checking
-        if (dev->is_mouse) {
-            uint8_t mouse_ep = (dev->hid_endpoint2 != 0) ? dev->hid_endpoint2 : dev->hid_endpoint;
-            uint8_t mouse_interval = (dev->hid_endpoint2 != 0) ? dev->hid_interval2 : dev->hid_interval;
-            
-            if (mouse_interval < 1) mouse_interval = 10;  // Default 10ms
-            uint64_t mouse_ticks = (mouse_interval + 9) / 10;
-            if (mouse_ticks < 1) mouse_ticks = 1;
-            
-            if (mouse_ep != 0 && (now - last_mouse_poll >= mouse_ticks)) {
-                HidMouseReport report;
-                uint16_t transferred;
+        else {
+            // --- KEYBOARD ONLY ---
+            if (dev->is_keyboard && !dev->is_mouse && dev->hid_endpoint != 0) {
+                uint64_t keyboard_interval = dev->hid_interval;
+                if (keyboard_interval < 1) keyboard_interval = 10;
+                uint64_t keyboard_ticks = (keyboard_interval + 9) / 10;
+                if (keyboard_ticks < 1) keyboard_ticks = 1;
                 
-                if (xhci_interrupt_transfer(dev->slot_id, mouse_ep,
-                                            &report, sizeof(report), &transferred)) {
-                    if (hid_debug) {
-                        DEBUG_LOG("Mouse: EP%d Len%d B%x X%d Y%d", 
-                            mouse_ep, transferred, report.buttons, report.x, report.y);
-                    }
+                if (now - last_keyboard_poll >= keyboard_ticks) {
+                    HidKeyboardReport report;
+                    uint16_t transferred = 0;
                     
-                    if (transferred >= 3) {
-                        process_mouse_report(&report, transferred);
+                    if (xhci_interrupt_transfer(dev->slot_id, dev->hid_endpoint, 
+                                                &report, sizeof(report), &transferred)) {
+                        if (transferred >= 3) {
+                            process_keyboard_report(&report);
+                        }
+                        last_keyboard_poll = now;
                     }
-                    last_mouse_poll = now;
+                }
+            }
+            
+            // --- MOUSE ONLY or separate endpoint ---
+            if (dev->is_mouse && !dev->is_keyboard) {
+                uint8_t mouse_ep = dev->hid_endpoint;
+                
+                if (mouse_ep != 0) {
+                    uint8_t report_buffer[16];
+                    uint16_t transferred = 0;
+                    
+                    if (xhci_interrupt_transfer(dev->slot_id, mouse_ep,
+                                                report_buffer, sizeof(report_buffer), &transferred)) {
+                        if (transferred >= 3) {
+                            if (!mouse_data_received) {
+                                DEBUG_INFO("USB Mouse: First data received!");
+                            }
+                            process_mouse_report((HidMouseReport*)report_buffer, transferred);
+                        }
+                        last_mouse_poll = now;
+                    }
                 }
             }
         }
