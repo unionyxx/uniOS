@@ -462,10 +462,10 @@ void usb_hid_poll() {
         UsbDeviceInfo* dev = usb_get_device(i);
         if (!dev || !dev->configured || dev->slot_id == 0) continue;
         
-        // Check if combo device (keyboard + mouse on same endpoint)
-        bool is_combo = dev->is_keyboard && dev->is_mouse && dev->hid_endpoint2 == 0;
+        // CASE 1: True Combo Device (Single endpoint for both keyboard and mouse)
+        bool is_single_ep_combo = dev->is_keyboard && dev->is_mouse && dev->hid_endpoint2 == 0;
         
-        if (is_combo && dev->hid_endpoint != 0) {
+        if (is_single_ep_combo && dev->hid_endpoint != 0) {
             // --- COMBO DEVICE: Poll once, route by size ---
             uint8_t buffer[16];
             uint16_t transferred = 0;
@@ -481,52 +481,66 @@ void usb_hid_poll() {
                         process_mouse_report((HidMouseReport*)buffer, transferred);
                     }
                 }
+            }
+            last_keyboard_poll = now;
+            last_mouse_poll = now;
+            continue; // Skip the rest for this device
+        }
+
+        // CASE 2, 3, & 4: Separate Endpoints (Keyboard-only, Mouse-only, or Composite-Separate)
+        // We poll endpoints independently if they exist.
+
+        // --- Poll Keyboard Endpoint ---
+        // Condition: Is a keyboard AND has a valid endpoint
+        if (dev->is_keyboard && dev->hid_endpoint != 0) {
+            uint64_t keyboard_interval = dev->hid_interval;
+            if (keyboard_interval < 1) keyboard_interval = 10;
+            uint64_t keyboard_ticks = (keyboard_interval + 9) / 10;
+            if (keyboard_ticks < 1) keyboard_ticks = 1;
+            
+            if (now - last_keyboard_poll >= keyboard_ticks) {
+                HidKeyboardReport report;
+                uint16_t transferred = 0;
+                
+                if (xhci_interrupt_transfer(dev->slot_id, dev->hid_endpoint, 
+                                            &report, sizeof(report), &transferred)) {
+                    if (transferred >= 3) {
+                        process_keyboard_report(&report);
+                    }
+                }
+                // Update poll time regardless of transfer success (prevents polling storm)
                 last_keyboard_poll = now;
-                last_mouse_poll = now;
             }
         }
-        else {
-            // --- KEYBOARD ONLY ---
-            if (dev->is_keyboard && !dev->is_mouse && dev->hid_endpoint != 0) {
-                uint64_t keyboard_interval = dev->hid_interval;
-                if (keyboard_interval < 1) keyboard_interval = 10;
-                uint64_t keyboard_ticks = (keyboard_interval + 9) / 10;
-                if (keyboard_ticks < 1) keyboard_ticks = 1;
-                
-                if (now - last_keyboard_poll >= keyboard_ticks) {
-                    HidKeyboardReport report;
-                    uint16_t transferred = 0;
-                    
-                    if (xhci_interrupt_transfer(dev->slot_id, dev->hid_endpoint, 
-                                                &report, sizeof(report), &transferred)) {
-                        if (transferred >= 3) {
-                            process_keyboard_report(&report);
-                        }
-                        last_keyboard_poll = now;
-                    }
-                }
+
+        // --- Poll Mouse Endpoint ---
+        // Condition: Is a mouse AND has a valid endpoint.
+        // For composite devices, the mouse is on endpoint2.
+        // For mouse-only devices, it's on endpoint (primary).
+        uint8_t mouse_ep = 0;
+        if (dev->is_mouse) {
+            if (dev->hid_endpoint2 != 0) {
+                mouse_ep = dev->hid_endpoint2; // Composite separate
+            } else if (!dev->is_keyboard) {
+                mouse_ep = dev->hid_endpoint;  // Mouse only
             }
+        }
+
+        if (mouse_ep != 0) {
+            uint8_t report_buffer[16];
+            uint16_t transferred = 0;
             
-            // --- MOUSE ONLY or separate endpoint ---
-            if (dev->is_mouse && !dev->is_keyboard) {
-                uint8_t mouse_ep = dev->hid_endpoint;
-                
-                if (mouse_ep != 0) {
-                    uint8_t report_buffer[16];
-                    uint16_t transferred = 0;
-                    
-                    if (xhci_interrupt_transfer(dev->slot_id, mouse_ep,
-                                                report_buffer, sizeof(report_buffer), &transferred)) {
-                        if (transferred >= 3) {
-                            if (!mouse_data_received) {
-                                DEBUG_INFO("USB Mouse: First data received!");
-                            }
-                            process_mouse_report((HidMouseReport*)report_buffer, transferred);
-                        }
-                        last_mouse_poll = now;
+            if (xhci_interrupt_transfer(dev->slot_id, mouse_ep,
+                                        report_buffer, sizeof(report_buffer), &transferred)) {
+                if (transferred >= 3) {
+                    if (!mouse_data_received) {
+                        DEBUG_INFO("USB Mouse: First data received!");
                     }
+                    process_mouse_report((HidMouseReport*)report_buffer, transferred);
                 }
             }
+            // Update poll time regardless of transfer success (prevents polling storm)
+            last_mouse_poll = now;
         }
     }
     
