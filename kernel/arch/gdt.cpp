@@ -89,3 +89,10 @@ void gdt_init() {
     load_gdt(&gdtr);
     load_tss();
 }
+
+// Update TSS rsp0 for context switching
+// Must be called before switching to a new task to ensure Ring 3 -> Ring 0
+// transitions use the correct kernel stack
+void tss_set_rsp0(uint64_t rsp0) {
+    tss.rsp0 = rsp0;
+}

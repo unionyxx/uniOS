@@ -295,7 +295,8 @@ void Terminal::update_cursor() {
     if (!cursor_visible) return;
     
     uint64_t now = timer_get_ticks();
-    if (now - last_blink_tick > 30) {
+    // 1000Hz timer: 500 ticks = 500ms blink rate
+    if (now - last_blink_tick > 500) {
         last_blink_tick = now;
         cursor_state = !cursor_state;
         draw_cursor(cursor_state);

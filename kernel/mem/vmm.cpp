@@ -157,6 +157,150 @@ uint64_t* vmm_create_address_space() {
     return new_pml4;
 }
 
+// Get HHDM offset for external use
+uint64_t vmm_get_hhdm_offset() {
+    return hhdm_offset;
+}
+
+// Helper: Clone a page table level (recursive for PDPT -> PD -> PT)
+static void clone_page_table_level(uint64_t* src, uint64_t* dst, int level) {
+    for (int i = 0; i < 512; i++) {
+        if (!(src[i] & PTE_PRESENT)) {
+            dst[i] = 0;
+            continue;
+        }
+        
+        uint64_t src_phys = src[i] & 0x000FFFFFFFFFF000ULL;
+        uint64_t flags = src[i] & 0xFFF;
+        
+        if (level == 1) {
+            // Level 1 = PT (Page Table): Copy the actual physical page
+            void* new_frame = pmm_alloc_frame();
+            if (!new_frame) {
+                dst[i] = 0;
+                continue;
+            }
+            
+            // Copy page content
+            uint64_t* src_page = (uint64_t*)(src_phys + hhdm_offset);
+            uint64_t* dst_page = (uint64_t*)((uint64_t)new_frame + hhdm_offset);
+            for (int j = 0; j < 512; j++) {
+                dst_page[j] = src_page[j];
+            }
+            
+            dst[i] = (uint64_t)new_frame | flags;
+        } else {
+            // Levels 2-3: Allocate new table and recurse
+            void* new_table = pmm_alloc_frame();
+            if (!new_table) {
+                dst[i] = 0;
+                continue;
+            }
+            
+            uint64_t* new_table_virt = (uint64_t*)((uint64_t)new_table + hhdm_offset);
+            uint64_t* src_table = (uint64_t*)(src_phys + hhdm_offset);
+            
+            // Zero new table first
+            for (int j = 0; j < 512; j++) new_table_virt[j] = 0;
+            
+            // Recursively clone
+            clone_page_table_level(src_table, new_table_virt, level - 1);
+            
+            dst[i] = (uint64_t)new_table | flags;
+        }
+    }
+}
+
+// Clone an entire address space (deep copy user pages, share kernel pages)
+uint64_t* vmm_clone_address_space(uint64_t* src_pml4) {
+    if (!src_pml4) return nullptr;
+    
+    // Allocate new PML4
+    void* frame = pmm_alloc_frame();
+    if (!frame) return nullptr;
+    
+    uint64_t* new_pml4 = (uint64_t*)((uint64_t)frame + hhdm_offset);
+    
+    // Zero the new PML4
+    for (int i = 0; i < 512; i++) new_pml4[i] = 0;
+    
+    // Copy kernel mappings (upper half - indices 256-511) BY REFERENCE
+    // These are shared between all processes
+    for (int i = 256; i < 512; i++) {
+        new_pml4[i] = src_pml4[i];
+    }
+    
+    // Deep copy user mappings (lower half - indices 0-255)
+    for (int i = 0; i < 256; i++) {
+        if (!(src_pml4[i] & PTE_PRESENT)) {
+            new_pml4[i] = 0;
+            continue;
+        }
+        
+        uint64_t src_phys = src_pml4[i] & 0x000FFFFFFFFFF000ULL;
+        uint64_t flags = src_pml4[i] & 0xFFF;
+        
+        // Allocate new PDPT
+        void* new_pdpt = pmm_alloc_frame();
+        if (!new_pdpt) {
+            new_pml4[i] = 0;
+            continue;
+        }
+        
+        uint64_t* new_pdpt_virt = (uint64_t*)((uint64_t)new_pdpt + hhdm_offset);
+        uint64_t* src_pdpt = (uint64_t*)(src_phys + hhdm_offset);
+        
+        for (int j = 0; j < 512; j++) new_pdpt_virt[j] = 0;
+        
+        // Clone PDPT -> PD -> PT -> Pages (level 3 -> 2 -> 1)
+        clone_page_table_level(src_pdpt, new_pdpt_virt, 3);
+        
+        new_pml4[i] = (uint64_t)new_pdpt | flags;
+    }
+    
+    return new_pml4;
+}
+
+// Helper: Free a page table level recursively
+static void free_page_table_level(uint64_t* table, int level) {
+    for (int i = 0; i < 512; i++) {
+        if (!(table[i] & PTE_PRESENT)) continue;
+        
+        uint64_t phys = table[i] & 0x000FFFFFFFFFF000ULL;
+        
+        if (level == 1) {
+            // Level 1 = PT: Free the physical page
+            pmm_free_frame((void*)phys);
+        } else {
+            // Levels 2-3: Recurse then free table
+            uint64_t* sub_table = (uint64_t*)(phys + hhdm_offset);
+            free_page_table_level(sub_table, level - 1);
+            pmm_free_frame((void*)phys);
+        }
+    }
+}
+
+// Free all user-space pages in an address space
+void vmm_free_address_space(uint64_t* target_pml4) {
+    if (!target_pml4) return;
+    if (target_pml4 == pml4) return;  // Don't free kernel PML4!
+    
+    // Free user half only (indices 0-255)
+    for (int i = 0; i < 256; i++) {
+        if (!(target_pml4[i] & PTE_PRESENT)) continue;
+        
+        uint64_t phys = target_pml4[i] & 0x000FFFFFFFFFF000ULL;
+        uint64_t* pdpt = (uint64_t*)(phys + hhdm_offset);
+        
+        free_page_table_level(pdpt, 3);
+        pmm_free_frame((void*)phys);
+    }
+    
+    // Free the PML4 itself
+    uint64_t pml4_phys = (uint64_t)target_pml4 - hhdm_offset;
+    pmm_free_frame((void*)pml4_phys);
+}
+
 void vmm_switch_address_space(uint64_t* new_pml4_phys) {
     asm volatile("mov %0, %%cr3" :: "r"(new_pml4_phys) : "memory");
 }

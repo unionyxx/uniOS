@@ -35,8 +35,9 @@ struct Process {
     uint64_t pid;
     uint64_t parent_pid;      // Parent process ID
     uint64_t sp;              // Stack Pointer (offset 528 = 512 + 16)
-    uint64_t* stack_base;     // For freeing
-    uint64_t* page_table;     // Process page table (for user processes)
+    uint64_t* stack_base;     // Virtual address of stack (KERNEL_STACK_TOP - SIZE)
+    uint64_t stack_phys;      // Physical address of stack (for freeing)
+    uint64_t* page_table;     // Process page table (PML4 virtual address)
     ProcessState state;
     int32_t exit_status;      // Exit code when ZOMBIE
     uint64_t wait_for_pid;    // PID to wait for (0 = any child)

@@ -1,115 +1,144 @@
 # uniOS Architecture
 
-> Technical overview for contributors and developers.
+Technical overview for contributors and developers.
 
 ## Overview
 
-**uniOS** is a scratch-built x86-64 operating system kernel written in C++20. It boots via Limine and provides a shell interface with networking, USB support, and a RAM-based filesystem.
+**uniOS** is a scratch-built x86-64 operating system kernel written in C++20. It boots via **Limine** and provides a shell interface with networking, USB support, and a RAM-based filesystem.
 
-Development is primarily done in **QEMU** for rapid iteration with debugging support. The OS targets **real x86_64 hardware** but hardware-specific issues may not be supportable due to project scope.
-
+```mermaid
+graph TD
+    User[User Shell] --> VFS[uniFS]
+    User --> Net[Network Stack]
+    
+    subgraph Kernel Core
+    Sched[Scheduler]
+    Mem[PMM / VMM]
+    end
+    
+    Net --> IPv4
+    IPv4 --> Ethernet
+    Ethernet --> Driver[e1000 Driver]
+    
+    Sched --> Context[Context Switch]
+    Context --> TSS[TSS rsp0 Update]
 ```
-┌─────────────────────────────────────────┐
-│              User Shell                 │
-├─────────────────────────────────────────┤
-│      Filesystem (uniFS)  │  Terminal    │
-├──────────────────────────┴──────────────┤
-│            Network Stack                │
-│   (TCP/UDP/ICMP/IPv4/ARP/Ethernet)      │
-├─────────────────────────────────────────┤
-│              Drivers                    │
-│   (e1000, xHCI, PS/2, Timer, ACPI)      │
-├─────────────────────────────────────────┤
-│              Core Kernel                │
-│   (Scheduler, Interrupts, Memory)       │
-├─────────────────────────────────────────┤
-│         Hardware Abstraction            │
-│       (GDT, IDT, PIC, I/O Ports)        │
-└─────────────────────────────────────────┘
-```
-
-## Versioning
-
-uniOS follows semantic versioning with a pre-1.0 adaptation:
-
-| Phase | Format | Description |
-|-------|--------|-------------|
-| **Pre-1.0** | `0.MAJOR.MINOR` | Active development. MAJOR for new subsystems, MINOR for features/fixes. |
-| **Post-1.0** | `MAJOR.MINOR.PATCH` | Stable. MAJOR for breaking changes, MINOR for features, PATCH for fixes. |
-
-The canonical version is defined in `kernel/core/version.h`. See that file for detailed increment rules.
 
 ## Memory Layout
 
-| Address Range | Usage |
-|---------------|-------|
-| `0x0000_0000_0000_0000` - `0x0000_7FFF_FFFF_FFFF` | User space (unused) |
-| `0xFFFF_8000_0000_0000` + | Higher Half Direct Map (HHDM) |
-| Dynamic | Kernel heap (bucket allocator) |
+| Virtual Address | Usage |
+|-----------------|:------|
+| `0x0000_0000_0000_0000` | User space (reserved, unused) |
+| `0xFFFF_8000_0000_0000` | Higher Half Direct Map (HHDM) |
+| `0xFFFF_FF80_0000_0000` | Fixed kernel stack per process |
+| `0xFFFF_FFFF_9000_0000` | MMIO virtual base (`mmio_next_virt`) |
 
-### Memory Management
+### Why These Addresses?
 
-- **PMM**: Bitmap-based physical frame allocator (supports up to 16GB RAM)
-- **VMM**: 4-level page tables (PML4)
-- **Heap**: Bucket allocator with spinlock protection
-- **Concurrency**: Interrupt-safe spinlocks for thread-safe memory allocation
+- **HHDM** is set by Limine. All physical memory is accessible at `phys + hhdm_offset`.
+- **Kernel stack** is at a fixed virtual address so `fork()` doesn't corrupt RBP pointers. Each process has stacks at the same vaddr mapped to different physical pages.
+- **MMIO** starts at a high address to avoid collisions with heap or HHDM.
 
-### Scheduler
+## Memory Management
 
-- **Preemptive**: Timer-based context switching at 100Hz
-- **FPU/SSE Context**: Full `fxsave`/`fxrstor` support for floating-point state
-- **Idle Task**: Dedicated task prevents deadlock when all processes are blocked
-- **Sleep**: Non-busy-waiting `scheduler_sleep_ms()` for efficient blocking
-- **16KB Kernel Stacks**: Per-task kernel stacks prevent overflow
+### PMM (Physical Memory Manager)
 
-## Key Subsystems
-
-### uniFS (Filesystem)
-
-Simple flat filesystem with two parts:
-- **Boot files**: Loaded from Limine module (read-only)
-- **RAM files**: Created at runtime (read-write, lost on reboot)
+Bitmap-based allocator in `pmm.cpp`.
 
 ```cpp
-// Create a file
-unifs_create("notes.txt");
-
-// Write to it
-unifs_write("notes.txt", "Hello", 5);
-
-// Read it back
-const UniFSFile* f = unifs_open("notes.txt");
+#define BITMAP_SIZE 524288  // 512KB = covers 16GB RAM
 ```
 
-### Network Stack
+> [!NOTE]
+> Hardcoded bitmap size means RAM above 16GB is ignored. This prevents overflow but wastes memory on large systems.
 
-```
-Application → TCP/UDP → IPv4 → ARP → Ethernet → e1000/RTL8139
+### VMM (Virtual Memory Manager)
+
+4-level paging (PML4 → PDPT → PD → PT).
+
+Key functions:
+- `vmm_map_page()` — Map in active PML4
+- `vmm_map_page_in()` — Map in a passive PML4 (for `fork`)
+- `vmm_clone_address_space()` — Deep copy user pages, share kernel pages
+- `vmm_free_address_space()` — Free user pages on process exit
+
+### Heap
+
+Bucket allocator in `heap.cpp`. Fixed bucket sizes (32, 64, 128, ... bytes). Large allocations fall back to direct PMM pages.
+
+Spinlock-protected for thread safety.
+
+## Scheduler
+
+Preemptive, timer-based at **1000Hz** (1ms granularity).
+
+### Why 16KB Stacks?
+
+```cpp
+#define KERNEL_STACK_SIZE 16384
 ```
 
-- Full DHCP client
-- DNS resolution
-- ICMP ping
+Deep call chains in networking (TCP → IP → ARP → driver → interrupt) can use 4-8KB. 16KB gives headroom. 4KB stacks caused overflows in practice.
+
+### Context Switching
+
+1. Save current task's callee-saved registers
+2. Save FPU/SSE state via `fxsave`
+3. Update `tss.rsp0` for next task
+4. Switch CR3 if next task has different page table
+5. Restore next task's state
+
+### Process Isolation
+
+`fork()` creates a new address space:
+- Clones page tables (deep copy of user pages)
+- Allocates separate physical stack pages
+- Maps stack to same virtual address (`KERNEL_STACK_TOP`)
+- Rebases RBP pointers when forking from HHDM-based kernel tasks
+
+## Drivers
+
+### Network (e1000)
+
+Interrupt-driven RX, synchronous TX. Ring buffer descriptors. DHCP and DNS work reliably in QEMU. Real hardware support is best-effort.
 
 ### USB (xHCI)
 
-- USB 3.0 host controller driver
-- HID support (keyboard, mouse)
-- Interrupt-based polling
+Polling-based HID. Why not interrupts? xHCI interrupt handling requires async TRB processing which adds complexity. Polling at 1000Hz is good enough for keyboards.
+
+<details>
+<summary>xHCI Design Decisions</summary>
+
+- **Scratchpad buffers**: Allocated at init for controller use
+- **64-byte context stride**: Detected and handled dynamically
+- **Legacy handoff**: BIOS may own the controller; we take ownership via USBLEGSUP
+
+</details>
+
+## uniFS
+
+Flat filesystem with two file sources:
+
+| Source | Storage | Writable |
+|--------|---------|:--------:|
+| Boot files | Limine module | No |
+| RAM files | Kernel heap | Yes |
+
+Files are stored as `{name, data, size}`. No directories. Suitable for config files and scripts, not large data.
 
 ## Build System
 
 ```bash
-make          # Release build (optimized, no debug)
-make debug    # Debug build (full logging)
-make run-gdb  # Run with GDB stub
+make          # Release (optimized, -O2)
+make debug    # Debug (logs enabled, -O0 -g)
+make run-gdb  # Attach GDB to localhost:1234
 ```
 
 ## Directory Structure
 
-```
+```text
 kernel/
-├── core/       # Entry point, version, debug, scheduler
+├── core/       # kmain, scheduler, debug, version
 ├── arch/       # GDT, IDT, interrupts, I/O
 ├── mem/        # PMM, VMM, heap
 ├── drivers/    # Hardware drivers
@@ -122,20 +151,19 @@ kernel/
 
 ## Coding Conventions
 
-- C++20 standard
-- No exceptions (`-fno-exceptions`)
-- No RTTI (`-fno-rtti`)
-- Kernel runs in ring 0
-- All memory is kernel-accessible
+| Rule | Reason |
+|------|--------|
+| `-fno-exceptions` | Can't unwind stack in kernel |
+| `-fno-rtti` | No `dynamic_cast` or `typeid` |
+| `kstring::` not `std::` | Avoid libc dependencies |
+| Named constants | Magic numbers are debugging nightmares |
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `kernel/core/kmain.cpp` | Kernel entry point |
-| `kernel/core/version.h` | Version info and policy |
-| `kernel/core/kstring.h` | Shared string utilities |
-| `kernel/mem/heap.cpp` | Dynamic memory allocator |
-| `kernel/net/tcp.cpp` | TCP implementation |
+| `kernel/core/scheduler.cpp` | Process management, context switch |
+| `kernel/mem/vmm.cpp` | Page table manipulation |
+| `kernel/net/tcp.cpp` | TCP state machine |
 | `kernel/drivers/usb/xhci.cpp` | USB 3.0 driver |
-

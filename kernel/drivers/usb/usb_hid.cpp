@@ -115,8 +115,8 @@ static uint8_t repeat_keycode = 0;
 static uint64_t repeat_start_tick = 0;      // When key was first pressed
 static uint64_t repeat_last_tick = 0;       // When last repeat occurred
 static bool repeat_shift = false;
-static const uint32_t REPEAT_DELAY_TICKS = 50;  // ~500ms at 100Hz timer
-static const uint32_t REPEAT_RATE_TICKS = 3;    // ~30ms between repeats
+static const uint32_t REPEAT_DELAY_TICKS = 500;  // 500ms initial delay (1000Hz timer)
+static const uint32_t REPEAT_RATE_TICKS = 33;    // ~30 chars per second (33ms between repeats)
 
 // Handle key repeat - called every poll, uses real timer ticks
 static void handle_key_repeat() {
@@ -236,6 +236,7 @@ static void process_keyboard_report(HidKeyboardReport* report) {
 }
 
 // Process a mouse report - supports both 8-bit and 16-bit formats
+// Gaming mice often use Report IDs and 16-bit coordinates
 static void process_mouse_report(HidMouseReport* report, uint16_t transferred) {
     uint8_t* raw = (uint8_t*)report;
     
@@ -250,75 +251,56 @@ static void process_mouse_report(HidMouseReport* report, uint16_t transferred) {
     if (transferred < 3) return;
 
     // --- DETECT FORMAT ---
-    // If packet is 5 or more bytes, it is almost certainly 16-bit (Gaming/High-Res Mouse)
-    // Structure: [Buttons, X_Low, X_High, Y_Low, Y_High, Wheel]
-    bool is_16bit = (transferred >= 5);
+    // Check for Report ID prefix first
+    // Gaming mice often send: [ReportID, Buttons, X_Lo, X_Hi, Y_Lo, Y_Hi, Wheel, ...]
+    // Heuristic: If byte 0 is small (ID 1-10) and byte 1 looks like buttons (low bits set, high bits 0)
+    // FIX: Use > 4, not >= 4, because standard 4-byte mice [Buttons][X][Y][Wheel] can trigger
+    // false positives when clicking while stationary (0x01, 0x00, ...)
+    int offset = 0;
+    if (transferred > 4 && raw[0] >= 1 && raw[0] <= 10 && (raw[1] & 0xF8) == 0) {
+        offset = 1;  // Skip Report ID
+    }
     
-    // Check for Report ID prefix (rare but possible: ID, Btn, X, Y)
-    bool is_report_id = (transferred == 4 && raw[0] >= 1 && raw[0] <= 3 && raw[1] <= 7);
+    // Calculate payload size after offset
+    uint16_t payload_size = transferred - offset;
+    
+    // Determine format based on payload size
+    // 16-bit format: [Buttons, X_Lo, X_Hi, Y_Lo, Y_Hi, Wheel?] = 5+ bytes
+    bool is_16bit = (payload_size >= 5);
 
     if (is_16bit) {
-        // --- 16-BIT FORMAT ---
-        buttons = raw[0];
+        // --- 16-BIT FORMAT (Gaming mice) ---
+        buttons = raw[offset + 0];
         
-        // Reconstruct 16-bit values properly
-        uint16_t raw_x = (uint16_t)raw[1] | ((uint16_t)raw[2] << 8);
-        uint16_t raw_y = (uint16_t)raw[3] | ((uint16_t)raw[4] << 8);
+        // Proper 16-bit reconstruction (little-endian)
+        dx = (int16_t)(raw[offset + 1] | (raw[offset + 2] << 8));
+        dy = (int16_t)(raw[offset + 3] | (raw[offset + 4] << 8));
         
-        // Cast to signed 16-bit to handle negative movement
-        dx = (int16_t)raw_x;
-        dy = (int16_t)raw_y;
-        
-        // Wheel is usually at byte 5 in this format
-        if (transferred >= 6) {
-            dwheel = (int8_t)raw[5];
+        if (payload_size >= 6) {
+            dwheel = (int8_t)raw[offset + 5];
         }
-    } 
-    else if (is_report_id) {
-        // --- REPORT ID FORMAT ---
-        buttons = raw[1];
-        dx = (int8_t)raw[2];
-        dy = (int8_t)raw[3];
     } 
     else {
-        // --- STANDARD 8-BIT FORMAT ---
-        // Structure: [Buttons, X, Y, Wheel]
-        buttons = raw[0];
-        dx = (int8_t)raw[1];
-        dy = (int8_t)raw[2];
+        // --- 8-BIT FORMAT (Boot protocol or simple mice) ---
+        buttons = raw[offset + 0];
+        dx = (int8_t)raw[offset + 1];
+        dy = (int8_t)raw[offset + 2];
         
-        if (transferred >= 4) {
-            dwheel = (int8_t)raw[3];
+        if (payload_size >= 4) {
+            dwheel = (int8_t)raw[offset + 3];
         }
-    }
+    } 
     
     // Update button states
     mouse_left = (buttons & HID_MOUSE_LEFT) != 0;
     mouse_right = (buttons & HID_MOUSE_RIGHT) != 0;
     mouse_middle = (buttons & HID_MOUSE_MIDDLE) != 0;
     
-    // --- SENSITIVITY ---
-    static int32_t accum_x = 0;
-    static int32_t accum_y = 0;
-    
-    accum_x += dx;
-    accum_y += dy;
-    
-    // 16-bit mice often have very high DPI (2000+), so raw values are huge.
-    // We increase the divisor to 3 or 4 to make it controllable.
-    const int32_t MOUSE_DIVISOR = 3; 
-    
-    int32_t move_x = accum_x / MOUSE_DIVISOR;
-    int32_t move_y = accum_y / MOUSE_DIVISOR;
-    
-    accum_x %= MOUSE_DIVISOR;
-    accum_y %= MOUSE_DIVISOR;
-
-    // Apply movement
-    mouse_x += move_x;
-    mouse_y += move_y;
+    // Apply raw movement directly (no divisor - let hardware DPI handle sensitivity)
+    mouse_x += dx;
+    mouse_y += dy;
     mouse_scroll += dwheel;
-    
+
     // Clamp to screen bounds
     if (mouse_x < 0) mouse_x = 0;
     if (mouse_y < 0) mouse_y = 0;
@@ -403,30 +385,14 @@ void usb_hid_init() {
             DEBUG_LOG("Mouse detected: Slot %d EP %d Iface %d Boot=%d", 
                 dev->slot_id, mouse_ep, mouse_iface, dev->is_boot_interface ? 1 : 0);
             
-            // Set boot protocol for boot-capable mice
-            // This MUST be done to get the standardized 3-byte report format
-            if (dev->is_boot_interface && mouse_ep != 0) {
-                uint16_t transferred;
-                bool proto_ok = xhci_control_transfer(
-                    dev->slot_id,
-                    0x21,  // Host-to-device, Class, Interface
-                    HID_REQ_SET_PROTOCOL,
-                    HID_PROTOCOL_BOOT,  // Boot protocol = 0
-                    mouse_iface,  // Interface number for mouse
-                    0,
-                    nullptr,
-                    &transferred
-                );
-                if (proto_ok) {
-                    DEBUG_LOG("Mouse Boot Protocol set OK");
-                } else {
-                    DEBUG_WARN("Mouse Boot Protocol FAIL (may still work)");
-                }
-            }
+            // FIX: Do NOT force Boot Protocol for mice!
+            // Gaming mice (1000Hz, high DPI) behave poorly in Boot Protocol.
+            // Boot Protocol clamps values to signed 8-bit (-127 to 127),
+            // causing "negative acceleration" or cursor sticking on fast movements.
+            // Leave mice in Report Protocol (default) for full precision.
             
-            // Set idle rate ONLY for boot-capable mice
-            // Generic HID mice may stop responding if sent SET_IDLE!
-            if (dev->is_boot_interface && mouse_ep != 0) {
+            // Only set Idle rate to 0 (report on change only) to prevent keep-alive spam
+            if (mouse_ep != 0) {
                 uint16_t transferred;
                 xhci_control_transfer(
                     dev->slot_id,
@@ -495,8 +461,8 @@ void usb_hid_poll() {
         if (dev->is_keyboard && dev->hid_endpoint != 0) {
             uint64_t keyboard_interval = dev->hid_interval;
             if (keyboard_interval < 1) keyboard_interval = 10;
-            uint64_t keyboard_ticks = (keyboard_interval + 9) / 10;
-            if (keyboard_ticks < 1) keyboard_ticks = 1;
+            // 1000Hz timer: 1 tick = 1ms, interval is already in ms
+            uint64_t keyboard_ticks = keyboard_interval;
             
             if (now - last_keyboard_poll >= keyboard_ticks) {
                 HidKeyboardReport report;
@@ -527,11 +493,19 @@ void usb_hid_poll() {
         }
 
         if (mouse_ep != 0) {
-            uint8_t report_buffer[16];
+            // Use device's max packet size for proper buffer sizing
+            uint16_t max_packet = (dev->hid_max_packet2 != 0) ? dev->hid_max_packet2 : dev->hid_max_packet;
+            if (max_packet == 0 || max_packet > 64) max_packet = 16;  // Clamp to reasonable size
+            
+            uint8_t report_buffer[64];
             uint16_t transferred = 0;
             
-            if (xhci_interrupt_transfer(dev->slot_id, mouse_ep,
-                                        report_buffer, sizeof(report_buffer), &transferred)) {
+            // IMPORTANT: Use while loop to drain ALL pending mouse packets!
+            // Gaming mice at 1000Hz can queue multiple packets between polls.
+            // Using 'if' would only get one packet, dropping the rest.
+            // xhci_interrupt_transfer returns true if data is ready, false if not.
+            while (xhci_interrupt_transfer(dev->slot_id, mouse_ep,
+                                           report_buffer, max_packet, &transferred)) {
                 if (transferred >= 3) {
                     if (!mouse_data_received) {
                         DEBUG_INFO("USB Mouse: First data received!");
@@ -539,8 +513,7 @@ void usb_hid_poll() {
                     process_mouse_report((HidMouseReport*)report_buffer, transferred);
                 }
             }
-            // Update poll time regardless of transfer success (prevents polling storm)
-            last_mouse_poll = now;
+            // NOTE: No last_mouse_poll update - we run free, letting hardware schedule
         }
     }
     

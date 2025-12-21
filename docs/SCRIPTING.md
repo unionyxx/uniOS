@@ -1,6 +1,6 @@
 # uniOS Shell Scripting Guide
 
-uniOS v0.6.0 shell scripting capabilities allow you to automate tasks with variables, control flow, and reusable script files.
+uniOS v0.6.1 shell scripting capabilities allow you to automate tasks with variables, control flow, and reusable script files.
 
 ## Quick Start
 
@@ -31,6 +31,11 @@ set NAME=value       # Set a variable
 set COUNT=5          # Numeric value
 set MSG=Hello World  # Spaces allowed in values
 ```
+
+> [!NOTE]
+> The parser is whitespace-sensitive.
+> - `set A=B` ✅
+> - `set A = B` ❌ (Parser sees 3 arguments)
 
 ### Using Variables
 ```bash

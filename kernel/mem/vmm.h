@@ -26,6 +26,20 @@ uint64_t* vmm_create_address_space();
 void vmm_switch_address_space(uint64_t* pml4_phys);
 uint64_t* vmm_get_kernel_pml4();
 
+// Process isolation support
+// Fixed kernel stack virtual address - same in every process
+#define KERNEL_STACK_TOP  0xFFFFFF8000000000ULL
+#define KERNEL_STACK_SIZE 16384  // 16KB per process
+
+// Clone an address space (deep copy user pages, share kernel pages)
+uint64_t* vmm_clone_address_space(uint64_t* src_pml4);
+
+// Free all user-space pages in an address space
+void vmm_free_address_space(uint64_t* pml4);
+
+// Get HHDM offset for physical->virtual conversion
+uint64_t vmm_get_hhdm_offset();
+
 // Map MMIO region (allocates virtual address, maps with uncacheable flags)
 uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size);
 

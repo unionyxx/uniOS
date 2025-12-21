@@ -99,6 +99,6 @@ void rtc_get_time(RTCTime* time) {
 uint64_t rtc_get_uptime_seconds() {
     uint64_t current = timer_get_ticks();
     uint64_t elapsed = current - boot_ticks;
-    // Timer is 100Hz, so 100 ticks = 1 second
-    return elapsed / 100;
+    // Use actual timer frequency for accuracy
+    return elapsed / timer_get_frequency();
 }

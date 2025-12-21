@@ -60,6 +60,9 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 struct limine_framebuffer* g_framebuffer = nullptr;
 
 // Global bootloader info (for version command)
+// Stored in kernel-owned buffers to survive bootloader memory reclamation
+static char g_bootloader_name_buf[64];
+static char g_bootloader_version_buf[64];
 const char* g_bootloader_name = nullptr;
 const char* g_bootloader_version = nullptr;
 
@@ -213,8 +216,8 @@ void gui_start() {
         uint64_t now = timer_get_ticks();
         bool status_updated = false;
         
-        // Update status bar every 100 ticks (~1 second)
-        if (now - last_update > 100) {
+        // Update status bar every 1000 ticks (1 second at 1000Hz)
+        if (now - last_update > 1000) {
             last_update = now;
             status_updated = true;
             
@@ -314,9 +317,30 @@ extern "C" void _start(void) {
     serial_puts(" ===\r\n");
     
     // Get bootloader info if available
+    // IMPORTANT: Copy strings to kernel-owned buffers!
+    // Limine response memory may be reclaimed and overwritten later.
     if (bootloader_info_request.response) {
-        g_bootloader_name = bootloader_info_request.response->name;
-        g_bootloader_version = bootloader_info_request.response->version;
+        const char* src_name = bootloader_info_request.response->name;
+        const char* src_ver = bootloader_info_request.response->version;
+        
+        // Copy name
+        int i = 0;
+        while (src_name && src_name[i] && i < 63) {
+            g_bootloader_name_buf[i] = src_name[i];
+            i++;
+        }
+        g_bootloader_name_buf[i] = '\0';
+        g_bootloader_name = g_bootloader_name_buf;
+        
+        // Copy version
+        i = 0;
+        while (src_ver && src_ver[i] && i < 63) {
+            g_bootloader_version_buf[i] = src_ver[i];
+            i++;
+        }
+        g_bootloader_version_buf[i] = '\0';
+        g_bootloader_version = g_bootloader_version_buf;
+        
         serial_printf("Bootloader: %s %s\r\n", g_bootloader_name, g_bootloader_version);
     }
     
@@ -340,8 +364,8 @@ extern "C" void _start(void) {
     ps2_mouse_init();
     DEBUG_INFO("PS/2 Mouse Initialized");
     
-    timer_init(100);
-    DEBUG_INFO("Timer Initialized (100Hz)");
+    timer_init(1000);  // 1000Hz = 1ms granularity (better for UI and network)
+    DEBUG_INFO("Timer Initialized (1000Hz)");
     
     pmm_init();
     DEBUG_INFO("PMM Initialized");
@@ -424,7 +448,7 @@ extern "C" void _start(void) {
     gfx_draw_centered_text("uniOS", COLOR_WHITE);
     // Wait ~0.5 seconds but keep polling input to avoid buffer overflows
     uint64_t splash_start = timer_get_ticks();
-    while (timer_get_ticks() - splash_start < 50) {
+    while (timer_get_ticks() - splash_start < 500) {  // 500 ticks at 1000Hz = 500ms
         input_poll();
         asm volatile("hlt");
     }

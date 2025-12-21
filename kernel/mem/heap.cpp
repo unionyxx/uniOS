@@ -119,6 +119,34 @@ void* malloc(size_t size) {
     return result;
 }
 
+// Allocate memory with specified alignment
+// alignment must be a power of 2 and >= sizeof(void*)
+void* aligned_alloc(size_t alignment, size_t size) {
+    if (alignment < sizeof(void*)) alignment = sizeof(void*);
+    
+    // Allocate extra space for alignment and storing original pointer
+    size_t total = size + alignment + sizeof(void*);
+    void* raw = malloc(total);
+    if (!raw) return nullptr;
+    
+    // Align the pointer
+    uintptr_t raw_addr = (uintptr_t)raw + sizeof(void*);
+    uintptr_t aligned_addr = (raw_addr + alignment - 1) & ~(alignment - 1);
+    
+    // Store original pointer just before the aligned address
+    ((void**)aligned_addr)[-1] = raw;
+    
+    return (void*)aligned_addr;
+}
+
+// Free memory allocated with aligned_alloc
+void aligned_free(void* ptr) {
+    if (!ptr) return;
+    // Retrieve original pointer stored before aligned address
+    void* raw = ((void**)ptr)[-1];
+    free(raw);
+}
+
 void free(void* ptr) {
     if (!ptr) return;
     

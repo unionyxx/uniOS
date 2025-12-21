@@ -19,12 +19,17 @@ html {
     scroll-behavior: smooth;
 }
 
+/* Technical Grid Background */
 body {
     font-family: var(--font-main);
-    background: var(--bg);
+    background-color: var(--bg);
     color: var(--text);
     line-height: 1.6;
-    background-image: radial-gradient(circle at 50% 0%, #1a1a1a 0%, transparent 60%);
+    background-image: 
+        linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        radial-gradient(circle at 50% 0%, #1a1a2e 0%, transparent 70%);
+    background-size: 30px 30px, 30px 30px, 100% 100%;
 }
 
 .wrapper {
@@ -129,6 +134,41 @@ main {
     margin: 0 auto 2.5rem;
 }
 
+/* Quick Start Code Block */
+.quick-start {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    max-width: 450px;
+    margin: 0 auto 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    transition: border-color 0.2s;
+}
+
+.quick-start:hover {
+    border-color: #444;
+}
+
+.copy-btn {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.copy-btn:hover {
+    color: var(--text);
+}
+
 .hero-buttons {
     display: flex;
     justify-content: center;
@@ -163,6 +203,17 @@ main {
 .btn-secondary:hover {
     background: rgba(255, 255, 255, 0.08);
     border-color: #444;
+}
+
+/* GitHub Stats Badge */
+.gh-stats {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    margin-top: 1.5rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
 }
 
 /* Screenshot Window */
@@ -223,12 +274,47 @@ main {
     font-size: 0.8rem;
     color: #888;
     margin-right: 52px;
-    /* Balance the buttons */
 }
 
 .terminal-window img {
     display: block;
     width: 100%;
+}
+
+/* Terminal Content (Typewriter) */
+.terminal-content {
+    padding: 1.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: #cccccc;
+    min-height: 300px;
+    text-align: left;
+}
+
+.cmd-line {
+    margin-bottom: 0.5rem;
+}
+
+.prompt {
+    color: var(--accent);
+    margin-right: 0.5rem;
+}
+
+.output {
+    color: var(--muted);
+    margin-bottom: 1rem;
+    white-space: pre-wrap;
+}
+
+/* Blinking Cursor */
+.cursor::after {
+    content: '▋';
+    animation: blink 1s step-start infinite;
+    color: var(--text);
+}
+
+@keyframes blink {
+    50% { opacity: 0; }
 }
 
 /* Features */
@@ -241,6 +327,21 @@ main {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 2rem;
+}
+
+/* Feature Card with Hover Glow */
+.feature-card {
+    background: var(--card);
+    padding: 1.5rem;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    transition: all 0.3s ease;
+}
+
+.feature-card:hover {
+    transform: translateY(-5px);
+    border-color: var(--accent);
+    box-shadow: 0 10px 30px -10px rgba(59, 130, 246, 0.3);
 }
 
 .feature-card h3 {
@@ -267,9 +368,7 @@ footer {
 
 /* Responsive */
 @media (max-width: 768px) {
-
-    nav,
-    main {
+    nav, main {
         padding-left: 1.5rem;
         padding-right: 1.5rem;
     }
@@ -280,6 +379,11 @@ footer {
 
     .feature-grid {
         grid-template-columns: 1fr 1fr;
+    }
+    
+    .quick-start {
+        font-size: 0.75rem;
+        max-width: 100%;
     }
 }
 

@@ -27,6 +27,27 @@ using kstring::strncmp;
 using kstring::strlen;
 using kstring::strcpy;
 
+// =============================================================================
+// Command Dispatch Table Types
+// =============================================================================
+enum CmdType {
+    CMD_NONE,      // No arguments (e.g., "help", "ls")
+    CMD_ARGS,      // Takes rest of line as args (e.g., "cat file.txt")
+    CMD_PIPED      // Supports piped input (e.g., "wc", "grep")
+};
+
+typedef void (*CmdHandlerNone)();
+typedef void (*CmdHandlerArgs)(const char*);
+typedef void (*CmdHandlerPiped)(const char*, const char*);
+
+struct CommandEntry {
+    const char* name;
+    CmdType type;
+    CmdHandlerNone handler_none;
+    CmdHandlerArgs handler_args;
+    CmdHandlerPiped handler_piped;
+};
+
 // Piping support
 #define PIPE_BUFFER_SIZE 4096
 static char pipe_buffer_a[PIPE_BUFFER_SIZE];
@@ -2579,6 +2600,62 @@ static void cmd_cat_piped(const char* input) {
     }
 }
 
+// =============================================================================
+// Command Dispatch Table
+// =============================================================================
+static const CommandEntry commands[] = {
+    // No-arg commands (exact match, no arguments)
+    {"help",     CMD_NONE, cmd_help, nullptr, nullptr},
+    {"ls",       CMD_NONE, cmd_ls, nullptr, nullptr},
+    {"df",       CMD_NONE, cmd_df, nullptr, nullptr},
+    {"mem",      CMD_NONE, cmd_mem, nullptr, nullptr},
+    {"date",     CMD_NONE, cmd_date, nullptr, nullptr},
+    {"uptime",   CMD_NONE, cmd_uptime, nullptr, nullptr},
+    {"version",  CMD_NONE, cmd_version, nullptr, nullptr},
+    {"uname",    CMD_NONE, cmd_uname, nullptr, nullptr},
+    {"cpuinfo",  CMD_NONE, cmd_cpuinfo, nullptr, nullptr},
+    {"lspci",    CMD_NONE, cmd_lspci, nullptr, nullptr},
+    {"ifconfig", CMD_NONE, cmd_ifconfig, nullptr, nullptr},
+    {"dhcp",     CMD_NONE, cmd_dhcp_request, nullptr, nullptr},
+    {"env",      CMD_NONE, cmd_env, nullptr, nullptr},
+    {"true",     CMD_NONE, cmd_true, nullptr, nullptr},
+    {"false",    CMD_NONE, cmd_false, nullptr, nullptr},
+    
+    // Arg commands (command + space + args)
+    {"cat",      CMD_ARGS, nullptr, cmd_cat, nullptr},
+    {"stat",     CMD_ARGS, nullptr, cmd_stat, nullptr},
+    {"hexdump",  CMD_ARGS, nullptr, cmd_hexdump, nullptr},
+    {"touch",    CMD_ARGS, nullptr, cmd_touch, nullptr},
+    {"rm",       CMD_ARGS, nullptr, cmd_rm, nullptr},
+    {"write",    CMD_ARGS, nullptr, cmd_write, nullptr},
+    {"append",   CMD_ARGS, nullptr, cmd_append, nullptr},
+    {"run",      CMD_ARGS, nullptr, cmd_run, nullptr},
+    {"set",      CMD_ARGS, nullptr, cmd_set, nullptr},
+    {"unset",    CMD_ARGS, nullptr, cmd_unset, nullptr},
+    {"ping",     CMD_ARGS, nullptr, cmd_ping, nullptr},
+    {"sleep",    CMD_ARGS, nullptr, cmd_sleep, nullptr},
+    {"read",     CMD_ARGS, nullptr, cmd_read, nullptr},
+    {"test",     CMD_ARGS, nullptr, cmd_test, nullptr},
+    {"expr",     CMD_ARGS, nullptr, cmd_expr, nullptr},
+    {"source",   CMD_ARGS, nullptr, cmd_source, nullptr},
+    {"time",     CMD_ARGS, nullptr, cmd_time, nullptr},
+    {"echo",     CMD_ARGS, nullptr, cmd_echo, nullptr},
+    
+    // Piped commands (support file arg or piped input)
+    {"wc",       CMD_PIPED, nullptr, nullptr, cmd_wc},
+    {"head",     CMD_PIPED, nullptr, nullptr, cmd_head},
+    {"tail",     CMD_PIPED, nullptr, nullptr, cmd_tail},
+    {"grep",     CMD_PIPED, nullptr, nullptr, cmd_grep},
+    {"sort",     CMD_PIPED, nullptr, nullptr, cmd_sort},
+    {"uniq",     CMD_PIPED, nullptr, nullptr, cmd_uniq},
+    {"rev",      CMD_PIPED, nullptr, nullptr, cmd_rev},
+    {"tac",      CMD_PIPED, nullptr, nullptr, cmd_tac},
+    {"nl",       CMD_PIPED, nullptr, nullptr, cmd_nl},
+    {"tr",       CMD_PIPED, nullptr, nullptr, cmd_tr},
+};
+
+static const int NUM_COMMANDS = sizeof(commands) / sizeof(commands[0]);
+
 // Execute a single command, optionally with piped input
 // Returns true if command was recognized, false otherwise
 static bool execute_single_command(const char* cmd, const char* piped_input) {
@@ -2610,146 +2687,98 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
             local_cmd[i + 1] = '\0';
         }
     }
+    // ==========================================================================
+    // Command Dispatch via Table Lookup
+    // ==========================================================================
+    for (int i = 0; i < NUM_COMMANDS; i++) {
+        const CommandEntry& c = commands[i];
+        int name_len = strlen(c.name);
+        
+        if (c.type == CMD_NONE) {
+            // No-arg command: exact match only
+            if (strcmp(local_cmd, c.name) == 0) {
+                c.handler_none();
+                return true;
+            }
+        }
+        else if (c.type == CMD_ARGS) {
+            // Arg command: "cmd" with no args, or "cmd args"
+            if (strcmp(local_cmd, c.name) == 0) {
+                c.handler_args("");  // No args case
+                return true;
+            }
+            if (strncmp(local_cmd, c.name, name_len) == 0 && local_cmd[name_len] == ' ') {
+                c.handler_args(local_cmd + name_len + 1);
+                return true;
+            }
+        }
+        else if (c.type == CMD_PIPED) {
+            // Piped command: supports file arg or piped input
+            if (strcmp(local_cmd, c.name) == 0) {
+                c.handler_piped(nullptr, piped_input);
+                return true;
+            }
+            if (strncmp(local_cmd, c.name, name_len) == 0 && local_cmd[name_len] == ' ') {
+                c.handler_piped(local_cmd + name_len + 1, piped_input);
+                return true;
+            }
+        }
+    }
     
-    // Command dispatch
-    if (strcmp(local_cmd, "help") == 0) {
-        cmd_help();
-    } else if (strcmp(local_cmd, "ls") == 0) {
-        cmd_ls();
-    } else if (strncmp(local_cmd, "cat ", 4) == 0) {
-        cmd_cat(local_cmd + 4);
-    } else if (strcmp(local_cmd, "cat") == 0) {
-        // cat with no args: output piped input
+    // ==========================================================================
+    // Special Commands (require inline logic, not table-dispatchable)
+    // ==========================================================================
+    
+    // "." is alias for "source"
+    if (strncmp(local_cmd, ". ", 2) == 0) {
+        cmd_source(local_cmd + 2);
+        return true;
+    }
+    
+    // "cat" with no args outputs piped input
+    if (strcmp(local_cmd, "cat") == 0) {
         cmd_cat_piped(piped_input);
-    } else if (strncmp(local_cmd, "stat ", 5) == 0) {
-        cmd_stat(local_cmd + 5);
-    } else if (strncmp(local_cmd, "hexdump ", 8) == 0) {
-        cmd_hexdump(local_cmd + 8);
-    } else if (strncmp(local_cmd, "touch ", 6) == 0) {
-        cmd_touch(local_cmd + 6);
-    } else if (strncmp(local_cmd, "rm ", 3) == 0) {
-        cmd_rm(local_cmd + 3);
-    } else if (strncmp(local_cmd, "write ", 6) == 0) {
-        cmd_write(local_cmd + 6);
-    } else if (strncmp(local_cmd, "append ", 7) == 0) {
-        cmd_append(local_cmd + 7);
-    } else if (strcmp(local_cmd, "df") == 0) {
-        cmd_df();
-    } else if (strcmp(local_cmd, "mem") == 0) {
-        cmd_mem();
-    } else if (strcmp(local_cmd, "date") == 0) {
-        cmd_date();
-    } else if (strcmp(local_cmd, "uptime") == 0) {
-        cmd_uptime();
-    // Text processing commands (work with piping)
-    } else if (strncmp(local_cmd, "wc ", 3) == 0) {
-        cmd_wc(local_cmd + 3, piped_input);
-    } else if (strcmp(local_cmd, "wc") == 0) {
-        cmd_wc(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "head ", 5) == 0) {
-        cmd_head(local_cmd + 5, piped_input);
-    } else if (strcmp(local_cmd, "head") == 0) {
-        cmd_head(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "tail ", 5) == 0) {
-        cmd_tail(local_cmd + 5, piped_input);
-    } else if (strcmp(local_cmd, "tail") == 0) {
-        cmd_tail(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "grep ", 5) == 0) {
-        cmd_grep(local_cmd + 5, piped_input);
-    } else if (strncmp(local_cmd, "sort ", 5) == 0) {
-        cmd_sort(local_cmd + 5, piped_input);
-    } else if (strcmp(local_cmd, "sort") == 0) {
-        cmd_sort(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "uniq ", 5) == 0) {
-        cmd_uniq(local_cmd + 5, piped_input);
-    } else if (strcmp(local_cmd, "uniq") == 0) {
-        cmd_uniq(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "rev ", 4) == 0) {
-        cmd_rev(local_cmd + 4, piped_input);
-    } else if (strcmp(local_cmd, "rev") == 0) {
-        cmd_rev(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "tac ", 4) == 0) {
-        cmd_tac(local_cmd + 4, piped_input);
-    } else if (strcmp(local_cmd, "tac") == 0) {
-        cmd_tac(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "nl ", 3) == 0) {
-        cmd_nl(local_cmd + 3, piped_input);
-    } else if (strcmp(local_cmd, "nl") == 0) {
-        cmd_nl(nullptr, piped_input);
-    } else if (strncmp(local_cmd, "tr ", 3) == 0) {
-        cmd_tr(local_cmd + 3, piped_input);
-    } else if (strncmp(local_cmd, "echo ", 5) == 0) {
-        // echo with piped input: output piped input + args (or just args)
-        cmd_echo(local_cmd + 5);
-    } else if (strcmp(local_cmd, "echo") == 0) {
-        // echo with no args: output piped input if present, else newline
+        return true;
+    }
+    
+    // "echo" with no args outputs piped input or newline
+    if (strcmp(local_cmd, "echo") == 0) {
         if (piped_input && piped_input[0]) {
             g_terminal.write(piped_input);
         } else {
             g_terminal.write("\n");
         }
-    } else if (strcmp(local_cmd, "version") == 0) {
-        cmd_version();
-    } else if (strcmp(local_cmd, "uname") == 0) {
-        cmd_uname();
-    } else if (strcmp(local_cmd, "cpuinfo") == 0) {
-        cmd_cpuinfo();
-    } else if (strcmp(local_cmd, "lspci") == 0) {
-        cmd_lspci();
-    } else if (strcmp(local_cmd, "ifconfig") == 0) {
-        cmd_ifconfig();
-    } else if (strcmp(local_cmd, "dhcp") == 0) {
-        cmd_dhcp_request();
-    } else if (strncmp(local_cmd, "ping ", 5) == 0) {
-        cmd_ping(local_cmd + 5);
-    // Scripting commands
-    } else if (strncmp(local_cmd, "run ", 4) == 0) {
-        cmd_run(local_cmd + 4);
-    } else if (strncmp(local_cmd, "set ", 4) == 0) {
-        cmd_set(local_cmd + 4);
-    } else if (strcmp(local_cmd, "set") == 0) {
-        cmd_set("");  // List all variables
-    } else if (strncmp(local_cmd, "unset ", 6) == 0) {
-        cmd_unset(local_cmd + 6);
-    // v0.5.x shell polish commands
-    } else if (strcmp(local_cmd, "env") == 0) {
-        cmd_env();
-    } else if (strcmp(local_cmd, "exit") == 0) {
-        // exit is an alias for poweroff
+        return true;
+    }
+    
+    // "exit" is alias for poweroff
+    if (strcmp(local_cmd, "exit") == 0) {
         if (acpi_is_available()) {
             g_terminal.write_line("Shutting down...");
         }
         acpi_poweroff();
         g_terminal.write_line("Shutdown failed.");
-    } else if (strncmp(local_cmd, "time ", 5) == 0) {
-        cmd_time(local_cmd + 5);
-    } else if (strcmp(local_cmd, "true") == 0) {
-        cmd_true();
-    } else if (strcmp(local_cmd, "false") == 0) {
-        cmd_false();
-    } else if (strncmp(local_cmd, "sleep ", 6) == 0) {
-        cmd_sleep(local_cmd + 6);
-    } else if (strncmp(local_cmd, "read ", 5) == 0) {
-        cmd_read(local_cmd + 5);
-    } else if (strncmp(local_cmd, "test ", 5) == 0) {
-        cmd_test(local_cmd + 5);
-    } else if (strncmp(local_cmd, "expr ", 5) == 0) {
-        cmd_expr(local_cmd + 5);
-    } else if (strncmp(local_cmd, "source ", 7) == 0) {
-        cmd_source(local_cmd + 7);
-    } else if (strncmp(local_cmd, ". ", 2) == 0) {
-        cmd_source(local_cmd + 2);  // . is alias for source
-    } else if (strcmp(local_cmd, "clear") == 0) {
+        return true;
+    }
+    
+    // "clear" - clear screen
+    if (strcmp(local_cmd, "clear") == 0) {
         g_terminal.clear();
         g_terminal.write("uniOS Shell\n\n");
-        // Don't call print_prompt here - execute_command handles it
-    } else if (strcmp(local_cmd, "gui") == 0) {
+        return true;
+    }
+    
+    // "gui" - start graphical interface
+    if (strcmp(local_cmd, "gui") == 0) {
         extern void gui_start();
         gui_start();
         g_terminal.clear();
         g_terminal.write("uniOS Shell\n\n");
-        // Don't call print_prompt here - execute_command handles it
-    } else if (strcmp(local_cmd, "reboot") == 0) {
+        return true;
+    }
+    
+    // "reboot" - restart system
+    if (strcmp(local_cmd, "reboot") == 0) {
         g_terminal.write_line("Rebooting...");
         outb(0x64, 0xFE);
         for (volatile int i = 0; i < 1000000; i++);
@@ -2761,7 +2790,11 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
         } __attribute__((packed)) invalid_idt = { 0, 0 };
         asm volatile("lidt %0; int3" :: "m"(invalid_idt));
         asm volatile("cli; hlt");
-    } else if (strcmp(local_cmd, "poweroff") == 0) {
+        return true;
+    }
+    
+    // "poweroff" - shutdown system
+    if (strcmp(local_cmd, "poweroff") == 0) {
         if (acpi_is_available()) {
             g_terminal.write_line("ACPI available, attempting shutdown...");
         } else {
@@ -2769,13 +2802,13 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
         }
         acpi_poweroff();
         g_terminal.write_line("Shutdown failed.");
-    } else {
-        g_terminal.write("Unknown command: ");
-        g_terminal.write_line(local_cmd);
-        return false;
+        return true;
     }
     
-    return true;
+    // Unknown command
+    g_terminal.write("Unknown command: ");
+    g_terminal.write_line(local_cmd);
+    return false;
 }
 
 static void execute_command() {

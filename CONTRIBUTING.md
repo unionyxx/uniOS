@@ -1,15 +1,12 @@
 # Contributing to uniOS
 
-Thank you for your interest in contributing to uniOS!
+uniOS is a hobby project. I welcome PRs, but keep in mind this is a learning OS, not a production kernel. If you're interested in kernel development, this is a good codebase to experiment with.
 
-## Getting Started
+## Development Environment
 
-1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/uniOS.git`
-3. Set up the build environment (see README.md)
-4. Create a feature branch: `git checkout -b feature/my-feature`
+I develop on **Ubuntu/WSL** and test primarily in **QEMU**. If it breaks on your specific hardware, I probably can't fix it without serial logs.
 
-## Build Requirements
+### Build Requirements
 
 - GCC cross-compiler for `x86_64-elf`
 - NASM assembler
@@ -19,15 +16,39 @@ Thank you for your interest in contributing to uniOS!
 
 ## Code Style
 
-- **C++20** with kernel restrictions (no exceptions, no RTTI)
-- Use `kstring::` utilities for string operations
-- Use `DEBUG_INFO/WARN/ERROR/LOG` macros for logging (debug builds only)
-- Keep functions focused and documented
-- Use named constants instead of magic numbers
+This is a **freestanding C++20 kernel**. That means:
+
+- **No exceptions** (`-fno-exceptions`) — We can't unwind the stack in a kernel.
+- **No RTTI** (`-fno-rtti`) — `dynamic_cast` and `typeid` don't exist.
+- **No `std::`** — We use `kstring::` for string operations to avoid libc.
+- **No `new`/`delete`** — Use `malloc()`/`free()` from the kernel heap.
+
+### Logging
+
+Use the `DEBUG_*` macros in `debug.h`:
+
+```cpp
+DEBUG_INFO("Initialized device %s\n", name);
+DEBUG_WARN("Timeout after %d ms\n", timeout);
+DEBUG_ERROR("Failed to allocate buffer\n");
+```
+
+These only print in debug builds (`make debug`). Release builds strip them.
+
+### Constants
+
+Use named constants. Magic numbers make debugging painful:
+
+```cpp
+// Bad
+if (status & 0x10) { ... }
+
+// Good
+#define STATUS_READY (1 << 4)
+if (status & STATUS_READY) { ... }
+```
 
 ## Testing
-
-**Testing is done in QEMU.** The OS targets real hardware, but hardware-specific issues may not be supportable.
 
 ```bash
 make clean && make debug  # Build with logging
@@ -35,37 +56,40 @@ make run                  # Test in QEMU
 make run-gdb              # Debug with GDB on localhost:1234
 ```
 
-Verify:
-- Kernel boots without errors
-- Your feature works as expected
-- Existing features still work (regression testing)
+Before submitting a PR:
+1. Verify it builds with both `make` and `make debug`
+2. Test your feature in QEMU
+3. Check that existing commands still work
+
+> [!WARNING]
+> I can't test on real hardware for every PR. If your change requires specific hardware, document how to test it.
 
 ## Versioning
 
-When your changes warrant a version bump (see `kernel/core/version.h` for rules):
-
-1. Update `UNIOS_VERSION_*` macros in `kernel/core/version.h`
-2. Update `UNIOS_VERSION_STRING` and `UNIOS_VERSION_FULL`
-3. Update `Current Version:` line in `README.md`
-
-**Don't bump for**: docs, refactoring, build changes, or minor cleanup.
-
-## Pull Request Process
-
-1. Ensure your code builds cleanly with both `make release` and `make debug`
-2. Test thoroughly in QEMU
-3. Update documentation if needed
-4. Submit a PR with a clear description of changes
+Version is defined in `kernel/core/version.h`. Bump it if you add a feature. Don't bump for:
+- Documentation changes
+- Refactoring
+- Build system tweaks
 
 ## Areas for Contribution
 
-- **Network**: Protocol implementations (TCP improvements, new protocols)
-- **Shell**: New commands and shell features
-- **Filesystem**: uniFS enhancements
-- **Documentation**: Improve docs and comments
-- **Drivers**: QEMU-compatible device support
+| Area | Notes |
+|------|-------|
+| **Network** | TCP improvements, new protocols |
+| **Shell** | New commands (must use existing uniFS/kernel APIs) |
+| **Drivers** | QEMU-compatible devices preferred |
+| **Docs** | Fix errors, add examples |
+
+## Out of Scope
+
+Please do not open PRs for:
+
+- **GUI window managers** — The shell is the focus
+- **Alternative filesystems** (FAT32, ext4) — uniFS is intentional
+- **32-bit (i386) support** — x86-64 only
+- **UEFI runtime services** — We boot via Limine and don't use UEFI after
+- **SMP (multicore)** — Single-core design for simplicity
 
 ## Questions?
 
-Open an issue for questions or feature discussions.
-
+Open an issue. I read them regularly.

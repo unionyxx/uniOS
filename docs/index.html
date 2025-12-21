@@ -4,14 +4,70 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>uniOS - A Scratch-Built x86-64 C++20 Operating System Kernel</title>
+
+    <!-- Primary SEO -->
+    <meta name="description"
+        content="uniOS is a hobby operating system built from scratch in C++20. Features a custom kernel, TCP/IP stack, USB xHCI driver, and a UNIX-like shell.">
+    <meta name="keywords"
+        content="osdev, operating system, kernel, c++20, x86_64, limine, tcp-ip, usb driver, hobby os">
+    <meta name="author" content="Unionyxx">
+    <meta name="robots" content="index, follow">
     <meta name="google-site-verification" content="MZPKP0MAzH6og5TcjXzXHI6hWN8lWK-AVLgcBijtryc" />
-    <title>uniOS - Minimal x86 Operating System</title>
+    <link rel="canonical" href="https://unionyxx.github.io/uniOS/">
+
+    <!-- Open Graph / Facebook / Discord -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://unionyxx.github.io/uniOS/">
+    <meta property="og:title" content="uniOS - Minimal x86-64 Kernel">
+    <meta property="og:description"
+        content="A scratch-built x86-64 OS written in C++20. Features networking, USB, and a custom shell.">
+    <meta property="og:image" content="https://unionyxx.github.io/uniOS/og-image.png">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="https://unionyxx.github.io/uniOS/">
+    <meta property="twitter:title" content="uniOS - Minimal x86-64 Kernel">
+    <meta property="twitter:description"
+        content="A scratch-built x86-64 OS written in C++20. Features networking, USB, and a custom shell.">
+    <meta property="twitter:image" content="https://unionyxx.github.io/uniOS/og-image.png">
+
+    <!-- Styles & Fonts -->
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
+
+    <!-- Favicon -->
+    <link rel="icon" href="favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+
+    <!-- JSON-LD Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "uniOS",
+      "operatingSystem": "x86-64",
+      "applicationCategory": "Operating System",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "description": "A scratch-built x86-64 operating system kernel written in C++20 featuring a custom TCP/IP stack and USB drivers.",
+      "softwareVersion": "0.6.1",
+      "author": {
+        "@type": "Person",
+        "name": "Unionyxx",
+        "url": "https://github.com/unionyxx"
+      },
+      "codeRepository": "https://github.com/unionyxx/uniOS",
+      "programmingLanguage": "C++"
+    }
+    </script>
 </head>
 
 <body>
@@ -20,7 +76,7 @@
             <div class="logo">uniOS</div>
             <div class="nav-links">
                 <a href="#features">Features</a>
-                <a href="https://github.com/unionyxx/uniOS" class="btn-github">
+                <a href="https://github.com/unionyxx/uniOS" class="btn-github" target="_blank">
                     <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
                         <path
                             d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
@@ -32,13 +88,32 @@
 
         <main>
             <section class="hero">
-                <span class="badge">v0.6.0</span>
+                <span class="badge">v0.6.1</span>
                 <h1>A minimal operating system</h1>
                 <p>A scratch-built x86-64 operating system kernel written in C++20.</p>
+
+                <!-- Quick Copy Block -->
+                <div class="quick-start" onclick="copyCloneCmd()">
+                    <span id="clone-text">git clone https://github.com/unionyxx/uniOS.git</span>
+                    <button class="copy-btn" aria-label="Copy clone command to clipboard">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+
                 <div class="hero-buttons">
                     <a href="https://github.com/unionyxx/uniOS" class="btn btn-primary">View Source</a>
                     <a href="https://github.com/unionyxx/uniOS/blob/main/docs/ARCHITECTURE.md"
                         class="btn btn-secondary">Documentation</a>
+                </div>
+
+                <!-- GitHub Stats -->
+                <div class="gh-stats">
+                    <span id="star-count">★ ...</span>
+                    <span id="latest-commit">Latest commit: ...</span>
                 </div>
             </section>
 
@@ -52,31 +127,40 @@
                         </div>
                         <div class="terminal-title">uniOS Shell</div>
                     </div>
-                    <img src="screenshot.png" alt="uniOS Terminal">
+                    <!-- Pre-fill for SEO bots / JS-disabled users -->
+                    <div class="terminal-content" id="terminal-typewriter">
+                        <span class="prompt">user@unios:~$</span> ls -la<br>
+                        <span class="output">
+                            drwxr-xr-x 1 root root 0 Jan 01 00:00 .<br>
+                            drwxr-xr-x 1 root root 0 Jan 01 00:00 ..<br>
+                            -rwxr-xr-x 1 root root 1024 Jan 01 00:00 kernel.elf<br>
+                        </span>
+                        <span class="prompt">user@unios:~$</span> <span class="cursor">_</span>
+                    </div>
                 </div>
             </section>
 
             <section id="features" class="features">
                 <div class="feature-grid">
                     <div class="feature-card">
-                        <h3>Modern Kernel</h3>
-                        <p>Written in C++20 with a focus on clean architecture. Features a bitmap PMM, 4-level paging
-                            VMM, and a custom heap allocator.</p>
+                        <h3>C++20 Kernel</h3>
+                        <p>Built with -fno-exceptions and -fno-rtti. Bitmap PMM (16GB cap), recursive paging VMM, and
+                            spinlock-protected heap allocator.</p>
                     </div>
                     <div class="feature-card">
-                        <h3>Interactive Shell</h3>
-                        <p>A powerful CLI with command piping, text processing (wc, grep, head, tail), tab completion,
-                            and command history.</p>
+                        <h3>Shell & Scripting</h3>
+                        <p>Command piping, history, and tab completion. Custom scripting language with variables, loops,
+                            and conditionals.</p>
                     </div>
                     <div class="feature-card">
-                        <h3>Native USB</h3>
-                        <p>Built-in xHCI (USB 3.0) driver stack with full Plug-and-Play support for HID keyboards and
-                            mice.</p>
+                        <h3>USB xHCI Stack</h3>
+                        <p>Scratch-built USB 3.0 driver. Supports HID keyboards and mice via polling. No hub support
+                            yet.</p>
                     </div>
                     <div class="feature-card">
-                        <h3>Networking</h3>
-                        <p>Complete TCP/IP stack including DHCP, DNS, and TCP. Supports Intel e1000/I219 and Realtek
-                            RTL8139 NICs.</p>
+                        <h3>TCP/IP Stack</h3>
+                        <p>Hand-written stack (ARP, IPv4, ICMP, UDP, TCP). Includes DHCP/DNS. Drivers for e1000 and
+                            RTL8139.</p>
                     </div>
                 </div>
             </section>
@@ -86,7 +170,77 @@
             <p>MIT License · 2025</p>
         </footer>
     </div>
-</body>
 
+    <script>
+        // Copy to Clipboard
+        function copyCloneCmd() {
+            const text = document.getElementById('clone-text').innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = document.querySelector('.quick-start');
+                btn.style.borderColor = '#4ade80';
+                setTimeout(() => btn.style.borderColor = '#222', 500);
+            });
+        }
+
+        // Fetch GitHub Stats
+        async function fetchStats() {
+            try {
+                const repo = await fetch('https://api.github.com/repos/unionyxx/uniOS');
+                const data = await repo.json();
+                document.getElementById('star-count').innerText = `★ ${data.stargazers_count} stars`;
+                document.getElementById('latest-commit').innerText = `Updated: ${new Date(data.pushed_at).toLocaleDateString()}`;
+            } catch (e) {
+                document.getElementById('star-count').style.display = 'none';
+                document.getElementById('latest-commit').style.display = 'none';
+            }
+        }
+        fetchStats();
+
+        // Typewriter Effect
+        const terminal = document.getElementById('terminal-typewriter');
+        const sequence = [
+            { text: "Booting uniOS v0.6.1...", delay: 50 },
+            { text: "[INFO] GDT Initialized", delay: 10 },
+            { text: "[INFO] IDT Initialized", delay: 10 },
+            { text: "[INFO] PMM Initialized (16GB max)", delay: 10 },
+            { text: "[INFO] Scheduler Initialized", delay: 10 },
+            { text: "[INFO] Network: e1000 link UP", delay: 30 },
+            { text: "\nuser@unios:~$ ", noNewLine: true, delay: 50 },
+            { text: "ls | grep .sh", type: true, delay: 100 },
+            { text: "\n  [TXT] 145B  hello.sh\n  [TXT] 200B  countdown.sh", delay: 20 },
+            { text: "\nuser@unios:~$ ", noNewLine: true, delay: 50 },
+            { text: "_", cursor: true }
+        ];
+
+        async function runTypewriter() {
+            // Clear SEO pre-fill content before animation
+            terminal.innerHTML = '';
+
+            for (let step of sequence) {
+                if (step.cursor) {
+                    const cursorSpan = document.createElement('span');
+                    cursorSpan.className = 'cursor';
+                    terminal.appendChild(cursorSpan);
+                    continue;
+                }
+
+                if (step.type) {
+                    for (let char of step.text) {
+                        terminal.innerHTML += char;
+                        await new Promise(r => setTimeout(r, Math.random() * 50 + 30));
+                    }
+                } else {
+                    terminal.innerHTML += step.text;
+                    if (!step.noNewLine) terminal.innerHTML += "<br>";
+                }
+
+                terminal.scrollTop = terminal.scrollHeight;
+                await new Promise(r => setTimeout(r, step.delay));
+            }
+        }
+
+        setTimeout(runTypewriter, 500);
+    </script>
+</body>
 
 </html>
