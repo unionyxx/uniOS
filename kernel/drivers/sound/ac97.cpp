@@ -99,7 +99,7 @@ void ac97_init() {
     outw(ac97_info.nam + AC97_NAM_PCM_OUT_VOLUME, 0x0);
 
     // Allocate memory for buffer entries.
-    size_t buffer_entries_alloc_size = sizeof(Ac97BufferEntry) * 32;
+    size_t buffer_entries_alloc_size = sizeof(Ac97BufferEntry) * AC97_BUFFER_ENTRY_COUNT;
     ac97_info.buffer_entries_dma = vmm_alloc_dma((buffer_entries_alloc_size + 4095) / 4096);
     ac97_info.buffer_entries = (Ac97BufferEntry*)ac97_info.buffer_entries_dma.virt;
 
@@ -109,7 +109,7 @@ void ac97_init() {
     }
 
     // Allocate memory for sound buffers.
-    size_t sound_buffers_alloc_size = AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE * 32;
+    size_t sound_buffers_alloc_size = AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE * AC97_BUFFER_ENTRY_COUNT;
     ac97_info.sound_buffers_dma = vmm_alloc_dma((sound_buffers_alloc_size + 4095) / 4096);
 
     if (!ac97_info.sound_buffers_dma.virt || !ac97_info.sound_buffers_dma.phys) {
