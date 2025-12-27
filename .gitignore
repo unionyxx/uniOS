@@ -29,3 +29,5 @@ Thumbs.db
 limine/
 limine-deploy-linux-x86_64
 limine-version
+
+/tools/copy_unios_sources.py

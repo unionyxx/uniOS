@@ -1,6 +1,15 @@
 #include "debug.h"
 #include "graphics.h"
+#include "serial.h"
+#include "spinlock.h"
 #include <stdarg.h>
+
+// Spinlock for preventing interleaved debug output
+static Spinlock debug_lock;
+
+// Global log filter settings
+int g_log_min_level = LOG_INFO;           // Default: show INFO and above
+uint32_t g_log_module_mask = MOD_ALL;     // Default: all modules enabled
 
 static struct limine_framebuffer* debug_fb = nullptr;
 static uint64_t debug_x = 10;
@@ -13,9 +22,17 @@ void debug_init(struct limine_framebuffer* fb) {
     debug_fb = fb;
     debug_x = MARGIN;
     debug_y = MARGIN;
+    // debug_lock is static and zero-initialized
 }
 
 static void debug_putchar(char c) {
+    // Always output to serial for debugging (even if screen not ready)
+    if (c == '\n') {
+        serial_putc('\r');  // CR before LF for proper terminal display
+    }
+    serial_putc(c);
+    
+    // Output to screen if framebuffer is available
     if (!debug_fb) return;
     
     if (c == '\n') {
@@ -90,6 +107,8 @@ static void debug_print_uint(uint64_t num, int base) {
 }
 
 void kprintf(const char* fmt, ...) {
+    spinlock_acquire(&debug_lock);
+    
     va_list args;
     va_start(args, fmt);
     
@@ -145,9 +164,12 @@ void kprintf(const char* fmt, ...) {
     }
     
     va_end(args);
+    spinlock_release(&debug_lock);
 }
 
 void kprintf_color(uint32_t color, const char* fmt, ...) {
+    spinlock_acquire(&debug_lock);
+    
     va_list args;
     va_start(args, fmt);
     
@@ -202,6 +224,7 @@ void kprintf_color(uint32_t color, const char* fmt, ...) {
     
     current_color = old_color;
     va_end(args);
+    spinlock_release(&debug_lock);
 }
 
 
@@ -217,6 +240,7 @@ void debug_hexdump(const void* addr, uint64_t size) {
         }
         
         kprintf("\n");
+    }
 }
 #endif
 
@@ -243,4 +267,175 @@ void debug_print_stack_trace() {
         depth++;
     }
     kprintf_color(0x00FFFF, "-------------------\n");
+}
+
+// ==============================================================================
+// klog() - Filtered kernel logging with serial output
+// ==============================================================================
+
+// Module name lookup table
+static const char* module_names[] = {
+    "KERNEL", "SCHED", "MEM", "NET", "FS", "DRIVER", "USB", "GFX"
+};
+
+// Level name lookup table
+static const char* level_names[] = {
+    "TRACE", "INFO", "WARN", "ERROR", "FATAL"
+};
+
+// Level color lookup table
+static const uint32_t level_colors[] = {
+    DEBUG_COLOR_TRACE,  // TRACE - gray
+    DEBUG_COLOR_INFO,   // INFO  - green
+    DEBUG_COLOR_WARN,   // WARN  - yellow
+    DEBUG_COLOR_ERROR,  // ERROR - red
+    DEBUG_COLOR_ERROR   // FATAL - red
+};
+
+void klog(LogModule mod, LogLevel level, const char* func, const char* fmt, ...) {
+    // Filter check: skip if level is below minimum
+    if (level < g_log_min_level) return;
+    
+    // Filter check: skip if module is not in mask
+    if (!(mod & g_log_module_mask)) return;
+    
+    // Acquire lock before building/outputting message
+    spinlock_acquire(&debug_lock);
+    
+    // Build prefix: [MODULE][LEVEL] func: 
+    char prefix[64];
+    int pi = 0;
+    
+    // Find module index (log2 of mod)
+    int mod_idx = 0;
+    uint32_t m = mod;
+    while (m > 1) { m >>= 1; mod_idx++; }
+    if (mod_idx >= 8) mod_idx = 0;  // Safety clamp
+    
+    // Build prefix string
+    prefix[pi++] = '[';
+    const char* mn = module_names[mod_idx];
+    while (*mn) prefix[pi++] = *mn++;
+    prefix[pi++] = ']';
+    prefix[pi++] = '[';
+    const char* ln = level_names[level];
+    while (*ln) prefix[pi++] = *ln++;
+    prefix[pi++] = ']';
+    prefix[pi++] = ' ';
+    while (*func && pi < 50) prefix[pi++] = *func++;
+    prefix[pi++] = ':';
+    prefix[pi++] = ' ';
+    prefix[pi] = '\0';
+    
+    // Format the message
+    char buffer[512];
+    va_list args;
+    va_start(args, fmt);
+    
+    int bi = 0;
+    while (*fmt && bi < 500) {
+        if (*fmt == '%') {
+            fmt++;
+            switch (*fmt) {
+                case 'd':
+                case 'i': {
+                    int val = va_arg(args, int);
+                    if (val < 0) { buffer[bi++] = '-'; val = -val; }
+                    char numtmp[16]; int ni = 0;
+                    if (val == 0) numtmp[ni++] = '0';
+                    while (val > 0) { numtmp[ni++] = '0' + (val % 10); val /= 10; }
+                    while (ni > 0) buffer[bi++] = numtmp[--ni];
+                    break;
+                }
+                case 'u': {
+                    unsigned int val = va_arg(args, unsigned int);
+                    char numtmp[16]; int ni = 0;
+                    if (val == 0) numtmp[ni++] = '0';
+                    while (val > 0) { numtmp[ni++] = '0' + (val % 10); val /= 10; }
+                    while (ni > 0) buffer[bi++] = numtmp[--ni];
+                    break;
+                }
+                case 'x': {
+                    unsigned int val = va_arg(args, unsigned int);
+                    char numtmp[16]; int ni = 0;
+                    if (val == 0) numtmp[ni++] = '0';
+                    while (val > 0) {
+                        int digit = val % 16;
+                        numtmp[ni++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+                        val /= 16;
+                    }
+                    while (ni > 0) buffer[bi++] = numtmp[--ni];
+                    break;
+                }
+                case 'p': {
+                    buffer[bi++] = '0'; buffer[bi++] = 'x';
+                    uint64_t val = va_arg(args, uint64_t);
+                    char numtmp[20]; int ni = 0;
+                    if (val == 0) numtmp[ni++] = '0';
+                    while (val > 0) {
+                        int digit = val % 16;
+                        numtmp[ni++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+                        val /= 16;
+                    }
+                    while (ni > 0) buffer[bi++] = numtmp[--ni];
+                    break;
+                }
+                case 'l':
+                    fmt++;
+                    if (*fmt == 'x' || *fmt == 'u') {
+                        uint64_t val = va_arg(args, uint64_t);
+                        char numtmp[24]; int ni = 0;
+                        int base = (*fmt == 'x') ? 16 : 10;
+                        if (val == 0) numtmp[ni++] = '0';
+                        while (val > 0) {
+                            int digit = val % base;
+                            numtmp[ni++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+                            val /= base;
+                        }
+                        while (ni > 0) buffer[bi++] = numtmp[--ni];
+                    }
+                    break;
+                case 's': {
+                    const char* s = va_arg(args, const char*);
+                    if (!s) s = "(null)";
+                    while (*s && bi < 500) buffer[bi++] = *s++;
+                    break;
+                }
+                case 'c':
+                    buffer[bi++] = (char)va_arg(args, int);
+                    break;
+                case '%':
+                    buffer[bi++] = '%';
+                    break;
+                default:
+                    buffer[bi++] = '%';
+                    buffer[bi++] = *fmt;
+            }
+        } else {
+            buffer[bi++] = *fmt;
+        }
+        fmt++;
+    }
+    buffer[bi++] = '\n';
+    buffer[bi] = '\0';
+    
+    va_end(args);
+    
+    // Output to serial (same as existing DEBUG_* macros)
+    for (int i = 0; prefix[i]; i++) {
+        if (prefix[i] == '\n') serial_putc('\r');
+        serial_putc(prefix[i]);
+    }
+    for (int i = 0; buffer[i]; i++) {
+        if (buffer[i] == '\n') serial_putc('\r');
+        serial_putc(buffer[i]);
+    }
+    
+    spinlock_release(&debug_lock);
+    
+    // Only show ERROR and FATAL on framebuffer (keep screen clean)
+    // kprintf_color has its own lock, so we call it after releasing ours
+    if (level >= LOG_ERROR) {
+        kprintf_color(level_colors[level], "%s%s", prefix, buffer);
+    }
 }

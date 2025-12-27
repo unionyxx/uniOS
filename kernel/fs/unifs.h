@@ -67,11 +67,6 @@ void unifs_init(void* start_addr);
 // Check if filesystem is mounted and valid
 bool unifs_is_mounted();
 
-// Open a file by name (returns nullptr if not found)
-// WARNING: This uses a static buffer - NOT thread-safe for concurrent access
-[[deprecated("Use unifs_open_into() instead - this function is not thread-safe")]]
-const UniFSFile* unifs_open(const char* name);
-
 // Thread-safe open: fills caller-provided buffer
 // Returns true if file found, false otherwise
 bool unifs_open_into(const char* name, UniFSFile* out_file);

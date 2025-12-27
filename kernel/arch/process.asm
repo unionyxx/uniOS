@@ -11,7 +11,9 @@ section .text
 ;   fpu_state:    0    (512 bytes, 16-byte aligned)
 ;   pid:          512
 ;   parent_pid:   520
-;   sp:           528
+;   name:         528  (32 bytes)
+;   cpu_time:     560
+;   sp:           568
 ;
 switch_to_task:
     ; Save current context - general purpose registers
@@ -23,15 +25,15 @@ switch_to_task:
     push r14
     push r15
     
-    ; Save RSP to current->sp (offset 528)
-    mov [rdi + 528], rsp
+    ; Save RSP to current->sp (offset 568)
+    mov [rdi + 568], rsp
     
     ; Save FPU/SSE state to current->fpu_state (offset 0)
     ; fxsave requires 16-byte aligned address
     fxsave [rdi]
     
-    ; Load RSP from next->sp (offset 528)
-    mov rsp, [rsi + 528]
+    ; Load RSP from next->sp (offset 568)
+    mov rsp, [rsi + 568]
     
     ; Restore FPU/SSE state from next->fpu_state (offset 0)
     fxrstor [rsi]

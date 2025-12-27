@@ -361,7 +361,8 @@ void gfx_draw_cursor(int32_t x, int32_t y) {
     }
 }
 
-void gfx_draw_char(int32_t x, int32_t y, char c, uint32_t color) {
+// Internal: Draw character WITHOUT marking dirty (for batched operations)
+static void gfx_draw_char_no_dirty(int32_t x, int32_t y, char c, uint32_t color) {
     if (!framebuffer) return;
     if (c < 0 || c > 127) return;
     
@@ -390,7 +391,10 @@ void gfx_draw_char(int32_t x, int32_t y, char c, uint32_t color) {
         }
         row_ptr += pitch_u32;  // Move to next line efficiently
     }
-    
+}
+
+void gfx_draw_char(int32_t x, int32_t y, char c, uint32_t color) {
+    gfx_draw_char_no_dirty(x, y, c, color);
     // Mark the character cell as dirty (9 pixels wide for spacing)
     mark_dirty_rect(x, y, 9, 8);
 }
@@ -400,18 +404,30 @@ void gfx_clear_char(int32_t x, int32_t y, uint32_t bg_color) {
 }
 
 void gfx_draw_string(int32_t x, int32_t y, const char *str, uint32_t color) {
+    if (!str || !*str) return;
+    
     int32_t cursor_x = x;
     int32_t cursor_y = y;
+    int32_t max_x = x;  // Track bounding box
+    int32_t max_y = y + 8;
+    
     while (*str) {
         if (*str == '\n') {
             cursor_x = x;
             cursor_y += 10;
+            if (cursor_y + 8 > max_y) max_y = cursor_y + 8;
         } else {
-            gfx_draw_char(cursor_x, cursor_y, *str, color);
+            // Draw without marking dirty (batched)
+            gfx_draw_char_no_dirty(cursor_x, cursor_y, *str, color);
             cursor_x += 9;
+            if (cursor_x > max_x) max_x = cursor_x;
+            if (cursor_y + 8 > max_y) max_y = cursor_y + 8;
         }
         str++;
     }
+    
+    // Mark single bounding box dirty for entire string
+    mark_dirty_rect(x, y, max_x - x, max_y - y);
 }
 
 void gfx_draw_centered_text(const char* text, uint32_t color) {

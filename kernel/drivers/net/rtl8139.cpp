@@ -265,8 +265,9 @@ int rtl8139_receive(void* buffer, uint16_t max_length) {
     g_rtl8139.rx_offset = (g_rtl8139.rx_offset + length + 4 + 3) & ~3;
     g_rtl8139.rx_offset %= 8192;
     
-    // Update CAPR
-    rtl_outw(RTL_REG_CAPR, g_rtl8139.rx_offset - 16);
+    // Update CAPR (handle wrap-around to prevent underflow when rx_offset < 16)
+    uint16_t capr_val = (g_rtl8139.rx_offset + 8192 - 16) % 8192;
+    rtl_outw(RTL_REG_CAPR, capr_val);
     
     return data_len;
 }

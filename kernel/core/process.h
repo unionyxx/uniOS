@@ -34,6 +34,8 @@ struct Process {
     // Offset 512: Process metadata
     uint64_t pid;
     uint64_t parent_pid;      // Parent process ID
+    char name[32];            // Human-readable task name (e.g., "Shell", "Idle")
+    uint64_t cpu_time;        // Ticks consumed (for profiling)
     uint64_t sp;              // Stack Pointer (offset 528 = 512 + 16)
     uint64_t* stack_base;     // Virtual address of stack (KERNEL_STACK_TOP - SIZE)
     uint64_t stack_phys;      // Physical address of stack (for freeing)

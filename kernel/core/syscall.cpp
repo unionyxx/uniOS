@@ -5,7 +5,11 @@
 #include "process.h"
 #include "debug.h"
 #include "graphics.h"
+#include "elf.h"
 #include <stddef.h>
+
+// External assembly function for Ring 3 transition
+extern "C" void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
 // ============================================================================
 // User Pointer Validation
@@ -182,7 +186,23 @@ static uint64_t sys_write(int fd, const char* buf, uint64_t count) {
         }
         return count;
     }
-    return (uint64_t)-1; // Can't write to files (read-only FS)
+    
+    // File descriptor write support
+    init_fd_table();
+    if (fd >= 3 && fd < MAX_OPEN_FILES && fd_table[fd].in_use) {
+        // Use unifs_write to overwrite file contents
+        // Note: This implements simple overwrite semantics, not append
+        int res = unifs_write(fd_table[fd].filename, buf, count);
+        if (res == 0) {
+            // Update cached size in fd_table
+            fd_table[fd].size = count;
+            fd_table[fd].position = count;
+            return count;
+        }
+        return (uint64_t)-1;
+    }
+    
+    return (uint64_t)-1;
 }
 
 // SYS_CLOSE: close(fd) -> 0 on success
@@ -198,6 +218,91 @@ static uint64_t sys_close(int fd) {
 
 // Process ID (simple, single PID for now)
 static uint64_t current_pid = 1;
+
+// User stack location (must match elf_load_user)
+#define USER_STACK_TOP 0x7FFFF000ULL  // Stack grows down from here
+
+// State for the user task wrapper
+static uint64_t g_user_entry = 0;
+static volatile bool g_user_task_done = false;
+static int32_t g_user_exit_status = 0;
+
+// External scheduler functions
+extern void scheduler_create_task(void (*entry)(), const char* name);
+extern void process_exit(int32_t status);
+extern void scheduler_yield();
+extern Process* process_get_current();
+
+/**
+ * @brief Wrapper function that runs in a kernel task, enters Ring 3, 
+ *        and when user code calls SYS_EXIT, properly terminates the task.
+ */
+static void user_task_wrapper() {
+    if (g_user_entry != 0) {
+        DEBUG_LOG("user_task: entering Ring 3 at 0x%llx\n", g_user_entry);
+        
+        // Transition to Ring 3 - when user calls SYS_EXIT, we handle it there
+        enter_user_mode(g_user_entry, USER_STACK_TOP);
+        
+        // Should never reach here - SYS_EXIT will call process_exit
+    }
+    
+    // Fallback - if enter_user_mode somehow returns
+    process_exit(-1);
+}
+
+/**
+ * @brief Execute an ELF binary in Ring 3 (userspace)
+ * @param path Path to the ELF file
+ * @return exit status of user program, or -1 on error
+ */
+static int64_t do_exec(const char* path) {
+    // Open the file
+    UniFSFile file;
+    if (!unifs_open_into(path, &file)) {
+        DEBUG_WARN("exec: file not found: %s\n", path);
+        return -1;
+    }
+    
+    // Validate it's an ELF
+    if (!elf_validate(file.data, file.size)) {
+        DEBUG_WARN("exec: not a valid ELF: %s\n", path);
+        return -1;
+    }
+    
+    DEBUG_LOG("exec: loading ELF '%s' (%llu bytes)\n", path, file.size);
+    
+    // Load the ELF into user memory space
+    uint64_t entry = elf_load_user(file.data, file.size);
+    if (entry == 0) {
+        DEBUG_WARN("exec: failed to load ELF\n");
+        return -1;
+    }
+    
+    DEBUG_LOG("exec: entry point = 0x%llx\n", entry);
+    
+    // Set up globals for the wrapper task
+    g_user_entry = entry;
+    g_user_task_done = false;
+    g_user_exit_status = 0;
+    
+    // Create a new task that will run the user program
+    scheduler_create_task(user_task_wrapper, "user");
+    
+    // Wait for the user task to complete
+    // The user task will set g_user_task_done when it exits
+    while (!g_user_task_done) {
+        scheduler_yield();
+    }
+    
+    DEBUG_LOG("exec: user program exited with status %d\n", g_user_exit_status);
+    return g_user_exit_status;
+}
+
+// Kernel-mode exec wrapper (for shell to call)
+int64_t kernel_exec(const char* path) {
+    return do_exec(path);
+}
 
 extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2, uint64_t arg3) {
     // DEBUG_LOG("Syscall: %d\n", syscall_num); // Uncomment for verbose logging
@@ -223,9 +328,28 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return process_fork();
         }
         case SYS_EXIT: {
-            extern void process_exit(int32_t status);
-            process_exit((int32_t)arg1);
-            return 0;
+            // Signal to the waiting shell that the user program has exited
+            g_user_exit_status = (int32_t)arg1;
+            g_user_task_done = true;
+            
+            // Mark this process as zombie
+            Process* p = process_get_current();
+            if (p) {
+                p->state = PROCESS_ZOMBIE;
+            }
+            
+            // Enable interrupts so timer can fire, then halt
+            asm volatile("sti; hlt" ::: "memory");
+            
+            // Loop forever
+            for(;;) { asm volatile("hlt"); }
+        }
+        case SYS_EXEC: {
+            // Validate path pointer
+            if (validate_user_string((const char*)arg1, 256) == (size_t)-1) {
+                return (uint64_t)-1;
+            }
+            return do_exec((const char*)arg1);
         }
         case SYS_WAIT4: {
             // Validate status pointer if provided

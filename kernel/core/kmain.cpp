@@ -156,37 +156,48 @@ struct Window {
     bool visible;
 };
 
-// Helper: Restore background behind cursor
+// Helper: Restore background behind cursor (optimized row-based)
 static void restore_cursor_area() {
     if (backup_x < 0) return;
-    uint32_t* fb = gfx_get_buffer();  // Use current drawing target
+    uint32_t* fb = gfx_get_buffer();
     uint32_t pitch = g_framebuffer->pitch / 4;
-    int idx = 0;
+    int32_t width = (int32_t)g_framebuffer->width;
+    int32_t height = (int32_t)g_framebuffer->height;
+    
     for (int row = 0; row < 19; row++) {
-        for (int col = 0; col < 12; col++) {
-            int32_t px = backup_x + col, py = backup_y + row;
-            if (px >= 0 && py >= 0 && px < (int32_t)g_framebuffer->width && py < (int32_t)g_framebuffer->height) {
-                fb[py * pitch + px] = cursor_backup[idx];
+        int32_t py = backup_y + row;
+        if (py >= 0 && py < height) {
+            uint32_t* fb_row = &fb[py * pitch];
+            uint32_t* backup_row = &cursor_backup[row * 12];
+            for (int col = 0; col < 12; col++) {
+                int32_t px = backup_x + col;
+                if (px >= 0 && px < width) {
+                    fb_row[px] = backup_row[col];
+                }
             }
-            idx++;
         }
     }
-    // CRITICAL: Tell graphics system this area changed!
     gfx_mark_dirty(backup_x, backup_y, 12, 19);
 }
 
-// Helper: Save background behind cursor
+// Helper: Save background behind cursor (optimized row-based)
 static void save_cursor_area(int32_t x, int32_t y) {
-    uint32_t* fb = gfx_get_buffer();  // Use current drawing target
+    uint32_t* fb = gfx_get_buffer();
     uint32_t pitch = g_framebuffer->pitch / 4;
-    int idx = 0;
+    int32_t width = (int32_t)g_framebuffer->width;
+    int32_t height = (int32_t)g_framebuffer->height;
+    
     for (int row = 0; row < 19; row++) {
-        for (int col = 0; col < 12; col++) {
-            int32_t px = x + col, py = y + row;
-            if (px >= 0 && py >= 0 && px < (int32_t)g_framebuffer->width && py < (int32_t)g_framebuffer->height) {
-                cursor_backup[idx] = fb[py * pitch + px];
+        int32_t py = y + row;
+        if (py >= 0 && py < height) {
+            uint32_t* fb_row = &fb[py * pitch];
+            uint32_t* backup_row = &cursor_backup[row * 12];
+            for (int col = 0; col < 12; col++) {
+                int32_t px = x + col;
+                if (px >= 0 && px < width) {
+                    backup_row[col] = fb_row[px];
+                }
             }
-            idx++;
         }
     }
     backup_x = x; backup_y = y;
@@ -623,7 +634,7 @@ extern "C" void _start(void) {
     DEBUG_INFO("Scheduler Initialized");
     
     // Create dedicated idle task (always runnable, prevents deadlock)
-    scheduler_create_task(idle_task_entry);
+    scheduler_create_task(idle_task_entry, "Idle");
     DEBUG_INFO("Idle Task Created");
     
     // Initialize USB subsystem via unified input layer

@@ -1,6 +1,7 @@
 #include "unifs.h"
 #include "kstring.h"
 #include "heap.h"
+#include "syscall.h"  // For is_file_open()
 
 // ============================================================================
 // uniFS Implementation
@@ -144,19 +145,6 @@ bool unifs_open_into(const char* name, UniFSFile* out_file) {
     }
     
     return false;
-}
-
-// DEPRECATED: NOT thread-safe! Use unifs_open_into() instead.
-// WARNING: This function uses a static buffer and WILL cause data races 
-// if called from multiple contexts (interrupts, concurrent tasks).
-// All new code should use unifs_open_into() with a stack-allocated UniFSFile.
-const UniFSFile* unifs_open(const char* name) {
-    static UniFSFile file;
-    
-    if (unifs_open_into(name, &file)) {
-        return &file;
-    }
-    return nullptr;
 }
 
 bool unifs_file_exists(const char* name) {
@@ -312,6 +300,11 @@ int unifs_write(const char* name, const void* data, uint64_t size) {
         int result = unifs_create(name);
         if (result != UNIFS_OK) return result;
         file = find_ram_file(name);
+    } else {
+        // Prevent modifying files currently open via fd (prevents use-after-free)
+        if (is_file_open(name)) {
+            return UNIFS_ERR_IN_USE;
+        }
     }
     
     // Allocate/reallocate buffer if needed
@@ -351,6 +344,11 @@ int unifs_append(const char* name, const void* data, uint64_t size) {
         int result = unifs_create(name);
         if (result != UNIFS_OK) return result;
         file = find_ram_file(name);
+    } else {
+        // Prevent modifying files currently open via fd (prevents use-after-free)
+        if (is_file_open(name)) {
+            return UNIFS_ERR_IN_USE;
+        }
     }
     
     uint64_t new_size = file->size + size;
@@ -394,7 +392,7 @@ int unifs_delete(const char* name) {
     }
     
     // Check if file is currently open (prevent use-after-free)
-    extern bool is_file_open(const char* filename);
+    // is_file_open() is declared in syscall.h
     if (is_file_open(name)) {
         return UNIFS_ERR_IN_USE;
     }

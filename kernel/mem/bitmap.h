@@ -17,4 +17,11 @@ public:
 private:
     uint8_t* m_buffer;
     size_t m_size; // in bits
+    mutable size_t m_next_free_hint;  // Optimization: start search from here
+    
+public:
+    void update_hint(size_t freed_index) {
+        if (freed_index < m_next_free_hint) m_next_free_hint = freed_index;
+    }
+    void reset_hint() { m_next_free_hint = 0; }
 };

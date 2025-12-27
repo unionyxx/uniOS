@@ -70,7 +70,7 @@ QEMU_USB = -device qemu-xhci -device usb-kbd -device usb-mouse
 # Build Targets
 # ==============================================================================
 
-.PHONY: all release debug clean run run-net run-usb run-sound run-serial run-gdb help directories
+.PHONY: all release debug clean run run-net run-usb run-sound run-serial run-gdb help directories version-sync version-check
 
 all: release
 
@@ -80,7 +80,7 @@ release:
 debug:
 	@$(MAKE) BUILD=debug iso
 
-iso: directories $(ISO_IMAGE)
+iso: directories version-sync $(ISO_IMAGE)
 
 directories:
 	@mkdir -p $(BUILD_DIR)
@@ -136,6 +136,12 @@ clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(BUILD_DIR)
 
+version-sync:
+	@$(PYTHON) $(TOOLS_DIR)/sync_version.py
+
+version-check:
+	@$(PYTHON) $(TOOLS_DIR)/sync_version.py --check
+
 help:
 	@echo "uniOS Build System"
 	@echo "=================="
@@ -155,4 +161,7 @@ help:
 	@echo ""
 	@echo "Utility:"
 	@echo "  make clean     - Remove build directory"
+	@echo "  make version-sync  - Sync version to README/docs"
+	@echo "  make version-check - Verify versions match"
 	@echo "  make help      - Show this help"
+

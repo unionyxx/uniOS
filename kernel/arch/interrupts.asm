@@ -18,6 +18,14 @@ extern exception_handler
 %endmacro
 
 isr_common_stub:
+    ; TODO: swapgs handling requires proper GS base initialization
+    ; For now, skip it to test basic userspace functionality
+    ; Check if we came from Ring 3 (userspace)
+    ; test qword [rsp+24], 3
+    ; jz .isr_from_kernel
+    ; swapgs
+; .isr_from_kernel:
+
     ; Save CPU state
     push rax
     push rbx
@@ -56,6 +64,12 @@ isr_common_stub:
     pop rax
 
     add rsp, 16         ; Clean up error code and interrupt number
+    
+    ; TODO: swapgs handling requires proper GS base initialization
+    ; test qword [rsp+8], 3
+    ; jz .isr_to_kernel
+    ; swapgs
+; .isr_to_kernel:
     iretq
 
 ; Define ISRs
@@ -104,6 +118,12 @@ ISR_NOERRCODE 31
 extern irq_handler
 
 irq_common_stub:
+    ; TODO: swapgs handling requires proper GS base initialization
+    ; test qword [rsp+24], 3
+    ; jz .irq_from_kernel
+    ; swapgs
+; .irq_from_kernel:
+
     ; Save CPU state
     push rax
     push rbx
@@ -142,6 +162,12 @@ irq_common_stub:
     pop rax
 
     add rsp, 16         ; Clean up error code and interrupt number
+    
+    ; TODO: swapgs handling requires proper GS base initialization
+    ; test qword [rsp+8], 3
+    ; jz .irq_to_kernel
+    ; swapgs
+; .irq_to_kernel:
     iretq
 
 ; Define IRQs (IRQ0-15 -> vectors 32-47)
@@ -184,6 +210,9 @@ extern syscall_handler
 
 global isr128
 isr128:
+    ; TODO: swapgs handling requires proper GS base initialization
+    ; For now, skip it - user code doesn't need GS
+
     ; Save callee-saved registers
     push rbx
     push rbp
@@ -192,11 +221,17 @@ isr128:
     push r14
     push r15
     
-    ; Syscall convention: RAX = syscall number, RDI/RSI/RDX = args
-    mov rdi, rax    ; syscall_num
-    mov rsi, rbx    ; arg1 (we use RBX for user-mode arg1)
-    mov rdx, rcx    ; arg2
-    mov rcx, r8     ; arg3
+    ; Linux x86-64 syscall convention:
+    ; User passes: RAX=syscall_num, RDI=arg1, RSI=arg2, RDX=arg3
+    ; C function expects: RDI=syscall_num, RSI=arg1, RDX=arg2, RCX=arg3
+    ; We need to shuffle without clobbering, use r10/r11 as temps
+    mov r10, rdi    ; save arg1
+    mov r11, rsi    ; save arg2
+    ; Now we can safely overwrite
+    mov rdi, rax    ; syscall_num = RAX
+    mov rsi, r10    ; arg1 = saved RDI
+    mov rcx, rdx    ; arg3 = RDX (before we clobber rdx)
+    mov rdx, r11    ; arg2 = saved RSI
     
     call syscall_handler
     
@@ -209,4 +244,7 @@ isr128:
     pop rbp
     pop rbx
     
+    ; TODO: swapgs handling requires proper GS base initialization
     iretq
+
+

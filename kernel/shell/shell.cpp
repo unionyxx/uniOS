@@ -19,6 +19,9 @@
 #include "mem/heap.h"
 #include "core/version.h"
 #include "core/scheduler.h"
+#include "core/debug.h"
+#include "core/process.h"
+#include "core/syscall.h"
 #include <stddef.h>
 
 #include "ac97.h"
@@ -1733,13 +1736,13 @@ static void cmd_wc(const char* filename, const char* piped_input) {
     
     // Get data from file or piped input
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -1813,13 +1816,13 @@ static void cmd_head(const char* args, const char* piped_input) {
     uint64_t data_len = 0;
     
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -1867,13 +1870,13 @@ static void cmd_tail(const char* args, const char* piped_input) {
     uint64_t data_len = 0;
     
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -2084,13 +2087,13 @@ static void cmd_uniq(const char* filename, const char* piped_input) {
     uint64_t data_len = 0;
     
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -2143,13 +2146,13 @@ static void cmd_rev(const char* filename, const char* piped_input) {
     uint64_t data_len = 0;
     
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -2180,13 +2183,13 @@ static void cmd_tac(const char* filename, const char* piped_input) {
     uint64_t data_len = 0;
     
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -2231,13 +2234,13 @@ static void cmd_nl(const char* filename, const char* piped_input) {
     uint64_t data_len = 0;
     
     if (filename && filename[0]) {
-        const UniFSFile* file = unifs_open(filename);
-        if (!file) {
+        UniFSFile file;
+        if (!unifs_open_into(filename, &file)) {
             error_file_not_found(filename);
             return;
         }
-        data = (const char*)file->data;
-        data_len = file->size;
+        data = (const char*)file.data;
+        data_len = file.size;
     } else if (piped_input) {
         data = piped_input;
         data_len = strlen(piped_input);
@@ -2669,6 +2672,171 @@ static void cmd_cat_piped(const char* input) {
 }
 
 // =============================================================================
+// Process Inspection (ps command)
+// =============================================================================
+static void cmd_ps() {
+    g_terminal.write_line("PID  State      Name");
+    g_terminal.write_line("---  ---------  ----------------");
+    
+    Process* head = scheduler_get_process_list();
+    if (!head) {
+        g_terminal.write_line("  (no processes)");
+        return;
+    }
+    
+    Process* p = head;
+    do {
+        char buf[64];
+        int i = 0;
+        
+        // PID (3 chars, right-align)
+        if (p->pid >= 100) buf[i++] = '0' + (p->pid / 100) % 10;
+        else buf[i++] = ' ';
+        if (p->pid >= 10) buf[i++] = '0' + (p->pid / 10) % 10;
+        else buf[i++] = ' ';
+        buf[i++] = '0' + p->pid % 10;
+        buf[i++] = ' '; buf[i++] = ' ';
+        
+        // State (9 chars)
+        const char* state_str = "???";
+        switch (p->state) {
+            case PROCESS_READY:    state_str = "READY    "; break;
+            case PROCESS_RUNNING:  state_str = "RUNNING  "; break;
+            case PROCESS_BLOCKED:  state_str = "BLOCKED  "; break;
+            case PROCESS_SLEEPING: state_str = "SLEEPING "; break;
+            case PROCESS_ZOMBIE:   state_str = "ZOMBIE   "; break;
+            case PROCESS_WAITING:  state_str = "WAITING  "; break;
+        }
+        while (*state_str) buf[i++] = *state_str++;
+        buf[i++] = ' '; buf[i++] = ' ';
+        
+        // Name
+        const char* n = p->name[0] ? p->name : "(unnamed)";
+        while (*n && i < 60) buf[i++] = *n++;
+        buf[i] = '\0';
+        
+        g_terminal.write_line(buf);
+        p = p->next;
+    } while (p != head);
+}
+
+// =============================================================================
+// Exec Command - Execute ELF binary in Ring 3
+// =============================================================================
+static void cmd_exec(const char* args) {
+    // Skip leading whitespace
+    while (*args == ' ') args++;
+    
+    if (args[0] == '\0') {
+        g_terminal.write_line("Usage: exec <program>");
+        g_terminal.write_line("Executes an ELF binary in Ring 3 (userspace).");
+        return;
+    }
+    
+    // Check if file exists first
+    if (!unifs_file_exists(args)) {
+        g_terminal.write("Error: program not found: ");
+        g_terminal.write_line(args);
+        last_exit_status = 1;
+        return;
+    }
+    
+    g_terminal.write("Executing: ");
+    g_terminal.write_line(args);
+    
+    // FIXME: fork() has issues with VMM isolation causing Double Faults.
+    // For now, just call kernel_exec directly. This works but the shell
+    // won't resume after the user program exits (it will crash).
+    // This is a known limitation until fork/exec is properly debugged.
+    
+    int64_t result = kernel_exec(args);
+    
+    if (result < 0) {
+        g_terminal.write_line("Failed to execute program.");
+        last_exit_status = 1;
+    }
+    // If user program exits, we may crash since we don't have proper
+    // process isolation yet
+}
+
+// =============================================================================
+// Debug Commands (debug level, debug module)
+// =============================================================================
+static void cmd_debug(const char* args) {
+    // Skip leading whitespace
+    while (*args == ' ') args++;
+    
+    if (args[0] == '\0') {
+        // Show current settings
+        char buf[64];
+        int i = 0;
+        
+        auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
+        auto append_num = [&](int n) {
+            if (n >= 100) buf[i++] = '0' + (n / 100) % 10;
+            if (n >= 10) buf[i++] = '0' + (n / 10) % 10;
+            buf[i++] = '0' + n % 10;
+        };
+        
+        append_str("Log level: "); append_num(g_log_min_level);
+        append_str(" (");
+        switch (g_log_min_level) {
+            case LOG_TRACE: append_str("TRACE"); break;
+            case LOG_INFO:  append_str("INFO");  break;
+            case LOG_WARN:  append_str("WARN");  break;
+            case LOG_ERROR: append_str("ERROR"); break;
+            case LOG_FATAL: append_str("FATAL"); break;
+            default:        append_str("???");   break;
+        }
+        append_str(")");
+        buf[i] = '\0';
+        g_terminal.write_line(buf);
+        
+        i = 0;
+        append_str("Module mask: 0x");
+        const char* hex = "0123456789ABCDEF";
+        buf[i++] = hex[(g_log_module_mask >> 4) & 0xF];
+        buf[i++] = hex[g_log_module_mask & 0xF];
+        buf[i] = '\0';
+        g_terminal.write_line(buf);
+        return;
+    }
+    
+    // Parse subcommand
+    if (strncmp(args, "level ", 6) == 0) {
+        int level = args[6] - '0';
+        if (level >= 0 && level <= 4) {
+            g_log_min_level = level;
+            g_terminal.write_line("Log level updated.");
+        } else {
+            g_terminal.write_line("Usage: debug level <0-4>");
+            g_terminal.write_line("  0=TRACE, 1=INFO, 2=WARN, 3=ERROR, 4=FATAL");
+        }
+    } else if (strncmp(args, "module ", 7) == 0) {
+        // Parse hex value
+        int mask = 0;
+        const char* p = args + 7;
+        if (*p == '0' && (*(p+1) == 'x' || *(p+1) == 'X')) p += 2;
+        while (*p) {
+            int digit;
+            if (*p >= '0' && *p <= '9') digit = *p - '0';
+            else if (*p >= 'a' && *p <= 'f') digit = *p - 'a' + 10;
+            else if (*p >= 'A' && *p <= 'F') digit = *p - 'A' + 10;
+            else break;
+            mask = (mask << 4) | digit;
+            p++;
+        }
+        g_log_module_mask = mask;
+        g_terminal.write_line("Module mask updated.");
+    } else {
+        g_terminal.write_line("Usage:");
+        g_terminal.write_line("  debug           - Show current settings");
+        g_terminal.write_line("  debug level <N> - Set log level (0=TRACE..4=FATAL)");
+        g_terminal.write_line("  debug module <hex> - Set module mask (0xFF=all)");
+    }
+}
+
+// =============================================================================
 // Command Dispatch Table
 // =============================================================================
 static const CommandEntry commands[] = {
@@ -2688,6 +2856,7 @@ static const CommandEntry commands[] = {
     {"env",      CMD_NONE, cmd_env, nullptr, nullptr},
     {"true",     CMD_NONE, cmd_true, nullptr, nullptr},
     {"false",    CMD_NONE, cmd_false, nullptr, nullptr},
+    {"ps",       CMD_NONE, cmd_ps, nullptr, nullptr},
     
     // Arg commands (command + space + args)
     {"cat",      CMD_ARGS, nullptr, cmd_cat, nullptr},
@@ -2708,6 +2877,8 @@ static const CommandEntry commands[] = {
     {"source",   CMD_ARGS, nullptr, cmd_source, nullptr},
     {"time",     CMD_ARGS, nullptr, cmd_time, nullptr},
     {"echo",     CMD_ARGS, nullptr, cmd_echo, nullptr},
+    {"debug",    CMD_ARGS, nullptr, cmd_debug, nullptr},
+    {"exec",     CMD_ARGS, nullptr, cmd_exec, nullptr},
     
     // Piped commands (support file arg or piped input)
     {"wc",       CMD_PIPED, nullptr, nullptr, cmd_wc},
@@ -3495,6 +3666,8 @@ void shell_process_char(char c) {
                 "exit", "time", "true", "false", "sleep", "read", "test", "expr", "source",
                 // Audio commands (v0.6.2+)
                 "audio",
+                // Debug commands (v0.7.0+)
+                "ps", "debug",
                 nullptr
             };
             

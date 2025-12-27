@@ -118,6 +118,7 @@ void pmm_free_frame(void* frame) {
     if (frame_idx < bitmap_bits) {
         if (pmm_bitmap[frame_idx]) {
             pmm_bitmap.set(frame_idx, false);
+            pmm_bitmap.update_hint(frame_idx);  // Update hint for faster reallocation
             free_memory += 4096;
         }
     }

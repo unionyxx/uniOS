@@ -138,12 +138,21 @@ uint64_t elf_load_user(const uint8_t* data, uint64_t size) {
         }
     }
     
-    // Also map a user stack at 0x7FFF0000
-    void* stack_frame = pmm_alloc_frame();
-    if (stack_frame) {
-        vmm_map_page(0x7FFF0000, (uint64_t)stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
-        void* stack_dest = (void*)vmm_phys_to_virt((uint64_t)stack_frame);
-        memset(stack_dest, 0, 0x1000);
+    // Also map a user stack (64KB = 16 pages) at USER_STACK_TOP
+    // Stack grows down, so we map pages below USER_STACK_TOP
+    #define USER_STACK_PAGES 16
+    #define USER_STACK_SIZE (USER_STACK_PAGES * 0x1000)
+    #define USER_STACK_TOP 0x7FFFF000ULL
+    
+    uint64_t stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        void* stack_frame = pmm_alloc_frame();
+        if (stack_frame) {
+            uint64_t vaddr = stack_base + i * 0x1000;
+            vmm_map_page(vaddr, (uint64_t)stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            void* stack_dest = (void*)vmm_phys_to_virt((uint64_t)stack_frame);
+            memset(stack_dest, 0, 0x1000);
+        }
     }
     
     return ehdr->e_entry;

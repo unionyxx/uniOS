@@ -16,7 +16,7 @@
 
 **uniOS** is a hobby operating system built from scratch. It features a working shell with command piping, TCP/IP networking, USB support, and runs on real x86-64 hardware.
 
-Current Version: **v0.6.2**
+Current Version: **v0.6.3**
 
 ---
 
@@ -46,7 +46,7 @@ Current Version: **v0.6.2**
 | Limitation | Details |
 |------------|---------|
 | **16GB RAM cap** | PMM bitmap is statically sized. Memory above 16GB is ignored. |
-| **No user-mode** | All code runs in ring 0. No syscall interface yet. |
+| **Experimental user-mode** | Basic syscall interface (exit, read, write). No memory protection between processes yet. |
 | **USB polling** | HID devices polled on timer, not via hardware interrupts. |
 | **No USB hubs** | Only devices directly connected to root ports work. |
 | **QEMU-first** | Tested primarily on QEMU. Real hardware may have driver issues. |

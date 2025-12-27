@@ -117,6 +117,31 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
 }
 
+// Map page without TLB flush (for batched operations - caller must flush)
+static void vmm_map_page_no_flush(uint64_t virt, uint64_t phys, uint64_t flags) {
+    uint64_t pml4_index = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
+    uint64_t pd_index   = (virt >> 21) & 0x1FF;
+    uint64_t pt_index   = (virt >> 12) & 0x1FF;
+
+    uint64_t* pdpt = get_next_level(pml4, pml4_index, true);
+    if (!pdpt) return;
+
+    uint64_t* pd = get_next_level(pdpt, pdpt_index, true);
+    if (!pd) return;
+
+    uint64_t* pt = get_next_level(pd, pd_index, true);
+    if (!pt) return;
+
+    pt[pt_index] = phys | flags;
+    // No TLB flush - caller is responsible
+}
+
+// Flush entire TLB (for use after batched mappings)
+static inline void vmm_flush_tlb_all() {
+    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+}
+
 uint64_t vmm_virt_to_phys(uint64_t virt) {
     uint64_t pml4_index = (virt >> 39) & 0x1FF;
     uint64_t pdpt_index = (virt >> 30) & 0x1FF;
@@ -374,12 +399,15 @@ uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size) {
     uint64_t virt_base = mmio_next_virt;
     mmio_next_virt += pages * 0x1000;
     
-    // Map each page with MMIO flags (uncacheable)
+    // Map each page with MMIO flags (uncacheable) - no per-page TLB flush
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t virt = virt_base + i * 0x1000;
         uint64_t phys = phys_page + i * 0x1000;
-        vmm_map_page(virt, phys, PTE_MMIO);
+        vmm_map_page_no_flush(virt, phys, PTE_MMIO);
     }
+    
+    // Single TLB flush after all mappings
+    vmm_flush_tlb_all();
     
     // Return virtual address with original offset
     return virt_base + offset;
@@ -397,10 +425,13 @@ DMAAllocation vmm_alloc_dma(size_t pages) {
     uint64_t virt_base = mmio_next_virt;
     mmio_next_virt += pages * 0x1000;
     
-    // Map pages
+    // Map pages without per-page TLB flush
     for (size_t i = 0; i < pages; i++) {
-        vmm_map_page(virt_base + i * 0x1000, phys + i * 0x1000, PTE_MMIO);
+        vmm_map_page_no_flush(virt_base + i * 0x1000, phys + i * 0x1000, PTE_MMIO);
     }
+    
+    // Single TLB flush after all mappings
+    vmm_flush_tlb_all();
     
     alloc.virt = virt_base;
     alloc.phys = phys;

@@ -38,6 +38,10 @@ Process* process_find_by_pid(uint64_t pid) {
     return nullptr;
 }
 
+Process* scheduler_get_process_list() {
+    return process_list;
+}
+
 void scheduler_init() {
     DEBUG_INFO("Initializing Scheduler...\n");
     
@@ -60,8 +64,22 @@ void scheduler_init() {
         panic("Failed to allocate idle task stack!");
     }
     
+    // Stack sentinel: fill bottom with magic pattern for overflow detection
+    uint64_t* sentinel = current_process->stack_base;
+    for (size_t i = 0; i < 8; i++) {
+        sentinel[i] = 0xDEADBEEFDEADBEEF;
+    }
+    
     current_process->pid = 0;
     current_process->parent_pid = 0;
+    
+    // Set name for initial kernel task
+    const char* init_name = "Kernel";
+    int ni = 0;
+    while (init_name[ni] && ni < 31) { current_process->name[ni] = init_name[ni]; ni++; }
+    current_process->name[ni] = '\0';
+    current_process->cpu_time = 0;
+    
     current_process->sp = 0;  // Not used - idle task continues on current stack
     current_process->stack_phys = 0;  // Heap-allocated, not PMM
     current_process->page_table = nullptr; // Kernel tasks share kernel page table
@@ -79,7 +97,7 @@ void scheduler_init() {
     DEBUG_INFO("Scheduler Initialized. Initial PID: 0\n");
 }
 
-void scheduler_create_task(void (*entry)()) {
+void scheduler_create_task(void (*entry)(), const char* name) {
     // CRITICAL: Disable interrupts to prevent timer IRQ from running scheduler_schedule
     // while we're modifying the process list. This prevents deadlock/corruption.
     uint64_t flags = interrupts_save_disable();
@@ -98,6 +116,15 @@ void scheduler_create_task(void (*entry)()) {
     
     new_process->pid = next_pid++;
     new_process->parent_pid = current_process ? current_process->pid : 0;
+    
+    // Copy task name
+    int ni = 0;
+    if (name) {
+        while (name[ni] && ni < 31) { new_process->name[ni] = name[ni]; ni++; }
+    }
+    new_process->name[ni] = '\0';
+    new_process->cpu_time = 0;
+    
     new_process->state = PROCESS_READY;
     new_process->exit_status = 0;
     new_process->wait_for_pid = 0;
@@ -115,6 +142,12 @@ void scheduler_create_task(void (*entry)()) {
         aligned_free(new_process);  // Must use aligned_free, not free!
         interrupts_restore(flags);
         return; 
+    }
+    
+    // Stack sentinel: fill with magic pattern for overflow detection
+    uint64_t* sentinel = new_process->stack_base;
+    for (size_t i = 0; i < 8; i++) {
+        sentinel[i] = 0xDEADBEEFDEADBEEF;
     }
     
     // Align stack top to 16 bytes
@@ -164,6 +197,16 @@ static void wake_sleeping_processes() {
 
 void scheduler_schedule() {
     if (!current_process) return;
+    
+    // Stack overflow detection: check if sentinel at bottom of stack is intact
+    // Only check if this is a created task (has a stack_base)
+    if (current_process->stack_base && 
+        current_process->stack_base[0] != 0xDEADBEEFDEADBEEF) {
+        // Stack has overflowed into sentinel area
+        kprintf_color(0xFF0000, "\n*** STACK OVERFLOW DETECTED ***\n");
+        kprintf("Process: PID=%d Name=%s\n", current_process->pid, current_process->name);
+        panic("Stack overflow detected in process!");
+    }
     
     // Disable interrupts during scheduling to prevent reentrancy
     // Note: We don't use spinlock here because we can't hold it across context switch

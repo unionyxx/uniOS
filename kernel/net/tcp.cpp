@@ -38,7 +38,11 @@
 #include "spinlock.h"
 
 static TcpSocket sockets[TCP_MAX_SOCKETS];
-static uint16_t next_ephemeral_port = 49152;
+
+// Ephemeral port range (IANA recommended: 49152-65535)
+#define EPHEMERAL_PORT_MIN 49152
+#define EPHEMERAL_PORT_MAX 65535
+static uint16_t next_ephemeral_port = EPHEMERAL_PORT_MIN;
 
 void tcp_init() {
     for (int i = 0; i < TCP_MAX_SOCKETS; i++) {
@@ -57,16 +61,11 @@ struct TcpPseudoHeader {
     uint16_t tcp_length;
 } __attribute__((packed));
 
-// Static lock for tcp_checksum buffer
-static Spinlock tcp_checksum_lock;
 
-// Calculate TCP checksum
+// Calculate TCP checksum (reentrant - uses stack buffer)
 static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip, const void* tcp_data, uint16_t length) {
-    // Use static buffer to avoid heap allocation overhead per packet
-    // Protected by spinlock in case of preemption between tasks
-    static uint8_t buffer[1600];
-    
-    spinlock_acquire(&tcp_checksum_lock);
+    // Stack-allocated buffer - reentrant, no locking needed
+    uint8_t buffer[1600];
     
     TcpPseudoHeader* pseudo = (TcpPseudoHeader*)buffer;
     
@@ -81,9 +80,7 @@ static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip, const void* tcp_d
         buffer[sizeof(TcpPseudoHeader) + i] = src[i];
     }
     
-    uint16_t result = ipv4_checksum(buffer, sizeof(TcpPseudoHeader) + length);
-    spinlock_release(&tcp_checksum_lock);
-    return result;
+    return ipv4_checksum(buffer, sizeof(TcpPseudoHeader) + length);
 }
 
 // Send TCP segment
@@ -374,6 +371,10 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port) {
     s->remote_ip = dst_ip;
     s->remote_port = dst_port;
     s->local_port = next_ephemeral_port++;
+    // Wrap around when uint16_t overflows past 65535 OR when we need to stay in range
+    if (next_ephemeral_port == 0 || next_ephemeral_port < EPHEMERAL_PORT_MIN) {
+        next_ephemeral_port = EPHEMERAL_PORT_MIN;
+    }
     s->seq_num = timer_get_ticks() & 0xFFFFFFFF;
     s->send_next = s->seq_num;
     s->state = TCP_SYN_SENT;
