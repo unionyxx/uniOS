@@ -24,7 +24,7 @@
 #include "core/syscall.h"
 #include <stddef.h>
 
-#include "ac97.h"
+#include "sound.h"
 
 // Use shared string utilities
 using kstring::strcmp;
@@ -3046,62 +3046,67 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
 
     // Sound driver debug commands
     if (strcmp(local_cmd, "audio status") == 0) {
-        if (ac97_is_initialized())
-            g_terminal.write_line("AC97 is initialized");
+        if (sound_is_initialized()) {
+            g_terminal.write_line("Sound is initialized");
+            if (sound_get_card_type() == SOUND_AC97)
+                g_terminal.write_line("Sound card: AC97 compatible");
+            else
+                g_terminal.write_line("Sound card: High Definition Audio compatible");
+        }
         else
-            g_terminal.write_line("AC97 is not initialized (no compatible sound card found)");
+            g_terminal.write_line("Sound is not initialized (no compatible sound card found)");
         return true;
     }
 
     if (strncmp(local_cmd, "audio play ", 11) == 0) {
-        if (!ac97_is_initialized()) {
-            g_terminal.write_line("Audio not available: No AC97 sound card found.");
+        if (!sound_is_initialized()) {
+            g_terminal.write_line("Audio not available: No compatible sound card found.");
             g_terminal.write_line("Tip: Use 'audio status' to check sound card status.");
             return true;
         }
         // Note: volume is preserved from last 'audio volume' command
-        ac97_play_wav_file(local_cmd + 11);
+        sound_play_wav_file(local_cmd + 11);
 
         return true;
     }
 
     if (strcmp(local_cmd, "audio pause") == 0) {
-        if (!ac97_is_initialized()) {
-            g_terminal.write_line("Audio not available: No AC97 sound card found.");
+        if (!sound_is_initialized()) {
+            g_terminal.write_line("Audio not available: No compatible sound card found.");
             return true;
         }
-        ac97_pause();
+        sound_pause();
         return true;
     }
 
     if (strcmp(local_cmd, "audio resume") == 0) {
-        if (!ac97_is_initialized()) {
-            g_terminal.write_line("Audio not available: No AC97 sound card found.");
+        if (!sound_is_initialized()) {
+            g_terminal.write_line("Audio not available: No compatible sound card found.");
             return true;
         }
-        ac97_resume();
+        sound_resume();
         return true;
     }
 
     if (strcmp(local_cmd, "audio stop") == 0) {
-        if (!ac97_is_initialized()) {
-            g_terminal.write_line("Audio not available: No AC97 sound card found.");
+        if (!sound_is_initialized()) {
+            g_terminal.write_line("Audio not available: No compatible sound card found.");
             return true;
         }
-        ac97_stop();
+        sound_stop();
         return true;
     }
     
     // audio volume [0-100] - Get or set volume
     if (strcmp(local_cmd, "audio volume") == 0) {
-        if (!ac97_is_initialized()) {
-            g_terminal.write_line("Audio not available: No AC97 sound card found.");
+        if (!sound_is_initialized()) {
+            g_terminal.write_line("Audio not available: No compatible sound card found.");
             return true;
         }
         // Show current volume
         char buf[32] = "Volume: ";
         int i = 8;
-        uint8_t vol = ac97_get_volume();
+        uint8_t vol = sound_get_volume();
         if (vol >= 100) buf[i++] = '1';
         if (vol >= 10) buf[i++] = '0' + (vol / 10) % 10;
         buf[i++] = '0' + vol % 10;
@@ -3112,8 +3117,8 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
     }
     
     if (strncmp(local_cmd, "audio volume ", 13) == 0) {
-        if (!ac97_is_initialized()) {
-            g_terminal.write_line("Audio not available: No AC97 sound card found.");
+        if (!sound_is_initialized()) {
+            g_terminal.write_line("Audio not available: No compatible sound card found.");
             return true;
         }
         // Parse volume value
@@ -3124,7 +3129,7 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
             vol_str++;
         }
         if (vol > 100) vol = 100;
-        ac97_set_volume((uint8_t)vol);
+        sound_set_volume((uint8_t)vol);
         
         char buf[32] = "Volume set to ";
         int i = 14;

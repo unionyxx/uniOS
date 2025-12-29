@@ -54,19 +54,21 @@ struct Ac97BufferEntry {
 };
 
 struct Ac97Device {
+    // Flags.
+    bool is_playing; // Is playing something?
+    bool is_paused; // Is paused?
+
+    bool free_sound_data_on_stop; // Free sound data memory when playback is finished?
+
+    bool is_initialized; // Is sound card initialized and ready to play?
+
+    uint8_t sound_volume; // Current sound volume.
+
     // Sound card data.
     uint64_t nam; // Native Audio Mixer base address.
     uint64_t nabm; // Native Audio Bus Master base address.
 
     uint16_t capabilities; // Extended capabilities of sound card.
-
-    // Flags.
-    bool is_playing; // Is playing something?
-    bool is_paused; // Is paused?
-
-    bool is_initialized; // Is sound card initialized and ready to play?
-
-    uint8_t sound_volume; // Current sound volume.
 
     // Memory stuff.
     DMAAllocation buffer_entries_dma; // DMA allocation for buffer entries.
@@ -96,9 +98,6 @@ void ac97_set_volume(uint8_t volume);
 uint8_t ac97_get_volume();
 
 void ac97_set_sample_rate(uint16_t sample_rate);
-
-void ac97_play_wav_file(const char* filename);
-void ac97_play_pcm_file(const char* filename);
 
 void ac97_play(uint8_t* data, uint32_t size);
 void ac97_resume();

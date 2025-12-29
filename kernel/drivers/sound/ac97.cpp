@@ -7,12 +7,18 @@
 // - unionyxx - uniOS.
 
 #include "ac97.h"
+
 #include "wav.h"
+#include "mp3.h"
+
 #include "debug.h"
 #include "unifs.h"
+
+#include "io.h"
 #include "pmm.h"
 #include "vmm.h"
-#include "io.h"
+#include "heap.h"
+
 #include "kstring.h"
 using kstring::memset;
 using kstring::memcpy;
@@ -135,7 +141,12 @@ void ac97_reset() {
     memset((void*)ac97_info.buffer_entries_dma.virt, 0, ac97_info.buffer_entries_dma.size);
     memset((void*)ac97_info.sound_buffers_dma.virt, 0, ac97_info.sound_buffers_dma.size);
 
-    // Do not free this one! It's pointer to file system file data!
+    // Do not free this one unless asked! It's pointer to file system file data!
+    if (ac97_info.free_sound_data_on_stop) {
+        free(ac97_info.sound_data);
+        ac97_info.free_sound_data_on_stop = false;
+    }
+
     ac97_info.sound_data = nullptr;
     ac97_info.sound_data_size = 0;
 }
@@ -178,57 +189,8 @@ void ac97_set_sample_rate(uint16_t sample_rate) {
         outw(ac97_info.nam + AC97_NAM_VARIABLE_SAMPLE_RATE_LFE_DAC, sample_rate);
         outw(ac97_info.nam + AC97_NAM_VARIABLE_SAMPLE_RATE_LR_ADC, sample_rate);
     }
-}
 
-// Play .wav audio file.
-void ac97_play_wav_file(const char* filename) {
-    if (!ac97_info.is_initialized) {
-        DEBUG_ERROR("ac97 device is not initialized");
-        return;
-    }
-
-    DEBUG_INFO("trying to play %s", filename);
-
-    uint8_t* data_ptr;
-    uint32_t data_size;
-
-    // Try to open WAV file.
-    WavHeader* wav = wav_open(filename, &data_ptr, &data_size);
-    if (!wav) {
-        DEBUG_ERROR("wav_open failed");
-        return;
-    }
-
-    // Set sample rate to one retrieved from WAV header.
-    ac97_set_sample_rate(wav->samples);
-
-    // Play it!
-    ac97_play(data_ptr, data_size);
-}
-
-// Play raw .pcm audio file.
-void ac97_play_pcm_file(const char* filename) {
-    if (!ac97_info.is_initialized) {
-        DEBUG_ERROR("ac97 device is not initialized");
-        return;
-    }
-
-    DEBUG_INFO("trying to play %s", filename);
-
-    UniFSFile file;
-    if (!unifs_open_into(filename, &file)) {
-        DEBUG_ERROR("unifs_open_into failed");
-        return;
-    }
-
-    uint8_t* data_ptr = (uint8_t*)(uint64_t)file.data;
-    uint32_t data_size = file.size;
-
-    // FIXME: hard-coded sample rate value for ffmpeg .pcm files.
-    ac97_set_sample_rate(22050);
-
-    // Play it!
-    ac97_play(data_ptr, data_size);
+    DEBUG_INFO("set sample rate to %d", sample_rate);
 }
 
 // Play PCM byte array.
@@ -448,6 +410,12 @@ uint32_t ac97_get_played_bytes() {
 uint32_t ac97_get_stream_position() {
     if (!ac97_info.is_initialized) {
         DEBUG_ERROR("ac97 device is not initialized");
+        return 0;
+    }
+
+    // Nothing is playing?
+    if (!ac97_info.is_playing) {
+        DEBUG_WARN("nothing is playing");
         return 0;
     }
 
