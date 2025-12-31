@@ -332,6 +332,7 @@ void hda_init() {
             // This node is pin. Get type of this pin node with pin widget configuration command.
             uint8_t pin_type = (hda_send_command(hda_info.codec, node, HDA_VERB_GET_PIN_WIDGET_CONFIGURATION, 0) >> 20) & 0xF;
             if (pin_type == HDA_PIN_LINE_OUT) {
+                // Initialize line out pin. Collect needed capabilities.
                 DEBUG_INFO("found line out pin widget at %d", node);
 
                 // Add this pin to array and initialize it.
@@ -361,7 +362,7 @@ void hda_init() {
     // Set default volume to 100%
     hda_set_volume(100);
 
-    //DEBUG_INFO("init completed");
+    DEBUG_INFO("init completed");
 }
 
 // Credits: BleskOS HDA driver.
