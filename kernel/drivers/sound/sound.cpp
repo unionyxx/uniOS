@@ -254,7 +254,6 @@ void sound_stop() {
 
 void sound_poll() {
     if (!sound_available) {
-        DEBUG_ERROR("sound card not found. audio is not available");
         return;
     }
 
