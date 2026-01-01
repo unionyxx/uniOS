@@ -851,7 +851,7 @@ static void cmd_help() {
     g_terminal.write_line("  ping <ip> - Ping an IP address");
     g_terminal.write_line("");
     g_terminal.write_line("Audio Commands:");
-    g_terminal.write_line("  audio status  - Show AC97 driver status");
+    g_terminal.write_line("  audio status  - Show sound card status");
     g_terminal.write_line("  audio play <f> - Play WAV file");
     g_terminal.write_line("  audio pause   - Pause playback");
     g_terminal.write_line("  audio resume  - Resume playback");
@@ -3736,4 +3736,5 @@ void shell_process_char(char c) {
 void shell_tick() {
     g_terminal.update_cursor();
 }
+
 
