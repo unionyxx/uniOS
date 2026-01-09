@@ -40,6 +40,30 @@ static inline void io_wait() {
 }
 
 // Memory-mapped I/O with barriers
+static inline uint8_t mmio_read8(volatile void* addr) {
+    uint8_t val = *(volatile uint8_t*)addr;
+    asm volatile("mfence" ::: "memory");
+    return val;
+}
+
+static inline void mmio_write8(volatile void* addr, uint8_t val) {
+    asm volatile("mfence" ::: "memory");
+    *(volatile uint8_t*)addr = val;
+    asm volatile("mfence" ::: "memory");
+}
+
+static inline uint16_t mmio_read16(volatile void* addr) {
+    uint16_t val = *(volatile uint16_t*)addr;
+    asm volatile("mfence" ::: "memory");
+    return val;
+}
+
+static inline void mmio_write16(volatile void* addr, uint16_t val) {
+    asm volatile("mfence" ::: "memory");
+    *(volatile uint16_t*)addr = val;
+    asm volatile("mfence" ::: "memory");
+}
+
 static inline uint32_t mmio_read32(volatile void* addr) {
     uint32_t val = *(volatile uint32_t*)addr;
     asm volatile("mfence" ::: "memory");

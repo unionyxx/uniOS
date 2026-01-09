@@ -57,7 +57,7 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 #include "version.h"
 
 // New
-#include "ac97.h"
+#include "sound.h"
 
 // Global framebuffer pointer
 struct limine_framebuffer* g_framebuffer = nullptr;
@@ -658,9 +658,9 @@ extern "C" void _start(void) {
     net_init();
     // net_init logs its own status
 
-    // Initialize sound driver
-    ac97_init();
-    // ac97_init logs its own status
+    // Initialize sound drivers
+    sound_init();
+    // sound_init logs its own status
     
     // Enable interrupts
     asm("sti");
@@ -716,7 +716,7 @@ extern "C" void _start(void) {
         net_poll();
 
         // Poll sound
-        ac97_poll();
+        sound_poll();
 
         uint64_t now = timer_get_ticks();
         
