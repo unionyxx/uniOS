@@ -6,15 +6,23 @@
 # Toolchain
 CXX = g++
 LD = ld
+NASM = nasm
 PYTHON = python3
 
-# Directories
-KERNEL_DIRS = kernel/core kernel/arch kernel/mem kernel/drivers kernel/drivers/net kernel/drivers/usb kernel/drivers/sound kernel/net kernel/fs kernel/shell
+# Directory structure
+INCLUDE_DIR = include
+SRC_DIR = src
 BUILD_DIR = build
 TOOLS_DIR = tools
 
+# Source directories (find all recursively)
+SRC_SUBDIRS = $(shell find $(SRC_DIR) -type d 2>/dev/null)
+
 # Build configuration (default: release)
 BUILD ?= release
+
+# Include paths - new structure
+INCLUDES = -I$(INCLUDE_DIR) -I$(SRC_DIR)
 
 # Base flags (always applied)
 CXXFLAGS_BASE = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector \
@@ -22,7 +30,7 @@ CXXFLAGS_BASE = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-p
                 -march=x86-64 -mtune=generic \
                 -ffunction-sections -fdata-sections \
                 -Wall -Wextra -Wno-volatile \
-                -I. -Ikernel $(foreach dir,$(KERNEL_DIRS),-I$(dir))
+                $(INCLUDES)
 
 # Debug-specific flags
 CXXFLAGS_DEBUG = $(CXXFLAGS_BASE) -DDEBUG -g -O0
@@ -37,7 +45,7 @@ else
     CXXFLAGS = $(CXXFLAGS_RELEASE)
 endif
 
-LDFLAGS_BASE = -nostdlib -T kernel/linker.ld -z max-page-size=0x1000 --gc-sections
+LDFLAGS_BASE = -nostdlib -T linker.ld -z max-page-size=0x1000 --gc-sections
 LDFLAGS_DEBUG = $(LDFLAGS_BASE)
 LDFLAGS_RELEASE = $(LDFLAGS_BASE)
 
@@ -47,11 +55,14 @@ else
     LDFLAGS = $(LDFLAGS_RELEASE)
 endif
 
-# Files
-KERNEL_SRC = $(foreach dir,$(KERNEL_DIRS),$(wildcard $(dir)/*.cpp))
-KERNEL_ASM = $(foreach dir,$(KERNEL_DIRS),$(wildcard $(dir)/*.asm))
-KERNEL_OBJ = $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(KERNEL_SRC)) \
-             $(patsubst %.asm, $(BUILD_DIR)/%.o, $(KERNEL_ASM))
+# Files - find all sources recursively
+SRC_CPP = $(shell find $(SRC_DIR) -name '*.cpp' 2>/dev/null)
+SRC_ASM = $(shell find $(SRC_DIR) -name '*.asm' 2>/dev/null)
+
+# Object files - preserve directory structure in build dir
+OBJ_CPP = $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(SRC_CPP))
+OBJ_ASM = $(patsubst $(SRC_DIR)/%.asm, $(BUILD_DIR)/%.o, $(SRC_ASM))
+OBJ_ALL = $(OBJ_CPP) $(OBJ_ASM)
 
 KERNEL_BIN = $(BUILD_DIR)/kernel.elf
 UNIFS_IMG = $(BUILD_DIR)/unifs.img
@@ -61,6 +72,7 @@ ISO_IMAGE = $(BUILD_DIR)/uniOS.iso
 QEMU = qemu-system-x86_64
 QEMU_BASE = -cdrom $(ISO_IMAGE) -m 512M
 QEMU_SOUND = -device ac97
+QEMU_HDA = -device intel-hda -device hda-duplex
 QEMU_NET = -nic user,model=e1000
 QEMU_SERIAL = -serial stdio
 QEMU_DEBUG = -s -S
@@ -70,7 +82,7 @@ QEMU_USB = -device qemu-xhci -device usb-kbd -device usb-mouse
 # Build Targets
 # ==============================================================================
 
-.PHONY: all release debug clean run run-net run-usb run-sound run-serial run-gdb help directories version-sync version-check
+.PHONY: all release debug clean run run-net run-usb run-sound run-hda run-serial run-gdb help directories version-sync version-check
 
 all: release
 
@@ -82,21 +94,28 @@ debug:
 
 iso: directories version-sync $(ISO_IMAGE)
 
+# Create build directory structure mirroring src
 directories:
 	@mkdir -p $(BUILD_DIR)
-	@for dir in $(KERNEL_DIRS); do mkdir -p $(BUILD_DIR)/$$dir; done
+	@for dir in $(SRC_SUBDIRS); do \
+		mkdir -p $(BUILD_DIR)/$${dir#$(SRC_DIR)/}; \
+	done
 
-$(KERNEL_BIN): $(KERNEL_OBJ)
+$(KERNEL_BIN): $(OBJ_ALL)
 	@echo "[Link] $@"
 	@$(LD) $(LDFLAGS) -o $@ $^
 
-$(BUILD_DIR)/%.o: %.cpp
+# Compile C++ files
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@echo "[CXX] $<"
+	@mkdir -p $(dir $@)
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: %.asm
+# Compile assembly files
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.asm
 	@echo "[ASM] $<"
-	@nasm -f elf64 $< -o $@
+	@mkdir -p $(dir $@)
+	@$(NASM) -f elf64 $< -o $@
 
 $(UNIFS_IMG): $(TOOLS_DIR)/mkunifs.py
 	@echo "[FS] Generating uniFS image..."
@@ -120,6 +139,9 @@ run-usb: $(ISO_IMAGE)
 
 run-sound: $(ISO_IMAGE)
 	$(QEMU) $(QEMU_BASE) $(QEMU_SOUND)
+
+run-hda: $(ISO_IMAGE)
+	$(QEMU) $(QEMU_BASE) $(QEMU_HDA)
 
 run-serial: $(ISO_IMAGE)
 	$(QEMU) $(QEMU_BASE) $(QEMU_SERIAL)
@@ -164,4 +186,3 @@ help:
 	@echo "  make version-sync  - Sync version to README/docs"
 	@echo "  make version-check - Verify versions match"
 	@echo "  make help      - Show this help"
-

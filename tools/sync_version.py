@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 # Paths relative to project root
-VERSION_H = Path("kernel/core/version.h")
+VERSION_H = Path("include/kernel/version.h")
 README_MD = Path("README.md")
 DOCS_HTML = Path("docs/index.html")
 
