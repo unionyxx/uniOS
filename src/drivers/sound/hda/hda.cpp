@@ -139,21 +139,129 @@ void hda_init() {
     // Get first output stream descriptor by adding descriptor size multiplied by input stream count to descriptor base.
     hda_info.output_stream = hda_info.base + HDA_STREAM_DESCRIPTOR_BASE + HDA_STREAM_DESCRIPTOR_SIZE * input_stream_count;
 
-    // CORB/RIRB initialization removed - using Immediate Command Interface (ICI) instead.
-    // This avoids DMA issues on QEMU and simplifies the driver.
-
-    // Check STATESTS to see which codecs are present (bit per codec, codecs 0-14)
-    // The controller sets bits here after reset for any connected codecs
-    uint16_t statests = mmio_read16((void*)(hda_info.base + 0x0E)); // STATESTS at offset 0x0E
-    DEBUG_INFO("statests: 0x%x (codec presence bitmap)", statests);
-    
-    if (statests == 0) {
-        DEBUG_WARN("no codecs detected in statests - waiting...");
-        // Wait a bit for codecs to be detected
-        for (int i = 0; i < 10000; i++) io_wait();
-        statests = mmio_read16((void*)(hda_info.base + 0x0E));
-        DEBUG_INFO("statests after wait: 0x%x", statests);
+    // Get first input stream descriptor (if available).
+    if (input_stream_count > 0) {
+        hda_info.input_stream = hda_info.base + HDA_STREAM_DESCRIPTOR_BASE;
+        DEBUG_INFO("input stream at offset 0x%x", HDA_STREAM_DESCRIPTOR_BASE);
+    } else {
+        hda_info.input_stream = 0;
+        DEBUG_INFO("no input streams available");
     }
+
+    // Allocate CORB DMA.
+    uint64_t corb_size = sizeof(uint32_t) * HDA_CORB_ENTRY_COUNT;
+    hda_info.corb_dma = vmm_alloc_dma((corb_size + 4095) / 4096);
+    hda_info.corb = (uint32_t*)hda_info.corb_dma.virt;
+
+    if (!hda_info.corb) {
+        DEBUG_ERROR("failed to allocate corb");
+        return;
+    }
+
+    // Allocate RIRB DMA.
+    uint64_t rirb_size = sizeof(uint32_t) * HDA_RIRB_ENTRY_COUNT * 2;
+    hda_info.rirb_dma = vmm_alloc_dma((rirb_size + 4095) / 4096);
+    hda_info.rirb = (uint32_t*)hda_info.rirb_dma.virt;
+
+    if (!hda_info.rirb) {
+        DEBUG_ERROR("failed to allocate rirb");
+        return;
+    }
+
+    // Reset CORB/RIRB positions.
+    hda_info.corb_entry = 1;
+    hda_info.rirb_entry = 1;
+
+    // Allocate Buffer Descriptor List entries.
+    uint64_t bdl_size = sizeof(HdAudioBufferEntry) * HDA_BUFFER_ENTRY_COUNT;
+    hda_info.buffer_entries_dma = vmm_alloc_dma((bdl_size + 4095) / 4096);
+    hda_info.buffer_entries = (HdAudioBufferEntry*)hda_info.buffer_entries_dma.virt;
+
+    if (!hda_info.buffer_entries) {
+        DEBUG_ERROR("failed to allocate buffer descriptor list");
+        return;
+    }
+
+    // Allocate sound buffers.
+    uint64_t sound_buf_size = HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * HDA_BUFFER_ENTRY_COUNT;
+    hda_info.sound_buffers_dma = vmm_alloc_dma((sound_buf_size + 4095) / 4096);
+
+    if (!hda_info.sound_buffers_dma.virt) {
+        DEBUG_ERROR("failed to allocate sound buffers");
+        return;
+    }
+
+    // Allocate input buffer entries and buffers (for recording support).
+    if (hda_info.input_stream) {
+        hda_info.input_buffer_entries_dma = vmm_alloc_dma((bdl_size + 4095) / 4096);
+        hda_info.input_buffer_entries = (HdAudioBufferEntry*)hda_info.input_buffer_entries_dma.virt;
+        
+        hda_info.input_buffers_dma = vmm_alloc_dma((sound_buf_size + 4095) / 4096);
+        
+        if (hda_info.input_buffer_entries && hda_info.input_buffers_dma.virt) {
+            // Setup input BDL entries.
+            uint64_t mem_offset = 0;
+            for (uint32_t i = 0; i < HDA_BUFFER_ENTRY_COUNT; i++) {
+                hda_info.input_buffer_entries[i].buffer = hda_info.input_buffers_dma.phys + mem_offset;
+                hda_info.input_buffer_entries[i].buffer_size = HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE;
+                mem_offset += HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE;
+            }
+            DEBUG_INFO("input buffers allocated");
+        } else {
+            DEBUG_WARN("failed to allocate input buffers - recording disabled");
+            hda_info.input_stream = 0;
+        }
+    }
+
+    // Tell sound card where to find CORB and RIRB. Set physical(!!!) addresses of CORB/RIRB.
+    mmio_write64((void*)(hda_info.base + HDA_CORB_BASE_ADDRESS), hda_info.corb_dma.phys); // CORB
+    mmio_write64((void*)(hda_info.base + HDA_RIRB_BASE_ADDRESS), hda_info.rirb_dma.phys); // RIRB
+
+    // Bit 0 = Number of CORB/RIRB ring entries.
+    // 0b00 - 2 entries.
+    // 0b01 - 16 entries.
+    // 0b10 - 256 entries.
+
+    // Tell sound card how many entries CORB/RIRB have. We assume that every sound card has 256 entries, so set 256 entries.
+    mmio_write8((void*)(hda_info.base + HDA_CORB_SIZE), (0b10 << HDA_CORB_SIZE_NUMBER_OF_RING_ENTRIES)); // CORB
+    mmio_write8((void*)(hda_info.base + HDA_RIRB_SIZE), (0b10 << HDA_RIRB_SIZE_NUMBER_OF_RING_ENTRIES)); // RIRB
+
+    // Try to reset CORB read pointer.
+    mmio_write16((void*)(hda_info.base + HDA_CORB_READ_POINTER), HDA_CORB_READ_POINTER_IN_RESET);
+
+    DEBUG_INFO("waiting for corb read pointer reset");
+
+    // Wait for reset.
+    while (!(mmio_read16((void*)(hda_info.base + HDA_CORB_READ_POINTER)) & HDA_CORB_READ_POINTER_IN_RESET)) {
+        io_wait();
+    }
+
+    // Clear read pointer.
+    mmio_write16((void*)(hda_info.base + HDA_CORB_READ_POINTER), HDA_CORB_READ_POINTER_CLEAR);
+
+    DEBUG_INFO("waiting for corb read pointer clear");
+
+    // Wait for reset.
+    while (mmio_read16((void*)(hda_info.base + HDA_CORB_READ_POINTER)) & HDA_CORB_READ_POINTER_IN_RESET) {
+        io_wait();
+    }
+
+    // Set CORB write pointer.
+    mmio_write16((void*)(hda_info.base + HDA_CORB_WRITE_POINTER), 0);
+
+    // Reset RIRB write pointer.
+    mmio_write16((void*)(hda_info.base + HDA_RIRB_WRITE_POINTER), HDA_RIRB_WRITE_POINTER_IN_RESET);
+
+    // Disable RIRB interrupts.
+    mmio_write16((void*)(hda_info.base + HDA_RIRB_RESPONSE_INTERRUPT_COUNT), 0);
+
+    // Bit 1 = CORB/RIRB stopped/running.
+    // 0 - stopped.
+    // 1 - running.
+
+    // Tell sound card that we are using CORB/RIRB.
+    mmio_write8((void*)(hda_info.base + HDA_CORB_CONTROL), HDA_CORB_CONTROL_STATUS_RUNNING); // CORB
+    mmio_write8((void*)(hda_info.base + HDA_RIRB_CONTROL), HDA_RIRB_CONTROL_STATUS_RUNNING); // RIRB
 
     // Sound card initialization has been finished.
     // Now we need to find valid codec.
@@ -164,8 +272,29 @@ void hda_init() {
     hda_info.codec = HDA_INVALID;
     hda_info.afg.node = HDA_INVALID;
 
-    // Check first 8 codecs. In almost every case first usable codec is at 0, but lets scan first 8 just in case.
-    for (uint32_t codec = 0; codec < 8; codec++) {
+    // Read STATESTS register to see which codecs are present.
+    // This register has a bit set for each CODEC that is present (bits 0-14).
+    uint16_t statests = mmio_read16((void*)(hda_info.base + 0x0E));
+    DEBUG_INFO("statests: 0x%x (codec presence bitmap)", statests);
+
+    // If no codecs detected, wait a bit and check again.
+    if (statests == 0) {
+        for (int i = 0; i < 10000; i++) io_wait();
+        statests = mmio_read16((void*)(hda_info.base + 0x0E));
+        DEBUG_INFO("statests after wait: 0x%x", statests);
+    }
+
+    // Scan only codecs indicated by STATESTS (or all 0-7 if STATESTS is 0).
+    for (uint32_t codec = 0; codec < 15; codec++) {
+        // Skip codec if not present in STATESTS (unless STATESTS is 0, then try all).
+        if (statests != 0 && !(statests & (1 << codec))) {
+            continue;
+        }
+        // Limit to first 8 if STATESTS is 0 (fallback behavior).
+        if (statests == 0 && codec >= 8) {
+            break;
+        }
+
         // Send command to root node of each codec id.
         uint32_t codec_present = hda_send_command(codec, 0, HDA_VERB_GET_PARAMETER, 0);
 
@@ -276,6 +405,16 @@ void hda_init() {
 
                 // Add this pin to array and initialize it.
                 hda_init_pin(current_node);
+            }
+            else if (pin_type == HDA_PIN_MIC_IN) {
+                // Initialize microphone input pin for recording.
+                DEBUG_INFO("found microphone in pin widget at %d", node);
+                hda_init_input_pin(current_node);
+            }
+            else if (pin_type == HDA_PIN_LINE_IN) {
+                // Initialize line input pin for recording.
+                DEBUG_INFO("found line in pin widget at %d", node);
+                hda_init_input_pin(current_node);
             }
             else {
                 // Don't enable power for not needed pins.
@@ -442,58 +581,44 @@ void hda_reset() {
     hda_info.sound_data = nullptr;
     hda_info.sound_data_size = 0;
 }
-// Send verb via Immediate Command Interface (ICx registers).
-// This bypasses CORB/RIRB DMA and works better with QEMU's HDA emulation.
+// Send verb via CORB/RIRB buffers.
 uint32_t hda_send_command(uint32_t codec, uint32_t node, uint32_t verb, uint32_t command) {
-    // Build the command (same format as CORB)
+    // CORB entry structure.
     // Bit 0-7 - Data.
     // Bit 8-19 - Command (Verb).
     // Bit 20-27 - Node.
     // Bit 28-31 - Codec.
-    uint32_t cmd = (codec << HDA_NODE_COMMAND_CODEC) | (node << HDA_NODE_COMMAND_NODE_INDEX) | 
-                   (verb << HDA_NODE_COMMAND_COMMAND) | (command << HDA_NODE_COMMAND_DATA);
+    hda_info.corb[hda_info.corb_entry] = (codec << HDA_NODE_COMMAND_CODEC) | (node << HDA_NODE_COMMAND_NODE_INDEX) | (verb << HDA_NODE_COMMAND_COMMAND) | (command << HDA_NODE_COMMAND_DATA);
 
-    // Wait for any previous command to complete (ICS bit 0 = ICB = busy)
-    uint32_t wait_timeout = 100000;
-    while (mmio_read16((void*)(hda_info.base + HDA_IMMEDIATE_STATUS)) & HDA_ICS_BUSY) {
+    // Update current CORB write pointer.
+    mmio_write16((void*)(hda_info.base + HDA_CORB_WRITE_POINTER), hda_info.corb_entry);
+
+    // Wait for response with timeout to prevent deadlocks.
+    uint32_t timeout = 100000;
+    while (mmio_read16((void*)(hda_info.base + HDA_RIRB_WRITE_POINTER)) != hda_info.corb_entry) {
         io_wait();
-        if (--wait_timeout == 0) {
-            DEBUG_WARN("hda ici busy timeout");
+        if (--timeout == 0) {
+            DEBUG_WARN("hda command timeout (codec %d, node %d, verb 0x%x)", codec, node, verb);
             return 0;
         }
     }
 
-    // Clear the IRV (Immediate Result Valid) bit by writing 1 to it
-    mmio_write16((void*)(hda_info.base + HDA_IMMEDIATE_STATUS), HDA_ICS_VALID);
+    // Read response.
+    uint32_t response = hda_info.rirb[hda_info.rirb_entry * 2];
 
-    // Write the command to IC register
-    mmio_write32((void*)(hda_info.base + HDA_IMMEDIATE_COMMAND), cmd);
-
-    // Set ICB (Immediate Command Busy) to start the command
-    mmio_write16((void*)(hda_info.base + HDA_IMMEDIATE_STATUS), HDA_ICS_BUSY);
-
-    // Wait for command to complete (ICB clears and IRV sets)
-    wait_timeout = 100000;
-    while (true) {
-        uint16_t status = mmio_read16((void*)(hda_info.base + HDA_IMMEDIATE_STATUS));
-        
-        // Command done when ICB clears
-        if (!(status & HDA_ICS_BUSY)) {
-            // Check if result is valid
-            if (status & HDA_ICS_VALID) {
-                // Read the response from IR register
-                return mmio_read32((void*)(hda_info.base + HDA_IMMEDIATE_RESPONSE));
-            }
-            // Result not valid - codec didn't respond
-            return 0;
-        }
-        
-        io_wait();
-        if (--wait_timeout == 0) {
-            DEBUG_WARN("hda ici command timeout (codec %d, node %d, verb 0x%x)", codec, node, verb);
-            return 0;
-        }
+    // Move to next CORB entry and make sure it does not exceed number of entries.
+    hda_info.corb_entry++;
+    if (hda_info.corb_entry >= HDA_CORB_ENTRY_COUNT) {
+        hda_info.corb_entry = 0;
     }
+
+    // Move to next RIRB entry and make sure it does not exceed number of entries.
+    hda_info.rirb_entry++;
+    if (hda_info.rirb_entry >= HDA_RIRB_ENTRY_COUNT) {
+        hda_info.rirb_entry = 0;
+    }
+
+    return response;
 }
 
 // Set node volume.
@@ -894,4 +1019,184 @@ uint32_t hda_get_stream_position() {
     }
 
     return mmio_read32((void*)(hda_info.output_stream + HDA_STREAM_DESCRIPTOR_BUFFER_ENTRY_POSITION));
+}
+
+// Set volume for a specific node with separate left/right channels.
+void hda_set_channel_volume(uint32_t node_id, uint8_t left, uint8_t right) {
+    if (!hda_info.is_initialized) {
+        DEBUG_ERROR("hd audio device is not initialized");
+        return;
+    }
+
+    if (node_id >= HDA_MAX_AFG_NODES) {
+        DEBUG_ERROR("invalid node id");
+        return;
+    }
+
+    HdAudioNode* node = &hda_info.nodes[node_id];
+    
+    // Get amplifier capabilities.
+    uint32_t amp_caps = node->output_amplifier_capabilities;
+    if (!amp_caps && node->parent_node) {
+        amp_caps = hda_info.nodes[node->parent_node].output_amplifier_capabilities;
+    }
+    if (!amp_caps) {
+        amp_caps = hda_info.afg.output_amplifier_capabilities;
+    }
+    if (!amp_caps) {
+        DEBUG_WARN("no amp capabilities for node %d", node_id);
+        return;
+    }
+
+    uint32_t max_gain = (amp_caps >> 8) & 0x7F;
+
+    // Set left channel (bit 13 = left output select).
+    uint32_t payload_left = 0x2000 | 0x8000; // Output amp, left channel
+    if (left == 0 && (amp_caps & 0x80000000)) {
+        payload_left |= 0x80; // Mute
+    } else {
+        payload_left |= (left * max_gain / 100);
+    }
+    hda_send_command(hda_info.codec, node->node, HDA_VERB_SET_AMPLIFIER_GAIN, payload_left);
+
+    // Set right channel (bit 12 = right output select).
+    uint32_t payload_right = 0x1000 | 0x8000; // Output amp, right channel
+    if (right == 0 && (amp_caps & 0x80000000)) {
+        payload_right |= 0x80; // Mute
+    } else {
+        payload_right |= (right * max_gain / 100);
+    }
+    hda_send_command(hda_info.codec, node->node, HDA_VERB_SET_AMPLIFIER_GAIN, payload_right);
+
+    DEBUG_INFO("set node %d left=%d right=%d", node_id, left, right);
+}
+
+// Initialize input pin widget for recording.
+void hda_init_input_pin(HdAudioNode* node) {
+    if (node->node_type != HDA_WIDGET_PIN_COMPLEX) {
+        DEBUG_WARN("trying to initialize non pin widget as input");
+        return;
+    }
+
+    // Set power state for this pin.
+    hda_power_on_node(node);
+
+    // Enable pin for input (bit 5 = input enable).
+    hda_send_command(hda_info.codec, node->node, HDA_VERB_SET_PIN_WIDGET_CONTROL,
+        (hda_send_command(hda_info.codec, node->node, 0xF07, 0) | 0x20));
+
+    // Collect node capabilities.
+    node->supported_rates = hda_send_command(hda_info.codec, node->node, HDA_VERB_GET_PARAMETER, HDA_NODE_PARAMETER_SUPPORTED_PCM_RATES);
+    node->supported_formats = hda_send_command(hda_info.codec, node->node, HDA_VERB_GET_PARAMETER, HDA_NODE_PARAMETER_SUPPORTED_FORMATS);
+    node->output_amplifier_capabilities = hda_send_command(hda_info.codec, node->node, HDA_VERB_GET_PARAMETER, HDA_NODE_PARAMETER_OUTPUT_AMPLIFIER_CAPABILITIES);
+
+    for (uint32_t i = 0; i < 1000; i++)
+        io_wait();
+
+    DEBUG_INFO("initialized input pin at node %d", node->node);
+}
+
+// Check if recording is in progress.
+bool hda_is_recording() {
+    return hda_info.is_recording;
+}
+
+// Start recording audio input.
+void hda_record_start(uint8_t* buffer, uint32_t size) {
+    if (!hda_info.is_initialized) {
+        DEBUG_ERROR("hd audio device is not initialized");
+        return;
+    }
+
+    if (hda_info.is_recording) {
+        DEBUG_WARN("already recording");
+        return;
+    }
+
+    if (!hda_info.input_stream) {
+        DEBUG_ERROR("input stream not initialized");
+        return;
+    }
+
+    // Reset input stream.
+    mmio_write8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1), HDA_STREAM_CONTROL_STREAM_IN_RESET);
+
+    while (!(mmio_read8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1)) & HDA_STREAM_CONTROL_STREAM_IN_RESET)) {
+        io_wait();
+    }
+
+    mmio_write8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1), HDA_STREAM_CONTROL_STREAM_STOPPED);
+
+    while (mmio_read8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1)) & HDA_STREAM_CONTROL_STREAM_IN_RESET) {
+        io_wait();
+    }
+
+    // Set buffer.
+    hda_info.input_data = buffer;
+    hda_info.input_data_size = size;
+    hda_info.recorded_bytes = 0;
+
+    // Setup BDL for input.
+    mmio_write64((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_BDL_BASE_ADDRESS), hda_info.input_buffer_entries_dma.phys);
+    mmio_write32((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_RING_BUFFER_LENGTH), HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * HDA_BUFFER_ENTRY_COUNT);
+    mmio_write16((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_LAST_VALID_INDEX), HDA_BUFFER_ENTRY_COUNT - 1);
+
+    // Set stream format.
+    uint16_t sound_format = hda_return_sound_data_format(hda_info.sample_rate, hda_info.channels, hda_info.bits_per_sample);
+    mmio_write16((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_FORMAT), sound_format);
+
+    // Start stream.
+    mmio_write8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_2), 0x14);
+    mmio_write8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1), HDA_STREAM_CONTROL_STREAM_RUNNING);
+
+    hda_info.is_recording = true;
+    DEBUG_INFO("recording started");
+}
+
+// Stop recording.
+void hda_record_stop() {
+    if (!hda_info.is_initialized) {
+        DEBUG_ERROR("hd audio device is not initialized");
+        return;
+    }
+
+    if (!hda_info.is_recording) {
+        DEBUG_WARN("not recording");
+        return;
+    }
+
+    // Stop input stream.
+    mmio_write8((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1), HDA_STREAM_CONTROL_STREAM_STOPPED);
+
+    hda_info.is_recording = false;
+    DEBUG_INFO("recording stopped, recorded %d bytes", hda_info.recorded_bytes);
+}
+
+// Poll recording status and copy data.
+void hda_record_poll() {
+    if (!hda_info.is_recording) return;
+
+    // Get current position in input buffer.
+    uint32_t pos = mmio_read32((void*)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_BUFFER_ENTRY_POSITION));
+
+    // Copy recorded data to user buffer.
+    if (hda_info.recorded_bytes < hda_info.input_data_size && pos > 0) {
+        size_t to_copy = pos;
+        if (hda_info.recorded_bytes + to_copy > hda_info.input_data_size) {
+            to_copy = hda_info.input_data_size - hda_info.recorded_bytes;
+        }
+        memcpy(hda_info.input_data + hda_info.recorded_bytes, 
+               (void*)hda_info.input_buffers_dma.virt, to_copy);
+        hda_info.recorded_bytes += to_copy;
+    }
+
+    // Auto-stop if buffer full.
+    if (hda_info.recorded_bytes >= hda_info.input_data_size) {
+        hda_record_stop();
+    }
+}
+
+// Get total recorded bytes.
+uint32_t hda_get_recorded_bytes() {
+    return hda_info.recorded_bytes;
 }

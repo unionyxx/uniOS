@@ -128,8 +128,37 @@ bool pci_find_ac97(PciDevice* out) {
     return pci_find_device_by_class(PCI_CLASS_AUDIO, PCI_SUBCLASS_AC97, out);
 }
 
+// Find HD Audio controller.
 bool pci_find_hda(PciDevice* out) {
-    return pci_find_device_by_class(PCI_CLASS_AUDIO, PCI_SUBCLASS_HDA, out);
+    for (uint16_t bus = 0; bus < PCI_MAX_BUS; bus++) {
+        for (uint8_t dev = 0; dev < PCI_MAX_DEVICE; dev++) {
+            if (!pci_device_exists(bus, dev, 0)) continue;
+
+            uint8_t header_type = pci_config_read8(bus, dev, 0, PCI_HEADER_TYPE);
+            uint8_t max_func = (header_type & 0x80) ? PCI_MAX_FUNC : 1;
+
+            for (uint8_t func = 0; func < max_func; func++) {
+                if (!pci_device_exists(bus, dev, func)) continue;
+
+                uint8_t cls = pci_config_read8(bus, dev, func, PCI_CLASS);
+                uint8_t sub = pci_config_read8(bus, dev, func, PCI_SUBCLASS);
+                uint16_t ven = pci_config_read16(bus, dev, func, PCI_VENDOR_ID);
+
+                if (cls == PCI_CLASS_AUDIO && sub == PCI_SUBCLASS_HDA) {
+                    // 8086 - Intel
+                    // 1022 - AMD
+                    // 1106 - VIA
+
+                    // IMPORTANT NOTE: OSDev tells us to use 1002 vendor ID for AMD but only iGPU HD Audio controller has 1002 ID, while Ryzen HD Audio vendor ID always seems to be 1022. Some systems may require to change this.
+                    if (ven == 0x8086 || ven == 0x1022 || ven == 0x1106) {
+                        pci_enum_function(bus, dev, func, out);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 // Get BAR value and optionally size
