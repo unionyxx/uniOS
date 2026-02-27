@@ -203,3 +203,50 @@ make run-gdb  # Attach GDB to localhost:1234
 | `src/fs/fat32/fat32.cpp` | FAT32 filesystem driver |
 | `src/drivers/video/framebuffer.cpp` | SSE-optimized renderer |
 | `src/drivers/bus/usb/xhci.cpp` | USB 3.0 driver |
+
+## Userland Development
+
+uniOS supports running user-mode applications. While assembly examples exist in `usr/userspace/`, C++ development is the preferred way to build complex tools.
+
+### System Calls
+
+System calls are triggered via `int 0x80` on x86_64. Arguments are passed in registers:
+- `RAX`: Syscall number (defined in `include/kernel/syscall.h`)
+- `RDI, RSI, RDX`: Arguments 1, 2, and 3
+- `RCX`: Argument 4 (if needed)
+
+### Minimal C++ Example
+
+```cpp
+#include <stdint.h>
+
+extern "C" void _start() {
+    const char* msg = "Hello from Userland!\n";
+    
+    // sys_write(STDOUT, msg, len)
+    asm volatile(
+        "mov $1, %%rax\n"   // SYS_WRITE
+        "mov $1, %%rdi\n"   // STDOUT_FD
+        "mov %0, %%rsi\n"   // buffer
+        "mov $21, %%rdx\n"  // length
+        "int $0x80"
+        : : "r"(msg) : "rax", "rdi", "rsi", "rdx"
+    );
+
+    // sys_exit(0)
+    asm volatile(
+        "mov $60, %%rax\n"  // SYS_EXIT
+        "xor %%rdi, %%rdi\n"
+        "int $0x80"
+        : : : "rax", "rdi"
+    );
+}
+```
+
+### Compiling Userland
+
+To compile for uniOS, use `x86_64-elf-gcc` with the following flags:
+- `-ffreestanding`: No standard library
+- `-fno-exceptions -fno-rtti`: No C++ runtime support
+- `-nostdlib`: Don't link standard startup files
+- `-T usr/userspace/user.ld`: Use the user-mode linker script

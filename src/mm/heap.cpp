@@ -294,3 +294,57 @@ void  operator delete  (void* ptr) noexcept         { free(ptr); }
 void  operator delete[](void* ptr) noexcept         { free(ptr); }
 void  operator delete  (void* ptr, size_t) noexcept { free(ptr); }
 void  operator delete[](void* ptr, size_t) noexcept { free(ptr); }
+
+#include <kernel/terminal.h>
+
+extern "C" void heap_dump_stats() {
+    g_terminal.write_line("Kernel Heap Stats:");
+    g_terminal.write_line("  Bucket Sizes: 16, 32, 64, 128, 256, 512, 1024, 2048, 4096");
+    g_terminal.write("  Free Blocks:  ");
+    
+    spinlock_acquire(&heap_lock);
+    for (int i = 0; i < NUM_BUCKETS; i++) {
+        int count = 0;
+        FreeBlock* cur = buckets[i];
+        while (cur) {
+            count++;
+            cur = cur->next;
+        }
+        
+        // Convert count to string manually
+        char buf[16];
+        int bi = 0;
+        if (count == 0) buf[bi++] = '0';
+        else {
+            char tmp[16];
+            int ti = 0;
+            int n = count;
+            while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+            while (ti > 0) buf[bi++] = tmp[--ti];
+        }
+        buf[bi] = '\0';
+        g_terminal.write(buf);
+        if (i < NUM_BUCKETS - 1) g_terminal.write(", ");
+    }
+    g_terminal.write("\n");
+
+    int tracked_pages = 0;
+    for (int i = 0; i < MAX_TRACKED_PAGES; i++) {
+        if (page_slots[i].page_virt != 0) tracked_pages++;
+    }
+    
+    g_terminal.write("  Tracked Pages: ");
+    char buf[16];
+    int bi = 0;
+    if (tracked_pages == 0) buf[bi++] = '0';
+    else {
+        char tmp[16]; int ti = 0; int n = tracked_pages;
+        while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+        while (ti > 0) buf[bi++] = tmp[--ti];
+    }
+    buf[bi] = '\0';
+    g_terminal.write(buf);
+    g_terminal.write(" / 512\n");
+    
+    spinlock_release(&heap_lock);
+}

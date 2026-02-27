@@ -2,10 +2,7 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.6.x   | :white_check_mark: |
-| < 0.6.0 | :x:                |
+Security support is provided for the latest commit on the `main` branch.
 
 ## Reporting a Vulnerability
 

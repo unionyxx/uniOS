@@ -4,24 +4,41 @@
 #include <kernel/sync/spinlock.h>
 #include <kernel/time/timer.h>
 #include <stdarg.h>
+#include <stddef.h>
 
 static Spinlock debug_lock;
 
 int g_log_min_level = LOG_INFO;
 uint32_t g_log_module_mask = MOD_ALL;
-bool g_boot_quiet = true; // Default to quiet boot
+bool g_boot_quiet = true;
+
+// Circular buffer for dmesg
+constexpr size_t KLOG_BUFFER_SIZE = 16384;
+static char klog_buffer[KLOG_BUFFER_SIZE];
+static size_t klog_head = 0;
+static size_t klog_total_written = 0;
 
 static struct limine_framebuffer* debug_fb = nullptr;
 static uint64_t debug_x = 10;
 static uint64_t debug_y = 10;
-static const int LINE_HEIGHT = 16;
-static const int MARGIN = 10;
+constexpr int LINE_HEIGHT = 16;
+constexpr int MARGIN = 10;
 static uint32_t current_color = COLOR_WHITE;
 
 void debug_init(struct limine_framebuffer* fb) {
     debug_fb = fb;
     debug_x = MARGIN;
     debug_y = MARGIN;
+}
+
+static void klog_push_char(char c) {
+    klog_buffer[klog_head] = c;
+    klog_head = (klog_head + 1) % KLOG_BUFFER_SIZE;
+    klog_total_written++;
+}
+
+static void klog_push_str(const char* s) {
+    while (*s) klog_push_char(*s++);
 }
 
 static void debug_putchar(char c) {
@@ -256,7 +273,13 @@ void klog(LogModule mod, LogLevel level, const char* func, const char* fmt, ...)
     if (bi > 0 && buffer[bi-1] != '\n') buffer[bi++] = '\n';
     buffer[bi] = '\0'; va_end(args);
     
-    // Serial output
+    // Write to circular buffer
+    klog_push_str(time_str);
+    klog_push_str(" | ");
+    klog_push_str(tag);
+    klog_push_str(" | ");
+    klog_push_str(buffer);
+
     for (int i = 0; time_str[i]; i++) serial_putc(time_str[i]);
     serial_putc(' '); serial_putc('|'); serial_putc(' ');
     for (int i = 0; tag[i]; i++) serial_putc(tag[i]);
@@ -272,6 +295,26 @@ void klog(LogModule mod, LogLevel level, const char* func, const char* fmt, ...)
     kprintf_color(tag_color, "%s", tag);
     kprintf_color(COLOR_GRAY, " | ");
     kprintf_color(COLOR_WHITE, "%s", buffer);
+}
+
+#include <kernel/terminal.h>
+
+extern "C" void klog_dump_buffer() {
+    spinlock_acquire(&debug_lock);
+    
+    size_t start = 0;
+    size_t length = klog_total_written;
+    if (length > KLOG_BUFFER_SIZE) {
+        length = KLOG_BUFFER_SIZE;
+        start = klog_head;
+    }
+
+    for (size_t i = 0; i < length; i++) {
+        char c = klog_buffer[(start + i) % KLOG_BUFFER_SIZE];
+        g_terminal.put_char(c);
+    }
+    
+    spinlock_release(&debug_lock);
 }
 
 void debug_print_stack_trace() {

@@ -26,11 +26,10 @@ void panic(const char* message) {
     hcf();
 }
 
-extern "C" void exception_handler(void* stack_frame) {
-    uint64_t* regs = (uint64_t*)stack_frame;
-    uint64_t int_no = regs[15];
-    uint64_t err_code = regs[16];
-    uint64_t rip = regs[17];
+extern "C" void exception_handler(InterruptFrame* frame) {
+    uint64_t int_no = frame->int_no;
+    uint64_t err_code = frame->err_code;
+    uint64_t rip = frame->rip;
 
     if (int_no == 14) {
         uint64_t cr2;
@@ -42,17 +41,38 @@ extern "C" void exception_handler(void* stack_frame) {
         
         kprintf_color(COLOR_RED, "\nEXCEPTION CAUGHT! (Page Fault)\n");
         kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
-        kprintf_color(COLOR_WHITE, "CR2: "); kprintf_color(COLOR_CYAN, "0x%llx  ", cr2);
-        kprintf_color(COLOR_WHITE, "ERR: "); kprintf_color(COLOR_CYAN, "0x%x  ", err_code);
-        kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%lx\n", rip);
+        kprintf_color(COLOR_WHITE, "CR2: "); kprintf_color(COLOR_CYAN, "0x%016llx  ", cr2);
+        kprintf_color(COLOR_WHITE, "ERR: "); kprintf_color(COLOR_CYAN, "0x%04x  ", err_code);
+        kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%016lx\n", rip);
     } else {
         kprintf_color(COLOR_RED, "\nEXCEPTION CAUGHT!\n");
         kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
-        kprintf_color(COLOR_WHITE, "INT: "); kprintf_color(COLOR_CYAN, "0x%x  ", int_no);
-        kprintf_color(COLOR_WHITE, "ERR: "); kprintf_color(COLOR_CYAN, "0x%x  ", err_code);
-        kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%lx\n", rip);
+        kprintf_color(COLOR_WHITE, "INT: "); kprintf_color(COLOR_CYAN, "0x%02x  ", int_no);
+        kprintf_color(COLOR_WHITE, "ERR: "); kprintf_color(COLOR_CYAN, "0x%04x  ", err_code);
+        kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%016lx\n", rip);
     }
     
+    // Register Dump
+    kprintf_color(COLOR_GRAY, "RAX: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->rax);
+    kprintf_color(COLOR_GRAY, "RBX: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->rbx);
+    kprintf_color(COLOR_GRAY, "RCX: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->rcx);
+    kprintf_color(COLOR_GRAY, "RDX: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->rdx);
+    kprintf_color(COLOR_GRAY, "RSI: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->rsi);
+    kprintf_color(COLOR_GRAY, "RDI: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->rdi);
+    kprintf_color(COLOR_GRAY, "RBP: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->rbp);
+    kprintf_color(COLOR_GRAY, "RSP: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->rsp);
+    kprintf_color(COLOR_GRAY, "R8:  "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->r8);
+    kprintf_color(COLOR_GRAY, "R9:  "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->r9);
+    kprintf_color(COLOR_GRAY, "R10: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->r10);
+    kprintf_color(COLOR_GRAY, "R11: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->r11);
+    kprintf_color(COLOR_GRAY, "R12: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->r12);
+    kprintf_color(COLOR_GRAY, "R13: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->r13);
+    kprintf_color(COLOR_GRAY, "R14: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->r14);
+    kprintf_color(COLOR_GRAY, "R15: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->r15);
+    kprintf_color(COLOR_GRAY, "CS:  "); kprintf_color(COLOR_WHITE, "0x%04lx              ", frame->cs);
+    kprintf_color(COLOR_GRAY, "FLG: "); kprintf_color(COLOR_WHITE, "0x%08lx\n", frame->rflags);
+    kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
+
     debug_print_stack_trace();
     
     hcf();

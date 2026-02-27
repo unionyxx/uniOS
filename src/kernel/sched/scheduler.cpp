@@ -224,6 +224,8 @@ void scheduler_schedule() {
 
     uint64_t flags = interrupts_save_disable();
 
+    current_process->cpu_time++;
+
     wake_sleeping_processes();
 
     Process* next  = current_process->next;

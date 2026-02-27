@@ -20,6 +20,7 @@ SRC_SUBDIRS = $(shell find $(SRC_DIR) -type d 2>/dev/null)
 
 # Build configuration (default: release)
 BUILD ?= release
+GIT_COMMIT := $(shell git rev-parse --short HEAD)
 
 # Include paths - new structure
 INCLUDES = -I$(INCLUDE_DIR) -I$(SRC_DIR)
@@ -31,6 +32,7 @@ CXXFLAGS_BASE = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-p
                 -ffunction-sections -fdata-sections \
                 -Wall -Wextra -Wno-volatile \
                 $(INCLUDES)
+CXXFLAGS_BASE += -DGIT_COMMIT=\"$(GIT_COMMIT)\"
 
 # Debug-specific flags
 CXXFLAGS_DEBUG = $(CXXFLAGS_BASE) -DDEBUG -g -O0
@@ -82,7 +84,7 @@ QEMU_USB = -device qemu-xhci -device usb-kbd -device usb-mouse
 # Build Targets
 # ==============================================================================
 
-.PHONY: all release debug clean run run-net run-usb run-sound run-hda run-serial run-gdb help directories version-sync version-check
+.PHONY: all release debug clean run run-net run-usb run-sound run-hda run-serial run-gdb help directories
 
 all: release
 
@@ -92,7 +94,7 @@ release:
 debug:
 	@$(MAKE) BUILD=debug iso
 
-iso: directories version-sync $(ISO_IMAGE)
+iso: directories $(ISO_IMAGE)
 
 # Create build directory structure mirroring src
 directories:
@@ -158,12 +160,6 @@ clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(BUILD_DIR)
 
-version-sync:
-	@$(PYTHON) $(TOOLS_DIR)/sync_version.py
-
-version-check:
-	@$(PYTHON) $(TOOLS_DIR)/sync_version.py --check
-
 help:
 	@echo "uniOS Build System"
 	@echo "=================="
@@ -183,6 +179,4 @@ help:
 	@echo ""
 	@echo "Utility:"
 	@echo "  make clean     - Remove build directory"
-	@echo "  make version-sync  - Sync version to README/docs"
-	@echo "  make version-check - Verify versions match"
 	@echo "  make help      - Show this help"

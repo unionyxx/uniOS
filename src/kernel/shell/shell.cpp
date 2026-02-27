@@ -17,7 +17,6 @@
 #include <kernel/net/dns.h>
 #include <libk/kstring.h>
 #include <kernel/mm/heap.h>
-#include <kernel/version.h>
 #include <kernel/scheduler.h>
 #include <kernel/debug.h>
 #include <kernel/process.h>
@@ -868,6 +867,9 @@ static void cmd_help() {
 
     write_help_category("System Commands");
     write_help_line("mem", "Show memory usage");
+    write_help_line("kheap", "Show kernel heap stats");
+    write_help_line("ps", "List processes & stats");
+    write_help_line("dmesg", "Show kernel boot logs");
     write_help_line("date", "Show current date/time");
     write_help_line("uptime", "Show system uptime");
     write_help_line("version", "Show kernel version");
@@ -895,6 +897,7 @@ static void cmd_help() {
     g_terminal.write_line("");
 
     write_help_category("Other");
+    write_help_line("history", "Show command history");
     write_help_line("clear", "Clear screen");
     write_help_line("gui", "Start GUI mode");
     write_help_line("reboot", "Reboot system");
@@ -1323,7 +1326,6 @@ static void cmd_append(const char* args) {
 
 static void cmd_df() {
     uint64_t total = unifs_get_total_size();
-    uint64_t free_slots = unifs_get_free_slots();
     uint64_t file_count = unifs_get_file_count();
     
     char buf[128];
@@ -1481,9 +1483,99 @@ static void cmd_echo(const char* text) {
     g_terminal.write_line(text);
 }
 
-// =============================================================================
-// Shell Polish Commands (v0.5.1-v0.5.9)
-// =============================================================================
+static void cmd_history() {
+    for (int i = 0; i < history_count; i++) {
+        int idx = (history_count <= HISTORY_SIZE) ? i : (history_count - HISTORY_SIZE + i) % HISTORY_SIZE;
+        if (idx < 0) idx += HISTORY_SIZE;
+        
+        char num[16];
+        int n = i + 1;
+        int ni = 0;
+        char tmp[16]; int ti = 0;
+        while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+        while (ti > 0) num[ni++] = tmp[--ti];
+        num[ni] = '\0';
+
+        g_terminal.write("  ");
+        g_terminal.write(num);
+        g_terminal.write("  ");
+        g_terminal.write_line(history[idx % HISTORY_SIZE]);
+    }
+}
+
+extern "C" void klog_dump_buffer();
+static void cmd_dmesg() {
+    klog_dump_buffer();
+}
+
+static void cmd_ps() {
+    Process* list = scheduler_get_process_list();
+    if (!list) return;
+
+    g_terminal.write_line("  PID  PARENT  STATE     TIME    MEM    NAME");
+    g_terminal.write_line("  ---  ------  -----     ----    ---    ----");
+
+    Process* p = list;
+    do {
+        char buf[128];
+        int bi = 0;
+
+        auto append_num = [&](uint64_t n, int width) {
+            char tmp[32]; int ti = 0;
+            if (n == 0) tmp[ti++] = '0';
+            while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+            int spaces = width - ti;
+            while (spaces-- > 0) buf[bi++] = ' ';
+            while (ti > 0) buf[bi++] = tmp[--ti];
+        };
+
+        buf[bi++] = ' ';
+        append_num(p->pid, 4);
+        buf[bi++] = ' ';
+        append_num(p->parent_pid, 6);
+        buf[bi++] = ' '; buf[bi++] = ' ';
+
+        const char* state_str = "UNKNOWN";
+        switch (p->state) {
+            case PROCESS_READY:    state_str = "READY  "; break;
+            case PROCESS_RUNNING:  state_str = "RUN    "; break;
+            case PROCESS_BLOCKED:  state_str = "BLOCK  "; break;
+            case PROCESS_SLEEPING: state_str = "SLEEP  "; break;
+            case PROCESS_ZOMBIE:   state_str = "ZOMBIE "; break;
+            case PROCESS_WAITING:  state_str = "WAIT   "; break;
+        }
+        while (*state_str) buf[bi++] = *state_str++;
+
+        append_num(p->cpu_time, 8);
+        
+        uint64_t mem_kb = 0;
+        VMA* vma = p->vma_list;
+        while (vma) {
+            mem_kb += (vma->end - vma->start) / 1024;
+            vma = vma->next;
+        }
+        // KERNEL_STACK_SIZE is 16384 bytes
+        if (p->stack_base) mem_kb += 16384 / 1024;
+        
+        buf[bi++] = ' ';
+        append_num(mem_kb, 5);
+        buf[bi++] = 'K';
+        buf[bi++] = ' ';
+        buf[bi++] = ' ';
+
+        const char* name = p->name;
+        while (*name) buf[bi++] = *name++;
+        buf[bi] = '\0';
+
+        g_terminal.write_line(buf);
+        p = p->next;
+    } while (p != list);
+}
+
+extern "C" void heap_dump_stats();
+static void cmd_kheap() {
+    heap_dump_stats();
+}
 
 // env - List all variables in a nice format
 static void cmd_env() {
@@ -2318,8 +2410,8 @@ static void cmd_tr(const char* args, const char* piped_input) {
 
 
 static void cmd_version() {
-    g_terminal.write("uniOS Kernel v");
-    g_terminal.write_line(UNIOS_VERSION_STRING);
+    g_terminal.write("uniOS @ ");
+    g_terminal.write_line(GIT_COMMIT);
     g_terminal.write_line("Built with GCC for x86_64-elf");
     
     // Display actual bootloader info if available
@@ -2334,8 +2426,8 @@ static void cmd_version() {
 }
 
 static void cmd_uname() {
-    g_terminal.write("uniOS ");
-    g_terminal.write(UNIOS_VERSION_STRING);
+    g_terminal.write("uniOS @ ");
+    g_terminal.write(GIT_COMMIT);
     g_terminal.write_line(" x86_64");
 }
 
@@ -2343,7 +2435,6 @@ static void cmd_cpuinfo() {
     uint32_t eax, ebx, ecx, edx;
     char vendor[13];
     
-    // Get vendor string
     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
     *(uint32_t*)&vendor[0] = ebx;
     *(uint32_t*)&vendor[4] = edx;
@@ -2352,21 +2443,34 @@ static void cmd_cpuinfo() {
     
     g_terminal.write("Vendor: ");
     g_terminal.write_line(vendor);
+
+    // Get Processor Brand String
+    char brand[49];
+    uint32_t* brand_ptr = (uint32_t*)brand;
     
-    // Get processor info
+    asm volatile("cpuid" : "=a"(eax) : "a"(0x80000000));
+    if (eax >= 0x80000004) {
+        for (uint32_t i = 0; i < 3; i++) {
+            asm volatile("cpuid" : "=a"(brand_ptr[i*4]), "=b"(brand_ptr[i*4+1]), "=c"(brand_ptr[i*4+2]), "=d"(brand_ptr[i*4+3]) : "a"(0x80000002 + i));
+        }
+        brand[48] = 0;
+        // Trim leading spaces
+        char* brand_start = brand;
+        while (*brand_start == ' ') brand_start++;
+        g_terminal.write("Brand:  ");
+        g_terminal.write_line(brand_start);
+    }
+    
     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
     
     uint32_t family = ((eax >> 8) & 0xF) + ((eax >> 20) & 0xFF);
     uint32_t model = ((eax >> 4) & 0xF) | (((eax >> 16) & 0xF) << 4);
     uint32_t stepping = eax & 0xF;
     
-    char buf[64];
+    char buf[128];
     int i = 0;
     
-    auto append_str = [&](const char* s) {
-        while (*s) buf[i++] = *s++;
-    };
-    
+    auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
     auto append_num = [&](uint32_t n) {
         if (n == 0) { buf[i++] = '0'; return; }
         char tmp[20]; int j = 0;
@@ -2378,10 +2482,8 @@ static void cmd_cpuinfo() {
     append_str(", Model: "); append_num(model);
     append_str(", Stepping: "); append_num(stepping);
     buf[i] = 0;
-    
     g_terminal.write_line(buf);
     
-    // Features
     g_terminal.write("Features: ");
     if (edx & (1 << 0)) g_terminal.write("FPU ");
     if (edx & (1 << 4)) g_terminal.write("TSC ");
@@ -2394,6 +2496,12 @@ static void cmd_cpuinfo() {
     if (ecx & (1 << 0)) g_terminal.write("SSE3 ");
     if (ecx & (1 << 9)) g_terminal.write("SSSE3 ");
     if (ecx & (1 << 28)) g_terminal.write("AVX ");
+    
+    // Check NX bit (EFER.NXE) - via CPUID 0x80000001
+    asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x80000001));
+    if (edx & (1 << 20)) g_terminal.write("NX ");
+    if (edx & (1 << 26)) g_terminal.write("1GB_PAGES ");
+    
     g_terminal.write("\n");
 }
 
@@ -2455,25 +2563,6 @@ static void cmd_lspci() {
             }
         }
     }
-}
-
-// Parse IP address from string (e.g., "10.0.2.2")
-static uint32_t parse_ip(const char* str) {
-    uint32_t ip = 0;
-    uint8_t octets[4] = {0, 0, 0, 0};
-    int octet_idx = 0;
-    
-    while (*str && octet_idx < 4) {
-        if (*str >= '0' && *str <= '9') {
-            octets[octet_idx] = octets[octet_idx] * 10 + (*str - '0');
-        } else if (*str == '.') {
-            octet_idx++;
-        }
-        str++;
-    }
-    
-    ip = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
-    return ip;
 }
 
 static void cmd_ifconfig() {
@@ -2669,65 +2758,12 @@ static void cmd_ping(const char* target) {
     g_terminal.write_line(summary);
 }
 
-// Helper: output piped input (used by cat when no file argument given)
 static void cmd_cat_piped(const char* input) {
     if (input) {
         g_terminal.write(input);
     }
 }
 
-// =============================================================================
-// Process Inspection (ps command)
-// =============================================================================
-static void cmd_ps() {
-    g_terminal.write_line("PID  State      Name");
-    g_terminal.write_line("---  ---------  ----------------");
-    
-    Process* head = scheduler_get_process_list();
-    if (!head) {
-        g_terminal.write_line("  (no processes)");
-        return;
-    }
-    
-    Process* p = head;
-    do {
-        char buf[64];
-        int i = 0;
-        
-        // PID (3 chars, right-align)
-        if (p->pid >= 100) buf[i++] = '0' + (p->pid / 100) % 10;
-        else buf[i++] = ' ';
-        if (p->pid >= 10) buf[i++] = '0' + (p->pid / 10) % 10;
-        else buf[i++] = ' ';
-        buf[i++] = '0' + p->pid % 10;
-        buf[i++] = ' '; buf[i++] = ' ';
-        
-        // State (9 chars)
-        const char* state_str = "???";
-        switch (p->state) {
-            case PROCESS_READY:    state_str = "READY    "; break;
-            case PROCESS_RUNNING:  state_str = "RUNNING  "; break;
-            case PROCESS_BLOCKED:  state_str = "BLOCKED  "; break;
-            case PROCESS_SLEEPING: state_str = "SLEEPING "; break;
-            case PROCESS_ZOMBIE:   state_str = "ZOMBIE   "; break;
-            case PROCESS_WAITING:  state_str = "WAITING  "; break;
-        }
-        while (*state_str) buf[i++] = *state_str++;
-        buf[i++] = ' '; buf[i++] = ' ';
-        
-        // Name
-        const char* n = p->name[0] ? p->name : "(unnamed)";
-        while (*n && i < 60) buf[i++] = *n++;
-        buf[i] = '\0';
-        
-        g_terminal.write_line(buf);
-        p = p->next;
-    } while (p != head);
-}
-
-// =============================================================================
-// Exec Command - Execute ELF binary in Ring 3
-// =============================================================================
 static void cmd_exec(const char* args) {
     // Skip leading whitespace
     while (*args == ' ') args++;
@@ -2862,6 +2898,9 @@ static const CommandEntry commands[] = {
     {"true",     CMD_NONE, cmd_true, nullptr, nullptr},
     {"false",    CMD_NONE, cmd_false, nullptr, nullptr},
     {"ps",       CMD_NONE, cmd_ps, nullptr, nullptr},
+    {"kheap",    CMD_NONE, cmd_kheap, nullptr, nullptr},
+    {"history",  CMD_NONE, cmd_history, nullptr, nullptr},
+    {"dmesg",    CMD_NONE, cmd_dmesg, nullptr, nullptr},
     
     // Arg commands (command + space + args)
     {"cat",      CMD_ARGS, nullptr, cmd_cat, nullptr},
@@ -2910,254 +2949,192 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
     int len = strlen(cmd);
     while (len > 0 && cmd[len - 1] == ' ') len--;
     
-    if (len == 0) return true;  // Empty command is OK
+    if (len == 0) return true;
     
-    // Make a local copy for parsing
     char local_cmd[256];
-    if (len > 255) len = 255;
-    for (int i = 0; i < len; i++) local_cmd[i] = cmd[i];
-    local_cmd[len] = '\0';
+    int copy_len = (len > 255) ? 255 : len;
+    kstring::strncpy(local_cmd, cmd, copy_len);
+    local_cmd[copy_len] = '\0';
     
+    // Check for redirection (e.g., cmd > file or cmd >> file)
+    char* redirect_ptr = nullptr;
+    bool append_mode = false;
+    for (int i = 0; i < len; i++) {
+        if (local_cmd[i] == '>') {
+            redirect_ptr = &local_cmd[i];
+            if (i + 1 < len && local_cmd[i+1] == '>') {
+                append_mode = true;
+            }
+            break;
+        }
+    }
+
+    char redirect_filename[64] = {0};
+    if (redirect_ptr) {
+        // Extract filename
+        char* f = redirect_ptr + (append_mode ? 2 : 1);
+        while (*f == ' ') f++;
+        int fi = 0;
+        while (*f && *f != ' ' && fi < 63) redirect_filename[fi++] = *f++;
+        redirect_filename[fi] = '\0';
+        
+        // Terminate command before redirection symbol
+        *redirect_ptr = '\0';
+        
+        // Trim trailing space from command
+        int clen = strlen(local_cmd);
+        while (clen > 0 && local_cmd[clen-1] == ' ') {
+            local_cmd[--clen] = '\0';
+        }
+        
+        if (redirect_filename[0] == '\0') {
+            g_terminal.write_line("Error: No redirection filename specified");
+            return true;
+        }
+        
+        // Start capture to pipe buffer (we reuse one of them)
+        pipe_buffer_a[0] = '\0';
+        g_terminal.start_capture(pipe_buffer_a, PIPE_BUFFER_SIZE - 1);
+    }
+
     // Expand variables in command (except for 'set' which handles its own)
-    // This is needed for arithmetic like set I=$I+1 to work correctly
     bool is_set_command = (strncmp(local_cmd, "set ", 4) == 0 || strcmp(local_cmd, "set") == 0);
     
     if (!is_set_command) {
         char expanded_cmd[256];
         expand_variables(local_cmd, expanded_cmd, sizeof(expanded_cmd));
-        // Use expanded_cmd from here on
         for (int i = 0; expanded_cmd[i] && i < 255; i++) {
             local_cmd[i] = expanded_cmd[i];
             local_cmd[i + 1] = '\0';
         }
     }
-    // ==========================================================================
-    // Command Dispatch via Table Lookup
-    // ==========================================================================
+
+    bool cmd_found = false;
     for (int i = 0; i < NUM_COMMANDS; i++) {
         const CommandEntry& c = commands[i];
         int name_len = strlen(c.name);
         
         if (c.type == CMD_NONE) {
-            // No-arg command: exact match only
             if (strcmp(local_cmd, c.name) == 0) {
                 c.handler_none();
-                return true;
+                cmd_found = true;
+                break;
             }
-        }
-        else if (c.type == CMD_ARGS) {
-            // Arg command: "cmd" with no args, or "cmd args"
+        } else if (c.type == CMD_ARGS) {
             if (strcmp(local_cmd, c.name) == 0) {
-                c.handler_args("");  // No args case
-                return true;
+                c.handler_args("");
+                cmd_found = true;
+                break;
             }
             if (strncmp(local_cmd, c.name, name_len) == 0 && local_cmd[name_len] == ' ') {
                 c.handler_args(local_cmd + name_len + 1);
-                return true;
+                cmd_found = true;
+                break;
             }
-        }
-        else if (c.type == CMD_PIPED) {
-            // Piped command: supports file arg or piped input
+        } else if (c.type == CMD_PIPED) {
             if (strcmp(local_cmd, c.name) == 0) {
                 c.handler_piped(nullptr, piped_input);
-                return true;
+                cmd_found = true;
+                break;
             }
             if (strncmp(local_cmd, c.name, name_len) == 0 && local_cmd[name_len] == ' ') {
                 c.handler_piped(local_cmd + name_len + 1, piped_input);
-                return true;
+                cmd_found = true;
+                break;
             }
         }
     }
     
-    // ==========================================================================
-    // Special Commands (require inline logic, not table-dispatchable)
-    // ==========================================================================
-    
-    // "." is alias for "source"
-    if (strncmp(local_cmd, ". ", 2) == 0) {
-        cmd_source(local_cmd + 2);
-        return true;
-    }
-    
-    // "cat" with no args outputs piped input
-    if (strcmp(local_cmd, "cat") == 0) {
-        cmd_cat_piped(piped_input);
-        return true;
-    }
-    
-    // "echo" with no args outputs piped input or newline
-    if (strcmp(local_cmd, "echo") == 0) {
-        if (piped_input && piped_input[0]) {
-            g_terminal.write(piped_input);
-        } else {
-            g_terminal.write("\n");
+    if (!cmd_found) {
+        if (strncmp(local_cmd, ". ", 2) == 0) {
+            cmd_source(local_cmd + 2);
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "cat") == 0) {
+            cmd_cat_piped(piped_input);
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "echo") == 0) {
+            if (piped_input && piped_input[0]) g_terminal.write(piped_input);
+            else g_terminal.write("\n");
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "exit") == 0) {
+            if (acpi_is_available()) g_terminal.write_line("Shutting down...");
+            acpi_poweroff();
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "clear") == 0) {
+            g_terminal.clear();
+            g_terminal.write("uniOS Shell\n\n");
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "gui") == 0) {
+            extern void gui_start();
+            gui_start();
+            g_terminal.clear();
+            g_terminal.write("uniOS Shell\n\n");
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "reboot") == 0) {
+            g_terminal.write_line("Rebooting...");
+            outb(0x64, 0xFE);
+            outb(0xCF9, 0x06);
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "poweroff") == 0) {
+            acpi_poweroff();
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "audio status") == 0) {
+            if (sound_is_initialized()) g_terminal.write_line("Sound card is initialized");
+            else g_terminal.write_line("Sound card is not initialized");
+            cmd_found = true;
+        } else if (strncmp(local_cmd, "audio play ", 11) == 0) {
+            if (sound_is_initialized()) sound_play_wav_file(local_cmd + 11);
+            else g_terminal.write_line("No sound card found.");
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "audio pause") == 0) {
+            if (sound_is_initialized()) sound_pause();
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "audio resume") == 0) {
+            if (sound_is_initialized()) sound_resume();
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "audio stop") == 0) {
+            if (sound_is_initialized()) sound_stop();
+            cmd_found = true;
+        } else if (strcmp(local_cmd, "audio volume") == 0) {
+            if (sound_is_initialized()) {
+                g_terminal.write("Volume: ");
+                char buf[16]; int v = sound_get_volume();
+                int i = 0; if (v == 0) buf[i++] = '0';
+                else { char tmp[8]; int j = 0; while (v > 0) { tmp[j++] = '0' + (v % 10); v /= 10; } while (j > 0) buf[i++] = tmp[--j]; }
+                buf[i++] = '%'; buf[i] = 0; g_terminal.write_line(buf);
+            } else g_terminal.write_line("No sound card found.");
+            cmd_found = true;
+        } else if (strncmp(local_cmd, "audio volume ", 13) == 0) {
+            if (sound_is_initialized()) {
+                int vol = str_to_int(local_cmd + 13);
+                if (vol > 100) vol = 100;
+                sound_set_volume((uint8_t)vol);
+                g_terminal.write("Volume set to ");
+                char buf[16]; int i = 0; if (vol == 0) buf[i++] = '0';
+                else { char tmp[8]; int j = 0; while (vol > 0) { tmp[j++] = '0' + (vol % 10); vol /= 10; } while (j > 0) buf[i++] = tmp[--j]; }
+                buf[i++] = '%'; buf[i] = 0; g_terminal.write_line(buf);
+            } else g_terminal.write_line("No sound card found.");
+            cmd_found = true;
+        } else if (strncmp(local_cmd, "audio", 5) == 0) {
+            error_usage("audio <status|play|pause|resume|stop|volume>");
+            cmd_found = true;
         }
-        return true;
-    }
-    
-    // "exit" is alias for poweroff
-    if (strcmp(local_cmd, "exit") == 0) {
-        if (acpi_is_available()) {
-            g_terminal.write_line("Shutting down...");
+
+        if (!cmd_found) {
+            g_terminal.write("Unknown command: ");
+            g_terminal.write_line(local_cmd);
         }
-        acpi_poweroff();
-        g_terminal.write_line("Shutdown failed.");
-        return true;
-    }
-    
-    // "clear" - clear screen
-    if (strcmp(local_cmd, "clear") == 0) {
-        g_terminal.clear();
-        g_terminal.write("uniOS Shell\n\n");
-        return true;
-    }
-    
-    // "gui" - start graphical interface
-    if (strcmp(local_cmd, "gui") == 0) {
-        extern void gui_start();
-        gui_start();
-        g_terminal.clear();
-        g_terminal.write("uniOS Shell\n\n");
-        return true;
-    }
-    
-    // "reboot" - restart system
-    if (strcmp(local_cmd, "reboot") == 0) {
-        g_terminal.write_line("Rebooting...");
-        outb(0x64, 0xFE);
-        for (volatile int i = 0; i < 1000000; i++);
-        outb(0xCF9, 0x06);
-        for (volatile int i = 0; i < 1000000; i++);
-        struct {
-            uint16_t limit;
-            uint64_t base;
-        } __attribute__((packed)) invalid_idt = { 0, 0 };
-        asm volatile("lidt %0; int3" :: "m"(invalid_idt));
-        asm volatile("cli; hlt");
-        return true;
-    }
-    
-    // "poweroff" - shutdown system
-    if (strcmp(local_cmd, "poweroff") == 0) {
-        if (acpi_is_available()) {
-            g_terminal.write_line("ACPI available, attempting shutdown...");
-        } else {
-            g_terminal.write_line("ACPI not available.");
-        }
-        acpi_poweroff();
-        g_terminal.write_line("Shutdown failed.");
-        return true;
     }
 
-    // Sound driver debug commands
-    if (strcmp(local_cmd, "audio status") == 0) {
-        if (sound_is_initialized())
-            g_terminal.write_line("Sound card is initialized");
-        else
-            g_terminal.write_line("Sound card is not initialized (no compatible sound card found)");
-        return true;
-    }
-
-    if (strncmp(local_cmd, "audio play ", 11) == 0) {
-        if (!sound_is_initialized()) {
-            g_terminal.write_line("Audio not available: No sound card found.");
-            g_terminal.write_line("Tip: Use 'audio status' to check sound card status.");
-            return true;
-        }
-        // Note: volume is preserved from last 'audio volume' command
-        sound_play_wav_file(local_cmd + 11);
-
-        return true;
-    }
-
-    if (strcmp(local_cmd, "audio pause") == 0) {
-        if (!sound_is_initialized()) {
-            g_terminal.write_line("Audio not available: No sound card found.");
-            return true;
-        }
-        sound_pause();
-        return true;
-    }
-
-    if (strcmp(local_cmd, "audio resume") == 0) {
-        if (!sound_is_initialized()) {
-            g_terminal.write_line("Audio not available: No sound card found.");
-            return true;
-        }
-        sound_resume();
-        return true;
-    }
-
-    if (strcmp(local_cmd, "audio stop") == 0) {
-        if (!sound_is_initialized()) {
-            g_terminal.write_line("Audio not available: No sound card found.");
-            return true;
-        }
-        sound_stop();
-        return true;
+    if (redirect_ptr) {
+        g_terminal.stop_capture();
+        uint64_t capture_len = strlen(pipe_buffer_a);
+        int result = append_mode ? unifs_append(redirect_filename, pipe_buffer_a, capture_len) 
+                                 : unifs_write(redirect_filename, pipe_buffer_a, capture_len);
+        if (result != UNIFS_OK) g_terminal.write_line("Redirection error.");
     }
     
-    // audio volume [0-100] - Get or set volume
-    if (strcmp(local_cmd, "audio volume") == 0) {
-        if (!sound_is_initialized()) {
-            g_terminal.write_line("Audio not available: No sound card found.");
-            return true;
-        }
-        // Show current volume
-        char buf[32] = "Volume: ";
-        int i = 8;
-        uint8_t vol = sound_get_volume();
-        if (vol >= 100) buf[i++] = '1';
-        if (vol >= 10) buf[i++] = '0' + (vol / 10) % 10;
-        buf[i++] = '0' + vol % 10;
-        buf[i++] = '%';
-        buf[i] = '\0';
-        g_terminal.write_line(buf);
-        return true;
-    }
-    
-    if (strncmp(local_cmd, "audio volume ", 13) == 0) {
-        if (!sound_is_initialized()) {
-            g_terminal.write_line("Audio not available: No sound card found.");
-            return true;
-        }
-        // Parse volume value
-        const char* vol_str = local_cmd + 13;
-        int vol = 0;
-        while (*vol_str >= '0' && *vol_str <= '9') {
-            vol = vol * 10 + (*vol_str - '0');
-            vol_str++;
-        }
-        if (vol > 100) vol = 100;
-        sound_set_volume((uint8_t)vol);
-        
-        char buf[32] = "Volume set to ";
-        int i = 14;
-        if (vol >= 100) buf[i++] = '1';
-        if (vol >= 10) buf[i++] = '0' + (vol / 10) % 10;
-        buf[i++] = '0' + vol % 10;
-        buf[i++] = '%';
-        buf[i] = '\0';
-        g_terminal.write_line(buf);
-        return true;
-    }
-    
-    // Show help for unknown audio subcommands
-    if (strncmp(local_cmd, "audio", 5) == 0) {
-        g_terminal.write_line("Usage: audio <command>");
-        g_terminal.write_line("  audio status  - Check sound card status");
-        g_terminal.write_line("  audio play <file.wav> - Play WAV file");
-        g_terminal.write_line("  audio pause   - Pause playback");
-        g_terminal.write_line("  audio resume  - Resume playback");
-        g_terminal.write_line("  audio stop    - Stop playback");
-        g_terminal.write_line("  audio volume [0-100] - Get/set volume");
-        return true;
-    }
-    
-    // Unknown command
-    g_terminal.write("Unknown command: ");
-    g_terminal.write_line(local_cmd);
-    return false;
+    return cmd_found;
 }
 
 static void execute_command() {
@@ -3614,6 +3591,39 @@ void shell_process_char(char c) {
                 }
             }
             
+            if (!handled && partial[0] == '$') {
+                handled = true;
+                int var_prefix_len = partial_len - 1;
+                const char* var_prefix = partial + 1;
+                
+                int matches = 0;
+                const char* last_match = nullptr;
+                for (int i = 0; i < MAX_VARS; i++) {
+                    if (shell_vars[i].in_use && strncmp(var_prefix, shell_vars[i].name, var_prefix_len) == 0) {
+                        matches++;
+                        last_match = shell_vars[i].name;
+                    }
+                }
+                
+                if (matches == 1) {
+                    int vlen = strlen(last_match);
+                    for (int i = 0; i < vlen; i++) cmd_buffer[last_space + 2 + i] = last_match[i];
+                    cmd_len = last_space + 2 + vlen;
+                    cursor_pos = cmd_len;
+                    int col, row; g_terminal.get_cursor_pos(&col, &row);
+                    redraw_line_at(row, cursor_pos);
+                } else if (matches > 1) {
+                    g_terminal.write("\n");
+                    for (int i = 0; i < MAX_VARS; i++) {
+                        if (shell_vars[i].in_use && strncmp(var_prefix, shell_vars[i].name, var_prefix_len) == 0) {
+                            g_terminal.write("$"); g_terminal.write(shell_vars[i].name); g_terminal.write("  ");
+                        }
+                    }
+                    g_terminal.write("\n"); print_prompt();
+                    for (int i = 0; i < cmd_len; i++) g_terminal.put_char(cmd_buffer[i]);
+                }
+            }
+
             if (!handled) {
                 // Filename completion - get partial filename after last space
                 // Search uniFS for matching files
@@ -3665,14 +3675,14 @@ void shell_process_char(char c) {
                 "mem", "date", "uptime", "version", "uname", "cpuinfo", "lspci",
                 "ifconfig", "dhcp", "ping", "clear", "gui", "reboot", "poweroff", "echo",
                 "wc", "head", "tail", "grep", "sort", "uniq", "rev", "tac", "nl", "tr",
-                // Scripting commands (v0.5.0+)
+                // Scripting commands
                 "run", "set", "unset", "env",
-                // v0.5.x additions
+                // Built-in commands
                 "exit", "time", "true", "false", "sleep", "read", "test", "expr", "source",
-                // Audio commands (v0.6.2+)
+                // Audio commands
                 "audio",
-                // Debug commands (v0.7.0+)
-                "ps", "debug",
+                // Debug & System commands
+                "ps", "debug", "kheap", "history", "dmesg",
                 nullptr
             };
             

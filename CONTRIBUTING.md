@@ -64,13 +64,6 @@ Before submitting a PR:
 > [!WARNING]
 > I can't test on real hardware for every PR. If your change requires specific hardware, document how to test it.
 
-## Versioning
-
-Version is defined in `include/kernel/version.h`. Bump it if you add a feature. Don't bump for:
-- Documentation changes
-- Refactoring
-- Build system tweaks
-
 ## Areas for Contribution
 
 | Area | Notes |
@@ -84,11 +77,12 @@ Version is defined in `include/kernel/version.h`. Bump it if you add a feature. 
 
 Please do not open PRs for:
 
-- **GUI window managers** — The shell is the focus
-- **Alternative filesystems** (FAT32, ext4) — uniFS is intentional
+- **Alternative Languages** — This is a pure C++20 project (no Rust, Zig, etc.)
+- **C++ Standard Library** — We do not use `std::` to keep the kernel freestanding
 - **32-bit (i386) support** — x86-64 only
 - **UEFI runtime services** — We boot via Limine and don't use UEFI after
 - **SMP (multicore)** — Single-core design for simplicity
+- **Complex Filesystems** — Ext4, NTFS, or ZFS are beyond this project's goals
 
 ## Questions?
 

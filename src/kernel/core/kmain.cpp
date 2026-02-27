@@ -55,7 +55,6 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 #include <drivers/rtc/rtc.h>
 #include <kernel/arch/x86_64/serial.h>
 #include <kernel/net/net.h>
-#include <kernel/version.h>
 #include <drivers/sound/sound.h>
 #include <kernel/panic.h>
 
@@ -92,8 +91,8 @@ extern "C" void _start(void) {
     gfx_clear(COLOR_BLACK);
 
     serial_init();
-    serial_printf("\r\n=== uniOS Kernel v%s ===\r\n", UNIOS_VERSION_STRING);
-    DEBUG_INFO("uniOS Kernel v%s starting...", UNIOS_VERSION_STRING);
+    serial_printf("\r\n=== uniOS Kernel @ %s ===\r\n", GIT_COMMIT);
+    DEBUG_INFO("uniOS Kernel @ %s starting...", GIT_COMMIT);
 
     if (bootloader_info_request.response) {
         const char* src_name = bootloader_info_request.response->name;
