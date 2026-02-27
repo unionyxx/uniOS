@@ -1,4 +1,5 @@
 #include <drivers/bus/usb/usb.h>
+#include <drivers/bus/usb/usb_hub.h>
 #include <drivers/bus/usb/xhci/xhci.h>
 #include <kernel/mm/heap.h>
 #include <kernel/debug.h>
@@ -23,7 +24,7 @@ static void usb_handle_hid_interface(UsbDeviceInfo* dev, UsbInterfaceDescriptor*
             dev->is_keyboard = true;
             dev->is_boot_interface = true;
             dev->hid_interface = iface->bInterfaceNumber;
-            DEBUG_LOG("Found boot keyboard interface %d", iface->bInterfaceNumber);
+            KLOG(MOD_USB, LOG_INFO, "Found boot keyboard interface %d", iface->bInterfaceNumber);
         }
     }
     else if (iface->bInterfaceSubClass == USB_SUBCLASS_BOOT &&
@@ -36,7 +37,7 @@ static void usb_handle_hid_interface(UsbDeviceInfo* dev, UsbInterfaceDescriptor*
             } else {
                 dev->hid_interface = iface->bInterfaceNumber;
             }
-            DEBUG_LOG("Found boot mouse interface %d", iface->bInterfaceNumber);
+            KLOG(MOD_USB, LOG_INFO, "Found boot mouse interface %d", iface->bInterfaceNumber);
         }
     }
     else if (iface->bInterfaceSubClass == 0 && iface->bInterfaceProtocol == 0) {
@@ -63,7 +64,7 @@ static void usb_handle_hid_endpoint(UsbDeviceInfo* dev, UsbInterfaceDescriptor* 
         iface->bInterfaceNumber == dev->hid_interface) {
         dev->is_mouse = true;
         dev->is_boot_interface = false;
-        DEBUG_LOG("Classified generic HID as mouse");
+        KLOG(MOD_USB, LOG_TRACE, "Classified generic HID as mouse");
     }
     
     if (iface->bInterfaceNumber == dev->hid_interface && dev->hid_endpoint == 0) {
@@ -102,7 +103,7 @@ static bool usb_parse_config(UsbDeviceInfo* dev, uint8_t* data, uint16_t length)
 }
 
 int usb_enumerate_device(uint8_t port) {
-    DEBUG_LOG("Enumerating port %d...", port);
+    DEBUG_INFO("Enumerating port %d...", port);
     if (usb_device_count >= USB_MAX_DEVICES) {
         DEBUG_ERROR("Max devices reached");
         return -1;
@@ -117,13 +118,13 @@ int usb_enumerate_device(uint8_t port) {
         DEBUG_ERROR("Invalid port speed");
         return -1;
     }
-    DEBUG_LOG("Port speed: %d", speed);
+    KLOG(MOD_USB, LOG_TRACE, "Port speed: %d", speed);
     int slot_id = xhci_enable_slot();
     if (slot_id < 0) {
         DEBUG_ERROR("Enable Slot failed");
         return -1;
     }
-    DEBUG_LOG("Slot ID: %d", slot_id);
+    KLOG(MOD_USB, LOG_TRACE, "Slot ID: %d", slot_id);
     if (!xhci_address_device(slot_id, port, speed)) {
         DEBUG_ERROR("Address Device failed");
         xhci_disable_slot(slot_id);
@@ -141,9 +142,15 @@ int usb_enumerate_device(uint8_t port) {
         xhci_disable_slot(slot_id);
         return -1;
     }
-    DEBUG_LOG("Device: VID=0x%04x PID=0x%04x Class=%d MaxPkt=%d",
+    KLOG(MOD_USB, LOG_TRACE, "Device: VID=0x%04x PID=0x%04x Class=%d MaxPkt=%d",
               dev_desc.idVendor, dev_desc.idProduct,
               dev_desc.bDeviceClass, dev_desc.bMaxPacketSize0);
+    
+    // Check if it's a hub
+    if (dev_desc.bDeviceClass == 0x09) {
+        usb_hub_register(0, port, speed); // address will be set later in a real driver
+    }
+
     UsbDeviceInfo* dev = &usb_devices[usb_device_count];
     kstring::zero_memory(dev, sizeof(UsbDeviceInfo));
     dev->slot_id = slot_id;
@@ -187,7 +194,7 @@ int usb_enumerate_device(uint8_t port) {
                                      dev->hid_max_packet, dev->hid_interval)) {
             DEBUG_ERROR("Configure primary endpoint failed");
         } else {
-            DEBUG_LOG("Primary endpoint %d configured", dev->hid_endpoint);
+            KLOG(MOD_USB, LOG_TRACE, "Primary endpoint %d configured", dev->hid_endpoint);
         }
     }
     if (dev->hid_endpoint2 != 0) {
@@ -195,7 +202,7 @@ int usb_enumerate_device(uint8_t port) {
                                      dev->hid_max_packet2, dev->hid_interval2)) {
             DEBUG_ERROR("Configure secondary endpoint failed");
         } else {
-            DEBUG_LOG("Secondary endpoint %d configured", dev->hid_endpoint2);
+            KLOG(MOD_USB, LOG_TRACE, "Secondary endpoint %d configured", dev->hid_endpoint2);
         }
     }
     dev->configured = true;
@@ -249,7 +256,9 @@ UsbDeviceInfo* usb_find_mouse() {
     return nullptr;
 }
 
-void usb_poll() { xhci_poll_events(); }
+void usb_poll() { 
+    // xHCI is now interrupt-driven; no polling needed here
+}
 
 void usb_init() {
     usb_device_count = 0;
@@ -260,6 +269,9 @@ void usb_init() {
         DEBUG_ERROR("xHCI initialization failed");
         return;
     }
+    
+    usb_hub_init();
+
     uint8_t max_ports = xhci_get_max_ports();
     int found = 0;
     for (uint8_t port = 1; port <= max_ports; port++) {

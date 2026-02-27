@@ -52,7 +52,7 @@ static void e1000_read_mac() {
         g_e1000.mac[3] = (ral >> 24) & 0xFF;
         g_e1000.mac[4] = rah & 0xFF;
         g_e1000.mac[5] = (rah >> 8) & 0xFF;
-        DEBUG_INFO("e1000: MAC from RAL/RAH: %02x:%02x:%02x:%02x:%02x:%02x",
+        KLOG(MOD_NET, LOG_TRACE, "e1000: MAC from RAL/RAH: %02x:%02x:%02x:%02x:%02x:%02x",
             g_e1000.mac[0], g_e1000.mac[1], g_e1000.mac[2],
             g_e1000.mac[3], g_e1000.mac[4], g_e1000.mac[5]);
         return;
@@ -70,7 +70,7 @@ static void e1000_read_mac() {
     g_e1000.mac[4] = word2 & 0xFF;
     g_e1000.mac[5] = (word2 >> 8) & 0xFF;
     
-    DEBUG_INFO("e1000: MAC from EEPROM: %02x:%02x:%02x:%02x:%02x:%02x",
+    KLOG(MOD_NET, LOG_TRACE, "e1000: MAC from EEPROM: %02x:%02x:%02x:%02x:%02x:%02x",
         g_e1000.mac[0], g_e1000.mac[1], g_e1000.mac[2],
         g_e1000.mac[3], g_e1000.mac[4], g_e1000.mac[5]);
     
@@ -130,7 +130,7 @@ static bool e1000_init_rx() {
                     E1000_RCTL_SECRC | E1000_RCTL_LBM_NONE;
     e1000_write_reg(E1000_REG_RCTL, rctl);
     
-    DEBUG_INFO("e1000: RX initialized with %d descriptors", E1000_NUM_RX_DESC);
+    KLOG(MOD_NET, LOG_TRACE, "e1000: RX initialized with %d descriptors", E1000_NUM_RX_DESC);
     return true;
 }
 
@@ -176,7 +176,7 @@ static bool e1000_init_tx() {
                     (64 << E1000_TCTL_COLD_SHIFT);   // Collision distance
     e1000_write_reg(E1000_REG_TCTL, tctl);
     
-    DEBUG_INFO("e1000: TX initialized with %d descriptors", E1000_NUM_TX_DESC);
+    KLOG(MOD_NET, LOG_TRACE, "e1000: TX initialized with %d descriptors", E1000_NUM_TX_DESC);
     return true;
 }
 
@@ -186,7 +186,7 @@ bool e1000_init() {
         return true;
     }
     
-    DEBUG_INFO("e1000: Scanning for Intel NIC...");
+    KLOG(MOD_NET, LOG_TRACE, "e1000: Scanning for Intel NIC...");
     
     // Scan PCI for Intel NICs
     PciDevice nic;
@@ -254,7 +254,7 @@ bool e1000_init() {
         DEBUG_ERROR("e1000: Failed to map MMIO region");
         return false;
     }
-    DEBUG_INFO("e1000: MMIO base at 0x%lx (phys 0x%lx), size %lu bytes",
+    KLOG(MOD_NET, LOG_TRACE, "e1000: MMIO base at 0x%lx (phys 0x%lx), size %lu bytes",
         g_e1000.mmio_base, bar0, bar_size);
     
     // Reset the device

@@ -2,11 +2,12 @@
 #include <drivers/video/framebuffer.h>
 #include <kernel/time/timer.h>
 #include <kernel/mm/heap.h>
+#include <libk/kstring.h>
 
 Terminal g_terminal;
 
 static const int CHAR_WIDTH = 9;
-static const int CHAR_HEIGHT = 10;
+static const int CHAR_HEIGHT = 18;
 static const int MARGIN_LEFT = 50;
 static const int MARGIN_TOP = 50;
 static const int MARGIN_BOTTOM = 30;
@@ -168,14 +169,43 @@ void Terminal::put_char(char c) {
 }
 
 void Terminal::write(const char* str) {
+    // Batch cursor updates: hide once before writing string
+    bool was_visible = cursor_visible;
+    if (was_visible) {
+        draw_cursor(false);
+        cursor_visible = false;
+    }
+    
     while (*str) {
         put_char(*str++);
+    }
+    
+    // Show cursor again at the new position
+    if (was_visible) {
+        cursor_visible = true;
+        draw_cursor(true);
+        cursor_state = true;
+        last_blink_tick = timer_get_ticks();
     }
 }
 
 void Terminal::write_line(const char* str) {
+    // Batch cursor updates: hide once before writing line
+    bool was_visible = cursor_visible;
+    if (was_visible) {
+        draw_cursor(false);
+        cursor_visible = false;
+    }
+    
     write(str);
     put_char('\n');
+    
+    if (was_visible) {
+        cursor_visible = true;
+        draw_cursor(true);
+        cursor_state = true;
+        last_blink_tick = timer_get_ticks();
+    }
 }
 
 void Terminal::new_line() {
@@ -192,32 +222,19 @@ void Terminal::scroll_up() {
     // Safety: ensure buffer exists and dimensions are valid
     if (!text_buffer || width_chars <= 0 || height_chars <= 1 || buffer_size <= 0) return;
     
-    // FAST: Shift text buffer up by one row in RAM (~2KB for 80x25)
+    // FAST: Use memmove for text buffer shift
     int rows_to_move = height_chars - 1;
-    
-    // Move rows 1..N-1 to rows 0..N-2
-    for (int row = 0; row < rows_to_move; row++) {
-        int dst_idx = row * width_chars;
-        int src_idx = (row + 1) * width_chars;
-        if (dst_idx >= 0 && src_idx + width_chars <= buffer_size) {
-            for (int col = 0; col < width_chars; col++) {
-                text_buffer[dst_idx + col] = text_buffer[src_idx + col];
-            }
-        }
-    }
+    kstring::memmove(text_buffer, text_buffer + width_chars, rows_to_move * width_chars * sizeof(Cell));
     
     // Clear the last row in buffer
     int last_row_idx = (height_chars - 1) * width_chars;
-    if (last_row_idx >= 0 && last_row_idx + width_chars <= buffer_size) {
-        for (int col = 0; col < width_chars; col++) {
-            text_buffer[last_row_idx + col].ch = ' ';
-            text_buffer[last_row_idx + col].fg = fg_color;
-            text_buffer[last_row_idx + col].bg = bg_color;
-        }
+    for (int col = 0; col < width_chars; col++) {
+        text_buffer[last_row_idx + col].ch = ' ';
+        text_buffer[last_row_idx + col].fg = fg_color;
+        text_buffer[last_row_idx + col].bg = bg_color;
     }
     
     // FAST: Use pixel-level scroll instead of character-by-character redraw
-    // gfx_scroll_up uses SSE2 and is ~100x faster than redraw_screen()
     gfx_scroll_up(CHAR_HEIGHT, bg_color);
 }
 
@@ -265,8 +282,6 @@ void Terminal::redraw_row(int row) {
 }
 
 void Terminal::draw_cursor(bool visible) {
-    if (!cursor_visible) return;
-    
     int x = MARGIN_LEFT + cursor_col * CHAR_WIDTH;
     int y = MARGIN_TOP + cursor_row * CHAR_HEIGHT;
     
@@ -274,20 +289,23 @@ void Terminal::draw_cursor(bool visible) {
     int cursor_y = y + CHAR_HEIGHT - cursor_height;
     
     if (visible) {
-        gfx_fill_rect(x, cursor_y, CHAR_WIDTH, cursor_height, 0xFFFFFFFF);
+        gfx_fill_rect(x, cursor_y, CHAR_WIDTH, cursor_height, COLOR_WHITE);
     } else {
         gfx_fill_rect(x, cursor_y, CHAR_WIDTH, cursor_height, bg_color);
     }
 }
 
 void Terminal::set_cursor_visible(bool visible) {
-    cursor_visible = visible;
+    if (cursor_visible == visible) return;
+    
     if (visible) {
+        cursor_visible = true;
         cursor_state = true;
         last_blink_tick = timer_get_ticks();
         draw_cursor(true);
     } else {
         draw_cursor(false);
+        cursor_visible = false;
     }
 }
 

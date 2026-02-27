@@ -26,7 +26,7 @@ INCLUDES = -I$(INCLUDE_DIR) -I$(SRC_DIR)
 
 # Base flags (always applied)
 CXXFLAGS_BASE = -std=c++20 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector \
-                -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+                -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
                 -march=x86-64 -mtune=generic \
                 -ffunction-sections -fdata-sections \
                 -Wall -Wextra -Wno-volatile \

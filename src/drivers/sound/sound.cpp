@@ -48,7 +48,7 @@ void sound_init() {
     sound_available = ac97_available || hda_available;
 
     if (!sound_available) {
-        DEBUG_ERROR("sound card not found. audio is not available");
+        DEBUG_WARN("No compatible sound card detected");
         return;
     }
 
@@ -62,6 +62,9 @@ void sound_init() {
     else {
         used_sound_card = hda_available ? SOUND_HD_AUDIO : SOUND_AC97;
     }
+
+    DEBUG_SUCCESS("Sound system active using %s", 
+                  used_sound_card == SOUND_HD_AUDIO ? "Intel HD Audio" : "AC97");
 }
 
 void sound_reset() {
@@ -124,95 +127,74 @@ void sound_set_sample_rate(uint32_t sample_rate) {
 
 void sound_play_mp3_file(const char* filename) {
     if (!sound_available) {
-        DEBUG_ERROR("sound card not found. audio is not available");
+        DEBUG_ERROR("Sound system not available");
         return;
     }
-
-    DEBUG_INFO("trying to play %s", filename);
 
     uint8_t* data_ptr;
     uint32_t data_size;
-
     uint32_t sample_rate;
     uint32_t channels;
 
-    // Try to open MP3 file.
     if (!mp3_open(filename, &data_ptr, &data_size, &sample_rate, &channels)) {
-        DEBUG_ERROR("mp3_open failed");
+        DEBUG_ERROR("Failed to open MP3 file: %s", filename);
         return;
     }
 
-    // 16-bit only for now.
+    DEBUG_INFO("Playing MP3: %s (%lu Hz, %d channels, %lu bytes)", 
+               filename, sample_rate, channels, data_size);
+
     sound_set_bits_per_sample(16);
-
-    // Set channel count to one retrieved from decoder.
     sound_set_channels(channels);
-
-    // Set sample rate to one retrieved from decoder.
     sound_set_sample_rate(sample_rate);
-
-    // Play it!
     sound_play(data_ptr, data_size);
 }
 
 void sound_play_wav_file(const char* filename) {
     if (!sound_available) {
-        DEBUG_ERROR("sound card not found. audio is not available");
+        DEBUG_ERROR("Sound system not available");
         return;
     }
-
-    DEBUG_INFO("trying to play %s", filename);
 
     uint8_t* data_ptr;
     uint32_t data_size;
-
     uint32_t sample_rate;
     uint32_t channels;
 
-    // Try to open WAV file.
     if (!wav_open(filename, &data_ptr, &data_size, &sample_rate, &channels)) {
-        DEBUG_ERROR("wav_open failed");
+        DEBUG_ERROR("Failed to open WAV file: %s", filename);
         return;
     }
 
-    // 16-bit only for now.
+    DEBUG_INFO("Playing WAV: %s (%lu Hz, %d channels, %lu bytes)", 
+               filename, sample_rate, channels, data_size);
+
     sound_set_bits_per_sample(16);
-
-    // Set channel count to one retrieved from WAV header.
     sound_set_channels(channels);
-
-    // Set sample rate to one retrieved from WAV header.
     sound_set_sample_rate(sample_rate);
-
-    // Play it!
     sound_play(data_ptr, data_size);
 }
 
 void sound_play_pcm_file(const char* filename) {
     if (!sound_available) {
-        DEBUG_ERROR("sound card not found. audio is not available");
+        DEBUG_ERROR("Sound system not available");
         return;
     }
 
-    DEBUG_INFO("trying to play %s", filename);
-
     UniFSFile file;
     if (!unifs_open_into(filename, &file)) {
-        DEBUG_ERROR("unifs_open_into failed");
+        DEBUG_ERROR("Failed to open PCM file: %s", filename);
         return;
     }
 
     uint8_t* data_ptr = (uint8_t*)(uint64_t)file.data;
     uint32_t data_size = file.size;
 
-    // 16-bit only for now.
-    sound_set_bits_per_sample(16);
+    DEBUG_INFO("Playing raw PCM: %s (%lu bytes)", filename, data_size);
 
-    // FIXME: hard-coded sample rate and channel count values for ffmpeg .pcm files.
+    sound_set_bits_per_sample(16);
     sound_set_channels(2);
     sound_set_sample_rate(22050);
-
-    // Play it!
     sound_play(data_ptr, data_size);
 }
 

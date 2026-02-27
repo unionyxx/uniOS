@@ -70,20 +70,17 @@ void gfx_enable_double_buffering() {
     if (!framebuffer) return;
     if (is_double_buffered) return;  // Already enabled
     
-    // FIX: Use pitch * height to account for hardware padding
+    // Use pitch * height to account for hardware padding
     uint64_t bytes = framebuffer->pitch * framebuffer->height;
     
-    // Allocate RAM for the backbuffer using malloc (heap must be initialized)
     backbuffer = (uint32_t*)malloc(bytes);
     
     if (backbuffer) {
-        // Sync: Copy current screen contents to backbuffer
         uint64_t* dst = (uint64_t*)backbuffer;
         uint64_t* src = (uint64_t*)frontbuffer;
         uint64_t count = bytes / 8;
         for (uint64_t i = 0; i < count; i++) dst[i] = src[i];
 
-        // Switch drawing target to RAM
         target_buffer = backbuffer;
         is_double_buffered = true;
     }
@@ -96,39 +93,32 @@ void gfx_swap_buffers() {
     uint32_t width = framebuffer->width;
     uint32_t height = framebuffer->height;
 
-    // If nothing changed, skip entirely
     if (!full_redraw_needed && dirty_min_x > dirty_max_x) return;
 
-    // Determine copy bounds (use full screen if full_redraw_needed)
     int32_t x1 = full_redraw_needed ? 0 : dirty_min_x;
     int32_t y1 = full_redraw_needed ? 0 : dirty_min_y;
     int32_t x2 = full_redraw_needed ? (int32_t)width - 1 : dirty_max_x;
     int32_t y2 = full_redraw_needed ? (int32_t)height - 1 : dirty_max_y;
 
-    // Clamp to screen bounds
     if (x1 < 0) x1 = 0;
     if (y1 < 0) y1 = 0;
     if (x2 >= (int32_t)width) x2 = width - 1;
     if (y2 >= (int32_t)height) y2 = height - 1;
 
-    // Copy only the dirty region
     uint32_t copy_width = x2 - x1 + 1;
     if (copy_width == 0) return;
 
-    // FAST PATH: If copying full width rows, use bulk transfer (skip row-by-row overhead)
-    // This is critical for scroll performance - avoids 1080 loop iterations
+    // Full-width row optimization: uses bulk SSE2 transfer
     if (x1 == 0 && copy_width == width) {
         uint32_t* src = &backbuffer[y1 * pitch_u32];
         uint32_t* dst = &frontbuffer[y1 * pitch_u32];
         uint64_t total_u32 = (uint64_t)(y2 - y1 + 1) * pitch_u32;
         
-        // Align destination to 16 bytes
         while (total_u32 > 0 && ((uint64_t)dst & 0xF)) {
             *dst++ = *src++;
             total_u32--;
         }
         
-        // Bulk SSE2 non-temporal copy: 32 bytes per iteration
         while (total_u32 >= 8) {
             asm volatile(
                 "prefetchnta 256(%0)\n\t"
@@ -145,25 +135,22 @@ void gfx_swap_buffers() {
             total_u32 -= 8;
         }
         
-        // Handle remaining pixels
         while (total_u32--) {
             *dst++ = *src++;
         }
     } else {
-        // SLOW PATH: Partial-width rows - must copy row by row
+        // Row-by-row copy for partial updates
         for (int32_t y = y1; y <= y2; y++) {
             uint32_t offset = y * pitch_u32 + x1;
             uint32_t* src = &backbuffer[offset];
             uint32_t* dst = &frontbuffer[offset];
             uint32_t count = copy_width;
 
-            // Align destination to 16 bytes for optimal SSE performance
             while (count > 0 && ((uint64_t)dst & 0xF)) {
                 *dst++ = *src++;
                 count--;
             }
 
-            // Unrolled SSE2 loop: Process 32 bytes (8 pixels) per iteration
             while (count >= 8) {
                 asm volatile(
                     "prefetchnta 128(%0)\n\t"
@@ -180,7 +167,6 @@ void gfx_swap_buffers() {
                 count -= 8;
             }
 
-            // Handle remaining 4 pixels
             if (count >= 4) {
                 asm volatile(
                     "movdqu (%0), %%xmm0\n\t"
@@ -194,18 +180,15 @@ void gfx_swap_buffers() {
                 count -= 4;
             }
 
-            // Handle remaining pixels (less than 4)
             while (count--) {
                 *dst++ = *src++;
             }
         }
     }
 
-    // Memory fence to ensure all WC buffers are flushed to VRAM
     asm volatile("sfence" ::: "memory");
 
-    // Reset dirty tracking for next frame
-    dirty_min_x = width;   // Inverted bounds to detect first write
+    dirty_min_x = width;
     dirty_min_y = height;
     dirty_max_x = -1;
     dirty_max_y = -1;
@@ -232,41 +215,35 @@ void gfx_put_pixel(int32_t x, int32_t y, uint32_t color) {
 void gfx_clear(uint32_t color) {
     if (!framebuffer) return;
     
-    uint64_t pitch_u32 = framebuffer->pitch / 4;
-    uint64_t height = framebuffer->height;
-    uint64_t width = framebuffer->width;
+    uint64_t total_u32 = (uint64_t)(framebuffer->pitch / 4) * framebuffer->height;
+    uint32_t* buf = target_buffer;
     
-    // Create 128-bit color pattern (4 pixels)
+    // SSE2 optimization: fill 4 pixels at a time
     uint32_t color_arr[4] __attribute__((aligned(16))) = {color, color, color, color};
     
-    for (uint64_t y = 0; y < height; y++) {
-        uint32_t* row = target_buffer + y * pitch_u32;
-        uint64_t count = width;
-        
-        // Align to 16 bytes
-        while (count > 0 && ((uint64_t)row & 0xF)) {
-            *row++ = color;
-            count--;
-        }
-        
-        // SSE2 fill: 8 pixels per iteration with prefetching
-        while (count >= 8) {
-            asm volatile(
-                "movdqa (%0), %%xmm0\n\t"     // Load color pattern
-                "movdqu %%xmm0,   (%1)\n\t"   // Store 4 pixels
-                "movdqu %%xmm0, 16(%1)\n\t"   // Store next 4 pixels
-                :
-                : "r"(color_arr), "r"(row)
-                : "memory"
-            );
-            row += 8;
-            count -= 8;
-        }
-        
-        // Handle remaining pixels
-        while (count--) {
-            *row++ = color;
-        }
+    // Align to 16 bytes
+    while (total_u32 > 0 && ((uint64_t)buf & 0xF)) {
+        *buf++ = color;
+        total_u32--;
+    }
+    
+    // SSE2 unrolled loop: 8 pixels per iteration
+    while (total_u32 >= 8) {
+        asm volatile(
+            "movdqa (%0), %%xmm0\n\t"
+            "movdqu %%xmm0,   (%1)\n\t"
+            "movdqu %%xmm0, 16(%1)\n\t"
+            :
+            : "r"(color_arr), "r"(buf)
+            : "memory"
+        );
+        buf += 8;
+        total_u32 -= 8;
+    }
+    
+    // Remaining pixels
+    while (total_u32--) {
+        *buf++ = color;
     }
     
     // Mark entire screen as needing redraw
@@ -286,10 +263,36 @@ void gfx_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
 
     uint32_t pitch = framebuffer->pitch / 4;
     
+    // SSE2 optimization: fill 4 pixels at a time
+    uint32_t color_arr[4] __attribute__((aligned(16))) = {color, color, color, color};
+    
     for (int32_t py = y; py < y + h; py++) {
         uint32_t* row = &target_buffer[py * pitch + x];
-        for (int32_t px = 0; px < w; px++) {
-            row[px] = color;
+        int32_t count = w;
+        
+        // Align to 16 bytes
+        while (count > 0 && ((uint64_t)row & 0xF)) {
+            *row++ = color;
+            count--;
+        }
+        
+        // SSE2 unrolled loop: 8 pixels per iteration
+        while (count >= 8) {
+            asm volatile(
+                "movdqa (%0), %%xmm0\n\t"
+                "movdqu %%xmm0,   (%1)\n\t"
+                "movdqu %%xmm0, 16(%1)\n\t"
+                :
+                : "r"(color_arr), "r"(row)
+                : "memory"
+            );
+            row += 8;
+            count -= 8;
+        }
+        
+        // Remaining pixels
+        while (count--) {
+            *row++ = color;
         }
     }
     
@@ -307,24 +310,53 @@ void gfx_draw_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
 void gfx_draw_gradient_v(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t top_color, uint32_t bottom_color) {
     if (!framebuffer || h <= 0 || w <= 0) return;
     
+    // Clip to screen
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int32_t)framebuffer->width) w = framebuffer->width - x;
+    if (y + h > (int32_t)framebuffer->height) h = framebuffer->height - y;
+    if (w <= 0 || h <= 0) return;
+
     // Extract RGB components
-    uint8_t tr = (top_color >> 16) & 0xFF;
-    uint8_t tg = (top_color >> 8) & 0xFF;
-    uint8_t tb = top_color & 0xFF;
+    uint32_t tr = (top_color >> 16) & 0xFF;
+    uint32_t tg = (top_color >> 8) & 0xFF;
+    uint32_t tb = top_color & 0xFF;
     
-    uint8_t br = (bottom_color >> 16) & 0xFF;
-    uint8_t bg = (bottom_color >> 8) & 0xFF;
-    uint8_t bb = bottom_color & 0xFF;
+    uint32_t br = (bottom_color >> 16) & 0xFF;
+    uint32_t bg = (bottom_color >> 8) & 0xFF;
+    uint32_t bb = bottom_color & 0xFF;
     
+    uint32_t pitch = framebuffer->pitch / 4;
+
     for (int32_t row = 0; row < h; row++) {
         // Linear interpolation
-        uint8_t r = tr + ((br - tr) * row) / h;
-        uint8_t g = tg + ((bg - tg) * row) / h;
-        uint8_t b = tb + ((bb - tb) * row) / h;
+        uint32_t r = tr + ((br - tr) * row) / h;
+        uint32_t g = tg + ((bg - tg) * row) / h;
+        uint32_t b = tb + ((bb - tb) * row) / h;
         uint32_t color = (r << 16) | (g << 8) | b;
         
-        gfx_fill_rect(x, y + row, w, 1, color);
+        uint32_t* row_ptr = &target_buffer[(y + row) * pitch + x];
+        int32_t count = w;
+
+        // Optimized row fill (simple loop but without function call overhead)
+        // For gradients, SIMD is harder because color changes every row, 
+        // but within a row it is constant.
+        uint32_t color_arr[4] __attribute__((aligned(16))) = {color, color, color, color};
+        
+        while (count > 0 && ((uint64_t)row_ptr & 0xF)) {
+            *row_ptr++ = color;
+            count--;
+        }
+        while (count >= 8) {
+            asm volatile("movdqa (%0), %%xmm0; movdqu %%xmm0, (%1); movdqu %%xmm0, 16(%1)"
+                         :: "r"(color_arr), "r"(row_ptr) : "memory");
+            row_ptr += 8; count -= 8;
+        }
+        while (count--) *row_ptr++ = color;
     }
+    
+    // Mark the entire gradient area as dirty at once
+    mark_dirty_rect(x, y, w, h);
 }
 
 // Simple arrow cursor (12x19)
@@ -361,46 +393,64 @@ void gfx_draw_cursor(int32_t x, int32_t y) {
     }
 }
 
-// Internal: Draw character WITHOUT marking dirty (for batched operations)
 static void gfx_draw_char_no_dirty(int32_t x, int32_t y, char c, uint32_t color) {
     if (!framebuffer) return;
-    if (c < 0 || c > 127) return;
     
     // Bounds check - skip if completely off-screen
     if (x >= (int32_t)framebuffer->width || y >= (int32_t)framebuffer->height) return;
-    if (x + 8 <= 0 || y + 8 <= 0) return;
+    if (x + 8 <= 0 || y + 16 <= 0) return;
     
-    const uint8_t* glyph = font8x8[(int)c];
+    const uint8_t* glyph = font8x16[(uint8_t)c];
     uint32_t pitch_u32 = framebuffer->pitch / 4;
-    
-    // Calculate starting row address - avoids multiplication per pixel
     uint32_t* row_ptr = target_buffer + (y * pitch_u32) + x;
     
-    for (int row = 0; row < 8; row++) {
-        // Skip rows that are off-screen
-        if (y + row >= 0 && y + row < (int32_t)framebuffer->height) {
+    // Optimization: If the character is fully on-screen, use a faster loop
+    bool fully_on_screen = (x >= 0 && y >= 0 && 
+                            x + 8 <= (int32_t)framebuffer->width && 
+                            y + 16 <= (int32_t)framebuffer->height);
+
+    if (fully_on_screen) {
+        for (int row = 0; row < 16; row++) {
             uint8_t bits = glyph[row];
-            for (int col = 0; col < 8; col++) {
-                // Skip columns that are off-screen
-                if (x + col >= 0 && x + col < (int32_t)framebuffer->width) {
-                    if ((bits >> (7 - col)) & 1) {
-                        row_ptr[col] = color;
+            if (bits) {
+                if (bits & 0x80) row_ptr[0] = color;
+                if (bits & 0x40) row_ptr[1] = color;
+                if (bits & 0x20) row_ptr[2] = color;
+                if (bits & 0x10) row_ptr[3] = color;
+                if (bits & 0x08) row_ptr[4] = color;
+                if (bits & 0x04) row_ptr[5] = color;
+                if (bits & 0x02) row_ptr[6] = color;
+                if (bits & 0x01) row_ptr[7] = color;
+            }
+            row_ptr += pitch_u32;
+        }
+    } else {
+        // Clipped version (slower but safe)
+        for (int row = 0; row < 16; row++) {
+            if (y + row >= 0 && y + row < (int32_t)framebuffer->height) {
+                uint8_t bits = glyph[row];
+                if (bits) {
+                    for (int col = 0; col < 8; col++) {
+                        if (x + col >= 0 && x + col < (int32_t)framebuffer->width) {
+                            if ((bits >> (7 - col)) & 1) {
+                                row_ptr[col] = color;
+                            }
+                        }
                     }
                 }
             }
+            row_ptr += pitch_u32;
         }
-        row_ptr += pitch_u32;  // Move to next line efficiently
     }
 }
 
 void gfx_draw_char(int32_t x, int32_t y, char c, uint32_t color) {
     gfx_draw_char_no_dirty(x, y, c, color);
-    // Mark the character cell as dirty (9 pixels wide for spacing)
-    mark_dirty_rect(x, y, 9, 8);
+    mark_dirty_rect(x, y, 9, 16);
 }
 
 void gfx_clear_char(int32_t x, int32_t y, uint32_t bg_color) {
-    gfx_fill_rect(x, y, 9, 8, bg_color);
+    gfx_fill_rect(x, y, 9, 16, bg_color);
 }
 
 void gfx_draw_string(int32_t x, int32_t y, const char *str, uint32_t color) {
@@ -408,25 +458,23 @@ void gfx_draw_string(int32_t x, int32_t y, const char *str, uint32_t color) {
     
     int32_t cursor_x = x;
     int32_t cursor_y = y;
-    int32_t max_x = x;  // Track bounding box
-    int32_t max_y = y + 8;
+    int32_t max_x = x;
+    int32_t max_y = y + 16;
     
     while (*str) {
         if (*str == '\n') {
             cursor_x = x;
-            cursor_y += 10;
-            if (cursor_y + 8 > max_y) max_y = cursor_y + 8;
+            cursor_y += 18;
+            if (cursor_y + 16 > max_y) max_y = cursor_y + 16;
         } else {
-            // Draw without marking dirty (batched)
             gfx_draw_char_no_dirty(cursor_x, cursor_y, *str, color);
             cursor_x += 9;
             if (cursor_x > max_x) max_x = cursor_x;
-            if (cursor_y + 8 > max_y) max_y = cursor_y + 8;
+            if (cursor_y + 16 > max_y) max_y = cursor_y + 16;
         }
         str++;
     }
     
-    // Mark single bounding box dirty for entire string
     mark_dirty_rect(x, y, max_x - x, max_y - y);
 }
 
@@ -437,7 +485,7 @@ void gfx_draw_centered_text(const char* text, uint32_t color) {
     const char* p = text;
     while (*p++) text_len++;
     
-    int char_width = 8;
+    int char_width = 9;
     int text_width = text_len * char_width;
     int center_x = (framebuffer->width - text_width) / 2;
     int center_y = (framebuffer->height - 16) / 2;
@@ -448,10 +496,9 @@ void gfx_draw_centered_text(const char* text, uint32_t color) {
 void gfx_scroll_up(int pixels, uint32_t fill_color) {
     if (!framebuffer || pixels <= 0) return;
     
-    uint64_t pitch = framebuffer->pitch / 4;  // pitch in uint32_t units
+    uint64_t pitch = framebuffer->pitch / 4;
     uint64_t height = framebuffer->height;
     
-    // Clamp pixels to height
     if ((uint64_t)pixels >= height) {
         gfx_clear(fill_color);
         return;
@@ -459,17 +506,13 @@ void gfx_scroll_up(int pixels, uint32_t fill_color) {
     
     uint64_t rows_to_move = height - pixels;
     
-    // ULTRA-FAST: Single bulk copy for entire scroll region
-    // Since pitch is consistent, we can copy the entire scroll area as one block
-    // This is much faster than row-by-row due to reduced loop overhead and better cache behavior
     uint32_t* dst = target_buffer;
     uint32_t* src = target_buffer + (pixels * pitch);
-    uint64_t total_u32 = rows_to_move * pitch;  // Total uint32_t elements to copy
+    uint64_t total_u32 = rows_to_move * pitch;
     
-    // SSE2 bulk copy: 8 uint32_t (32 bytes) per iteration
     while (total_u32 >= 8) {
         asm volatile(
-            "prefetchnta 256(%0)\n\t"   // Prefetch ahead for streaming
+            "prefetchnta 256(%0)\n\t"
             "movdqu   (%0), %%xmm0\n\t"
             "movdqu 16(%0), %%xmm1\n\t"
             "movdqu %%xmm0,   (%1)\n\t"
@@ -483,18 +526,15 @@ void gfx_scroll_up(int pixels, uint32_t fill_color) {
         total_u32 -= 8;
     }
     
-    // Handle remaining elements
     while (total_u32--) {
         *dst++ = *src++;
     }
     
-    // Fill bottom rows - also as bulk fill for the fill region
     uint32_t* fill_start = target_buffer + (rows_to_move * pitch);
     uint64_t fill_count = pixels * pitch;
     
     uint32_t color_arr[4] __attribute__((aligned(16))) = {fill_color, fill_color, fill_color, fill_color};
     
-    // SSE2 bulk fill: 8 pixels per iteration
     while (fill_count >= 8) {
         asm volatile(
             "movdqa (%0), %%xmm0\n\t"
@@ -508,13 +548,10 @@ void gfx_scroll_up(int pixels, uint32_t fill_color) {
         fill_count -= 8;
     }
     
-    // Handle remaining pixels
     while (fill_count--) {
         *fill_start++ = fill_color;
     }
     
-    // Mark entire visible area as dirty instead of full_redraw_needed
-    // This allows multiple scrolls to accumulate without redundant full copies
     gfx_mark_dirty(0, 0, framebuffer->width, framebuffer->height);
 }
 

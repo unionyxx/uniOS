@@ -211,7 +211,7 @@ static bool hid_set_idle(UsbDeviceInfo* dev, uint8_t iface, uint8_t duration) {
 
 void usb_hid_init() {
     int count = usb_get_device_count();
-    DEBUG_LOG("HID init: %d USB devices", count);
+    DEBUG_INFO("HID init: %d USB devices", count);
     
     for (int i = 0; i < count; i++) {
         UsbDeviceInfo* dev = usb_get_device(i);
@@ -222,7 +222,7 @@ void usb_hid_init() {
             keyboard_device = dev;
             if (dev->is_boot_interface) hid_set_protocol(dev, dev->hid_interface, HID_PROTOCOL_BOOT);
             hid_set_idle(dev, dev->hid_interface, 25);
-            DEBUG_LOG("Keyboard ready: Slot=%d EP=%d", dev->slot_id, dev->hid_endpoint);
+            DEBUG_INFO("Keyboard ready: Slot=%d EP=%d", dev->slot_id, dev->hid_endpoint);
         }
         
         if (dev->is_mouse) {
@@ -232,7 +232,7 @@ void usb_hid_init() {
             hid_set_idle(dev, mouse_iface, 0);
             mouse_x = screen_width / 2;
             mouse_y = screen_height / 2;
-            DEBUG_LOG("Mouse ready: Slot=%d EP=%d", dev->slot_id,
+            DEBUG_INFO("Mouse ready: Slot=%d EP=%d", dev->slot_id,
                       dev->hid_endpoint2 ? dev->hid_endpoint2 : dev->hid_endpoint);
         }
     }

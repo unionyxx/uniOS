@@ -13,12 +13,10 @@
 // External assembly function to initialize FPU state
 extern "C" void init_fpu_state(uint8_t* fpu_buffer);
 
-// Scheduler lock for thread safety
 static Spinlock scheduler_lock = SPINLOCK_INIT;
 
 static Process* current_process    = nullptr;
 static Process* process_list       = nullptr;
-// FIXED: tail pointer for O(1) insertion instead of O(n) list walk
 static Process* process_list_tail  = nullptr;
 static uint64_t next_pid           = 1;
 
@@ -43,25 +41,20 @@ Process* scheduler_get_process_list() {
 }
 
 void scheduler_init() {
-    DEBUG_INFO("Initializing Scheduler...\n");
+    DEBUG_INFO("Initializing Scheduler...");
 
-    // Use aligned_alloc to ensure FPU state is 16-byte aligned for fxsave/fxrstor
     current_process = (Process*)aligned_alloc(16, sizeof(Process));
     if (!current_process) {
         panic("Failed to allocate initial process!");
     }
 
-    // FIXED: replaced manual byte loop with __builtin_memset
     __builtin_memset(current_process, 0, sizeof(Process));
 
-    // Allocate a real stack for the idle task so rsp0 can be updated correctly
-    // when switching back to this task after a user-mode task runs.
     current_process->stack_base = (uint64_t*)malloc(KERNEL_STACK_SIZE);
     if (!current_process->stack_base) {
         panic("Failed to allocate idle task stack!");
     }
 
-    // Stack sentinel: fill bottom 8 words with magic pattern for overflow detection
     uint64_t* sentinel = current_process->stack_base;
     for (size_t i = 0; i < 8; i++) {
         sentinel[i] = 0xDEADBEEFDEADBEEFULL;
@@ -85,17 +78,28 @@ void scheduler_init() {
     current_process->state       = PROCESS_RUNNING;
     current_process->exit_status = 0;
     current_process->wait_for_pid = 0;
-    current_process->next        = current_process;  // Circular list
+    current_process->next        = current_process;
+    current_process->vma_list    = nullptr;
+    current_process->cursor_x    = 50;
+    current_process->cursor_y    = 480;
+    current_process->exec_entry  = 0;
+    current_process->exec_done   = false;
+    current_process->exec_exit_status = 0;
 
-    // Initialize FPU state for idle task
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        current_process->fd_table[i].in_use = false;
+    }
+    current_process->fd_table[0].in_use = true;
+    current_process->fd_table[1].in_use = true;
+    current_process->fd_table[2].in_use = true;
+
     init_fpu_state(current_process->fpu_state);
     current_process->fpu_initialized = true;
 
-    // FIXED: initialise both head and tail
     process_list      = current_process;
     process_list_tail = current_process;
 
-    DEBUG_INFO("Scheduler Initialized. Initial PID: 0\n");
+    DEBUG_INFO("Scheduler Initialized. Initial PID: 0");
 }
 
 void scheduler_create_task(void (*entry)(), const char* name) {
@@ -106,12 +110,11 @@ void scheduler_create_task(void (*entry)(), const char* name) {
     // Use aligned_alloc to ensure FPU state is 16-byte aligned for fxsave/fxrstor
     Process* new_process = (Process*)aligned_alloc(16, sizeof(Process));
     if (!new_process) {
-        DEBUG_ERROR("Failed to allocate process struct\n");
+        DEBUG_ERROR("Failed to allocate process struct");
         interrupts_restore(flags);
         return;
     }
 
-    // FIXED: replaced manual byte loop with __builtin_memset
     __builtin_memset(new_process, 0, sizeof(Process));
 
     new_process->pid        = next_pid++;
@@ -132,6 +135,19 @@ void scheduler_create_task(void (*entry)(), const char* name) {
     new_process->wait_for_pid = 0;
     new_process->page_table  = nullptr;
     new_process->stack_phys  = 0;
+    new_process->vma_list    = nullptr;
+    new_process->cursor_x    = 50;
+    new_process->cursor_y    = 480;
+    new_process->exec_entry  = 0;
+    new_process->exec_done   = false;
+    new_process->exec_exit_status = 0;
+
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        new_process->fd_table[i].in_use = false;
+    }
+    new_process->fd_table[0].in_use = true;
+    new_process->fd_table[1].in_use = true;
+    new_process->fd_table[2].in_use = true;
 
     // Initialize FPU state
     init_fpu_state(new_process->fpu_state);
@@ -146,38 +162,34 @@ void scheduler_create_task(void (*entry)(), const char* name) {
         return;
     }
 
-    // Stack sentinel
     uint64_t* sentinel = new_process->stack_base;
     for (size_t i = 0; i < 8; i++) {
         sentinel[i] = 0xDEADBEEFDEADBEEFULL;
     }
 
-    // Align stack top to 16 bytes
     uint64_t  stack_addr = (uint64_t)new_process->stack_base + KERNEL_STACK_SIZE;
     stack_addr &= ~(uint64_t)0xF;
     uint64_t* stack_top = (uint64_t*)stack_addr;
 
-    // Set up initial stack frame for switch_to_task
     stack_top--; *stack_top = 0;               // Dummy return address
     stack_top--; *stack_top = (uint64_t)entry; // RIP
     stack_top--; *stack_top = 0x202;           // RFLAGS (IF=1)
 
-    // Callee-saved registers (rbp, rbx, r12, r13, r14, r15)
+    // Callee-saved registers
     for (int i = 0; i < 6; i++) {
         stack_top--; *stack_top = 0;
     }
 
     new_process->sp = (uint64_t)stack_top;
 
-    // FIXED: O(1) insertion using process_list_tail instead of O(n) list walk
     spinlock_acquire(&scheduler_lock);
     process_list_tail->next = new_process;
-    new_process->next       = process_list;   // circular: new tail points to head
+    new_process->next       = process_list;
     process_list_tail       = new_process;
     spinlock_release(&scheduler_lock);
 
     interrupts_restore(flags);
-    DEBUG_INFO("Created Task PID: %d\n", new_process->pid);
+    DEBUG_INFO("Created Task PID: %d", new_process->pid);
 }
 
 // Helper: wake up any sleeping processes whose sleep timer has expired
@@ -197,12 +209,11 @@ static void wake_sleeping_processes() {
 void scheduler_schedule() {
     if (!current_process) return;
 
-    // FIXED: check ALL 8 sentinel words, not just [0].
-    // An overflow that reaches [1]-[7] but not yet [0] was previously invisible.
+    // Check all stack sentinel words
     if (current_process->stack_base) {
         for (int s = 0; s < 8; s++) {
             if (current_process->stack_base[s] != 0xDEADBEEFDEADBEEFULL) {
-                kprintf_color(0xFF0000, "\n*** STACK OVERFLOW DETECTED ***\n");
+                kprintf_color(LOG_COLOR_ERROR, "\n*** STACK OVERFLOW DETECTED ***\n");
                 kprintf("Process: PID=%d Name=%s sentinel[%d]=%llx\n",
                         current_process->pid, current_process->name,
                         s, current_process->stack_base[s]);
@@ -211,8 +222,6 @@ void scheduler_schedule() {
         }
     }
 
-    // Disable interrupts during scheduling to prevent reentrancy.
-    // We cannot hold the spinlock across the context switch itself.
     uint64_t flags = interrupts_save_disable();
 
     wake_sleeping_processes();
@@ -243,8 +252,6 @@ void scheduler_schedule() {
     current_process->state = PROCESS_RUNNING;
 
     // CRITICAL: Update TSS rsp0 before context switch.
-    // When the new task returns to user mode and an interrupt fires, the CPU
-    // reads rsp0 from the TSS to find the kernel stack.
     if (current_process->page_table) {
         tss_set_rsp0(KERNEL_STACK_TOP);
     } else if (current_process->stack_base) {
@@ -252,23 +259,17 @@ void scheduler_schedule() {
         tss_set_rsp0(new_rsp0);
     }
 
-    // Switch address space if required
     if (current_process->page_table) {
         uint64_t pml4_phys = (uint64_t)current_process->page_table - vmm_get_hhdm_offset();
         vmm_switch_address_space((uint64_t*)pml4_phys);
     } else if (prev->page_table) {
-        // Switching from user process back to kernel task – restore kernel PML4
         uint64_t kernel_pml4_phys = (uint64_t)vmm_get_kernel_pml4() - vmm_get_hhdm_offset();
         vmm_switch_address_space((uint64_t*)kernel_pml4_phys);
     }
 
     switch_to_task(prev, current_process);
 
-    // CRITICAL: Restore interrupts after the context switch.
-    // switch_to_task saves/restores RFLAGS via pushfq/popfq, but since we
-    // disabled interrupts before the switch the saved RFLAGS has IF=0.
-    // Without this restore the task would resume with interrupts permanently
-    // disabled, hanging the system (no timer = no scheduling).
+    // CRITICAL: Restore interrupts after context switch.
     interrupts_restore(flags);
 }
 
@@ -276,14 +277,19 @@ void scheduler_yield() {
     scheduler_schedule();
 }
 
+extern "C" void fork_ret();
+
 // Fork: create a copy of the current process with VMM isolation
-uint64_t process_fork() {
+uint64_t process_fork(struct SyscallFrame* frame) {
     Process* parent = current_process;
+
+    if (!parent->page_table) {
+        panic("process_fork: Cannot fork a kernel thread!");
+    }
 
     Process* child = (Process*)aligned_alloc(16, sizeof(Process));
     if (!child) return (uint64_t)-1;
 
-    // FIXED: replaced manual byte loop with __builtin_memset
     __builtin_memset(child, 0, sizeof(Process));
 
     spinlock_acquire(&scheduler_lock);
@@ -295,25 +301,33 @@ uint64_t process_fork() {
     child->exit_status = 0;
     child->wait_for_pid = 0;
 
-    // Copy parent's FPU state
+    // FPU state
     for (size_t i = 0; i < FPU_STATE_SIZE; i++) {
         child->fpu_state[i] = parent->fpu_state[i];
     }
     child->fpu_initialized = true;
 
-    // === VMM isolation ===
-    if (parent->page_table) {
-        child->page_table = vmm_clone_address_space(parent->page_table);
-    } else {
-        child->page_table = vmm_create_address_space();
+    // File descriptors
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        child->fd_table[i] = parent->fd_table[i];
     }
+
+    child->cursor_x = parent->cursor_x;
+    child->cursor_y = parent->cursor_y;
+    child->exec_entry = 0;
+    child->exec_done = false;
+    child->exec_exit_status = 0;
+
+    // === VMM isolation ===
+    child->page_table = vmm_clone_address_space(parent->page_table);
+    child->vma_list   = vma_clone(parent->vma_list);
 
     if (!child->page_table) {
         aligned_free(child);
         return (uint64_t)-1;
     }
 
-    // Allocate physical pages for child's kernel stack
+    // Child kernel stack
     size_t stack_pages = KERNEL_STACK_SIZE / 4096;
     void*  stack_phys  = pmm_alloc_frames(stack_pages);
     if (!stack_phys) {
@@ -331,54 +345,40 @@ uint64_t process_fork() {
     }
     child->stack_base = (uint64_t*)stack_virt_base;
 
-    // Copy parent's stack content to child's physical pages
-    uint64_t* dst = (uint64_t*)(child->stack_phys + vmm_get_hhdm_offset());
-
-    if (parent->page_table) {
-        // Parent is VMM-isolated – copy via HHDM; RBP pointers reference
-        // KERNEL_STACK_TOP which is valid in both address spaces, no rebase needed.
-        uint64_t* src = (uint64_t*)(parent->stack_phys + vmm_get_hhdm_offset());
-        for (size_t i = 0; i < KERNEL_STACK_SIZE / sizeof(uint64_t); i++) {
-            dst[i] = src[i];
-        }
-        child->sp = parent->sp;
-    } else {
-        // Parent is a kernel task (HHDM stack) – copy and rebase RBP pointers.
-        // NOTE: This heuristic scans for values that look like pointers into the
-        // parent stack range.  It can mis-rebase integer values that happen to
-        // fall in that range (e.g. a stored fd number).  A proper fix is to save
-        // only the cpu_context struct (callee-saved regs) rather than scanning
-        // raw stack memory.
-        uint64_t* src              = parent->stack_base;
-        uint64_t  parent_stack_start = (uint64_t)parent->stack_base;
-        uint64_t  parent_stack_end   = parent_stack_start + KERNEL_STACK_SIZE;
-
-        for (size_t i = 0; i < KERNEL_STACK_SIZE / sizeof(uint64_t); i++) {
-            uint64_t val = src[i];
-            if (val >= parent_stack_start && val < parent_stack_end) {
-                uint64_t offset = val - parent_stack_start;
-                dst[i] = stack_virt_base + offset;
-            } else {
-                dst[i] = val;
-            }
-        }
-        uint64_t sp_offset = parent->sp - parent_stack_start;
-        child->sp = stack_virt_base + sp_offset;
+    // Stack sentinel
+    uint64_t* hhdm_stack_base = (uint64_t*)(child->stack_phys + vmm_get_hhdm_offset());
+    for (size_t i = 0; i < 8; i++) {
+        hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
     }
 
-    // FIXED: O(1) insertion using process_list_tail
+    // CPU context on new kernel stack
+    uint64_t stack_top_hhdm = child->stack_phys + KERNEL_STACK_SIZE + vmm_get_hhdm_offset();
+    
+    stack_top_hhdm -= sizeof(SyscallFrame);
+    SyscallFrame* child_frame = (SyscallFrame*)stack_top_hhdm;
+    *child_frame = *frame;
+    
+    stack_top_hhdm -= sizeof(Context);
+    Context* child_context = (Context*)stack_top_hhdm;
+    __builtin_memset(child_context, 0, sizeof(Context));
+    child_context->rflags = 0x202; // IF=1
+    child_context->rip = (uint64_t)fork_ret;
+    
+    uint64_t used_bytes = sizeof(SyscallFrame) + sizeof(Context);
+    child->sp = KERNEL_STACK_TOP - used_bytes;
+
     spinlock_acquire(&scheduler_lock);
     process_list_tail->next = child;
     child->next             = process_list;
     process_list_tail       = child;
     spinlock_release(&scheduler_lock);
 
-    DEBUG_INFO("Forked PID %d -> %d (isolated)\n", parent->pid, child->pid);
+    DEBUG_INFO("Forked PID %d -> %d (isolated)", parent->pid, child->pid);
     return child->pid;
 }
 
 void process_exit(int32_t status) {
-    DEBUG_INFO("Process %d exiting with status %d\n",
+    DEBUG_INFO("Process %d exiting with status %d",
                current_process->pid, status);
 
     current_process->state       = PROCESS_ZOMBIE;
@@ -439,9 +439,12 @@ int64_t process_waitpid(int64_t pid, int32_t* status) {
                     } else if (p->stack_base) {
                         free(p->stack_base);
                     }
+                    if (p->vma_list) {
+                        vma_free_all(p->vma_list);
+                    }
                     aligned_free(p);
 
-                    DEBUG_INFO("Reaped zombie PID %d\n", child_pid);
+                    DEBUG_INFO("Reaped zombie PID %d", child_pid);
                     return child_pid;
                 }
             }

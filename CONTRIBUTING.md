@@ -66,7 +66,7 @@ Before submitting a PR:
 
 ## Versioning
 
-Version is defined in `kernel/core/version.h`. Bump it if you add a feature. Don't bump for:
+Version is defined in `include/kernel/version.h`. Bump it if you add a feature. Don't bump for:
 - Documentation changes
 - Refactoring
 - Build system tweaks

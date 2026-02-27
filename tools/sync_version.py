@@ -2,7 +2,7 @@
 """
 sync_version.py - Synchronize version across all uniOS files
 
-Reads version from kernel/core/version.h (the single source of truth)
+Reads version from include/kernel/version.h (the single source of truth)
 and updates README.md and docs/index.html to match.
 
 Usage: python3 tools/sync_version.py [--check]

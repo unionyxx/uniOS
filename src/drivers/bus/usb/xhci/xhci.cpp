@@ -9,6 +9,7 @@
 #include <drivers/bus/usb/xhci/xhci.h>
 #include <drivers/bus/pci/pci.h>
 #include <kernel/arch/x86_64/io.h>
+#include <kernel/arch/x86_64/pic.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/heap.h>
@@ -25,6 +26,13 @@ static Spinlock xhci_lock = SPINLOCK_INIT;
 
 // Per-endpoint DMA buffers for interrupt transfers
 static DMAAllocation intr_buffer_dma[32][32] = {{{0, 0, 0}}};
+
+// IRQ line
+static uint8_t xhci_irq = 0;
+
+uint8_t xhci_get_irq() {
+    return xhci_irq;
+}
 
 // Endpoint failure tracking
 static uint8_t ep_failures[256][32] = {{0}};
@@ -76,12 +84,10 @@ static void xhci_bios_handoff() {
         if (cap_id == XECP_ID_LEGACY) {
             // USB Legacy Support capability found
             if (header & USBLEGSUP_BIOS_SEM) {
-                DEBUG_LOG("BIOS owns xHCI, requesting handoff...");
+                KLOG(MOD_USB, LOG_INFO, "BIOS owns xHCI, requesting handoff...");
                 
-                // Request OS ownership
                 mmio_write32((void*)xecp, header | USBLEGSUP_OS_SEM);
                 
-                // Wait for BIOS to release (up to 1 second)
                 uint64_t start = timer_get_ticks();
                 while (mmio_read32((void*)xecp) & USBLEGSUP_BIOS_SEM) {
                     if (timer_get_ticks() - start > 1000) {
@@ -91,14 +97,13 @@ static void xhci_bios_handoff() {
                     for (volatile int j = 0; j < 1000; j++);
                 }
                 
-                // Disable legacy SMIs
                 volatile uint32_t* legctlsts = xecp + 1;
                 uint32_t ctl = mmio_read32((void*)legctlsts);
-                ctl &= ~0xFFFF;  // Clear SMI enable bits
-                ctl |= 0xE0000000;  // Clear status bits
+                ctl &= ~0xFFFF;
+                ctl |= 0xE0000000;
                 mmio_write32((void*)legctlsts, ctl);
                 
-                DEBUG_LOG("BIOS handoff complete");
+                KLOG(MOD_USB, LOG_SUCCESS, "BIOS handoff complete");
             }
             return;
         }
@@ -154,21 +159,28 @@ static void xhci_parse_protocols() {
 
 bool xhci_init() {
     if (xhci_initialized) return true;
-    DEBUG_LOG("Initializing xHCI controller...");
+    DEBUG_INFO("Initializing xHCI controller...");
     
-    // Find xHCI via PCI
     PciDevice pci_dev;
     if (!pci_find_xhci(&pci_dev)) {
         DEBUG_ERROR("xHCI controller not found");
         return false;
     }
-    DEBUG_LOG("Found xHCI at %d:%d.%d", pci_dev.bus, pci_dev.device, pci_dev.function);
+    DEBUG_INFO("Found xHCI at %d:%d.%d", pci_dev.bus, pci_dev.device, pci_dev.function);
     
-    // Enable PCI features
     pci_enable_memory_space(&pci_dev);
     pci_enable_bus_mastering(&pci_dev);
+    pci_enable_interrupts(&pci_dev);
+    xhci_irq = pci_dev.irq_line;
+
+    if (xhci_irq > 0 && xhci_irq < 16) {
+        if (xhci_irq >= 8) pic_clear_mask(2);
+        pic_clear_mask(xhci_irq);
+        DEBUG_INFO("xHCI IRQ %d unmasked", xhci_irq);
+    } else {
+        DEBUG_WARN("xHCI: Invalid or unsupported IRQ line %d", xhci_irq);
+    }
     
-    // Map BAR0
     uint64_t bar_size;
     uint64_t bar_phys = pci_get_bar(&pci_dev, 0, &bar_size);
     if (!bar_phys) {
@@ -207,9 +219,9 @@ bool xhci_init() {
     xhci.page_size = mmio_read32((void*)&xhci.op->pagesize) << 12;
     xhci.num_scratchpad = HCSPARAMS2_MAX_SCRATCHPAD(hcsparams2);
     
-    DEBUG_LOG("MaxSlots=%d MaxPorts=%d PageSize=%d CSZ=%d",
-              xhci.max_slots, xhci.max_ports, xhci.page_size,
-              xhci.context_size_64 ? 64 : 32);
+    KLOG(MOD_USB, LOG_TRACE, "MaxSlots=%d MaxPorts=%d PageSize=%d CSZ=%d",
+         xhci.max_slots, xhci.max_ports, xhci.page_size,
+         xhci.context_size_64 ? 64 : 32);
     
     // Parse protocol capabilities
     xhci_parse_protocols();
@@ -839,10 +851,15 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
                              uint16_t length, uint16_t* transferred) {
     if (!xhci.transfer_rings[slot_id][ep_num]) return false;
     
+    spinlock_acquire(&xhci_lock);
+
     // Allocate DMA buffer once per endpoint
     if (intr_buffer_dma[slot_id][ep_num].phys == 0) {
         intr_buffer_dma[slot_id][ep_num] = vmm_alloc_dma(1);
-        if (!intr_buffer_dma[slot_id][ep_num].phys) return false;
+        if (!intr_buffer_dma[slot_id][ep_num].phys) {
+            spinlock_release(&xhci_lock);
+            return false;
+        }
     }
     
     // Check for completion
@@ -868,6 +885,7 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
                 xhci_set_tr_dequeue(slot_id, ep_num);
                 ep_failures[slot_id][ep_num] = 0;
             }
+            spinlock_release(&xhci_lock);
             return false;
         }
         
@@ -879,6 +897,8 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
         uint8_t* dst = (uint8_t*)data;
         for (uint32_t i = 0; i < actual; i++) dst[i] = src[i];
         if (transferred) *transferred = actual;
+        
+        spinlock_release(&xhci_lock);
         return true;
     }
     
@@ -887,6 +907,7 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
         if (timer_get_ticks() - xhci.intr_start_time[slot_id][ep_num] > 100) {
             xhci.intr_pending[slot_id][ep_num] = false;
         } else {
+            spinlock_release(&xhci_lock);
             return false;
         }
     }
@@ -900,6 +921,7 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
     xhci.intr_pending[slot_id][ep_num] = true;
     xhci.intr_start_time[slot_id][ep_num] = timer_get_ticks();
     
+    spinlock_release(&xhci_lock);
     return false;
 }
 
@@ -910,6 +932,23 @@ bool xhci_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, void* data,
 void xhci_poll_events() {
     if (!xhci_initialized || !xhci.event_ring) return;
     
+    spinlock_acquire(&xhci_lock);
+
+    volatile XhciInterrupterRegs* ir = 
+        (volatile XhciInterrupterRegs*)((uint64_t)xhci.runtime + 0x20);
+
+    // Clear Interrupt Pending bit (W1C - Write 1 to Clear)
+    uint32_t iman = mmio_read32((void*)&ir->iman);
+    if (iman & IMAN_IP) {
+        mmio_write32((void*)&ir->iman, iman | IMAN_IP);
+    }
+
+    // Clear Event Interrupt bit in USBSTS (W1C)
+    uint32_t usbsts = mmio_read32((void*)&xhci.op->usbsts);
+    if (usbsts & USBSTS_EINT) {
+        mmio_write32((void*)&xhci.op->usbsts, usbsts | USBSTS_EINT);
+    }
+
     int count = 0;
     while (count++ < 64) {
         Trb* evt = &xhci.event_ring[xhci.event_dequeue];
@@ -943,11 +982,11 @@ void xhci_poll_events() {
             xhci.event_cycle ^= 1;
         }
         
-        volatile XhciInterrupterRegs* ir = 
-            (volatile XhciInterrupterRegs*)((uint64_t)xhci.runtime + 0x20);
         uint64_t erdp = xhci.event_ring_phys + xhci.event_dequeue * sizeof(Trb);
         mmio_write64((void*)&ir->erdp, erdp | ERDP_EHB);
     }
+
+    spinlock_release(&xhci_lock);
 }
 
 bool xhci_wait_for_event(uint32_t timeout_ms) {
@@ -962,16 +1001,16 @@ bool xhci_wait_for_event(uint32_t timeout_ms) {
 
 void xhci_dump_status() {
     if (!xhci_initialized) {
-        DEBUG_LOG("xHCI not initialized");
+        KLOG(MOD_USB, LOG_WARN, "xHCI not initialized");
         return;
     }
     
-    DEBUG_LOG("xHCI Status: USBSTS=0x%x", mmio_read32((void*)&xhci.op->usbsts));
+    KLOG(MOD_USB, LOG_INFO, "xHCI Status: USBSTS=0x%x", mmio_read32((void*)&xhci.op->usbsts));
     for (uint8_t i = 0; i < xhci.max_ports && i < 8; i++) {
         uint32_t portsc = mmio_read32((void*)&xhci.ports[i]);
-        DEBUG_LOG("Port %d: PORTSC=0x%x CCS=%d PED=%d Speed=%d",
-                  i + 1, portsc, (portsc & PORTSC_CCS) ? 1 : 0,
-                  (portsc & PORTSC_PED) ? 1 : 0,
-                  (portsc >> PORTSC_SPEED_SHIFT) & 0xF);
+        KLOG(MOD_USB, LOG_TRACE, "Port %d: PORTSC=0x%x CCS=%d PED=%d Speed=%d",
+             i + 1, portsc, (portsc & PORTSC_CCS) ? 1 : 0,
+             (portsc & PORTSC_PED) ? 1 : 0,
+             (portsc >> PORTSC_SPEED_SHIFT) & 0xF);
     }
 }

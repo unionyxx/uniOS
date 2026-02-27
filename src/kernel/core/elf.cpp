@@ -2,6 +2,8 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/heap.h>
+#include <kernel/mm/vma.h>
+#include <kernel/process.h>
 #include <libk/kstring.h>
 #include <stddef.h>
 
@@ -14,30 +16,23 @@ bool elf_validate(const uint8_t* data, uint64_t size) {
     
     const Elf64_Ehdr* ehdr = (const Elf64_Ehdr*)data;
     
-    // Check magic
     if (*(uint32_t*)ehdr->e_ident != ELF_MAGIC) return false;
-    
-    // Check class (64-bit)
     if (ehdr->e_ident[4] != ELFCLASS64) return false;
-    
-    // Check endianness (little)
     if (ehdr->e_ident[5] != ELFDATA2LSB) return false;
-    
-    // Check type (executable)
     if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) return false;
-    
-    // Check machine (x86_64)
     if (ehdr->e_machine != EM_X86_64) return false;
     
     return true;
 }
 
-uint64_t elf_load(const uint8_t* data, uint64_t size) {
+uint64_t elf_load(const uint8_t* data, uint64_t size, Process* proc) {
     if (!elf_validate(data, size)) return 0;
     
     const Elf64_Ehdr* ehdr = (const Elf64_Ehdr*)data;
     const Elf64_Phdr* phdr = (const Elf64_Phdr*)(data + ehdr->e_phoff);
     
+    uint64_t* target_pml4 = proc ? proc->page_table : nullptr;
+
     // Load each PT_LOAD segment
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_LOAD) continue;
@@ -51,17 +46,27 @@ uint64_t elf_load(const uint8_t* data, uint64_t size) {
         uint64_t num_pages = (memsz + 0xFFF) / 0x1000;
         uint64_t bytes_copied = 0;
         
+        uint64_t flags = PTE_PRESENT;
+        if (phdr[i].p_flags & PF_W) flags |= PTE_WRITABLE;
+        // If user-accessible, add user flag
+        if (phdr[i].p_flags & PF_R) flags |= PTE_USER;
+
+        if (proc) {
+            vma_add(&proc->vma_list, vaddr & ~0xFFF, (vaddr + memsz + 0xFFF) & ~0xFFF, 
+                    flags, (phdr[i].p_flags & PF_X) ? VMA_TEXT : VMA_DATA);
+        }
+        
         for (uint64_t p = 0; p < num_pages; p++) {
             void* frame = pmm_alloc_frame();
             if (!frame) return 0;
             
             uint64_t page_vaddr = (vaddr & ~0xFFF) + (p * 0x1000);
-            uint64_t flags = PTE_PRESENT | PTE_WRITABLE;
             
-            // If user-accessible, add user flag
-            if (phdr[i].p_flags & PF_R) flags |= PTE_USER;
-            
-            vmm_map_page(page_vaddr, (uint64_t)frame, flags);
+            if (target_pml4) {
+                vmm_map_page_in(target_pml4, page_vaddr, (uint64_t)frame, flags);
+            } else {
+                vmm_map_page(page_vaddr, (uint64_t)frame, flags);
+            }
             
             // Copy data to this page through higher-half mapping
             void* dest = (void*)vmm_phys_to_virt((uint64_t)frame);
@@ -92,12 +97,14 @@ uint64_t elf_load(const uint8_t* data, uint64_t size) {
 }
 
 // Load ELF for Ring 3 execution (with user flag on all pages)
-uint64_t elf_load_user(const uint8_t* data, uint64_t size) {
+uint64_t elf_load_user(const uint8_t* data, uint64_t size, Process* proc) {
     if (!elf_validate(data, size)) return 0;
     
     const Elf64_Ehdr* ehdr = (const Elf64_Ehdr*)data;
     const Elf64_Phdr* phdr = (const Elf64_Phdr*)(data + ehdr->e_phoff);
     
+    uint64_t* target_pml4 = proc ? proc->page_table : nullptr;
+
     // Load each PT_LOAD segment
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_LOAD) continue;
@@ -110,15 +117,25 @@ uint64_t elf_load_user(const uint8_t* data, uint64_t size) {
         uint64_t num_pages = (memsz + 0xFFF) / 0x1000;
         uint64_t bytes_copied = 0;
         
+        uint64_t flags = PTE_PRESENT | PTE_USER;
+        if (phdr[i].p_flags & PF_W) flags |= PTE_WRITABLE;
+
+        if (proc) {
+            vma_add(&proc->vma_list, vaddr & ~0xFFF, (vaddr + memsz + 0xFFF) & ~0xFFF, 
+                    flags, (phdr[i].p_flags & PF_X) ? VMA_TEXT : VMA_DATA);
+        }
+
         for (uint64_t p = 0; p < num_pages; p++) {
             void* frame = pmm_alloc_frame();
             if (!frame) return 0;
             
             uint64_t page_vaddr = (vaddr & ~0xFFF) + (p * 0x1000);
-            // Always set USER flag for Ring 3
-            uint64_t flags = PTE_PRESENT | PTE_WRITABLE | PTE_USER;
             
-            vmm_map_page(page_vaddr, (uint64_t)frame, flags);
+            if (target_pml4) {
+                vmm_map_page_in(target_pml4, page_vaddr, (uint64_t)frame, flags);
+            } else {
+                vmm_map_page(page_vaddr, (uint64_t)frame, flags);
+            }
             
             void* dest = (void*)vmm_phys_to_virt((uint64_t)frame);
             memset(dest, 0, 0x1000);
@@ -145,11 +162,19 @@ uint64_t elf_load_user(const uint8_t* data, uint64_t size) {
     #define USER_STACK_TOP 0x7FFFF000ULL
     
     uint64_t stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    if (proc) {
+        vma_add(&proc->vma_list, stack_base, USER_STACK_TOP, PTE_PRESENT | PTE_WRITABLE | PTE_USER, VMA_STACK);
+    }
+
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         void* stack_frame = pmm_alloc_frame();
         if (stack_frame) {
             uint64_t vaddr = stack_base + i * 0x1000;
-            vmm_map_page(vaddr, (uint64_t)stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            if (target_pml4) {
+                vmm_map_page_in(target_pml4, vaddr, (uint64_t)stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            } else {
+                vmm_map_page(vaddr, (uint64_t)stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            }
             void* stack_dest = (void*)vmm_phys_to_virt((uint64_t)stack_frame);
             memset(stack_dest, 0, 0x1000);
         }

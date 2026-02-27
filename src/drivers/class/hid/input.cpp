@@ -46,11 +46,7 @@ void input_init() {
 // -----------------------------------------------------------------------------
 
 void input_poll() {
-    // Poll xHCI controller for events (USB transfers, port changes)
-    if (xhci_is_initialized()) {
-        xhci_poll_events();
-    }
-    
+    // xHCI is now interrupt-driven, so we don't poll it here anymore.
     // Poll USB HID layer (keyboard/mouse reports)
     usb_hid_poll();
     

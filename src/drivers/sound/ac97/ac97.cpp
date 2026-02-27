@@ -33,64 +33,40 @@ bool ac97_is_playing() {
 
 // Initialize AC97 sound card.
 void ac97_init() {
-    // Check if it was already initialized.
-    if (ac97_info.is_initialized) {
-        DEBUG_WARN("ac97_init called, but it is already initialized!");
-        return;
-    }
+    if (ac97_info.is_initialized) return;
 
     PciDevice pci_dev;
-
-    // Try to find AC97 compatible sound card.
     if (!pci_find_ac97(&pci_dev)) {
-        DEBUG_ERROR("pci_find_ac97 failed");
         return;
     }
 
-    DEBUG_INFO("ac97 device found at pci bus %d | device %d | function %d",
-               pci_dev.bus,
-               pci_dev.device,
-               pci_dev.function);
+    DEBUG_INFO("Found AC97 controller at %02x:%02x.%x", pci_dev.bus, pci_dev.device, pci_dev.function);
 
-    // Enable I/O space and bus mastering for sound card device.
     pci_enable_io_space(&pci_dev);
     pci_enable_bus_mastering(&pci_dev);
 
-    DEBUG_INFO("enabled io space and bus mastering for ac97 device");
-
-    // Get BAR0 (Native Audio Mixer) and BAR1 (Native Audio Bus Master) addresses.
     ac97_info.nam = pci_get_bar(&pci_dev, 0, nullptr);
     ac97_info.nabm = pci_get_bar(&pci_dev, 1, nullptr);
 
-    DEBUG_INFO("nam %p | nabm %p", ac97_info.nam, ac97_info.nabm);
-
-    // Configure sound card.
-    // Bit 1 = Cold reset. 1 - resume to operational state
-    // Bit 20-21 - Channels for PCM output. 00 - 2 channels | 01 - 4 channels | 10 - 6 channels
-    // Bit 22-23 - PCM output mode. 00 - 16 bit samples | 01 - 20 bit samples
     outl(ac97_info.nabm + AC97_NABM_GLOBAL_CONTROL, (0b00<<AC97_NABM_GLOBAL_CONTROL_PCM_OUT_SAMPLES) | (0b00<<AC97_NABM_GLOBAL_CONTROL_PCM_OUT_CHANNELS) | (1<<AC97_NABM_GLOBAL_CONTROL_COLD_RESET));
-
     io_wait();
 
-    // Write any value to reset NAM registers.
     outw(ac97_info.nam + AC97_NAM_RESET, 0x1);
 
-    // Read extended capabilities.
     ac97_info.capabilities = inw(ac97_info.nam + AC97_NAM_EXTENDED_CAPABILITIES);
     if(ac97_info.capabilities & AC97_EXTENDED_CAPABILITY_VARIABLE_SAMPLE_RATE) {
-        outw(ac97_info.nam + AC97_NAM_EXTENDED_FEATURES_CONTROL, AC97_EXTENDED_CAPABILITY_VARIABLE_SAMPLE_RATE); //enable variable sample rate
+        outw(ac97_info.nam + AC97_NAM_EXTENDED_FEATURES_CONTROL, AC97_EXTENDED_CAPABILITY_VARIABLE_SAMPLE_RATE);
+        DEBUG_INFO("AC97: Variable sample rate supported");
     }
 
-    // Set maximum volume for PCM output.
     outw(ac97_info.nam + AC97_NAM_PCM_OUT_VOLUME, 0x0);
 
-    // Allocate memory for buffer entries.
     size_t buffer_entries_alloc_size = sizeof(Ac97BufferEntry) * AC97_BUFFER_ENTRY_COUNT;
     ac97_info.buffer_entries_dma = vmm_alloc_dma((buffer_entries_alloc_size + 4095) / 4096);
     ac97_info.buffer_entries = (Ac97BufferEntry*)ac97_info.buffer_entries_dma.virt;
 
-    if (!ac97_info.buffer_entries_dma.virt || !ac97_info.buffer_entries_dma.phys) {
-        DEBUG_ERROR("vmm_alloc_dma for buffer entries failed");
+    if (!ac97_info.buffer_entries_dma.virt) {
+        DEBUG_ERROR("AC97: DMA allocation failed");
         return;
     }
 

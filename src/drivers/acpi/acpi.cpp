@@ -2,6 +2,8 @@
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/mm/vmm.h>
 #include <drivers/video/framebuffer.h>
+#include <kernel/debug.h>
+#include <libk/kstring.h>
 
 // ACPI state
 static bool acpi_available = false;
@@ -39,13 +41,10 @@ static bool sdt_checksum_valid(const AcpiSdtHeader* header) {
     return sum == 0;
 }
 
-// Search for RSDP in memory range
 static AcpiRsdp* find_rsdp_in_range(uint64_t start, uint64_t end) {
-    // RSDP must be 16-byte aligned
     for (uint64_t addr = start; addr < end; addr += 16) {
         uint8_t* ptr = (uint8_t*)vmm_phys_to_virt(addr);
         
-        // Check "RSD PTR " signature
         if (ptr[0] == 'R' && ptr[1] == 'S' && ptr[2] == 'D' && ptr[3] == ' ' &&
             ptr[4] == 'P' && ptr[5] == 'T' && ptr[6] == 'R' && ptr[7] == ' ') {
             AcpiRsdp* rsdp = (AcpiRsdp*)ptr;
@@ -57,17 +56,13 @@ static AcpiRsdp* find_rsdp_in_range(uint64_t start, uint64_t end) {
     return nullptr;
 }
 
-// Find RSDP (Root System Description Pointer)
 static AcpiRsdp* find_rsdp() {
-    // Search in Extended BIOS Data Area (EBDA) - typically at 0x9FC00-0x9FFFF
-    // The EBDA address is at 0x40E (word, segment address)
     uint16_t ebda_segment = *(uint16_t*)vmm_phys_to_virt(0x40E);
     uint64_t ebda_addr = (uint64_t)ebda_segment << 4;
     
     AcpiRsdp* rsdp = find_rsdp_in_range(ebda_addr, ebda_addr + 0x400);
     if (rsdp) return rsdp;
     
-    // Search in BIOS ROM area (0xE0000-0xFFFFF)
     return find_rsdp_in_range(0xE0000, 0x100000);
 }
 
@@ -149,7 +144,7 @@ void acpi_init() {
     // Find RSDP
     AcpiRsdp* rsdp = find_rsdp();
     if (!rsdp) {
-        gfx_draw_string(10, 10, "ACPI: RSDP not found", COLOR_GRAY);
+        DEBUG_WARN("ACPI: RSDP not found");
         return;
     }
     
@@ -171,7 +166,7 @@ void acpi_init() {
     
     AcpiSdtHeader* rsdt = (AcpiSdtHeader*)vmm_phys_to_virt(rsdt_phys);
     if (!sdt_checksum_valid(rsdt)) {
-        gfx_draw_string(10, 10, "ACPI: RSDT checksum failed", COLOR_GRAY);
+        DEBUG_ERROR("ACPI: RSDT checksum failed");
         return;
     }
     
@@ -205,27 +200,12 @@ void acpi_init() {
             }
             
             acpi_available = true;
-            
-            // Debug: show ACPI status using graphics (before shell starts)
-            char buf[64];
-            buf[0] = 'A'; buf[1] = 'C'; buf[2] = 'P'; buf[3] = 'I';
-            buf[4] = ':'; buf[5] = ' '; buf[6] = 'P'; buf[7] = 'M';
-            buf[8] = '1'; buf[9] = 'a'; buf[10] = '='; buf[11] = '0';
-            buf[12] = 'x';
-            // Simple hex conversion
-            uint16_t val = pm1a_cnt;
-            for (int i = 0; i < 4; i++) {
-                int nibble = (val >> (12 - i*4)) & 0xF;
-                buf[13 + i] = nibble < 10 ? '0' + nibble : 'A' + nibble - 10;
-            }
-            buf[17] = 0;
-            gfx_draw_string(10, gfx_get_height() - 40, buf, COLOR_GRAY);
-            
+            DEBUG_INFO("ACPI initialized. PM1a=0x%x", pm1a_cnt);
             return;
         }
     }
     
-    gfx_draw_string(10, 10, "ACPI: FADT not found", COLOR_GRAY);
+    DEBUG_WARN("ACPI: FADT not found");
 }
 
 bool acpi_is_available() {
@@ -236,50 +216,30 @@ bool acpi_is_available() {
 #define ACPI_SCI_EN (1 << 0)
 
 bool acpi_poweroff() {
-    gfx_draw_string(10, 20, "ACPI: Starting shutdown sequence...", COLOR_WHITE);
+    DEBUG_INFO("ACPI: Starting shutdown sequence...");
     
-    // 1. Try ACPI Shutdown
     if (acpi_available && pm1a_cnt != 0) {
-        gfx_draw_string(10, 30, "ACPI: PM1a_CNT found", COLOR_WHITE);
-        
-        // Disable interrupts
         asm volatile("cli");
         
-        // Check if ACPI is already enabled (SCI_EN bit set in PM1a_CNT)
         uint16_t pm1_value = inw(pm1a_cnt);
         if (!(pm1_value & ACPI_SCI_EN)) {
-            gfx_draw_string(10, 40, "ACPI: Enabling ACPI...", COLOR_WHITE);
-            // ACPI is not enabled, need to enable it via SMI command
             if (smi_cmd_port != 0 && acpi_enable_val != 0) {
                 outb(smi_cmd_port, acpi_enable_val);
                 
-                // Wait for ACPI to become enabled
                 for (int i = 0; i < 1000; i++) {
                     pm1_value = inw(pm1a_cnt);
                     if (pm1_value & ACPI_SCI_EN) break;
-                    for (volatile int j = 0; j < 10000; j++); // Small delay
+                    for (volatile int j = 0; j < 10000; j++);
                 }
             }
         }
         
-        gfx_draw_string(10, 50, "ACPI: ACPI Enabled.", COLOR_WHITE);
-        
-        // Try our parsed SLP_TYPa first
         if (slp_typa != 0) {
-            char buf[64];
-            // Manually format string to avoid dependency issues
-            buf[0] = 'U'; buf[1] = 's'; buf[2] = 'i'; buf[3] = 'n'; buf[4] = 'g'; buf[5] = ' ';
-            buf[6] = 'S'; buf[7] = 'L'; buf[8] = 'P'; buf[9] = '_'; buf[10] = 'T'; buf[11] = 'Y'; buf[12] = 'P'; buf[13] = 'a'; buf[14] = 0;
-            gfx_draw_string(10, 60, buf, COLOR_WHITE);
-            
             outw(pm1a_cnt, slp_typa | ACPI_SLP_EN);
             if (pm1b_cnt != 0) outw(pm1b_cnt, slp_typb | ACPI_SLP_EN);
             for (volatile int i = 0; i < 1000000; i++);
-        } else {
-             gfx_draw_string(10, 60, "ACPI: SLP_TYPa NOT found in DSDT", COLOR_RED);
         }
         
-        // Try common SLP_TYP values for S5 (bits 10-12)
         static const uint16_t common_slp_types[] = {
             (5 << 10),  // Most common: SLP_TYP = 5
             (0 << 10),  // SLP_TYP = 0 (older systems)
@@ -291,13 +251,7 @@ bool acpi_poweroff() {
             (7 << 10),
         };
         
-        char buf[32];
         for (int i = 0; i < 8; i++) {
-            // Debug: show which type we are trying
-            buf[0] = 'T'; buf[1] = 'r'; buf[2] = 'y'; buf[3] = ' '; 
-            buf[4] = '0' + i; buf[5] = 0;
-            gfx_draw_string(10, 70 + i*10, buf, COLOR_WHITE);
-            
             outw(pm1a_cnt, common_slp_types[i] | ACPI_SLP_EN);
             if (pm1b_cnt != 0) {
                 outw(pm1b_cnt, common_slp_types[i] | ACPI_SLP_EN);
@@ -306,14 +260,9 @@ bool acpi_poweroff() {
         }
     }
     
-    gfx_draw_string(10, 160, "ACPI: Fallback to QEMU (0x604)...", COLOR_WHITE);
+    DEBUG_WARN("ACPI: Fallback to QEMU shutdown...");
     
-    // 2. Try QEMU/Bochs/VirtualBox Shutdown (0x604 0x2000)
     outw(QEMU_SHUTDOWN_PORT, QEMU_SHUTDOWN_VALUE);
     
-    // REMOVED unsafe ports (0xB004, 0x4004) to prevent freezing on real hardware
-    // outw(0xB004, 0x2000);
-    // outw(0x4004, 0x3400);
-
     return false;
 }

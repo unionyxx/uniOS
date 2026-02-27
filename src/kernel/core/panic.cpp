@@ -1,5 +1,6 @@
 #include <kernel/panic.h>
 #include <kernel/debug.h>
+#include <kernel/mm/vmm.h>
 #include <drivers/video/framebuffer.h>
 
 void hcf(void) {
@@ -8,22 +9,19 @@ void hcf(void) {
 }
 
 void panic(const char* message) {
-    // Red background for panic
     if (gfx_get_width() > 0) {
-        gfx_clear(0x550000); // Dark red
+        gfx_clear(0x220000); 
     }
     
-    // Reset debug cursor to ensure message is visible
-    // We might need to expose a way to reset debug cursor or just print newlines
     kprintf("\n\n");
+    kprintf_color(COLOR_RED, "!!! KERNEL PANIC !!!\n");
+    kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
+    kprintf_color(COLOR_WHITE, "%s\n", message);
+    kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
     
-    kprintf_color(0xFFFFFF, "=== KERNEL PANIC ===\n\n");
-    kprintf_color(0xFFFFFF, "%s\n", message);
-    
-    // Print stack trace to help debugging
     debug_print_stack_trace();
     
-    kprintf_color(0xFFFFFF, "\nSystem halted.");
+    kprintf_color(COLOR_WHITE, "\nSystem halted.");
     
     hcf();
 }
@@ -34,17 +32,27 @@ extern "C" void exception_handler(void* stack_frame) {
     uint64_t err_code = regs[16];
     uint64_t rip = regs[17];
 
-    // Red background for exception
-    if (gfx_get_width() > 0) {
-        // We don't want to clear the whole screen if we can avoid it, 
-        // but for now let's make it visible
-        // gfx_clear(0x550000); 
+    if (int_no == 14) {
+        uint64_t cr2;
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        
+        if (vmm_handle_page_fault(cr2, err_code)) {
+            return;
+        }
+        
+        kprintf_color(COLOR_RED, "\nEXCEPTION CAUGHT! (Page Fault)\n");
+        kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
+        kprintf_color(COLOR_WHITE, "CR2: "); kprintf_color(COLOR_CYAN, "0x%llx  ", cr2);
+        kprintf_color(COLOR_WHITE, "ERR: "); kprintf_color(COLOR_CYAN, "0x%x  ", err_code);
+        kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%lx\n", rip);
+    } else {
+        kprintf_color(COLOR_RED, "\nEXCEPTION CAUGHT!\n");
+        kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
+        kprintf_color(COLOR_WHITE, "INT: "); kprintf_color(COLOR_CYAN, "0x%x  ", int_no);
+        kprintf_color(COLOR_WHITE, "ERR: "); kprintf_color(COLOR_CYAN, "0x%x  ", err_code);
+        kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%lx\n", rip);
     }
-
-    kprintf_color(0xFF0000, "\nEXCEPTION CAUGHT!\n");
-    kprintf("INT: 0x%x  ERROR: 0x%x  RIP: 0x%lx\n", int_no, err_code, rip);
     
-    // Print stack trace to help debugging
     debug_print_stack_trace();
     
     hcf();

@@ -30,6 +30,7 @@ public:
     
     // Cursor blinking
     void set_cursor_visible(bool visible);
+    bool is_cursor_visible() const { return cursor_visible; }
     void update_cursor(); // Call periodically
     
     // Direct character operations (no cursor logic)

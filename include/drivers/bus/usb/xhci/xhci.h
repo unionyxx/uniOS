@@ -353,6 +353,7 @@ bool xhci_start();
 void xhci_stop();
 bool xhci_is_initialized();
 uint8_t xhci_get_max_ports();
+uint8_t xhci_get_irq();
 
 // Port operations
 uint8_t xhci_get_port_speed(uint8_t port);

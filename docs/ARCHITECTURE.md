@@ -8,17 +8,27 @@ Technical overview for contributors and developers.
 
 ```mermaid
 graph TD
-    User[User Shell] --> VFS[uniFS]
+    User[User Shell / GUI] --> VFS[uniFS / FAT32]
     User --> Net[Network Stack]
+    User --> Audio[Audio Stack]
+    User --> USB[USB Stack]
     
     subgraph Kernel Core
     Sched[Scheduler]
     Mem[PMM / VMM]
+    GUI[Window Manager]
     end
     
     Net --> IPv4
     IPv4 --> Ethernet
-    Ethernet --> Driver[e1000 Driver]
+    Ethernet --> Driver[e1000/RTL8139 Driver]
+    
+    Audio --> HDA[HDA Driver]
+    Audio --> AC97[AC97 Driver]
+    
+    USB --> xHCI[xHCI Controller]
+    xHCI --> HID[HID Keyboard/Mouse]
+    xHCI --> HUB[Hub Detection (Initial)]
     
     Sched --> Context[Context Switch]
     Context --> TSS[TSS rsp0 Update]
@@ -39,18 +49,32 @@ graph TD
 - **Kernel stack** is at a fixed virtual address so `fork()` doesn't corrupt RBP pointers. Each process has stacks at the same vaddr mapped to different physical pages.
 - **MMIO** starts at a high address to avoid collisions with heap or HHDM.
 
+## GUI & Graphics
+
+### Windowing System
+
+uniOS features a custom window manager in `src/kernel/core/gui.cpp`. Features include:
+- Draggable windows with title bars and close buttons.
+- Desktop environment with icons and taskbar.
+- Real-time clock with periodic updates.
+- Cursor management with background restoration (no flickering).
+
+### SSE-Accelerated Renderer
+
+The renderer in `src/drivers/video/framebuffer.cpp` is heavily optimized:
+- **SSE2 Primitives**: Fills, copies, and gradients use 128-bit SIMD instructions.
+- **Dirty Rectangle Tracking**: Only the portions of the screen that changed are copied to VRAM.
+- **Double Buffering**: Renders to a RAM backbuffer before swapping to VRAM to eliminate tearing.
+- **Bulk Transfers**: Full-width row copies are optimized to bypass row-by-row overhead.
+
 ## Memory Management
 
 ### PMM (Physical Memory Manager)
 
-Bitmap-based allocator in `pmm.cpp`.
-
-```cpp
-#define BITMAP_SIZE 524288  // 512KB = covers 16GB RAM
-```
+Bitmap-based allocator in `pmm.cpp`. The bitmap is dynamically sized at boot time to cover all usable physical memory reported by Limine.
 
 > [!NOTE]
-> Hardcoded bitmap size means RAM above 16GB is ignored. This prevents overflow but wastes memory on large systems.
+> The PMM tracks frame reference counts to support future copy-on-write functionality and shared memory.
 
 ### VMM (Virtual Memory Manager)
 
@@ -66,11 +90,13 @@ Key functions:
 
 Bucket allocator in `heap.cpp`. Fixed bucket sizes (32, 64, 128, ... bytes). Large allocations fall back to direct PMM pages.
 
+Features **Page Coalescing**: Fully freed pages are automatically returned to the PMM instead of being held in bucket free-lists indefinitely, reducing memory waste.
+
 Spinlock-protected for thread safety.
 
 ## Scheduler
 
-Preemptive, timer-based at **1000Hz** (1ms granularity).
+Preemptive, timer-based at **1000Hz** (1ms granularity). Features **O(1) task insertion** using a tail pointer for the process list, improving performance when creating many tasks.
 
 ### Why 16KB Stacks?
 
@@ -102,29 +128,29 @@ Deep call chains in networking (TCP → IP → ARP → driver → interrupt) can
 
 Interrupt-driven RX, synchronous TX. Ring buffer descriptors. DHCP and DNS work reliably in QEMU. Real hardware support is best-effort.
 
+### Interrupts (MSI-X)
+
+Support for **Message Signaled Interrupts (MSI-X)**. MSI-X allows devices to bypass the I/O APIC and write interrupt messages directly to local APICs, reducing latency and allowing for more interrupt vectors.
+
 ### USB (xHCI)
 
 Polling-based HID. Why not interrupts? xHCI interrupt handling requires async TRB processing which adds complexity. Polling at 1000Hz is good enough for keyboards.
 
-<details>
-<summary>xHCI Design Decisions</summary>
+### Audio (HDA & AC97)
 
-- **Scratchpad buffers**: Allocated at init for controller use
-- **64-byte context stride**: Detected and handled dynamically
-- **Legacy handoff**: BIOS may own the controller; we take ownership via USBLEGSUP
+Dual driver support for audio. **Intel HD Audio (HDA)** uses DMA-based CORB/RIRB transfers for modern hardware compatibility. **AC97** is supported for legacy systems.
 
-</details>
+## Filesystems
 
-## uniFS
-
-Flat filesystem with two file sources:
+uniOS supports multiple filesystem types via a block device abstraction:
 
 | Source | Storage | Writable |
 |--------|---------|:--------:|
-| Boot files | Limine module | No |
-| RAM files | Kernel heap | Yes |
+| Boot files | Limine module (uniFS) | No |
+| RAM files | Kernel heap (uniFS) | Yes |
+| Disk files | Block device (**FAT32**) | Initial |
 
-Files are stored as `{name, data, size}`. No directories. Suitable for config files and scripts, not large data.
+Files are accessed via common interfaces, with FAT32 support currently in the early infrastructure stage (parsing boot sectors).
 
 ## Build System
 
@@ -137,16 +163,22 @@ make run-gdb  # Attach GDB to localhost:1234
 ## Directory Structure
 
 ```text
-kernel/
-├── core/       # kmain, scheduler, debug, version
-├── arch/       # GDT, IDT, interrupts, I/O
-├── mem/        # PMM, VMM, heap
-├── drivers/    # Hardware drivers
-│   ├── net/    # e1000, RTL8139
-│   └── usb/    # xHCI, HID
-├── net/        # TCP/IP stack
-├── fs/         # uniFS filesystem
-└── shell/      # Command interpreter
+├── include/      # Header files
+│   ├── boot/     # Limine boot protocol
+│   ├── kernel/   # Kernel core headers
+│   ├── drivers/  # Driver interfaces
+│   └── libk/     # Kernel library
+├── src/          # Source files
+│   ├── kernel/   # Core logic
+│   │   ├── core/ # kmain, cpu, irq, gui, syscalls
+│   │   ├── sched/# Scheduler
+│   │   ├── shell/# Shell
+│   │   └── time/ # Timer
+│   ├── arch/     # CPU/Arch specific code
+│   ├── mm/       # Memory management (PMM, VMM, Heap, VMA)
+│   ├── drivers/  # Hardware drivers (Net, USB, Audio, Video, Bus)
+│   ├── net/      # Network stack
+│   ├── fs/       # Filesystems (uniFS, FAT32)
 ```
 
 ## Coding Conventions
@@ -162,8 +194,12 @@ kernel/
 
 | File | Purpose |
 |------|---------|
-| `kernel/core/kmain.cpp` | Kernel entry point |
-| `kernel/core/scheduler.cpp` | Process management, context switch |
-| `kernel/mem/vmm.cpp` | Page table manipulation |
-| `kernel/net/tcp.cpp` | TCP state machine |
-| `kernel/drivers/usb/xhci.cpp` | USB 3.0 driver |
+| `src/kernel/core/kmain.cpp` | Kernel entry and initialization |
+| `src/kernel/core/cpu.cpp` | CPU feature detection and setup (SSE, etc) |
+| `src/kernel/core/irq.cpp` | Interrupt and exception routing |
+| `src/kernel/core/gui.cpp` | Window manager and desktop |
+| `src/kernel/sched/scheduler.cpp` | Process management, context switch |
+| `src/mm/vmm.cpp` | Page table manipulation |
+| `src/fs/fat32/fat32.cpp` | FAT32 filesystem driver |
+| `src/drivers/video/framebuffer.cpp` | SSE-optimized renderer |
+| `src/drivers/bus/usb/xhci.cpp` | USB 3.0 driver |

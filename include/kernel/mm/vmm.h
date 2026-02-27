@@ -58,3 +58,6 @@ DMAAllocation vmm_alloc_dma(size_t pages);
 // Free DMA allocation (release physical frames)
 void vmm_free_dma(DMAAllocation alloc);
 
+// Page fault handling (CoW, demand paging)
+bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code);
+

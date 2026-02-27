@@ -40,59 +40,34 @@ bool hda_is_playing() {
 
 // Initialize HD Audio sound card. Really huge function!
 void hda_init() {
-    // Check if it was already initialized.
-    if (hda_info.is_initialized) {
-        DEBUG_WARN("hda_init called, but it is already initialized!");
-        return;
-    }
+    if (hda_info.is_initialized) return;
 
     PciDevice pci_dev;
-
-    // Try to find HD Audio compatible sound card.
-    // Real hardware may have more than one HD Audio device (ex. AMD HD Audio + NVIDIA HD Audio)
     if (!pci_find_hda(&pci_dev)) {
-        DEBUG_ERROR("pci_find_hda failed");
         return;
     }
 
-    DEBUG_INFO("hd audio device found at pci bus %d | device %d | function %d",
-               pci_dev.bus,
-               pci_dev.device,
-               pci_dev.function);
+    DEBUG_INFO("Found HDA controller at %02x:%02x.%x", pci_dev.bus, pci_dev.device, pci_dev.function);
 
-    // Enable memory space and bus mastering for sound card device.
     pci_enable_memory_space(&pci_dev);
     pci_enable_bus_mastering(&pci_dev);
-
-    DEBUG_INFO("enabled memory space and bus mastering for hd audio device");
 
     uint64_t bar0_size = 0;
     uint64_t bar0_base = pci_get_bar(&pci_dev, 0, &bar0_size);
 
-    // Get virtual address of PCI BAR0.
     hda_info.base = vmm_map_mmio(bar0_base, bar0_size);
     if (!hda_info.base) {
-        DEBUG_ERROR("failed to map mmio");
+        DEBUG_ERROR("HDA: MMIO mapping failed");
         return;
     }
 
-    // Initialize HD Audio controller.
-
-    // Controller state is first 8 bits of Global Control register.
-    // 0 - In reset state.
-    // 1 - In operational state.
-
-    // Try to reset.
     mmio_write16((void*)(hda_info.base + HDA_GLOBAL_CONTROL), HDA_GLOBAL_CONTROL_IN_RESET);
 
-    DEBUG_INFO("waiting for reset");
-
-    // Wait for reset with timeout.
     uint32_t reset_timeout = 100000;
     while (mmio_read16((void*)(hda_info.base + HDA_GLOBAL_CONTROL)) & HDA_GLOBAL_CONTROL_IN_OPERATIONAL_STATE) {
         io_wait();
         if (--reset_timeout == 0) {
-            DEBUG_WARN("controller reset timeout");
+            DEBUG_WARN("HDA: Controller reset timeout");
             break;
         }
     }

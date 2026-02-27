@@ -384,29 +384,19 @@ static void print_prompt() {
     int col, row;
     g_terminal.get_cursor_pos(&col, &row);
     
-    // Draw colored prompt segments
-    // "user" in blue
-    g_terminal.write_char_at_color(0, row, 'u', COLOR_PROMPT_USER, COLOR_BG);
-    g_terminal.write_char_at_color(1, row, 's', COLOR_PROMPT_USER, COLOR_BG);
-    g_terminal.write_char_at_color(2, row, 'e', COLOR_PROMPT_USER, COLOR_BG);
-    g_terminal.write_char_at_color(3, row, 'r', COLOR_PROMPT_USER, COLOR_BG);
+    const char* path = "~ ";
+    const char* arrow = "\xaf "; // Modern arrow symbol (❯)
     
-    // "@unios" in green
-    g_terminal.write_char_at_color(4, row, '@', COLOR_PROMPT_HOST, COLOR_BG);
-    g_terminal.write_char_at_color(5, row, 'u', COLOR_PROMPT_HOST, COLOR_BG);
-    g_terminal.write_char_at_color(6, row, 'n', COLOR_PROMPT_HOST, COLOR_BG);
-    g_terminal.write_char_at_color(7, row, 'i', COLOR_PROMPT_HOST, COLOR_BG);
-    g_terminal.write_char_at_color(8, row, 'o', COLOR_PROMPT_HOST, COLOR_BG);
-    g_terminal.write_char_at_color(9, row, 's', COLOR_PROMPT_HOST, COLOR_BG);
+    int c = 0;
+    while (*path) g_terminal.write_char_at_color(c++, row, *path++, COLOR_GRAY, COLOR_BG);
+    while (*arrow) g_terminal.write_char_at_color(c++, row, *arrow++, COLOR_CYAN, COLOR_BG);
     
-    // ":~$ " in gray
-    g_terminal.write_char_at_color(10, row, ':', COLOR_PROMPT_PATH, COLOR_BG);
-    g_terminal.write_char_at_color(11, row, '~', COLOR_PROMPT_PATH, COLOR_BG);
-    g_terminal.write_char_at_color(12, row, '$', COLOR_PROMPT_PATH, COLOR_BG);
-    g_terminal.write_char_at_color(13, row, ' ', COLOR_TEXT, COLOR_BG);
-    
-    g_terminal.set_cursor_pos(PROMPT_LEN, row);
+    g_terminal.set_cursor_pos(4, row);
 }
+
+// Helper redraw line needs updated PROMPT_LEN
+#undef PROMPT_LEN
+#define PROMPT_LEN 4
 
 // Helper to redraw entire command line without ANY cursor glitches
 // Uses ONLY direct drawing methods - never put_char
@@ -433,7 +423,7 @@ static void redraw_line_at(int row, int new_cursor_pos) {
         bool is_selected = (sel_min >= 0 && i >= sel_min && i < sel_max);
         if (is_selected) {
             // Draw with inverted colors for selection
-            g_terminal.write_char_at_color(PROMPT_LEN + i, row, cmd_buffer[i], 0xFF000000, 0xFFFFFFFF);
+            g_terminal.write_char_at_color(PROMPT_LEN + i, row, cmd_buffer[i], COLOR_BLACK, COLOR_WHITE);
         } else {
             g_terminal.write_char_at(PROMPT_LEN + i, row, cmd_buffer[i]);
         }
@@ -824,89 +814,99 @@ static void cmd_run(const char* filename) {
     last_exit_status = 0;
 }
 
+static void write_help_category(const char* cat) {
+    g_terminal.write_line("");
+    g_terminal.set_color(COLOR_HELP_HEADER, COLOR_BG);
+    g_terminal.write("  ");
+    g_terminal.write_line(cat);
+}
+
+static void write_help_line(const char* full_cmd, const char* desc) {
+    g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+    g_terminal.write("    ");
+    
+    int chars_written = 4;
+    const char* p = full_cmd;
+    
+    while (*p) {
+        if (*p == '<') g_terminal.set_color(COLOR_YELLOW, COLOR_BG);
+        else if (*p == '[') g_terminal.set_color(COLOR_GRAY, COLOR_BG);
+        
+        g_terminal.put_char(*p);
+        chars_written++;
+        
+        if (*p == '>') g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+        else if (*p == ']') g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+        p++;
+    }
+    
+    // Aligned to column 24 (4 indent + 20 width)
+    while (chars_written < 24) {
+        g_terminal.put_char(' ');
+        chars_written++;
+    }
+    
+    g_terminal.set_color(COLOR_GRAY, COLOR_BG);
+    g_terminal.write_line(desc);
+}
+
 static void cmd_help() {
-    g_terminal.write_line("File Commands:");
-    g_terminal.write_line("  ls        - List files with sizes");
-    g_terminal.write_line("  cat <f>   - Show file contents");
-    g_terminal.write_line("  stat <f>  - Show file information");
-    g_terminal.write_line("  hexdump <f> - Hex dump of file");
-    g_terminal.write_line("  touch <f> - Create empty file");
-    g_terminal.write_line("  rm <f>    - Delete file");
-    g_terminal.write_line("  write <f> <text> - Write text to file");
-    g_terminal.write_line("  append <f> <text> - Append text to file");
-    g_terminal.write_line("  df        - Show filesystem stats");
+    // Hide cursor once for the entire command to avoid flickering and improve speed
+    bool was_visible = g_terminal.is_cursor_visible();
+    if (was_visible) g_terminal.set_cursor_visible(false);
+
+    write_help_category("File Commands");
+    write_help_line("ls", "List files with sizes");
+    write_help_line("cat <f>", "Show file contents");
+    write_help_line("stat <f>", "Show file information");
+    write_help_line("hexdump <f>", "Hex dump of file");
+    write_help_line("touch <f>", "Create empty file");
+    write_help_line("rm <f>", "Delete file");
+    write_help_line("write <f> <t>", "Write text to file");
+    write_help_line("df", "Show filesystem stats");
     g_terminal.write_line("");
-    g_terminal.write_line("System Commands:");
-    g_terminal.write_line("  mem       - Show memory usage");
-    g_terminal.write_line("  date      - Show current date/time");
-    g_terminal.write_line("  uptime    - Show system uptime");
-    g_terminal.write_line("  version   - Show kernel version");
-    g_terminal.write_line("  uname     - System information");
-    g_terminal.write_line("  cpuinfo   - CPU information");
-    g_terminal.write_line("  lspci     - List PCI devices");
+
+    write_help_category("System Commands");
+    write_help_line("mem", "Show memory usage");
+    write_help_line("date", "Show current date/time");
+    write_help_line("uptime", "Show system uptime");
+    write_help_line("version", "Show kernel version");
+    write_help_line("cpuinfo", "CPU information");
+    write_help_line("lspci", "List PCI devices");
     g_terminal.write_line("");
-    g_terminal.write_line("Network Commands:");
-    g_terminal.write_line("  ifconfig  - Show network config");
-    g_terminal.write_line("  dhcp      - Request IP via DHCP");
-    g_terminal.write_line("  ping <ip> - Ping an IP address");
+
+    write_help_category("Network Commands");
+    write_help_line("ifconfig", "Show network config");
+    write_help_line("dhcp", "Request IP via DHCP");
+    write_help_line("ping <ip>", "Ping an IP address");
     g_terminal.write_line("");
-    g_terminal.write_line("Audio Commands:");
-    g_terminal.write_line("  audio status  - Show AC97 driver status");
-    g_terminal.write_line("  audio play <f> - Play WAV file");
-    g_terminal.write_line("  audio pause   - Pause playback");
-    g_terminal.write_line("  audio resume  - Resume playback");
-    g_terminal.write_line("  audio stop    - Stop playback");
+
+    write_help_category("Audio Commands");
+    write_help_line("audio status", "Show sound status");
+    write_help_line("audio play <f>", "Play WAV file");
+    write_help_line("audio stop", "Stop playback");
     g_terminal.write_line("");
-    g_terminal.write_line("Scripting:");
-    g_terminal.write_line("  run <f>   - Execute script file");
-    g_terminal.write_line("  source <f> - Run script (same as run)");
-    g_terminal.write_line("  set N=V   - Set variable (or list all)");
-    g_terminal.write_line("  unset N   - Remove variable");
-    g_terminal.write_line("  env       - List all variables");
-    g_terminal.write_line("  $NAME     - Variable expansion");
-    g_terminal.write_line("  # comment - Script comments");
-    g_terminal.write_line("  if/else/endif - Conditionals");
-    g_terminal.write_line("  while/end - Loops");
-    g_terminal.write_line("  test <expr> - Evaluate condition");
-    g_terminal.write_line("  expr <n> <op> <n> - Arithmetic");
-    g_terminal.write_line("  read <var> - Read input to variable");
+
+    write_help_category("Text Processing");
+    write_help_line("wc [f]", "Count lines/words/chars");
+    write_help_line("grep <p> [f]", "Search for pattern");
+    write_help_line("sort [f]", "Sort lines alphabetically");
+    write_help_line("echo <text>", "Print text");
     g_terminal.write_line("");
-    g_terminal.write_line("Utilities:");
-    g_terminal.write_line("  true/false - Exit with 0/1");
-    g_terminal.write_line("  sleep <ms> - Wait milliseconds");
-    g_terminal.write_line("  time <cmd> - Measure execution time");
-    g_terminal.write_line("  exit      - Shutdown (alias for poweroff)");
+
+    write_help_category("Other");
+    write_help_line("clear", "Clear screen");
+    write_help_line("gui", "Start GUI mode");
+    write_help_line("reboot", "Reboot system");
+    write_help_line("poweroff", "Shutdown system");
     g_terminal.write_line("");
-    g_terminal.write_line("Text Processing (pipe-friendly):");
-    g_terminal.write_line("  wc [f]    - Count lines/words/chars");
-    g_terminal.write_line("  head [n] [f] - First n lines (default 10)");
-    g_terminal.write_line("  tail [n] [f] - Last n lines (default 10)");
-    g_terminal.write_line("  grep <p> [f] - Search for pattern");
-    g_terminal.write_line("  sort [f]  - Sort lines alphabetically");
-    g_terminal.write_line("  uniq [f]  - Remove duplicate lines");
-    g_terminal.write_line("  rev [f]   - Reverse characters in each line");
-    g_terminal.write_line("  tac [f]   - Print lines in reverse order");
-    g_terminal.write_line("  nl [f]    - Number lines");
-    g_terminal.write_line("  tr <a> <b> - Translate char a to b (pipe)");
-    g_terminal.write_line("  echo <text> - Print text");
-    g_terminal.write_line("");
-    g_terminal.write_line("Other:");
-    g_terminal.write_line("  clear     - Clear screen");
-    g_terminal.write_line("  gui       - Start GUI mode");
-    g_terminal.write_line("  help      - Show this help");
-    g_terminal.write_line("  reboot    - Reboot system");
-    g_terminal.write_line("  poweroff  - Shutdown system");
-    g_terminal.write_line("");
+
+    g_terminal.set_color(COLOR_DIM_GRAY, COLOR_BG);
     g_terminal.write_line("Piping: cmd1 | cmd2 - Pass output as input");
-    g_terminal.write_line("Shortcuts:");
-    g_terminal.write_line("  Tab       - Command/filename completion");
-    g_terminal.write_line("  Ctrl+A/E  - Move to start/end");
-    g_terminal.write_line("  Ctrl+U/K  - Cut before/after cursor");
-    g_terminal.write_line("  Ctrl+W    - Delete word");
-    g_terminal.write_line("  Ctrl+Y    - Paste");
-    g_terminal.write_line("  Ctrl+C    - Copy selection / cancel");
-    g_terminal.write_line("  Ctrl+L    - Clear screen");
-    g_terminal.write_line("  Shift+Arrows - Select text");
+    g_terminal.write_line("Tab for completion, Ctrl+L to clear, Ctrl+C to cancel");
+    g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+
+    if (was_visible) g_terminal.set_cursor_visible(true);
 }
 
 static void cmd_ls() {
@@ -916,6 +916,9 @@ static void cmd_ls() {
         g_terminal.write_line("No files.");
         return;
     }
+    
+    bool was_visible = g_terminal.is_cursor_visible();
+    if (was_visible) g_terminal.set_cursor_visible(false);
     
     for (uint64_t i = 0; i < count; i++) {
         const char* name = unifs_get_file_name(i);
@@ -962,6 +965,8 @@ static void cmd_ls() {
             g_terminal.write_line(name);
         }
     }
+    
+    if (was_visible) g_terminal.set_cursor_visible(true);
 }
 
 static void cmd_stat(const char* filename) {

@@ -16,27 +16,35 @@
 
 **uniOS** is a hobby operating system built from scratch. It features a working shell with command piping, TCP/IP networking, USB support, and runs on real x86-64 hardware.
 
-Current Version: **v0.6.5**
+Current Version: **v0.7.0**
 
 ---
 
 ## Features
 
+- **Modular windowing system (GUI)** — Desktop environment with draggable windows, taskbar, and icons. Now moved to a dedicated subsystem with a new **8x16 premium terminal font**.
+
+- **SSE-Accelerated Renderer** — High-performance graphics primitives (fills, gradients, copies) utilizing SSE2 SIMD instructions. Features **dirty rectangle tracking** and double buffering.
+
+- **Initial FAT32 Support** — Early infrastructure for **FAT32** filesystem parsing (boot sectors and block device abstraction).
+
 - **C++20 Kernel** — Built with `-fno-exceptions` and `-fno-rtti`. Uses `kstring::` utilities instead of `std::` to avoid libc dependencies.
 
-- **Bitmap PMM & 4-Level Paging** — Physical memory tracked via bitmap allocator. Currently capped at 16GB to prevent bitmap overflow. Recursive 4-level paging for virtual memory.
+- **Bitmap PMM & 4-Level Paging** — Physical memory tracked via dynamic bitmap allocator. Recursive 4-level paging for virtual memory. Support for systems with any amount of RAM.
 
-- **Preemptive Multitasking** — 1000Hz timer-based scheduling. 16KB kernel stacks per process (sized for deep networking call chains). FPU/SSE context saved via `fxsave`/`fxrstor`.
+- **Preemptive Multitasking** — 1000Hz timer-based scheduling. 16KB kernel stacks per process. Features **O(1) task insertion** for improved scalability.
 
-- **Scratch-built TCP/IP Stack** — Not a port of lwIP. Hand-written Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, and DNS. Tested with `ping` and basic TCP handshakes.
+- **Heap Page Coalescing** — Bucket-based allocator with automatic page coalescing. Fully freed pages are returned to the PMM to prevent memory fragmentation.
 
-- **Native xHCI Driver** — USB 3.0 host controller support. HID keyboards and mice work via interrupt transfers. No hub support.
+- **Scratch-built TCP/IP Stack** — Hand-written Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, and DNS.
 
-- **uniFS** — Simple flat filesystem. Boot files loaded from Limine module (read-only), runtime files stored in RAM (lost on reboot).
+- **Interrupt-driven USB Stack** — USB 3.0 (xHCI) support with initial **USB Hub** detection. Switched to efficient interrupt-driven event handling.
 
-- **Shell** — Command-line interface with tab completion, history, piping (`ls | grep elf | wc`), and scripting support.
+- **Audio Stack** — Dual support for **Intel HD Audio (HDA)** and **AC97**. Play WAV/PCM files directly from the shell with per-channel volume control.
 
-- **AC97 Audio** — Basic sound card driver. Play WAV/PCM files from the shell. Supports 16-bit stereo audio.
+- **MSI-X Support** — Support for Message Signaled Interrupts (MSI-X), providing significantly lower interrupt latency compared to traditional I/O APIC.
+
+- **Modern Debug System** — Overhauled logging with module-based filtering and severity levels.
 
 ## Known Limitations
 
@@ -45,10 +53,8 @@ Current Version: **v0.6.5**
 
 | Limitation | Details |
 |------------|---------|
-| **16GB RAM cap** | PMM bitmap is statically sized. Memory above 16GB is ignored. |
 | **Experimental user-mode** | Basic syscall interface (exit, read, write). No memory protection between processes yet. |
 | **USB polling** | HID devices polled on timer, not via hardware interrupts. |
-| **No USB hubs** | Only devices directly connected to root ports work. |
 | **QEMU-first** | Tested primarily on QEMU. Real hardware may have driver issues. |
 
 ## Getting Started
@@ -178,17 +184,24 @@ make run-net
 ## Project Structure
 
 ```text
-kernel/
-├── core/       # Entry point, scheduler, terminal, debug
-├── arch/       # GDT, IDT, interrupts, I/O
-├── mem/        # PMM, VMM, heap
-├── drivers/    # Hardware drivers
-│   ├── net/    # e1000, RTL8139
-│   ├── usb/    # xHCI, HID
-│   └── sound/  # AC97
-├── net/        # TCP/IP stack
-├── fs/         # uniFS filesystem
-└── shell/      # Command interpreter
+├── include/      # Header files
+│   ├── boot/     # Limine boot protocol
+│   ├── kernel/   # Kernel core headers
+│   ├── drivers/  # Driver interfaces
+│   └── libk/     # Kernel library
+├── src/          # Source files
+│   ├── kernel/   # Core kernel logic
+│   │   ├── core/ # Entry (kmain), CPU, IRQ, GUI, Syscalls
+│   │   ├── sched/# Task scheduler
+│   │   ├── shell/# Command interpreter
+│   │   ├── sync/ # Mutex, Spinlock
+│   │   └── time/ # PIT Timer
+│   ├── arch/     # CPU/Arch specific code (x86_64)
+│   ├── mm/       # Memory management (PMM, VMM, Heap, VMA)
+│   ├── drivers/  # Hardware drivers (Net, USB, Audio, Video, PCI, ACPI)
+│   ├── fs/       # Filesystems (uniFS, FAT32, Block Dev)
+│   └── net/      # TCP/IP stack
+└── tools/        # Build and sync utilities
 ```
 
 ## License

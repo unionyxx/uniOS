@@ -1,5 +1,6 @@
 #include <drivers/bus/pci/pci.h>
 #include <kernel/arch/x86_64/io.h>
+#include <kernel/debug.h>
 
 // Build PCI config address for Mechanism 1
 static uint32_t pci_make_address(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset) {
@@ -85,6 +86,8 @@ bool pci_find_device_by_class(uint8_t class_code, uint8_t subclass, PciDevice* o
 
                 if (cls == class_code && sub == subclass) {
                     pci_enum_function(bus, dev, func, out);
+                    DEBUG_INFO("Found PCI device %02x:%02x.%x (Class %02x:%02x) Vendor=%04x Device=%04x",
+                               bus, dev, func, cls, sub, out->vendor_id, out->device_id);
                     return true;
                 }
             }

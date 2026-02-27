@@ -1,19 +1,27 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/vma.h>
+#include <kernel/process.h>
+#include <kernel/debug.h>
+#include <kernel/panic.h>
 #include <boot/limine.h>
+#include <libk/kstring.h>
 
-// Limine HHDM request (Higher Half Direct Map)
+// Use kstring memory utilities
+using kstring::memcpy;
+
 __attribute__((used, section(".requests")))
 static volatile struct limine_hhdm_request hhdm_request = {
     .id = LIMINE_HHDM_REQUEST,
-    .revision = 0
+    .revision = 0,
+    .response = nullptr
 };
 
-// Limine Kernel Address request
 __attribute__((used, section(".requests")))
 static volatile struct limine_kernel_address_request kernel_address_request = {
     .id = LIMINE_KERNEL_ADDRESS_REQUEST,
-    .revision = 0
+    .revision = 0,
+    .response = nullptr
 };
 
 static uint64_t* pml4 = nullptr;
@@ -24,41 +32,33 @@ static uint64_t hhdm_offset = 0;
 // on memory that was originally mapped as a huge page by UEFI/Limine
 static bool split_huge_page(uint64_t* pd, uint64_t index) {
     uint64_t huge_entry = pd[index];
-    if (!(huge_entry & (1ULL << 7))) return false; // Not a huge page (PS bit not set)
+    if (!(huge_entry & (1ULL << 7))) return false;
 
-    // Allocate a new page table to hold the 512 4KB entries
     void* pt_frame = pmm_alloc_frame();
     if (!pt_frame) return false;
 
     uint64_t pt_phys = (uint64_t)pt_frame;
     uint64_t* pt_virt = (uint64_t*)(pt_phys + hhdm_offset);
 
-    // Physical base address of the 2MB region (bits 21-51)
     uint64_t base_phys = huge_entry & 0x000FFFFFFFE00000ULL;
-    // Preserve existing flags but clear the PS (Page Size) bit
     uint64_t flags = huge_entry & 0xFFF;
-    flags &= ~(1ULL << 7); // Clear PS bit - these are now 4KB pages
+    flags &= ~(1ULL << 7);
 
-    // Fill the new page table with 512 entries, each pointing to a 4KB chunk
     for (int i = 0; i < 512; i++) {
         pt_virt[i] = (base_phys + (i * 0x1000)) | flags;
     }
 
-    // Update the PD entry to point to the new page table
-    pd[index] = pt_phys | (flags & ~(1ULL << 7)); // Ensure PS bit is clear
+    pd[index] = pt_phys | (flags & ~(1ULL << 7));
     
-    // Invalidate TLB for the affected range (full flush for safety)
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
     return true;
 }
 
 static uint64_t* get_next_level(uint64_t* current_level, uint64_t index, bool alloc) {
     if (current_level[index] & PTE_PRESENT) {
-        // Check if this is a huge page (PS bit set at PD level)
-        // If so, we need to split it before we can traverse deeper
         if (current_level[index] & (1ULL << 7)) {
             if (!split_huge_page(current_level, index)) {
-                return nullptr; // Failed to split
+                return nullptr;
             }
         }
         
@@ -75,7 +75,7 @@ static uint64_t* get_next_level(uint64_t* current_level, uint64_t index, bool al
     current_level[index] = phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
     
     uint64_t* next_level = (uint64_t*)(phys + hhdm_offset);
-    for (int i = 0; i < 512; i++) next_level[i] = 0; // Clear new page table
+    for (int i = 0; i < 512; i++) next_level[i] = 0;
     
     return next_level;
 }
@@ -84,11 +84,9 @@ void vmm_init() {
     if (hhdm_request.response == nullptr) return;
     hhdm_offset = hhdm_request.response->offset;
 
-    // Get current CR3 (Physical address of PML4)
     uint64_t cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
     
-    // Access PML4 via HHDM
     pml4 = (uint64_t*)(cr3 + hhdm_offset);
 }
 
@@ -97,6 +95,13 @@ uint64_t vmm_phys_to_virt(uint64_t phys) {
 }
 
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
+    if (virt >= 0xFFFF800000000000ULL && (flags & PTE_USER)) {
+        panic("vmm: Attempted to map kernel address with PTE_USER!");
+    }
+    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER)) {
+        panic("vmm: Attempted to map userspace address without PTE_USER!");
+    }
+
     uint64_t pml4_index = (virt >> 39) & 0x1FF;
     uint64_t pdpt_index = (virt >> 30) & 0x1FF;
     uint64_t pd_index   = (virt >> 21) & 0x1FF;
@@ -113,12 +118,18 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
     pt[pt_index] = phys | flags;
     
-    // Invalidate TLB
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
 }
 
 // Map page without TLB flush (for batched operations - caller must flush)
 static void vmm_map_page_no_flush(uint64_t virt, uint64_t phys, uint64_t flags) {
+    if (virt >= 0xFFFF800000000000ULL && (flags & PTE_USER)) {
+        panic("vmm: Attempted to map kernel address with PTE_USER!");
+    }
+    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER)) {
+        panic("vmm: Attempted to map userspace address without PTE_USER!");
+    }
+
     uint64_t pml4_index = (virt >> 39) & 0x1FF;
     uint64_t pdpt_index = (virt >> 30) & 0x1FF;
     uint64_t pd_index   = (virt >> 21) & 0x1FF;
@@ -200,6 +211,13 @@ static uint64_t* get_next_level_in(uint64_t* current_level, uint64_t index, bool
 }
 
 void vmm_map_page_in(uint64_t* target_pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
+    if (virt >= 0xFFFF800000000000ULL && (flags & PTE_USER)) {
+        panic("vmm: Attempted to map kernel address with PTE_USER!");
+    }
+    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER)) {
+        panic("vmm: Attempted to map userspace address without PTE_USER!");
+    }
+
     uint64_t pml4_index = (virt >> 39) & 0x1FF;
     uint64_t pdpt_index = (virt >> 30) & 0x1FF;
     uint64_t pd_index   = (virt >> 21) & 0x1FF;
@@ -218,16 +236,13 @@ void vmm_map_page_in(uint64_t* target_pml4, uint64_t virt, uint64_t phys, uint64
 }
 
 uint64_t* vmm_create_address_space() {
-    // Allocate a new PML4
     void* frame = pmm_alloc_frame();
     if (!frame) return nullptr;
     
     uint64_t* new_pml4 = (uint64_t*)((uint64_t)frame + hhdm_offset);
     
-    // Clear the new PML4
     for (int i = 0; i < 512; i++) new_pml4[i] = 0;
     
-    // Copy kernel mappings (upper half - indices 256-511)
     for (int i = 256; i < 512; i++) {
         new_pml4[i] = pml4[i];
     }
@@ -235,12 +250,10 @@ uint64_t* vmm_create_address_space() {
     return new_pml4;
 }
 
-// Get HHDM offset for external use
 uint64_t vmm_get_hhdm_offset() {
     return hhdm_offset;
 }
 
-// Helper: Clone a page table level (recursive for PDPT -> PD -> PT)
 static void clone_page_table_level(uint64_t* src, uint64_t* dst, int level) {
     for (int i = 0; i < 512; i++) {
         if (!(src[i] & PTE_PRESENT)) {
@@ -252,23 +265,16 @@ static void clone_page_table_level(uint64_t* src, uint64_t* dst, int level) {
         uint64_t flags = src[i] & 0xFFF;
         
         if (level == 1) {
-            // Level 1 = PT (Page Table): Copy the actual physical page
-            void* new_frame = pmm_alloc_frame();
-            if (!new_frame) {
-                dst[i] = 0;
-                continue;
+            // Level 1 = PT (Page Table): Implement Copy-on-Write
+            pmm_refcount_inc((void*)src_phys);
+            
+            if (flags & PTE_WRITABLE) {
+                flags &= ~PTE_WRITABLE;
+                src[i] &= ~PTE_WRITABLE;
             }
             
-            // Copy page content
-            uint64_t* src_page = (uint64_t*)(src_phys + hhdm_offset);
-            uint64_t* dst_page = (uint64_t*)((uint64_t)new_frame + hhdm_offset);
-            for (int j = 0; j < 512; j++) {
-                dst_page[j] = src_page[j];
-            }
-            
-            dst[i] = (uint64_t)new_frame | flags;
+            dst[i] = src_phys | flags;
         } else {
-            // Levels 2-3: Allocate new table and recurse
             void* new_table = pmm_alloc_frame();
             if (!new_table) {
                 dst[i] = 0;
@@ -278,10 +284,8 @@ static void clone_page_table_level(uint64_t* src, uint64_t* dst, int level) {
             uint64_t* new_table_virt = (uint64_t*)((uint64_t)new_table + hhdm_offset);
             uint64_t* src_table = (uint64_t*)(src_phys + hhdm_offset);
             
-            // Zero new table first
             for (int j = 0; j < 512; j++) new_table_virt[j] = 0;
             
-            // Recursively clone
             clone_page_table_level(src_table, new_table_virt, level - 1);
             
             dst[i] = (uint64_t)new_table | flags;
@@ -293,22 +297,18 @@ static void clone_page_table_level(uint64_t* src, uint64_t* dst, int level) {
 uint64_t* vmm_clone_address_space(uint64_t* src_pml4) {
     if (!src_pml4) return nullptr;
     
-    // Allocate new PML4
     void* frame = pmm_alloc_frame();
     if (!frame) return nullptr;
     
     uint64_t* new_pml4 = (uint64_t*)((uint64_t)frame + hhdm_offset);
-    
-    // Zero the new PML4
     for (int i = 0; i < 512; i++) new_pml4[i] = 0;
     
-    // Copy kernel mappings (upper half - indices 256-511) BY REFERENCE
-    // These are shared between all processes
+    // Copy kernel mappings (indices 256-511)
     for (int i = 256; i < 512; i++) {
         new_pml4[i] = src_pml4[i];
     }
     
-    // Deep copy user mappings (lower half - indices 0-255)
+    // Copy user mappings (indices 0-255)
     for (int i = 0; i < 256; i++) {
         if (!(src_pml4[i] & PTE_PRESENT)) {
             new_pml4[i] = 0;
@@ -318,7 +318,6 @@ uint64_t* vmm_clone_address_space(uint64_t* src_pml4) {
         uint64_t src_phys = src_pml4[i] & 0x000FFFFFFFFFF000ULL;
         uint64_t flags = src_pml4[i] & 0xFFF;
         
-        // Allocate new PDPT
         void* new_pdpt = pmm_alloc_frame();
         if (!new_pdpt) {
             new_pml4[i] = 0;
@@ -327,12 +326,9 @@ uint64_t* vmm_clone_address_space(uint64_t* src_pml4) {
         
         uint64_t* new_pdpt_virt = (uint64_t*)((uint64_t)new_pdpt + hhdm_offset);
         uint64_t* src_pdpt = (uint64_t*)(src_phys + hhdm_offset);
-        
         for (int j = 0; j < 512; j++) new_pdpt_virt[j] = 0;
         
-        // Clone PDPT -> PD -> PT -> Pages (level 3 -> 2 -> 1)
         clone_page_table_level(src_pdpt, new_pdpt_virt, 3);
-        
         new_pml4[i] = (uint64_t)new_pdpt | flags;
     }
     
@@ -361,9 +357,8 @@ static void free_page_table_level(uint64_t* table, int level) {
 // Free all user-space pages in an address space
 void vmm_free_address_space(uint64_t* target_pml4) {
     if (!target_pml4) return;
-    if (target_pml4 == pml4) return;  // Don't free kernel PML4!
+    if (target_pml4 == pml4) return;
     
-    // Free user half only (indices 0-255)
     for (int i = 0; i < 256; i++) {
         if (!(target_pml4[i] & PTE_PRESENT)) continue;
         
@@ -374,7 +369,6 @@ void vmm_free_address_space(uint64_t* target_pml4) {
         pmm_free_frame((void*)phys);
     }
     
-    // Free the PML4 itself
     uint64_t pml4_phys = (uint64_t)target_pml4 - hhdm_offset;
     pmm_free_frame((void*)pml4_phys);
 }
@@ -383,33 +377,25 @@ void vmm_switch_address_space(uint64_t* new_pml4_phys) {
     asm volatile("mov %0, %%cr3" :: "r"(new_pml4_phys) : "memory");
 }
 
-// MMIO virtual address allocator
-// Start at a high kernel address that won't conflict with other mappings
 static uint64_t mmio_next_virt = 0xFFFFFFFF90000000ULL;
 
 uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size) {
     if (size == 0) return 0;
     
-    // Align to page boundary
     uint64_t phys_page = phys_addr & ~0xFFFULL;
     uint64_t offset = phys_addr & 0xFFF;
     uint64_t pages = (size + offset + 0xFFF) / 0x1000;
     
-    // Get virtual address for this mapping
     uint64_t virt_base = mmio_next_virt;
     mmio_next_virt += pages * 0x1000;
     
-    // Map each page with MMIO flags (uncacheable) - no per-page TLB flush
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t virt = virt_base + i * 0x1000;
         uint64_t phys = phys_page + i * 0x1000;
         vmm_map_page_no_flush(virt, phys, PTE_MMIO);
     }
     
-    // Single TLB flush after all mappings
     vmm_flush_tlb_all();
-    
-    // Return virtual address with original offset
     return virt_base + offset;
 }
 
@@ -475,4 +461,65 @@ void vmm_free_dma(DMAAllocation alloc) {
     // Note: Virtual mappings are left in place as unmapping requires
     // tracking MMIO allocations separately. The physical memory is freed
     // which prevents running out of RAM on driver reinit.
+}
+
+bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code) {
+    // Check if it's a write fault (bit 1 of error code)
+    if (!(error_code & 2)) return false;
+    
+    Process* curr = process_get_current();
+    if (!curr || !curr->vma_list) return false;
+    
+    // Find the VMA for this fault address
+    VMA* vma = vma_find(curr->vma_list, fault_addr);
+    if (!vma) {
+        // No VMA - this is a real illegal access (segmentation fault)
+        return false;
+    }
+    
+    // Check if the VMA allows writing (if it doesn't, this is also illegal)
+    if (!(vma->flags & PTE_WRITABLE)) return false;
+    
+    // It's a write on a read-only page within a writable VMA -> handle CoW
+    uint64_t page_vaddr = fault_addr & ~0xFFFULL;
+    uint64_t phys = vmm_virt_to_phys(page_vaddr);
+    
+    if (phys == 0) {
+        // Page not mapped at all - this might be demand paging, but for now 
+        // we'll return false.
+        return false;
+    }
+    
+    uint16_t refcount = pmm_get_refcount((void*)phys);
+    
+    if (refcount > 1) {
+        // Clone the physical page
+        void* new_frame = pmm_alloc_frame();
+        if (!new_frame) {
+            panic("OOM during CoW page fault!");
+        }
+        
+        uint8_t* src_virt = (uint8_t*)vmm_phys_to_virt(phys);
+        uint8_t* dst_virt = (uint8_t*)vmm_phys_to_virt((uint64_t)new_frame);
+        
+        // Copy 4KB of data
+        kstring::memcpy(dst_virt, src_virt, 4096);
+        
+        // Update page table to point to the new private frame with WRITABLE bit
+        vmm_map_page(page_vaddr, (uint64_t)new_frame, vma->flags | PTE_PRESENT | PTE_USER);
+        
+        // Decrement reference count of the old shared frame
+        pmm_refcount_dec((void*)phys);
+        
+        DEBUG_INFO("CoW: PID %d duplicated page at 0x%llx (frame 0x%llx -> 0x%llx)", 
+                   curr->pid, page_vaddr, phys, (uint64_t)new_frame);
+    } else {
+        // Refcount is 1 - this process is the only owner, just make it writable
+        vmm_map_page(page_vaddr, phys, vma->flags | PTE_PRESENT | PTE_USER);
+        
+        DEBUG_INFO("CoW: PID %d restored write permission on page 0x%llx", 
+                   curr->pid, page_vaddr);
+    }
+    
+    return true;
 }
