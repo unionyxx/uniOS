@@ -1,7 +1,7 @@
 # Makefile for uniOS
 # ==================
 # Build: make [release|debug]  (default: release)
-# Run:   make run[-debug|-serial|-gdb]
+# Run:   make run [USB=1] [NET=1] [SOUND=1] [SERIAL=1] [GDB=1]
 
 # Toolchain
 CXX = g++
@@ -74,18 +74,30 @@ DISK_IMG = $(BUILD_DIR)/disk.img
 # QEMU options
 QEMU = qemu-system-x86_64
 QEMU_BASE = -boot d -cdrom $(ISO_IMAGE) -drive file=$(DISK_IMG),format=raw,if=ide,index=0 -m 512M
-QEMU_SOUND = -device ac97
-QEMU_HDA = -device intel-hda -device hda-duplex
-QEMU_NET = -nic user,model=e1000
-QEMU_SERIAL = -serial stdio
-QEMU_DEBUG = -s -S
-QEMU_USB = -device qemu-xhci -device usb-kbd -device usb-mouse
+
+# Command line flags for 'make run'
+QEMU_FLAGS = 
+ifeq ($(USB),1)
+    QEMU_FLAGS += -device qemu-xhci -device usb-kbd -device usb-mouse
+endif
+ifeq ($(NET),1)
+    QEMU_FLAGS += -nic user,model=e1000
+endif
+ifeq ($(SOUND),1)
+    QEMU_FLAGS += -device ac97
+endif
+ifeq ($(SERIAL),1)
+    QEMU_FLAGS += -serial stdio
+endif
+ifeq ($(GDB),1)
+    QEMU_FLAGS += -s -S
+endif
 
 # ==============================================================================
 # Build Targets
 # ==============================================================================
 
-.PHONY: all release debug clean run run-net run-usb run-sound run-hda run-serial run-gdb help directories
+.PHONY: all release debug clean run run-net run-usb run-sound run-serial run-gdb help directories iso
 
 all: release
 
@@ -141,27 +153,21 @@ $(DISK_IMG):
 # Run Targets
 # ==============================================================================
 
-run: $(ISO_IMAGE)
-	$(QEMU) $(QEMU_BASE)
+run: iso
+	@if [ "$(GDB)" = "1" ]; then echo "Waiting for GDB on localhost:1234..."; fi
+	$(QEMU) $(QEMU_BASE) $(QEMU_FLAGS)
 
-run-net: $(ISO_IMAGE)
-	$(QEMU) $(QEMU_BASE) $(QEMU_NET)
-
-run-usb: $(ISO_IMAGE)
-	$(QEMU) $(QEMU_BASE) $(QEMU_USB)
-
-run-sound: $(ISO_IMAGE)
-	$(QEMU) $(QEMU_BASE) $(QEMU_SOUND)
-
-run-hda: $(ISO_IMAGE)
-	$(QEMU) $(QEMU_BASE) $(QEMU_HDA)
-
-run-serial: $(ISO_IMAGE)
-	$(QEMU) $(QEMU_BASE) $(QEMU_SERIAL)
-
-run-gdb: $(ISO_IMAGE)
-	@echo "Waiting for GDB on localhost:1234..."
-	$(QEMU) $(QEMU_BASE) $(QEMU_DEBUG)
+# Shortcuts
+run-net:
+	@$(MAKE) run NET=1
+run-usb:
+	@$(MAKE) run USB=1
+run-sound:
+	@$(MAKE) run SOUND=1
+run-serial:
+	@$(MAKE) run SERIAL=1
+run-gdb:
+	@$(MAKE) run GDB=1
 
 # ==============================================================================
 # Utility Targets
@@ -181,12 +187,12 @@ help:
 	@echo "  make debug     - Build debug version with DEBUG macro"
 	@echo ""
 	@echo "Run targets:"
-	@echo "  make run       - Run in QEMU"
-	@echo "  make run-net   - Run with e1000 network"
-	@echo "  make run-usb   - Run with xHCI USB controller"
-	@echo "  make run-sound - Run with AC'97 sound card"
-	@echo "  make run-serial- Run with serial output to stdio"
-	@echo "  make run-gdb   - Run with GDB stub (localhost:1234)"
+	@echo "  make run       - Run in QEMU (Flags: USB=1 NET=1 SOUND=1 SERIAL=1 GDB=1)"
+	@echo "  make run-net   - Shortcut for NET=1"
+	@echo "  make run-usb   - Shortcut for USB=1"
+	@echo "  make run-sound - Shortcut for SOUND=1"
+	@echo "  make run-serial- Shortcut for SERIAL=1"
+	@echo "  make run-gdb   - Shortcut for GDB=1"
 	@echo ""
 	@echo "Utility:"
 	@echo "  make clean     - Remove build directory"
