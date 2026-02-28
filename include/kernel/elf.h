@@ -1,65 +1,51 @@
 #pragma once
 #include <stdint.h>
 
-// ELF Magic
-#define ELF_MAGIC 0x464C457F // "\x7FELF"
+constexpr uint32_t ELF_MAGIC = 0x464C457F;
+constexpr uint8_t  ELFCLASS64 = 2;
+constexpr uint8_t  ELFDATA2LSB = 1;
+constexpr uint16_t ET_EXEC = 2;
+constexpr uint16_t ET_DYN  = 3;
+constexpr uint16_t EM_X86_64 = 62;
 
-// ELF Class
-#define ELFCLASS64 2
+constexpr uint32_t PT_NULL    = 0;
+constexpr uint32_t PT_LOAD    = 1;
+constexpr uint32_t PT_DYNAMIC = 2;
+constexpr uint32_t PT_INTERP  = 3;
 
-// ELF Data encoding
-#define ELFDATA2LSB 1 // Little endian
+constexpr uint32_t PF_X = 0x1;
+constexpr uint32_t PF_W = 0x2;
+constexpr uint32_t PF_R = 0x4;
 
-// ELF Type
-#define ET_EXEC 2 // Executable
-#define ET_DYN  3 // Shared object (PIE)
-
-// ELF Machine
-#define EM_X86_64 62
-
-// Program header types
-#define PT_NULL    0
-#define PT_LOAD    1
-#define PT_DYNAMIC 2
-#define PT_INTERP  3
-
-// Program header flags
-#define PF_X 0x1 // Execute
-#define PF_W 0x2 // Write
-#define PF_R 0x4 // Read
-
-// ELF64 Header
 struct Elf64_Ehdr {
-    uint8_t  e_ident[16];  // Magic number and other info
-    uint16_t e_type;       // Object file type
-    uint16_t e_machine;    // Architecture
-    uint32_t e_version;    // Object file version
-    uint64_t e_entry;      // Entry point virtual address
-    uint64_t e_phoff;      // Program header table file offset
-    uint64_t e_shoff;      // Section header table file offset
-    uint32_t e_flags;      // Processor-specific flags
-    uint16_t e_ehsize;     // ELF header size
-    uint16_t e_phentsize;  // Program header table entry size
-    uint16_t e_phnum;      // Program header table entry count
-    uint16_t e_shentsize;  // Section header table entry size
-    uint16_t e_shnum;      // Section header table entry count
-    uint16_t e_shstrndx;   // Section header string table index
+    uint8_t  e_ident[16];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
 } __attribute__((packed));
 
-// ELF64 Program Header
 struct Elf64_Phdr {
-    uint32_t p_type;    // Segment type
-    uint32_t p_flags;   // Segment flags
-    uint64_t p_offset;  // Segment file offset
-    uint64_t p_vaddr;   // Segment virtual address
-    uint64_t p_paddr;   // Segment physical address (unused)
-    uint64_t p_filesz;  // Segment size in file
-    uint64_t p_memsz;   // Segment size in memory
-    uint64_t p_align;   // Segment alignment
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
 } __attribute__((packed));
 
-// ELF Loader functions
 struct Process;
-bool elf_validate(const uint8_t* data, uint64_t size);
-uint64_t elf_load(const uint8_t* data, uint64_t size, Process* proc);
-uint64_t elf_load_user(const uint8_t* data, uint64_t size, Process* proc);
+[[nodiscard]] bool elf_validate(const uint8_t* data, uint64_t size);
+[[nodiscard]] uint64_t elf_load(const uint8_t* data, uint64_t size, Process* proc);
+[[nodiscard]] uint64_t elf_load_user(const uint8_t* data, uint64_t size, Process* proc);

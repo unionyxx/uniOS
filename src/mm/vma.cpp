@@ -2,23 +2,19 @@
 #include <kernel/mm/heap.h>
 #include <kernel/debug.h>
 
-VMA* vma_find(VMA* list, uint64_t addr) {
-    VMA* current = list;
-    while (current) {
+[[nodiscard]] VMA* vma_find(VMA* list, uint64_t addr) {
+    for (VMA* current = list; current; current = current->next) {
         if (addr >= current->start && addr < current->end) {
             return current;
         }
-        current = current->next;
     }
     return nullptr;
 }
 
-VMA* vma_add(VMA** list_ptr, uint64_t start, uint64_t end, uint64_t flags, VMAType type) {
+[[nodiscard]] VMA* vma_add(VMA** list_ptr, uint64_t start, uint64_t end, uint64_t flags, VMAType type) {
     if (start >= end) return nullptr;
     
-    // Simple implementation: Add to the beginning of the list, no merging for now.
-    // In a production OS, we'd use an AVL tree or red-black tree and merge adjacent VMAs.
-    VMA* new_vma = (VMA*)malloc(sizeof(VMA));
+    VMA* new_vma = static_cast<VMA*>(malloc(sizeof(VMA)));
     if (!new_vma) return nullptr;
     
     new_vma->start = start;
@@ -33,7 +29,6 @@ VMA* vma_add(VMA** list_ptr, uint64_t start, uint64_t end, uint64_t flags, VMATy
 }
 
 void vma_remove(VMA** list_ptr, uint64_t start, uint64_t end) {
-    // Basic implementation: Only support removing entire VMAs that match the range exactly for now.
     VMA** current = list_ptr;
     while (*current) {
         VMA* v = *current;
@@ -46,25 +41,22 @@ void vma_remove(VMA** list_ptr, uint64_t start, uint64_t end) {
     }
 }
 
-VMA* vma_clone(VMA* src_list) {
+[[nodiscard]] VMA* vma_clone(VMA* src_list) {
     VMA* new_list = nullptr;
     VMA** last_ptr = &new_list;
     
-    VMA* current = src_list;
-    while (current) {
-        VMA* new_vma = (VMA*)malloc(sizeof(VMA));
+    for (VMA* current = src_list; current; current = current->next) {
+        VMA* new_vma = static_cast<VMA*>(malloc(sizeof(VMA)));
         if (!new_vma) {
             vma_free_all(new_list);
             return nullptr;
         }
         
-        *new_vma = *current; // Copy data
+        *new_vma = *current;
         new_vma->next = nullptr;
         
         *last_ptr = new_vma;
         last_ptr = &(new_vma->next);
-        
-        current = current->next;
     }
     
     return new_list;

@@ -864,6 +864,34 @@ static void write_help_line(const char* full_cmd, const char* desc) {
     g_terminal.write_line(desc);
 }
 
+static void cmd_mount() {
+    Mount* m = vfs_get_mounts();
+    if (!m) {
+        g_terminal.write_line("No filesystems mounted.");
+        return;
+    }
+    
+    g_terminal.write_line("Mounts:");
+    while (m) {
+        g_terminal.write("  ");
+        g_terminal.write(m->path);
+        g_terminal.write(" on ");
+        // Try to identify filesystem type
+        if (m->root && m->root->ops) {
+            if (m->root->ops->readdir && m->root->ops->lookup) {
+                // Heuristic: FAT32 has specific ops (we could add a name field to ops or mount)
+                // For now just show "mounted"
+                g_terminal.write_line("active");
+            } else {
+                g_terminal.write_line("active");
+            }
+        } else {
+            g_terminal.write_line("invalid");
+        }
+        m = m->next;
+    }
+}
+
 static void cmd_help() {
     // Hide cursor once for the entire command to avoid flickering and improve speed
     bool was_visible = g_terminal.is_cursor_visible();
@@ -881,6 +909,7 @@ static void cmd_help() {
     write_help_line("write <f> <t>", "Write text to file");
     write_help_line("append <f> <t>", "Append text to file");
     write_help_line("df", "Show filesystem stats");
+    write_help_line("mount", "Show mount points");
     g_terminal.write_line("");
 
     write_help_category("System Commands");
@@ -1045,7 +1074,6 @@ static void cmd_ls(const char* path) {
     const int column_width = 20;
     int col, row;
     g_terminal.get_cursor_pos(&col, &row);
-    int start_row = row;
 
     while (vfs_readdir(fd, name) == 0) {
         // Skip current and parent dir markers
@@ -1436,54 +1464,48 @@ static void cmd_append(const char* args) {
 }
 
 static void cmd_df() {
-    uint64_t total = unifs_get_total_size();
-    uint64_t file_count = unifs_get_file_count();
-    
-    char buf[128];
-    int i = 0;
-    
-    auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
-    auto append_num = [&](uint64_t n) {
-        if (n == 0) { buf[i++] = '0'; return; }
-        char tmp[20]; int j = 0;
-        while (n > 0) { tmp[j++] = '0' + (n % 10); n /= 10; }
-        while (j-- > 0) buf[i++] = tmp[j];
-    };
-    
-    // Calculate boot vs RAM files (boot files have is_boot flag in uniFS)
-    uint64_t boot_file_count = unifs_get_boot_file_count();
-    uint64_t ram_file_count = file_count > boot_file_count ? file_count - boot_file_count : 0;
-    
-    // Filesystem summary
-    g_terminal.write_line("uniFS Status:");
-    
-    i = 0;
-    append_str("  Boot:  ");
-    append_num(boot_file_count);
-    append_str(" files (read-only)");
-    buf[i] = 0;
-    g_terminal.write_line(buf);
-    
-    i = 0;
-    append_str("  RAM:   ");
-    append_num(ram_file_count);
-    append_str(" / ");
-    append_num(64);  // UNIFS_MAX_FILES
-    append_str(" files");
-    buf[i] = 0;
-    g_terminal.write_line(buf);
-    
-    i = 0;
-    append_str("  Used:  ");
-    if (total >= 1024) {
-        append_num(total / 1024);
-        append_str(" KB");
-    } else {
-        append_num(total);
-        append_str(" B");
+    Mount* m = vfs_get_mounts();
+    if (!m) {
+        g_terminal.write_line("No filesystems mounted.");
+        return;
     }
-    buf[i] = 0;
-    g_terminal.write_line(buf);
+    
+    while (m) {
+        char buf[128];
+        int i = 0;
+        auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
+        auto append_num = [&](uint64_t n) {
+            if (n == 0) { buf[i++] = '0'; return; }
+            char tmp[20]; int j = 0;
+            while (n > 0) { tmp[j++] = '0' + (n % 10); n /= 10; }
+            while (j-- > 0) buf[i++] = tmp[j];
+        };
+        
+        g_terminal.write("Filesystem: ");
+        g_terminal.write_line(m->path);
+        
+        // Custom info based on path
+        if (strcmp(m->path, "/") == 0) {
+            uint64_t total = unifs_get_total_size();
+            uint64_t file_count = unifs_get_file_count();
+            uint64_t boot_file_count = unifs_get_boot_file_count();
+            uint64_t ram_file_count = file_count > boot_file_count ? file_count - boot_file_count : 0;
+            
+            i = 0;
+            append_str("  Type:  uniFS (Boot modules + RAM)\n");
+            append_str("  RAM:   "); append_num(ram_file_count); append_str(" / 64 files\n");
+            append_str("  Used:  "); 
+            if (total >= 1024) { append_num(total / 1024); append_str(" KB"); }
+            else { append_num(total); append_str(" B"); }
+            buf[i] = 0;
+            g_terminal.write_line(buf);
+        } else {
+            g_terminal.write_line("  Type:  Persistent (FAT32)");
+            // We could add fat32_get_stats if needed
+        }
+        g_terminal.write_line("");
+        m = m->next;
+    }
 }
 
 static void cmd_mem() {
@@ -1649,12 +1671,12 @@ static void cmd_ps() {
 
         const char* state_str = "UNKNOWN";
         switch (p->state) {
-            case PROCESS_READY:    state_str = "READY  "; break;
-            case PROCESS_RUNNING:  state_str = "RUN    "; break;
-            case PROCESS_BLOCKED:  state_str = "BLOCK  "; break;
-            case PROCESS_SLEEPING: state_str = "SLEEP  "; break;
-            case PROCESS_ZOMBIE:   state_str = "ZOMBIE "; break;
-            case PROCESS_WAITING:  state_str = "WAIT   "; break;
+            case ProcessState::Ready:    state_str = "READY  "; break;
+            case ProcessState::Running:  state_str = "RUN    "; break;
+            case ProcessState::Blocked:  state_str = "BLOCK  "; break;
+            case ProcessState::Sleeping: state_str = "SLEEP  "; break;
+            case ProcessState::Zombie:   state_str = "ZOMBIE "; break;
+            case ProcessState::Waiting:  state_str = "WAIT   "; break;
         }
         while (*state_str) buf[bi++] = *state_str++;
 
@@ -2032,7 +2054,8 @@ static void cmd_head(const char* args, const char* piped_input) {
         if (args[0] >= '0' && args[0] <= '9') {
             n = 0; const char* p = args;
             while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
-            while (*p == ' ') p++; if (*p) filename = p;
+            while (*p == ' ') p++;
+            if (*p) filename = p;
         } else filename = args;
     }
     uint64_t data_len = 0;
@@ -2057,7 +2080,8 @@ static void cmd_tail(const char* args, const char* piped_input) {
         if (args[0] >= '0' && args[0] <= '9') {
             n = 0; const char* p = args;
             while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
-            while (*p == ' ') p++; if (*p) filename = p;
+            while (*p == ' ') p++;
+            if (*p) filename = p;
         } else filename = args;
     }
     uint64_t data_len = 0;
@@ -2092,7 +2116,8 @@ static void cmd_grep(const char* args, const char* piped_input) {
     char pattern[64]; const char* p = args; int pi = 0;
     while (*p && *p != ' ' && pi < 63) pattern[pi++] = *p++;
     pattern[pi] = '\0';
-    while (*p == ' ') p++; const char* filename = (*p) ? p : nullptr;
+    while (*p == ' ') p++;
+    const char* filename = (*p) ? p : nullptr;
     uint64_t data_len = 0;
     char* data = get_file_data(filename, piped_input, &data_len);
     if (!data) return;
@@ -2240,7 +2265,9 @@ static void cmd_nl(const char* filename, const char* piped_input) {
 static void cmd_tr(const char* args, const char* piped_input) {
     if (!args || !args[0]) { g_terminal.write_line("Usage: tr <from_char> <to_char>"); return; }
     char from_char = args[0]; char to_char = ' ';
-    const char* p = args + 1; while (*p == ' ') p++; if (*p) to_char = *p;
+    const char* p = args + 1;
+    while (*p == ' ') p++;
+    if (*p) to_char = *p;
     if (!piped_input) { g_terminal.write_line("tr requires piped input"); return; }
     for (const char* s = piped_input; *s; s++) g_terminal.put_char(*s == from_char ? to_char : *s);
 }
@@ -2645,14 +2672,11 @@ static void cmd_exec(const char* args) {
 // Debug Commands (debug level, debug module)
 // =============================================================================
 static void cmd_debug(const char* args) {
-    // Skip leading whitespace
     while (*args == ' ') args++;
     
     if (args[0] == '\0') {
-        // Show current settings
         char buf[64];
         int i = 0;
-        
         auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
         auto append_num = [&](int n) {
             if (n >= 100) buf[i++] = '0' + (n / 100) % 10;
@@ -2660,15 +2684,16 @@ static void cmd_debug(const char* args) {
             buf[i++] = '0' + n % 10;
         };
         
-        append_str("Log level: "); append_num(g_log_min_level);
+        append_str("Log level: "); append_num(static_cast<int>(g_log_min_level));
         append_str(" (");
         switch (g_log_min_level) {
-            case LOG_TRACE: append_str("TRACE"); break;
-            case LOG_INFO:  append_str("INFO");  break;
-            case LOG_WARN:  append_str("WARN");  break;
-            case LOG_ERROR: append_str("ERROR"); break;
-            case LOG_FATAL: append_str("FATAL"); break;
-            default:        append_str("???");   break;
+            case LogLevel::Trace:   append_str("TRACE"); break;
+            case LogLevel::Info:    append_str("INFO");  break;
+            case LogLevel::Success: append_str("OK");    break;
+            case LogLevel::Warn:    append_str("WARN");  break;
+            case LogLevel::Error:   append_str("ERROR"); break;
+            case LogLevel::Fatal:   append_str("FATAL"); break;
+            default:                append_str("???");   break;
         }
         append_str(")");
         buf[i] = '\0';
@@ -2684,18 +2709,16 @@ static void cmd_debug(const char* args) {
         return;
     }
     
-    // Parse subcommand
     if (strncmp(args, "level ", 6) == 0) {
         int level = args[6] - '0';
-        if (level >= 0 && level <= 4) {
-            g_log_min_level = level;
+        if (level >= 0 && level <= 5) {
+            g_log_min_level = static_cast<LogLevel>(level);
             g_terminal.write_line("Log level updated.");
         } else {
-            g_terminal.write_line("Usage: debug level <0-4>");
-            g_terminal.write_line("  0=TRACE, 1=INFO, 2=WARN, 3=ERROR, 4=FATAL");
+            g_terminal.write_line("Usage: debug level <0-5>");
+            g_terminal.write_line("  0=TRACE, 1=INFO, 2=OK, 3=WARN, 4=ERROR, 5=FATAL");
         }
     } else if (strncmp(args, "module ", 7) == 0) {
-        // Parse hex value
         int mask = 0;
         const char* p = args + 7;
         if (*p == '0' && (*(p+1) == 'x' || *(p+1) == 'X')) p += 2;
@@ -2713,8 +2736,8 @@ static void cmd_debug(const char* args) {
     } else {
         g_terminal.write_line("Usage:");
         g_terminal.write_line("  debug           - Show current settings");
-        g_terminal.write_line("  debug level <N> - Set log level (0=TRACE..4=FATAL)");
-        g_terminal.write_line("  debug module <hex> - Set module mask (0xFF=all)");
+        g_terminal.write_line("  debug level <N> - Set log level (0=TRACE..5=FATAL)");
+        g_terminal.write_line("  debug module <hex> - Set module mask (0xFFFF=all)");
     }
 }
 
@@ -2725,6 +2748,7 @@ static const CommandEntry commands[] = {
     // No-arg commands (exact match, no arguments)
     {"help",     CMD_NONE, cmd_help, nullptr, nullptr},
     {"df",       CMD_NONE, cmd_df, nullptr, nullptr},
+    {"mount",    CMD_NONE, cmd_mount, nullptr, nullptr},
     {"mem",      CMD_NONE, cmd_mem, nullptr, nullptr},
     {"date",     CMD_NONE, cmd_date, nullptr, nullptr},
     {"uptime",   CMD_NONE, cmd_uptime, nullptr, nullptr},
@@ -2970,7 +2994,7 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
     }
 
     if (redirect_ptr) {
-        g_terminal.stop_capture();
+        static_cast<void>(g_terminal.stop_capture());
         uint64_t capture_len = strlen(pipe_buffer_a);
         
         char resolved[256];
@@ -3067,7 +3091,7 @@ static void execute_command() {
                 current_output[0] = '\0';  // Clear destination buffer
                 g_terminal.start_capture(current_output, PIPE_BUFFER_SIZE - 1);
                 execute_single_command(commands[i], current_input);
-                g_terminal.stop_capture();
+                static_cast<void>(g_terminal.stop_capture());
                 
                 // Swap buffers for next iteration
                 current_input = current_output;
@@ -3553,6 +3577,9 @@ void shell_process_char(char c) {
                                 is_dir = st.is_dir;
                             }
                             
+                            // Skip non-directories if the command is 'cd'
+                            if (is_cd && !is_dir) continue;
+                            
                             matches++;
                             kstring::strncpy(last_match, entry_name, 255);
                             last_match_is_dir = is_dir;
@@ -3606,6 +3633,9 @@ void shell_process_char(char c) {
                                 if (vfs_stat(full_entry_path, &st) == 0) {
                                     is_dir = st.is_dir;
                                 }
+                                
+                                // Skip non-directories if the command is 'cd'
+                                if (is_cd && !is_dir) continue;
                                 
                                 if (is_dir) {
                                     g_terminal.set_color(COLOR_CYAN, COLOR_BG);

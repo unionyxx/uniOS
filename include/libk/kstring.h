@@ -11,6 +11,41 @@
 
 namespace kstring {
 
+class string_view {
+    const char* ptr_;
+    size_t len_;
+public:
+    constexpr string_view() : ptr_(nullptr), len_(0) {}
+    constexpr string_view(const char* s) : ptr_(s), len_(0) {
+        if (s) {
+            while (s[len_]) len_++;
+        }
+    }
+    constexpr string_view(const char* s, size_t len) : ptr_(s), len_(len) {}
+
+    [[nodiscard]] constexpr const char* data() const noexcept { return ptr_; }
+    [[nodiscard]] constexpr size_t size() const noexcept { return len_; }
+    [[nodiscard]] constexpr bool empty() const noexcept { return len_ == 0; }
+
+    [[nodiscard]] constexpr char operator[](size_t i) const { return ptr_[i]; }
+
+    [[nodiscard]] bool operator==(string_view other) const noexcept {
+        if (len_ != other.len_) return false;
+        for (size_t i = 0; i < len_; i++) {
+            if (ptr_[i] != other.ptr_[i]) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool starts_with(string_view other) const noexcept {
+        if (len_ < other.len_) return false;
+        for (size_t i = 0; i < other.len_; i++) {
+            if (ptr_[i] != other.ptr_[i]) return false;
+        }
+        return true;
+    }
+};
+
 // String comparison (returns 0 if equal)
 inline int strcmp(const char* s1, const char* s2) {
     while (*s1 && (*s1 == *s2)) { s1++; s2++; }

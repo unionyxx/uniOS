@@ -3,15 +3,13 @@
 #include <kernel/mm/vmm.h>
 #include <drivers/video/framebuffer.h>
 
-void hcf(void) {
+void hcf() {
     asm("cli");
     for (;;) asm("hlt");
 }
 
 void panic(const char* message) {
-    if (gfx_get_width() > 0) {
-        gfx_clear(0x220000); 
-    }
+    if (gfx_get_width() > 0) gfx_clear(0x220000);
     
     kprintf("\n\n");
     kprintf_color(COLOR_RED, "!!! KERNEL PANIC !!!\n");
@@ -20,9 +18,7 @@ void panic(const char* message) {
     kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
     
     debug_print_stack_trace();
-    
     kprintf_color(COLOR_WHITE, "\nSystem halted.");
-    
     hcf();
 }
 
@@ -34,10 +30,7 @@ extern "C" void exception_handler(InterruptFrame* frame) {
     if (int_no == 14) {
         uint64_t cr2;
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
-        
-        if (vmm_handle_page_fault(cr2, err_code)) {
-            return;
-        }
+        if (vmm_handle_page_fault(cr2, err_code)) return;
         
         kprintf_color(COLOR_RED, "\nEXCEPTION CAUGHT! (Page Fault)\n");
         kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
@@ -52,7 +45,6 @@ extern "C" void exception_handler(InterruptFrame* frame) {
         kprintf_color(COLOR_WHITE, "RIP: "); kprintf_color(COLOR_CYAN, "0x%016lx\n", rip);
     }
     
-    // Register Dump
     kprintf_color(COLOR_GRAY, "RAX: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->rax);
     kprintf_color(COLOR_GRAY, "RBX: "); kprintf_color(COLOR_WHITE, "0x%016lx\n", frame->rbx);
     kprintf_color(COLOR_GRAY, "RCX: "); kprintf_color(COLOR_WHITE, "0x%016lx  ", frame->rcx);
@@ -74,6 +66,5 @@ extern "C" void exception_handler(InterruptFrame* frame) {
     kprintf_color(COLOR_GRAY, "--------------------------------------------------\n");
 
     debug_print_stack_trace();
-    
     hcf();
 }

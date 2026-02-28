@@ -10,6 +10,8 @@ struct FAT32Filesystem {
     uint32_t fat_count;
     uint32_t sectors_per_fat;
     uint32_t root_dir_cluster;
+    uint32_t fsinfo_sector;
+    uint32_t total_sectors;
 };
 
 struct VNode;

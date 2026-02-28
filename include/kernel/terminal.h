@@ -1,8 +1,8 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <libk/kstd.h>
 
-// Cell structure for text buffer (character + colors)
 struct Cell {
     char ch;
     uint32_t fg;
@@ -12,68 +12,58 @@ struct Cell {
 class Terminal {
 public:
     Terminal();
-    ~Terminal();
+    ~Terminal() = default;
     
-    // Initialize with screen dimensions and colors
     void init(uint32_t fg_color, uint32_t bg_color);
     
-    // Output
     void put_char(char c);
     void write(const char* str);
     void write_line(const char* str);
     
-    // Control
     void clear();
     void set_color(uint32_t fg, uint32_t bg);
     void set_cursor_pos(int col, int row);
     void get_cursor_pos(int* col, int* row);
     
-    // Cursor blinking
     void set_cursor_visible(bool visible);
-    bool is_cursor_visible() const { return cursor_visible; }
-    void update_cursor(); // Call periodically
+    [[nodiscard]] bool is_cursor_visible() const { return m_cursor_visible; }
+    void update_cursor();
     
-    // Direct character operations (no cursor logic)
     void clear_chars(int col, int row, int count);
     void write_char_at(int col, int row, char c);
     void write_char_at_color(int col, int row, char c, uint32_t fg, uint32_t bg);
     
-    // Output capture for piping
     void start_capture(char* buffer, size_t max_len);
-    size_t stop_capture();  // Returns bytes captured
-    bool is_capturing() const { return capturing; }
+    [[nodiscard]] size_t stop_capture();
+    [[nodiscard]] bool is_capturing() const { return m_capturing; }
 
 private:
     void scroll_up();
     void new_line();
     void draw_cursor(bool visible);
-    void redraw_screen();           // Redraw entire screen from text buffer
-    void redraw_row(int row);       // Redraw single row from text buffer
-    Cell* get_cell(int col, int row); // Get cell pointer
+    void redraw_screen();
+    void redraw_row(int row);
+    [[nodiscard]] Cell* get_cell(int col, int row);
 
-    int width_chars;
-    int height_chars;
-    int cursor_col;
-    int cursor_row;
+    int m_width_chars = 0;
+    int m_height_chars = 0;
+    int m_cursor_col = 0;
+    int m_cursor_row = 0;
     
-    uint32_t fg_color;
-    uint32_t bg_color;
+    uint32_t m_fg_color = 0xFFFFFFFF;
+    uint32_t m_bg_color = 0;
     
-    bool cursor_visible;
-    bool cursor_state; // For blinking
-    uint64_t last_blink_tick;
+    bool m_cursor_visible = true;
+    bool m_cursor_state = true;
+    uint64_t m_last_blink_tick = 0;
     
-    // Text buffer for fast scrolling
-    Cell* text_buffer;
-    int buffer_size;
+    kstd::unique_ptr<Cell[]> m_text_buffer;
+    int m_buffer_size = 0;
     
-    // Capture mode for piping
-    bool capturing;
-    char* capture_buffer;
-    size_t capture_len;
-    size_t capture_max;
+    bool m_capturing = false;
+    char* m_capture_buffer = nullptr;
+    size_t m_capture_len = 0;
+    size_t m_capture_max = 0;
 };
 
-// Global terminal instance
 extern Terminal g_terminal;
-

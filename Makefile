@@ -69,10 +69,11 @@ OBJ_ALL = $(OBJ_CPP) $(OBJ_ASM)
 KERNEL_BIN = $(BUILD_DIR)/kernel.elf
 UNIFS_IMG = $(BUILD_DIR)/unifs.img
 ISO_IMAGE = $(BUILD_DIR)/uniOS.iso
+DISK_IMG = $(BUILD_DIR)/disk.img
 
 # QEMU options
 QEMU = qemu-system-x86_64
-QEMU_BASE = -cdrom $(ISO_IMAGE) -m 512M
+QEMU_BASE = -boot d -cdrom $(ISO_IMAGE) -drive file=$(DISK_IMG),format=raw,if=ide,index=0 -m 512M
 QEMU_SOUND = -device ac97
 QEMU_HDA = -device intel-hda -device hda-duplex
 QEMU_NET = -nic user,model=e1000
@@ -123,8 +124,18 @@ $(UNIFS_IMG): $(TOOLS_DIR)/mkunifs.py
 	@echo "[FS] Generating uniFS image..."
 	@$(PYTHON) $(TOOLS_DIR)/mkunifs.py rootfs $@
 
-$(ISO_IMAGE): $(KERNEL_BIN) $(UNIFS_IMG) limine.conf
+$(ISO_IMAGE): $(KERNEL_BIN) $(UNIFS_IMG) limine.conf $(DISK_IMG)
 	@$(PYTHON) $(TOOLS_DIR)/create_iso.py $(KERNEL_BIN) $(UNIFS_IMG) limine $@ $(BUILD_DIR)
+
+$(DISK_IMG):
+	@echo "[DISK] Creating 64MB FAT32 disk image..."
+	@if [ "$(shell uname)" = "Darwin" ]; then \
+		hdiutil create -size 64m -fs "MS-DOS FAT32" -volname "UNI_OS" -layout NONE $@.dmg >/dev/null; \
+		mv $@.dmg $@; \
+	else \
+		dd if=/dev/zero of=$@ bs=1M count=64 status=none; \
+		mkfs.fat -F 32 $@ >/dev/null; \
+	fi
 
 # ==============================================================================
 # Run Targets

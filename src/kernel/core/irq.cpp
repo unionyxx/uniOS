@@ -7,9 +7,8 @@
 #include <drivers/bus/usb/xhci/xhci.h>
 
 extern "C" void irq_handler(void* stack_frame) {
-    uint64_t* regs   = (uint64_t*)stack_frame;
-    uint64_t  int_no = regs[15];
-    uint8_t   irq    = (uint8_t)(int_no - 32);
+    const uint64_t int_no = static_cast<uint64_t*>(stack_frame)[15];
+    const uint8_t irq = static_cast<uint8_t>(int_no - 32);
 
     pic_send_eoi(irq);
 

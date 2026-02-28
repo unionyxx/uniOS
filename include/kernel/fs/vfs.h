@@ -52,6 +52,7 @@ int  vfs_stat(const char* path, VNodeStat* out);
 int  vfs_mkdir(const char* path);
 int  vfs_unlink(const char* path);
 void vfs_close_vnode(VNode* node);
+Mount* vfs_get_mounts();
 
 // Seek constants
 #define SEEK_SET 0
