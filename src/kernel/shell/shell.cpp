@@ -2,6 +2,7 @@
 #include <kernel/terminal.h>
 #include <drivers/video/framebuffer.h>
 #include <kernel/fs/unifs.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/arch/x86_64/io.h>
 #include <drivers/acpi/acpi.h>
@@ -29,7 +30,9 @@
 using kstring::strcmp;
 using kstring::strncmp;
 using kstring::strlen;
-using kstring::strcpy;
+
+// Forward declaration for internal shell utilities
+static void shell_resolve_path(const char* path, char* out);
 
 // =============================================================================
 // Command Dispatch Table Types
@@ -368,48 +371,50 @@ static void add_to_history(const char* cmd) {
 }
 
 static int last_displayed_len = 0;  // Track last displayed line length for proper clearing
+static int last_displayed_prompt_len = 0;
 
-// =============================================================================
-// Rich Prompt: user@unios:~$
-// =============================================================================
-// Prompt segments:
-//   "user"   (4 chars) - blue
-//   "@unios" (6 chars) - green  
-//   ":~$ "   (4 chars) - gray
-// Total: 14 characters
-#define PROMPT_LEN 14
+static int get_prompt_len() {
+    Process* p = process_get_current();
+    return kstring::strlen(p->cwd) + 3; // +3 for " > " separator
+}
 
 static void print_prompt() {
     int col, row;
     g_terminal.get_cursor_pos(&col, &row);
     
-    const char* path = "~ ";
-    const char* arrow = "\xaf "; // Modern arrow symbol (❯)
+    Process* p = process_get_current();
+    const char* path = p->cwd;
+    const char* sep = " > ";
     
     int c = 0;
-    while (*path) g_terminal.write_char_at_color(c++, row, *path++, COLOR_GRAY, COLOR_BG);
-    while (*arrow) g_terminal.write_char_at_color(c++, row, *arrow++, COLOR_CYAN, COLOR_BG);
+    while (*path) g_terminal.write_char_at_color(c++, row, *path++, COLOR_CYAN, COLOR_BG);
+    while (*sep) g_terminal.write_char_at_color(c++, row, *sep++, COLOR_WHITE, COLOR_BG);
     
-    g_terminal.set_cursor_pos(4, row);
+    last_displayed_prompt_len = c;
+    g_terminal.set_cursor_pos(c, row);
 }
-
-// Helper redraw line needs updated PROMPT_LEN
-#undef PROMPT_LEN
-#define PROMPT_LEN 4
 
 // Helper to redraw entire command line without ANY cursor glitches
 // Uses ONLY direct drawing methods - never put_char
 static void redraw_line_at(int row, int new_cursor_pos) {
+    int cur_prompt_len = get_prompt_len();
+
     // 1. Hide cursor completely - sync position first so it clears at right spot
-    g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
+    g_terminal.set_cursor_pos(last_displayed_prompt_len + cursor_pos, row);
     g_terminal.set_cursor_visible(false);
     
     // 2. Calculate how much to clear (max of current and previous length + extra margin)
-    int clear_count = last_displayed_len + PROMPT_LEN;
-    if (cmd_len + PROMPT_LEN > clear_count) clear_count = cmd_len + PROMPT_LEN;
+    int clear_count = last_displayed_len + last_displayed_prompt_len;
+    if (cmd_len + cur_prompt_len > clear_count) clear_count = cmd_len + cur_prompt_len;
     
     // 3. Clear entire line area using direct method (after prompt)
-    g_terminal.clear_chars(PROMPT_LEN, row, clear_count);
+    // We clear from the smallest prompt len if it changed?
+    int clear_start = (cur_prompt_len < last_displayed_prompt_len) ? cur_prompt_len : last_displayed_prompt_len;
+    g_terminal.clear_chars(clear_start, row, clear_count);
+    
+    // Redraw prompt if it changed? 
+    // Actually, prompt only changes when a command is executed, which usually prints a new line.
+    // So within one line, prompt_len is constant.
     
     // 4. Draw new content - highlight selected text if selection active
     int sel_min = -1, sel_max = -1;
@@ -422,18 +427,19 @@ static void redraw_line_at(int row, int new_cursor_pos) {
         bool is_selected = (sel_min >= 0 && i >= sel_min && i < sel_max);
         if (is_selected) {
             // Draw with inverted colors for selection
-            g_terminal.write_char_at_color(PROMPT_LEN + i, row, cmd_buffer[i], COLOR_BLACK, COLOR_WHITE);
+            g_terminal.write_char_at_color(cur_prompt_len + i, row, cmd_buffer[i], COLOR_BLACK, COLOR_WHITE);
         } else {
-            g_terminal.write_char_at(PROMPT_LEN + i, row, cmd_buffer[i]);
+            g_terminal.write_char_at(cur_prompt_len + i, row, cmd_buffer[i]);
         }
     }
     
     // 5. Update tracking variables
     last_displayed_len = cmd_len;
+    last_displayed_prompt_len = cur_prompt_len;
     cursor_pos = new_cursor_pos;
     
     // 6. Position and show cursor at new location
-    g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
+    g_terminal.set_cursor_pos(cur_prompt_len + cursor_pos, row);
     g_terminal.set_cursor_visible(true);
 }
 
@@ -444,17 +450,12 @@ static void clear_line() {
     
     g_terminal.set_cursor_visible(false);
     
+    int cur_prompt_len = get_prompt_len();
+    
     // Clear entire area with direct method
-    int clear_count = last_displayed_len + PROMPT_LEN;
-    if (cmd_len + PROMPT_LEN > clear_count) clear_count = cmd_len + PROMPT_LEN;
-    g_terminal.clear_chars(PROMPT_LEN, row, clear_count);
-    
-    cmd_len = 0;
-    cursor_pos = 0;
-    last_displayed_len = 0;
-    
-    g_terminal.set_cursor_pos(PROMPT_LEN, row);
-    // NOTE: Do NOT show cursor here - display_line will show it at the right position
+    int clear_count = last_displayed_len + last_displayed_prompt_len;
+    if (cmd_len + cur_prompt_len > clear_count) clear_count = cmd_len + cur_prompt_len;
+    g_terminal.clear_chars(cur_prompt_len, row, clear_count);
 }
 
 // Display line for history - shows cursor at end
@@ -465,14 +466,15 @@ static void display_line() {
     // Cursor should already be hidden from clear_line
     g_terminal.set_cursor_visible(false);
     
+    int cur_prompt_len = get_prompt_len();
     for (int i = 0; i < cmd_len; i++) {
-        g_terminal.write_char_at(PROMPT_LEN + i, row, cmd_buffer[i]);
+        g_terminal.write_char_at(cur_prompt_len + i, row, cmd_buffer[i]);
     }
     
     cursor_pos = cmd_len;
     last_displayed_len = cmd_len;
     
-    g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
+    g_terminal.set_cursor_pos(cur_prompt_len + cursor_pos, row);
     g_terminal.set_cursor_visible(true);
 }
 
@@ -728,30 +730,43 @@ static void cmd_run(const char* filename) {
     // Skip leading spaces
     while (*filename == ' ') filename++;
     
-    // Use unifs_open_into with local buffer to avoid race conditions
-    UniFSFile file;
-    if (!unifs_open_into(filename, &file)) {
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+
+    VNodeStat st;
+    if (vfs_stat(resolved, &st) < 0) {
         error_file_not_found(filename);
         last_exit_status = 1;
         return;
     }
-    
-    // CRITICAL: Make a heap copy of the script data
-    // This is necessary because script commands (cat, grep, etc.) may call
-    // unifs_open, which would overwrite the static buffer if we used unifs_open.
-    // Even with unifs_open_into, the file->data pointer may point to underlying
-    // storage that could be affected by nested file operations.
-    char* script_data = (char*)malloc(file.size + 1);
+
+    int fd = vfs_open(resolved, O_RDONLY);
+    if (fd < 0) {
+        error_file_not_found(filename);
+        last_exit_status = 1;
+        return;
+    }
+
+    char* script_data = (char*)malloc(st.size + 1);
     if (!script_data) {
+        vfs_close(fd);
         g_terminal.write_line("Out of memory for script");
         last_exit_status = 1;
         return;
     }
-    kstring::memcpy(script_data, file.data, file.size);
-    script_data[file.size] = '\0';
+
+    if (vfs_read(fd, script_data, st.size) < (int64_t)st.size) {
+        free(script_data);
+        vfs_close(fd);
+        g_terminal.write_line("Error reading script");
+        last_exit_status = 1;
+        return;
+    }
+    vfs_close(fd);
+    script_data[st.size] = '\0';
     
     // Parse script_data into lines
-    uint64_t size = file.size;
+    uint64_t size = st.size;
     
     script_line_count = 0;
     const char* line_start = script_data;
@@ -855,13 +870,16 @@ static void cmd_help() {
     if (was_visible) g_terminal.set_cursor_visible(false);
 
     write_help_category("File Commands");
-    write_help_line("ls", "List files with sizes");
+    write_help_line("ls [dir]", "List files with sizes");
+    write_help_line("cd [dir]", "Change directory");
+    write_help_line("pwd", "Print working directory");
     write_help_line("cat <f>", "Show file contents");
     write_help_line("stat <f>", "Show file information");
     write_help_line("hexdump <f>", "Hex dump of file");
     write_help_line("touch <f>", "Create empty file");
     write_help_line("rm <f>", "Delete file");
     write_help_line("write <f> <t>", "Write text to file");
+    write_help_line("append <f> <t>", "Append text to file");
     write_help_line("df", "Show filesystem stats");
     g_terminal.write_line("");
 
@@ -869,6 +887,7 @@ static void cmd_help() {
     write_help_line("mem", "Show memory usage");
     write_help_line("kheap", "Show kernel heap stats");
     write_help_line("ps", "List processes & stats");
+    write_help_line("exec <bin>", "Run ELF executable");
     write_help_line("dmesg", "Show kernel boot logs");
     write_help_line("date", "Show current date/time");
     write_help_line("uptime", "Show system uptime");
@@ -893,6 +912,11 @@ static void cmd_help() {
     write_help_line("wc [f]", "Count lines/words/chars");
     write_help_line("grep <p> [f]", "Search for pattern");
     write_help_line("sort [f]", "Sort lines alphabetically");
+    write_help_line("uniq [f]", "Remove duplicate lines");
+    write_help_line("rev [f]", "Reverse lines");
+    write_help_line("tac [f]", "Print lines in reverse order");
+    write_help_line("nl [f]", "Number lines");
+    write_help_line("tr <s1> <s2>", "Translate characters");
     write_help_line("echo <text>", "Print text");
     g_terminal.write_line("");
 
@@ -912,116 +936,236 @@ static void cmd_help() {
     if (was_visible) g_terminal.set_cursor_visible(true);
 }
 
-static void cmd_ls() {
-    uint64_t count = unifs_get_file_count();
+static void shell_resolve_path(const char* path, char* out) {
+    Process* p = process_get_current();
+    char temp_path[256];
+
+    if (path[0] == '/') {
+        kstring::strncpy(temp_path, path, 255);
+    } else {
+        kstring::strncpy(temp_path, p->cwd, 255);
+        if (temp_path[kstring::strlen(temp_path)-1] != '/') {
+            kstring::strncat(temp_path, "/", 255 - kstring::strlen(temp_path));
+        }
+        kstring::strncat(temp_path, path, 255 - kstring::strlen(temp_path));
+    }
     
-    if (count == 0) {
-        g_terminal.write_line("No files.");
+    // Normalize: resolve . and .. components
+    char* segments[32];
+    int depth = 0;
+    char copy[256];
+    kstring::strncpy(copy, temp_path, 255);
+
+    char* tok = copy;
+    if (*tok == '/') tok++;
+    
+    char* p2 = tok;
+    while (true) {
+        if (*p2 == '/' || *p2 == '\0') {
+            char saved = *p2;
+            *p2 = '\0';
+            
+            if (kstring::strcmp(tok, "..") == 0) {
+                if (depth > 0) depth--;
+            } else if (kstring::strcmp(tok, ".") != 0 && tok[0] != '\0') {
+                if (depth < 32) segments[depth++] = tok;
+            }
+            
+            if (saved == '\0') break;
+            tok = p2 + 1;
+            p2 = tok;
+            continue;
+        }
+        p2++;
+    }
+
+    // Rebuild path correctly
+    out[0] = '\0';
+    for (int i = 0; i < depth; i++) {
+        kstring::strncat(out, "/", 255 - kstring::strlen(out));
+        kstring::strncat(out, segments[i], 255 - kstring::strlen(out));
+    }
+    if (out[0] == '\0') {
+        kstring::strncpy(out, "/", 255);
+    }
+}
+
+static void cmd_pwd() {
+    Process* p = process_get_current();
+    g_terminal.write_line(p->cwd);
+}
+
+static void cmd_cd(const char* path) {
+    if (!path || kstring::strlen(path) == 0) {
+        const char* home = shell_get_var("HOME");
+        path = home ? home : "/";
+    }
+    
+    char resolved[256];
+    shell_resolve_path(path, resolved);
+    
+    VNode* node = vfs_lookup_vnode(resolved);
+    if (!node) {
+        g_terminal.write("cd: no such directory: ");
+        g_terminal.write_line(path);
         return;
     }
     
-    bool was_visible = g_terminal.is_cursor_visible();
-    if (was_visible) g_terminal.set_cursor_visible(false);
+    if (!node->is_dir) {
+        g_terminal.write("cd: not a directory: ");
+        g_terminal.write_line(path);
+        vfs_close_vnode(node);
+        return;
+    }
     
-    for (uint64_t i = 0; i < count; i++) {
-        const char* name = unifs_get_file_name(i);
-        uint64_t size = unifs_get_file_size_by_index(i);
-        int type = unifs_get_file_type(name);
+    Process* p = process_get_current();
+    kstring::strncpy(p->cwd, resolved, 255);
+    vfs_close_vnode(node);
+}
+
+static void cmd_ls(const char* path) {
+    char resolved[256];
+    if (!path || kstring::strlen(path) == 0) {
+        Process* p = process_get_current();
+        kstring::strncpy(resolved, p->cwd, 255);
+    } else {
+        shell_resolve_path(path, resolved);
+    }
+    
+    int fd = vfs_open(resolved, O_RDONLY);
+    if (fd < 0) {
+        g_terminal.write("ls: cannot access '");
+        g_terminal.write(resolved);
+        g_terminal.write_line("': No such file or directory");
+        return;
+    }
+    
+    char name[256];
+    int count = 0;
+    const int column_width = 20;
+    int col, row;
+    g_terminal.get_cursor_pos(&col, &row);
+    int start_row = row;
+
+    while (vfs_readdir(fd, name) == 0) {
+        // Skip current and parent dir markers
+        if (kstring::strcmp(name, ".") == 0 || kstring::strcmp(name, "..") == 0) continue;
+
+        // Get type info
+        char full_path[512];
+        kstring::strncpy(full_path, resolved, 511);
+        if (full_path[kstring::strlen(full_path)-1] != '/') {
+            kstring::strncat(full_path, "/", 511 - kstring::strlen(full_path));
+        }
+        kstring::strncat(full_path, name, 511 - kstring::strlen(full_path));
         
-        if (name) {
-            // Format size (right-aligned in 8 chars)
-            char size_str[16];
-            int si = 0;
-            if (size >= 1024) {
-                uint64_t kb = size / 1024;
-                if (kb >= 1000) size_str[si++] = '0' + (kb / 1000) % 10;
-                if (kb >= 100) size_str[si++] = '0' + (kb / 100) % 10;
-                if (kb >= 10) size_str[si++] = '0' + (kb / 10) % 10;
-                size_str[si++] = '0' + kb % 10;
-                size_str[si++] = 'K';
-            } else {
-                if (size >= 1000) size_str[si++] = '0' + (size / 1000) % 10;
-                if (size >= 100) size_str[si++] = '0' + (size / 100) % 10;
-                if (size >= 10) size_str[si++] = '0' + (size / 10) % 10;
-                size_str[si++] = '0' + size % 10;
-                size_str[si++] = 'B';
-            }
-            size_str[si] = 0;
-            
-            // Type indicator
-            const char* type_str;
-            switch (type) {
-                case UNIFS_TYPE_TEXT: type_str = "[TXT]"; break;
-                case UNIFS_TYPE_ELF:  type_str = "[ELF]"; break;
-                case UNIFS_TYPE_BINARY: type_str = "[BIN]"; break;
-                default: type_str = "[???]"; break;
-            }
-            
-            g_terminal.write("  ");
-            g_terminal.write(type_str);
-            g_terminal.write(" ");
-            
-            // Pad size to 6 chars
-            for (int p = si; p < 6; p++) g_terminal.write(" ");
-            g_terminal.write(size_str);
-            g_terminal.write("  ");
-            g_terminal.write_line(name);
+        VNodeStat st;
+        bool is_dir = false;
+        if (vfs_stat(full_path, &st) == 0) {
+            is_dir = st.is_dir;
+        }
+        
+        if (is_dir) {
+            g_terminal.set_color(COLOR_CYAN, COLOR_BG);
+            g_terminal.write(name);
+            g_terminal.write("/");
+        } else {
+            g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+            g_terminal.write(name);
+        }
+        
+        // Reset color for padding
+        g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+        
+        count++;
+        // Simple grid: if we're not at the end of a line, pad to next column
+        g_terminal.get_cursor_pos(&col, &row);
+        if (col % column_width != 0) {
+            int spaces = column_width - (col % column_width);
+            for (int s = 0; s < spaces; s++) g_terminal.write(" ");
+        }
+        
+        // Wrap to next line if we exceed a reasonable width (e.g. 80 chars)
+        g_terminal.get_cursor_pos(&col, &row);
+        if (col >= 80) {
+            g_terminal.write("\n");
         }
     }
     
-    if (was_visible) g_terminal.set_cursor_visible(true);
+    // Ensure we end with a newline if we wrote anything and didn't just end on a newline
+    g_terminal.get_cursor_pos(&col, &row);
+    if (col != 0) {
+        g_terminal.write("\n");
+    }
+    
+    vfs_close(fd);
 }
 
 static void cmd_stat(const char* filename) {
-    if (!unifs_file_exists(filename)) {
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+
+    VNodeStat st;
+    if (vfs_stat(resolved, &st) < 0) {
         error_file_not_found(filename);
         return;
     }
-    
-    uint64_t size = unifs_get_file_size(filename);
-    int type = unifs_get_file_type(filename);
     
     g_terminal.write("  File: ");
     g_terminal.write_line(filename);
     
     g_terminal.write("  Size: ");
     char size_str[32];
-    int si = 0;
-    if (size >= 10000) size_str[si++] = '0' + (size / 10000) % 10;
-    if (size >= 1000) size_str[si++] = '0' + (size / 1000) % 10;
-    if (size >= 100) size_str[si++] = '0' + (size / 100) % 10;
-    if (size >= 10) size_str[si++] = '0' + (size / 10) % 10;
-    size_str[si++] = '0' + size % 10;
-    size_str[si++] = ' ';
-    size_str[si++] = 'b';
-    size_str[si++] = 'y';
-    size_str[si++] = 't';
-    size_str[si++] = 'e';
-    size_str[si++] = 's';
-    size_str[si] = 0;
-    g_terminal.write_line(size_str);
+    kstring::itoa(st.size, size_str);
+    g_terminal.write(size_str);
+    g_terminal.write_line(" bytes");
     
     g_terminal.write("  Type: ");
-    switch (type) {
-        case UNIFS_TYPE_TEXT: g_terminal.write_line("Text file"); break;
-        case UNIFS_TYPE_ELF: g_terminal.write_line("ELF executable"); break;
-        case UNIFS_TYPE_BINARY: g_terminal.write_line("Binary file"); break;
-        default: g_terminal.write_line("Unknown"); break;
+    if (st.is_dir) {
+        g_terminal.write_line("Directory");
+    } else {
+        // Try to identify ELF
+        int fd = vfs_open(resolved, O_RDONLY);
+        if (fd >= 0) {
+            uint8_t magic[4];
+            if (vfs_read(fd, magic, 4) == 4) {
+                if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+                    g_terminal.write_line("ELF executable");
+                } else {
+                    g_terminal.write_line("Regular file");
+                }
+            } else {
+                g_terminal.write_line("Regular file");
+            }
+            vfs_close(fd);
+        } else {
+            g_terminal.write_line("Regular file");
+        }
     }
 }
 
 static void cmd_hexdump(const char* filename) {
-    UniFSFile file;
-    if (!unifs_open_into(filename, &file)) {
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+
+    int fd = vfs_open(resolved, O_RDONLY);
+    if (fd < 0) {
         error_file_not_found(filename);
         return;
     }
     
-    // Limit output to 256 bytes for readability
-    uint64_t display_size = (file.size < 256) ? file.size : 256;
+    // Read up to 256 bytes
+    uint8_t buffer[256];
+    int64_t bytes_read = vfs_read(fd, buffer, 256);
+    vfs_close(fd);
+
+    if (bytes_read < 0) {
+        g_terminal.write_line("Error reading file.");
+        return;
+    }
+
     const char* hex = "0123456789abcdef";
-    
-    for (uint64_t offset = 0; offset < display_size; offset += 16) {
+    for (uint64_t offset = 0; offset < (uint64_t)bytes_read; offset += 16) {
         char line[80];
         int li = 0;
         
@@ -1035,8 +1179,8 @@ static void cmd_hexdump(const char* filename) {
         
         // Hex bytes
         for (int i = 0; i < 16; i++) {
-            if (offset + i < file.size) {
-                uint8_t b = file.data[offset + i];
+            if (offset + i < (uint64_t)bytes_read) {
+                uint8_t b = buffer[offset + i];
                 line[li++] = hex[b >> 4];
                 line[li++] = hex[b & 0xF];
             } else {
@@ -1051,8 +1195,8 @@ static void cmd_hexdump(const char* filename) {
         line[li++] = '|';
         
         // ASCII representation
-        for (int i = 0; i < 16 && offset + i < file.size; i++) {
-            uint8_t b = file.data[offset + i];
+        for (int i = 0; i < 16 && offset + i < (uint64_t)bytes_read; i++) {
+            uint8_t b = buffer[offset + i];
             line[li++] = (b >= 32 && b < 127) ? b : '.';
         }
         
@@ -1061,97 +1205,75 @@ static void cmd_hexdump(const char* filename) {
         g_terminal.write_line(line);
     }
     
-    if (file.size > 256) {
+    if (bytes_read == 256) {
         g_terminal.write_line("... (truncated, showing first 256 bytes)");
     }
 }
 
 static void cmd_cat(const char* filename) {
-    UniFSFile file;
-    if (unifs_open_into(filename, &file)) {
-        // Check if it's a text file
-        if (unifs_get_file_type(filename) != UNIFS_TYPE_TEXT) {
-            g_terminal.write_line("Binary file, use 'hexdump' instead.");
-            return;
-        }
-        
-        int row_count = 0;
-        const int max_rows = 20;  // Pause every 20 lines
-        
-        for (uint64_t i = 0; i < file.size; i++) {
-            g_terminal.put_char(file.data[i]);
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+
+    int fd = vfs_open(resolved, 0);
+    if (fd < 0) {
+        error_file_not_found(filename);
+        return;
+    }
+    
+    char buffer[512];
+    int row_count = 0;
+    const int max_rows = gfx_get_height() / 18 - 2;
+    
+    int64_t bytes_read;
+    while ((bytes_read = vfs_read(fd, buffer, sizeof(buffer))) > 0) {
+        for (int64_t i = 0; i < bytes_read; i++) {
+            g_terminal.put_char(buffer[i]);
             
-            if (file.data[i] == '\n') {
+            if (buffer[i] == '\n') {
                 row_count++;
                 if (row_count >= max_rows) {
                     g_terminal.write("-- More (q to quit) --");
-                    
-                    // Wait for keypress without burning CPU
                     while (!input_keyboard_has_char()) { 
                         input_poll(); 
                         scheduler_yield();
                     }
-                    
                     char c = input_keyboard_get_char();
-                    
-                    // Clear the prompt
                     g_terminal.write("\r                      \r");
-                    
-                    // Allow quitting with 'q'
                     if (c == 'q' || c == 'Q') {
                         g_terminal.write("\n");
+                        vfs_close(fd);
                         return;
                     }
-                    
                     row_count = 0;
                 }
             }
         }
-        g_terminal.write("\n");
-    } else {
-        error_file_not_found(filename);
     }
+    g_terminal.write("\n");
+    vfs_close(fd);
 }
 
 static void cmd_touch(const char* filename) {
-    int result = unifs_create(filename);
-    switch (result) {
-        case UNIFS_OK:
-            g_terminal.write("Created: ");
-            g_terminal.write_line(filename);
-            break;
-        case UNIFS_ERR_EXISTS:
-            g_terminal.write_line("File already exists.");
-            break;
-        case UNIFS_ERR_FULL:
-            g_terminal.write_line("Filesystem full (max 64 files).");
-            break;
-        case UNIFS_ERR_NAME_TOO_LONG:
-            g_terminal.write_line("Filename too long (max 63 chars).");
-            break;
-        default:
-            g_terminal.write_line("Error creating file.");
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+    int fd = vfs_open(resolved, O_CREAT);
+    if (fd >= 0) {
+        g_terminal.write("Created: ");
+        g_terminal.write_line(filename);
+        vfs_close(fd);
+    } else {
+        g_terminal.write_line("Error creating file.");
     }
 }
 
 static void cmd_rm(const char* filename) {
-    int result = unifs_delete(filename);
-    switch (result) {
-        case UNIFS_OK:
-            g_terminal.write("Deleted: ");
-            g_terminal.write_line(filename);
-            break;
-        case UNIFS_ERR_NOT_FOUND:
-            error_file_not_found(filename);
-            break;
-        case UNIFS_ERR_READONLY:
-            g_terminal.write_line("Cannot delete boot file (read-only).");
-            break;
-        case UNIFS_ERR_IN_USE:
-            g_terminal.write_line("Cannot delete: file is currently open.");
-            break;
-        default:
-            g_terminal.write_line("Error deleting file.");
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+    if (vfs_unlink(resolved) == 0) {
+        g_terminal.write("Deleted: ");
+        g_terminal.write_line(filename);
+    } else {
+        g_terminal.write_line("Error deleting file.");
     }
 }
 
@@ -1225,7 +1347,7 @@ static void cmd_write(const char* args) {
             g_terminal.write_line("Out of memory.");
             return;
         }
-        strcpy(final_text, processed);
+        kstring::strncpy(final_text, processed, processed_len + 1);
         final_text[processed_len] = '\n';
         final_text[processed_len + 1] = '\0';
         processed_len++;
@@ -1234,27 +1356,20 @@ static void cmd_write(const char* args) {
         processed = nullptr;  // Don't double-free
     }
     
-    int result = unifs_write(filename, final_text, processed_len);
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+    int fd = vfs_open(resolved, O_CREAT | O_WRONLY | O_TRUNC);
+    if (fd >= 0) {
+        vfs_write(fd, final_text, processed_len);
+        vfs_close(fd);
+        g_terminal.write("Written: ");
+        g_terminal.write_line(filename);
+    } else {
+        g_terminal.write_line("Error opening file for writing.");
+    }
+    
     free(final_text);
     if (processed) free(processed);
-    
-    switch (result) {
-        case UNIFS_OK:
-            g_terminal.write("Written: ");
-            g_terminal.write_line(filename);
-            break;
-        case UNIFS_ERR_READONLY:
-            g_terminal.write_line("Cannot write to boot file (read-only).");
-            break;
-        case UNIFS_ERR_NO_MEMORY:
-            g_terminal.write_line("Out of memory or file too large.");
-            break;
-        case UNIFS_ERR_FULL:
-            g_terminal.write_line("Filesystem full.");
-            break;
-        default:
-            g_terminal.write_line("Error writing file.");
-    }
 }
 
 static void cmd_append(const char* args) {
@@ -1295,7 +1410,7 @@ static void cmd_append(const char* args) {
             g_terminal.write_line("Out of memory.");
             return;
         }
-        strcpy(final_text, processed);
+        kstring::strncpy(final_text, processed, processed_len + 1);
         final_text[processed_len] = '\n';
         final_text[processed_len + 1] = '\0';
         processed_len++;
@@ -1304,24 +1419,20 @@ static void cmd_append(const char* args) {
         processed = nullptr;  // Don't double-free
     }
     
-    int result = unifs_append(filename, final_text, processed_len);
+    char resolved[256];
+    shell_resolve_path(filename, resolved);
+    int fd = vfs_open(resolved, O_CREAT | O_WRONLY | O_APPEND);
+    if (fd >= 0) {
+        vfs_write(fd, final_text, processed_len);
+        vfs_close(fd);
+        g_terminal.write("Appended to: ");
+        g_terminal.write_line(filename);
+    } else {
+        g_terminal.write_line("Error opening file for appending.");
+    }
+    
     free(final_text);
     if (processed) free(processed);
-    
-    switch (result) {
-        case UNIFS_OK:
-            g_terminal.write("Appended to: ");
-            g_terminal.write_line(filename);
-            break;
-        case UNIFS_ERR_READONLY:
-            g_terminal.write_line("Cannot append to boot file (read-only).");
-            break;
-        case UNIFS_ERR_NO_MEMORY:
-            g_terminal.write_line("Out of memory or file too large.");
-            break;
-        default:
-            g_terminal.write_line("Error appending to file.");
-    }
 }
 
 static void cmd_df() {
@@ -1484,17 +1595,18 @@ static void cmd_echo(const char* text) {
 }
 
 static void cmd_history() {
-    for (int i = 0; i < history_count; i++) {
-        int idx = (history_count <= HISTORY_SIZE) ? i : (history_count - HISTORY_SIZE + i) % HISTORY_SIZE;
+    if (history_count == 0) {
+        g_terminal.write_line("No history.");
+        return;
+    }
+    
+    int count = (history_count < HISTORY_SIZE) ? history_count : HISTORY_SIZE;
+    for (int i = 0; i < count; i++) {
+        int idx = (history_count <= HISTORY_SIZE) ? i : (history_count + i) % HISTORY_SIZE;
         if (idx < 0) idx += HISTORY_SIZE;
         
         char num[16];
-        int n = i + 1;
-        int ni = 0;
-        char tmp[16]; int ti = 0;
-        while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
-        while (ti > 0) num[ni++] = tmp[--ti];
-        num[ni] = '\0';
+        kstring::itoa(i + 1, num);
 
         g_terminal.write("  ");
         g_terminal.write(num);
@@ -1724,9 +1836,14 @@ static void cmd_test(const char* args) {
     if (strncmp(args, "-f ", 3) == 0) {
         const char* fname = args + 3;
         while (*fname == ' ') fname++;
-        char expanded[64];
-        expand_variables(fname, expanded, 64);
-        last_exit_status = unifs_file_exists(expanded) ? 0 : 1;
+        char expanded[256];
+        expand_variables(fname, expanded, 256);
+        
+        char resolved[256];
+        shell_resolve_path(expanded, resolved);
+        
+        VNodeStat st;
+        last_exit_status = (vfs_stat(resolved, &st) == 0 && !st.is_dir) ? 0 : 1;
         return;
     }
     
@@ -1825,53 +1942,75 @@ static void cmd_source(const char* filename) {
 // Better than Unix: cleaner output, smarter defaults, works with pipes
 // =============================================================================
 
-// wc - Word/line/character count with formatted output
-// Usage: wc [file] or pipe: ls | wc
-static void cmd_wc(const char* filename, const char* piped_input) {
-    const char* data = nullptr;
-    uint64_t data_len = 0;
-    
-    // Get data from file or piped input
+// Helper to get data from file or piped input
+static char* get_file_data(const char* filename, const char* piped_input, uint64_t* out_len) {
     if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
+        char resolved[256];
+        shell_resolve_path(filename, resolved);
+        
+        VNodeStat st;
+        if (vfs_stat(resolved, &st) < 0) {
             error_file_not_found(filename);
-            return;
+            return nullptr;
         }
-        data = (const char*)file.data;
-        data_len = file.size;
+        
+        int fd = vfs_open(resolved, O_RDONLY);
+        if (fd < 0) {
+            error_file_not_found(filename);
+            return nullptr;
+        }
+        
+        char* data = (char*)malloc(st.size + 1);
+        if (!data) {
+            vfs_close(fd);
+            g_terminal.write_line("Out of memory.");
+            return nullptr;
+        }
+        
+        int64_t bytes_read = vfs_read(fd, data, st.size);
+        vfs_close(fd);
+        
+        if (bytes_read < 0) {
+            free(data);
+            g_terminal.write_line("Error reading file.");
+            return nullptr;
+        }
+        
+        data[bytes_read] = '\0';
+        *out_len = (uint64_t)bytes_read;
+        return data;
     } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: wc <file> or pipe input");
+        uint64_t len = kstring::strlen(piped_input);
+        char* data = (char*)malloc(len + 1);
+        if (!data) return nullptr;
+        kstring::strncpy(data, piped_input, len);
+        *out_len = len;
+        return data;
+    }
+    return nullptr;
+}
+
+// wc - Word/line/character count with formatted output
+static void cmd_wc(const char* filename, const char* piped_input) {
+    uint64_t data_len = 0;
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) {
+        if (!filename || !filename[0]) g_terminal.write_line("Usage: wc <file> or pipe input");
         return;
     }
     
-    // Count statistics
     uint64_t lines = 0, words = 0, chars = 0;
     bool in_word = false;
-    
     for (uint64_t i = 0; i < data_len; i++) {
         char c = data[i];
         chars++;
-        
         if (c == '\n') lines++;
-        
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            in_word = false;
-        } else if (!in_word) {
-            in_word = true;
-            words++;
-        }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') in_word = false;
+        else if (!in_word) { in_word = true; words++; }
     }
-    
-    // Add 1 to lines if data doesn't end with newline
     if (data_len > 0 && data[data_len - 1] != '\n') lines++;
     
-    // Output in clean format
-    char buf[128];
-    int i = 0;
+    char buf[128]; int i = 0;
     auto append_str = [&](const char* s) { while (*s) buf[i++] = *s++; };
     auto append_num = [&](uint64_t n) {
         if (n == 0) { buf[i++] = '0'; return; }
@@ -1879,276 +2018,123 @@ static void cmd_wc(const char* filename, const char* piped_input) {
         while (n > 0) { tmp[j++] = '0' + (n % 10); n /= 10; }
         while (j > 0) buf[i++] = tmp[--j];
     };
-    
     append_str("  Lines: "); append_num(lines); append_str("\n");
     append_str("  Words: "); append_num(words); append_str("\n");
     append_str("  Chars: "); append_num(chars);
-    buf[i] = 0;
-    g_terminal.write_line(buf);
+    buf[i] = 0; g_terminal.write_line(buf);
+    free(data);
 }
 
-// head - Show first N lines (default 10)
-// Usage: head [n] [file] or pipe: ls | head 5
+// head - Show first N lines
 static void cmd_head(const char* args, const char* piped_input) {
-    int n = 10;  // Smart default
-    const char* filename = nullptr;
-    
-    // Parse args: could be "5", "5 file.txt", "file.txt", or empty
+    int n = 10; const char* filename = nullptr;
     if (args && args[0]) {
         if (args[0] >= '0' && args[0] <= '9') {
-            n = 0;
-            const char* p = args;
-            while (*p >= '0' && *p <= '9') {
-                n = n * 10 + (*p - '0');
-                p++;
-            }
-            while (*p == ' ') p++;
-            if (*p) filename = p;
-        } else {
-            filename = args;
-        }
+            n = 0; const char* p = args;
+            while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
+            while (*p == ' ') p++; if (*p) filename = p;
+        } else filename = args;
     }
-    
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file.data;
-        data_len = file.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: head [n] <file> or pipe input");
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) {
+        if (!filename || !filename[0]) g_terminal.write_line("Usage: head [n] <file> or pipe input");
         return;
     }
-    
-    // Output first n lines
     int line_count = 0;
     for (uint64_t i = 0; i < data_len && line_count < n; i++) {
         g_terminal.put_char(data[i]);
         if (data[i] == '\n') line_count++;
     }
-    
-    // Add newline if last line didn't have one
-    if (data_len > 0 && data[data_len - 1] != '\n' && line_count < n) {
-        g_terminal.put_char('\n');
-    }
+    if (data_len > 0 && data[data_len - 1] != '\n' && line_count < n) g_terminal.put_char('\n');
+    free(data);
 }
 
-// tail - Show last N lines (default 10)
-// Usage: tail [n] [file] or pipe: ls | tail 3
+// tail - Show last N lines
 static void cmd_tail(const char* args, const char* piped_input) {
-    int n = 10;  // Smart default
-    const char* filename = nullptr;
-    
-    // Parse args: could be "5", "5 file.txt", "file.txt", or empty
+    int n = 10; const char* filename = nullptr;
     if (args && args[0]) {
         if (args[0] >= '0' && args[0] <= '9') {
-            n = 0;
-            const char* p = args;
-            while (*p >= '0' && *p <= '9') {
-                n = n * 10 + (*p - '0');
-                p++;
-            }
-            while (*p == ' ') p++;
-            if (*p) filename = p;
-        } else {
-            filename = args;
-        }
+            n = 0; const char* p = args;
+            while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
+            while (*p == ' ') p++; if (*p) filename = p;
+        } else filename = args;
     }
-    
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file.data;
-        data_len = file.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: tail [n] <file> or pipe input");
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) {
+        if (!filename || !filename[0]) g_terminal.write_line("Usage: tail [n] <file> or pipe input");
         return;
     }
-    
-    // Count total lines
     int total_lines = 0;
-    for (uint64_t i = 0; i < data_len; i++) {
-        if (data[i] == '\n') total_lines++;
-    }
+    for (uint64_t i = 0; i < data_len; i++) if (data[i] == '\n') total_lines++;
     if (data_len > 0 && data[data_len - 1] != '\n') total_lines++;
-    
-    // Find start position for last n lines
-    int skip_lines = (total_lines > n) ? (total_lines - n) : 0;
-    int line_count = 0;
-    uint64_t start = 0;
-    
-    for (uint64_t i = 0; i < data_len && line_count < skip_lines; i++) {
-        if (data[i] == '\n') {
-            line_count++;
-            start = i + 1;
-        }
-    }
-    
-    // Output from start position
-    for (uint64_t i = start; i < data_len; i++) {
-        g_terminal.put_char(data[i]);
-    }
-    
-    // Add newline if needed
-    if (data_len > 0 && data[data_len - 1] != '\n') {
-        g_terminal.put_char('\n');
-    }
+    int skip = (total_lines > n) ? total_lines - n : 0;
+    int current_line = 0; uint64_t i = 0;
+    while (i < data_len && current_line < skip) { if (data[i] == '\n') current_line++; i++; }
+    uint64_t start = i;
+    for (uint64_t j = start; j < data_len; j++) g_terminal.put_char(data[j]);
+    if (data_len > 0 && data[data_len - 1] != '\n') g_terminal.put_char('\n');
+    free(data);
 }
 
-// Helper: case-insensitive character comparison
 static char to_lower(char c) {
-    return (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
 }
 
-// grep - Search for pattern in text
-// Usage: grep pattern [file] or pipe: ls | grep elf
-// Case-insensitive by default (modern approach)
+// grep - Search for pattern
 static void cmd_grep(const char* args, const char* piped_input) {
     if (!args || !args[0]) {
-        g_terminal.write_line("Usage: grep <pattern> [file]");
+        g_terminal.write_line("Usage: grep <pattern> [file] or pipe input");
         return;
     }
-    
-    // Parse pattern and optional filename
-    char pattern[64];
-    const char* filename = nullptr;
-    int pi = 0;
-    const char* p = args;
-    
-    // Get pattern (first word)
-    while (*p && *p != ' ' && pi < 63) {
-        pattern[pi++] = *p++;
-    }
+    char pattern[64]; const char* p = args; int pi = 0;
+    while (*p && *p != ' ' && pi < 63) pattern[pi++] = *p++;
     pattern[pi] = '\0';
-    
-    // Skip space and get filename if present
-    while (*p == ' ') p++;
-    if (*p) filename = p;
-    
-    const char* data = nullptr;
+    while (*p == ' ') p++; const char* filename = (*p) ? p : nullptr;
     uint64_t data_len = 0;
-    
-    UniFSFile file_data;
-    if (filename && filename[0]) {
-        if (!unifs_open_into(filename, &file_data)) {
-            error_file_not_found(filename);
-            return;
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) return;
+    char* line = data;
+    while (line && *line) {
+        char* next_line = line;
+        while (*next_line && *next_line != '\n') next_line++;
+        char saved = *next_line; *next_line = '\0';
+        bool found = false;
+        for (int i = 0; line[i]; i++) {
+            bool match = true;
+            for (int j = 0; pattern[j]; j++) { if (to_lower(line[i+j]) != to_lower(pattern[j])) { match = false; break; } }
+            if (match) { found = true; break; }
         }
-        data = (const char*)file_data.data;
-        data_len = file_data.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: grep <pattern> <file> or pipe input");
-        return;
+        if (found) g_terminal.write_line(line);
+        *next_line = saved;
+        if (saved == '\n') line = next_line + 1;
+        else line = nullptr;
     }
-    
-    int pattern_len = strlen(pattern);
-    if (pattern_len == 0) return;
-    
-    // Process line by line
-    uint64_t line_start = 0;
-    int matches = 0;
-    
-    for (uint64_t i = 0; i <= data_len; i++) {
-        bool is_end = (i == data_len) || (data[i] == '\n');
-        
-        if (is_end) {
-            // Check if this line contains the pattern (case-insensitive)
-            bool found = false;
-            
-            for (uint64_t j = line_start; j + pattern_len <= i && !found; j++) {
-                bool match = true;
-                for (int k = 0; k < pattern_len && match; k++) {
-                    if (to_lower(data[j + k]) != to_lower(pattern[k])) {
-                        match = false;
-                    }
-                }
-                if (match) found = true;
-            }
-            
-            // Output matching line
-            if (found) {
-                matches++;
-                for (uint64_t j = line_start; j < i; j++) {
-                    g_terminal.put_char(data[j]);
-                }
-                g_terminal.put_char('\n');
-            }
-            
-            line_start = i + 1;
-        }
-    }
-    
-    if (matches == 0) {
-        g_terminal.write_line("No matches found.");
-    }
+    free(data);
 }
 
 // sort - Sort lines alphabetically
-// Usage: sort [file] or pipe: ls | sort
 static void cmd_sort(const char* filename, const char* piped_input) {
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    UniFSFile file_data;
-    if (filename && filename[0]) {
-        if (!unifs_open_into(filename, &file_data)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file_data.data;
-        data_len = file_data.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: sort <file> or pipe input");
-        return;
-    }
-    
-    if (data_len == 0) return;
-    
-    // Count lines and store pointers
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) return;
     const int MAX_LINES = 256;
-    const char* lines[MAX_LINES];
-    int line_lens[MAX_LINES];
-    int line_count = 0;
-    
+    const char* lines[MAX_LINES]; int line_lens[MAX_LINES]; int line_count = 0;
     uint64_t line_start = 0;
     for (uint64_t i = 0; i <= data_len && line_count < MAX_LINES; i++) {
         if (i == data_len || data[i] == '\n') {
-            if (i > line_start) {  // Skip empty lines
+            if (i > line_start) {
                 lines[line_count] = data + line_start;
-                line_lens[line_count] = i - line_start;
+                line_lens[line_count] = (int)(i - line_start);
                 line_count++;
             }
             line_start = i + 1;
         }
     }
-    
-    // Bubble sort (simple, works for small datasets)
     for (int i = 0; i < line_count - 1; i++) {
         for (int j = 0; j < line_count - i - 1; j++) {
-            // Compare lines
             int min_len = (line_lens[j] < line_lens[j+1]) ? line_lens[j] : line_lens[j+1];
             bool swap = false;
             for (int k = 0; k < min_len; k++) {
@@ -2156,256 +2142,107 @@ static void cmd_sort(const char* filename, const char* piped_input) {
                 if (lines[j][k] < lines[j+1][k]) break;
             }
             if (!swap && line_lens[j] > line_lens[j+1]) swap = true;
-            
             if (swap) {
-                const char* tmp = lines[j];
-                lines[j] = lines[j+1];
-                lines[j+1] = tmp;
-                int tmp_len = line_lens[j];
-                line_lens[j] = line_lens[j+1];
-                line_lens[j+1] = tmp_len;
+                const char* tmp = lines[j]; lines[j] = lines[j+1]; lines[j+1] = tmp;
+                int tmp_len = line_lens[j]; line_lens[j] = line_lens[j+1]; line_lens[j+1] = tmp_len;
             }
         }
     }
-    
-    // Output sorted lines
     for (int i = 0; i < line_count; i++) {
-        for (int j = 0; j < line_lens[i]; j++) {
-            g_terminal.put_char(lines[i][j]);
-        }
+        for (int j = 0; j < line_lens[i]; j++) g_terminal.put_char(lines[i][j]);
         g_terminal.put_char('\n');
     }
+    free(data);
 }
 
 // uniq - Remove consecutive duplicate lines
-// Usage: uniq [file] or pipe: sort data.txt | uniq
 static void cmd_uniq(const char* filename, const char* piped_input) {
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file.data;
-        data_len = file.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: uniq <file> or pipe input");
-        return;
-    }
-    
-    if (data_len == 0) return;
-    
-    const char* prev_line = nullptr;
-    int prev_len = 0;
-    uint64_t line_start = 0;
-    
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) return;
+    const char* prev_line = nullptr; int prev_len = 0; uint64_t line_start = 0;
     for (uint64_t i = 0; i <= data_len; i++) {
         if (i == data_len || data[i] == '\n') {
-            const char* curr_line = data + line_start;
-            int curr_len = i - line_start;
-            
-            // Check if different from previous
+            const char* curr_line = data + line_start; int curr_len = (int)(i - line_start);
             bool is_dup = false;
             if (prev_line && curr_len == prev_len) {
                 is_dup = true;
-                for (int j = 0; j < curr_len; j++) {
-                    if (curr_line[j] != prev_line[j]) {
-                        is_dup = false;
-                        break;
-                    }
-                }
+                for (int j = 0; j < curr_len; j++) if (curr_line[j] != prev_line[j]) { is_dup = false; break; }
             }
-            
             if (!is_dup && curr_len > 0) {
-                for (int j = 0; j < curr_len; j++) {
-                    g_terminal.put_char(curr_line[j]);
-                }
+                for (int j = 0; j < curr_len; j++) g_terminal.put_char(curr_line[j]);
                 g_terminal.put_char('\n');
             }
-            
-            prev_line = curr_line;
-            prev_len = curr_len;
-            line_start = i + 1;
+            prev_line = curr_line; prev_len = curr_len; line_start = i + 1;
         }
     }
+    free(data);
 }
 
 // rev - Reverse characters in each line
-// Usage: rev [file] or pipe: echo hello | rev → olleh
 static void cmd_rev(const char* filename, const char* piped_input) {
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file.data;
-        data_len = file.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: rev <file> or pipe input");
-        return;
-    }
-    
-    if (data_len == 0) return;
-    
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) return;
     uint64_t line_start = 0;
     for (uint64_t i = 0; i <= data_len; i++) {
         if (i == data_len || data[i] == '\n') {
-            // Reverse this line
-            for (int64_t j = i - 1; j >= (int64_t)line_start; j--) {
-                g_terminal.put_char(data[j]);
-            }
+            for (int64_t j = i - 1; j >= (int64_t)line_start; j--) g_terminal.put_char(data[j]);
             g_terminal.put_char('\n');
             line_start = i + 1;
         }
     }
+    free(data);
 }
 
-// tac - Print lines in reverse order (opposite of cat)
-// Usage: tac [file] or pipe: ls | tac
+// tac - Print lines in reverse order
 static void cmd_tac(const char* filename, const char* piped_input) {
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file.data;
-        data_len = file.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: tac <file> or pipe input");
-        return;
-    }
-    
-    if (data_len == 0) return;
-    
-    // Store line positions
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) return;
     const int MAX_LINES = 256;
-    uint64_t line_starts[MAX_LINES];
-    uint64_t line_ends[MAX_LINES];
-    int line_count = 0;
-    
+    uint64_t line_starts[MAX_LINES]; uint64_t line_ends[MAX_LINES]; int line_count = 0;
     uint64_t line_start = 0;
     for (uint64_t i = 0; i <= data_len && line_count < MAX_LINES; i++) {
         if (i == data_len || data[i] == '\n') {
-            if (i > line_start) {
-                line_starts[line_count] = line_start;
-                line_ends[line_count] = i;
-                line_count++;
-            }
+            if (i > line_start) { line_starts[line_count] = line_start; line_ends[line_count] = i; line_count++; }
             line_start = i + 1;
         }
     }
-    
-    // Print lines in reverse
     for (int i = line_count - 1; i >= 0; i--) {
-        for (uint64_t j = line_starts[i]; j < line_ends[i]; j++) {
-            g_terminal.put_char(data[j]);
-        }
+        for (uint64_t j = line_starts[i]; j < line_ends[i]; j++) g_terminal.put_char(data[j]);
         g_terminal.put_char('\n');
     }
+    free(data);
 }
 
 // nl - Number lines
-// Usage: nl [file] or pipe: cat file.txt | nl
 static void cmd_nl(const char* filename, const char* piped_input) {
-    const char* data = nullptr;
     uint64_t data_len = 0;
-    
-    if (filename && filename[0]) {
-        UniFSFile file;
-        if (!unifs_open_into(filename, &file)) {
-            error_file_not_found(filename);
-            return;
-        }
-        data = (const char*)file.data;
-        data_len = file.size;
-    } else if (piped_input) {
-        data = piped_input;
-        data_len = strlen(piped_input);
-    } else {
-        g_terminal.write_line("Usage: nl <file> or pipe input");
-        return;
-    }
-    
-    if (data_len == 0) return;
-    
-    int line_num = 1;
-    uint64_t line_start = 0;
-    
+    char* data = get_file_data(filename, piped_input, &data_len);
+    if (!data) return;
+    int line_num = 1; uint64_t line_start = 0;
     for (uint64_t i = 0; i <= data_len; i++) {
         if (i == data_len || data[i] == '\n') {
-            // Print line number (right-aligned in 6 chars)
-            char num_buf[8];
-            int n = line_num;
-            int pos = 5;
-            num_buf[6] = ' ';
-            num_buf[7] = '\0';
-            while (pos >= 0) {
-                if (n > 0) {
-                    num_buf[pos--] = '0' + (n % 10);
-                    n /= 10;
-                } else {
-                    num_buf[pos--] = ' ';
-                }
-            }
+            char num_buf[8]; int n = line_num; int pos = 5;
+            num_buf[6] = ' '; num_buf[7] = '\0';
+            while (pos >= 0) { if (n > 0) { num_buf[pos--] = '0' + (n % 10); n /= 10; } else num_buf[pos--] = ' '; }
             g_terminal.write(num_buf);
-            
-            // Print line content
-            for (uint64_t j = line_start; j < i; j++) {
-                g_terminal.put_char(data[j]);
-            }
+            for (uint64_t j = line_start; j < i; j++) g_terminal.put_char(data[j]);
             g_terminal.put_char('\n');
-            
-            line_num++;
-            line_start = i + 1;
+            line_num++; line_start = i + 1;
         }
     }
+    free(data);
 }
 
-// tr - Translate characters (simple version: tr <from> <to>)
-// Usage: echo hello | tr e a → hallo
+// tr - Translate characters
 static void cmd_tr(const char* args, const char* piped_input) {
-    if (!args || !args[0]) {
-        g_terminal.write_line("Usage: tr <from_char> <to_char>");
-        return;
-    }
-    
-    char from_char = args[0];
-    char to_char = ' ';
-    
-    // Parse: "e a" or "ea"
-    const char* p = args + 1;
-    while (*p == ' ') p++;
-    if (*p) to_char = *p;
-    
-    if (!piped_input) {
-        g_terminal.write_line("tr requires piped input");
-        return;
-    }
-    
-    // Translate and output
-    for (const char* s = piped_input; *s; s++) {
-        g_terminal.put_char(*s == from_char ? to_char : *s);
-    }
+    if (!args || !args[0]) { g_terminal.write_line("Usage: tr <from_char> <to_char>"); return; }
+    char from_char = args[0]; char to_char = ' ';
+    const char* p = args + 1; while (*p == ' ') p++; if (*p) to_char = *p;
+    if (!piped_input) { g_terminal.write_line("tr requires piped input"); return; }
+    for (const char* s = piped_input; *s; s++) g_terminal.put_char(*s == from_char ? to_char : *s);
 }
 
 
@@ -2775,7 +2612,11 @@ static void cmd_exec(const char* args) {
     }
     
     // Check if file exists first
-    if (!unifs_file_exists(args)) {
+    char resolved[256];
+    shell_resolve_path(args, resolved);
+    
+    VNodeStat st;
+    if (vfs_stat(resolved, &st) < 0 || st.is_dir) {
         g_terminal.write("Error: program not found: ");
         g_terminal.write_line(args);
         last_exit_status = 1;
@@ -2790,7 +2631,7 @@ static void cmd_exec(const char* args) {
     // won't resume after the user program exits (it will crash).
     // This is a known limitation until fork/exec is properly debugged.
     
-    int64_t result = kernel_exec(args);
+    int64_t result = kernel_exec(resolved);
     
     if (result < 0) {
         g_terminal.write_line("Failed to execute program.");
@@ -2883,7 +2724,6 @@ static void cmd_debug(const char* args) {
 static const CommandEntry commands[] = {
     // No-arg commands (exact match, no arguments)
     {"help",     CMD_NONE, cmd_help, nullptr, nullptr},
-    {"ls",       CMD_NONE, cmd_ls, nullptr, nullptr},
     {"df",       CMD_NONE, cmd_df, nullptr, nullptr},
     {"mem",      CMD_NONE, cmd_mem, nullptr, nullptr},
     {"date",     CMD_NONE, cmd_date, nullptr, nullptr},
@@ -2898,11 +2738,14 @@ static const CommandEntry commands[] = {
     {"true",     CMD_NONE, cmd_true, nullptr, nullptr},
     {"false",    CMD_NONE, cmd_false, nullptr, nullptr},
     {"ps",       CMD_NONE, cmd_ps, nullptr, nullptr},
+    {"pwd",      CMD_NONE, cmd_pwd, nullptr, nullptr},
     {"kheap",    CMD_NONE, cmd_kheap, nullptr, nullptr},
     {"history",  CMD_NONE, cmd_history, nullptr, nullptr},
     {"dmesg",    CMD_NONE, cmd_dmesg, nullptr, nullptr},
     
     // Arg commands (command + space + args)
+    {"ls",       CMD_ARGS, nullptr, cmd_ls, nullptr},
+    {"cd",       CMD_ARGS, nullptr, cmd_cd, nullptr},
     {"cat",      CMD_ARGS, nullptr, cmd_cat, nullptr},
     {"stat",     CMD_ARGS, nullptr, cmd_stat, nullptr},
     {"hexdump",  CMD_ARGS, nullptr, cmd_hexdump, nullptr},
@@ -3129,9 +2972,21 @@ static bool execute_single_command(const char* cmd, const char* piped_input) {
     if (redirect_ptr) {
         g_terminal.stop_capture();
         uint64_t capture_len = strlen(pipe_buffer_a);
-        int result = append_mode ? unifs_append(redirect_filename, pipe_buffer_a, capture_len) 
-                                 : unifs_write(redirect_filename, pipe_buffer_a, capture_len);
-        if (result != UNIFS_OK) g_terminal.write_line("Redirection error.");
+        
+        char resolved[256];
+        shell_resolve_path(redirect_filename, resolved);
+        
+        int flags = O_CREAT | O_WRONLY;
+        if (append_mode) flags |= O_APPEND;
+        else flags |= O_TRUNC;
+        
+        int fd = vfs_open(resolved, flags);
+        if (fd >= 0) {
+            vfs_write(fd, pipe_buffer_a, capture_len);
+            vfs_close(fd);
+        } else {
+            g_terminal.write_line("Redirection error: could not open file.");
+        }
     }
     
     return cmd_found;
@@ -3273,7 +3128,7 @@ void shell_process_char(char c) {
                 clear_line();
                 int idx = (history_count - 1 - history_index) % HISTORY_SIZE;
                 if (idx < 0) idx += HISTORY_SIZE;
-                strcpy(cmd_buffer, history[idx]);
+                kstring::strncpy(cmd_buffer, history[idx], 255);
                 cmd_len = strlen(cmd_buffer);
                 display_line();
             }
@@ -3285,7 +3140,7 @@ void shell_process_char(char c) {
             clear_line();
             int idx = (history_count - 1 - history_index) % HISTORY_SIZE;
             if (idx < 0) idx += HISTORY_SIZE;
-            strcpy(cmd_buffer, history[idx]);
+            kstring::strncpy(cmd_buffer, history[idx], 255);
             cmd_len = strlen(cmd_buffer);
             display_line();
         } else if (history_index == 0) {
@@ -3330,7 +3185,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(PROMPT_LEN, row);
+                g_terminal.set_cursor_pos(get_prompt_len(), row);
             }
         }
     } else if (c == 5) {  // Ctrl+E - move to end - clear selection
@@ -3343,7 +3198,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(PROMPT_LEN + cmd_len, row);
+                g_terminal.set_cursor_pos(get_prompt_len() + cmd_len, row);
             }
         }
     } else if (c == 3) {  // Ctrl+C - copy selection OR cancel line
@@ -3452,7 +3307,7 @@ void shell_process_char(char c) {
         // Position cursor correctly
         int col, row;
         g_terminal.get_cursor_pos(&col, &row);
-        g_terminal.set_cursor_pos(PROMPT_LEN + cursor_pos, row);
+        g_terminal.set_cursor_pos(get_prompt_len() + cursor_pos, row);
     } else if (uc == KEY_HOME) {  // Home key - move to start - clear selection
         bool had_selection = (selection_start >= 0);
         selection_start = -1;
@@ -3463,7 +3318,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(PROMPT_LEN, row);
+                g_terminal.set_cursor_pos(get_prompt_len(), row);
             }
         }
     } else if (uc == KEY_END) {  // End key - move to end - clear selection
@@ -3476,7 +3331,7 @@ void shell_process_char(char c) {
             if (had_selection) {
                 redraw_line_at(row, cursor_pos);
             } else {
-                g_terminal.set_cursor_pos(PROMPT_LEN + cmd_len, row);
+                g_terminal.set_cursor_pos(get_prompt_len() + cmd_len, row);
             }
         }
     } else if (uc == KEY_DELETE) {  // Delete key - delete char at cursor
@@ -3574,15 +3429,31 @@ void shell_process_char(char c) {
                         g_terminal.get_cursor_pos(&col, &row);
                         redraw_line_at(row, cursor_pos);
                     } else if (matches > 1) {
-                        // Show matching subcommands
+                        // Show matching subcommands in a grid
                         g_terminal.write("\n");
+                        const int column_width = 20;
+                        int col, row;
+                        
                         for (int i = 0; audio_cmds[i]; i++) {
                             if (strncmp(partial, audio_cmds[i], partial_len) == 0) {
                                 g_terminal.write(audio_cmds[i]);
-                                g_terminal.write("  ");
+                                
+                                // Grid padding
+                                g_terminal.get_cursor_pos(&col, &row);
+                                if (col % column_width != 0) {
+                                    int spaces = column_width - (col % column_width);
+                                    for (int s = 0; s < spaces; s++) g_terminal.write(" ");
+                                }
+                                
+                                // Wrap
+                                g_terminal.get_cursor_pos(&col, &row);
+                                if (col >= 80) g_terminal.write("\n");
                             }
                         }
-                        g_terminal.write("\n");
+                        
+                        g_terminal.get_cursor_pos(&col, &row);
+                        if (col != 0) g_terminal.write("\n");
+                        
                         print_prompt();
                         for (int i = 0; i < cmd_len; i++) {
                             g_terminal.put_char(cmd_buffer[i]);
@@ -3625,47 +3496,147 @@ void shell_process_char(char c) {
             }
 
             if (!handled) {
-                // Filename completion - get partial filename after last space
-                // Search uniFS for matching files
-                int matches = 0;
-                const char* last_match = nullptr;
-                uint64_t file_count = unifs_get_file_count();
+                // Filename completion - get partial path after last space
+                char partial_path[256];
+                kstring::strncpy(partial_path, partial, 255);
+                partial_path[255] = '\0';
                 
-                for (uint64_t i = 0; i < file_count; i++) {
-                    const char* fname = unifs_get_file_name(i);
-                    if (fname && strncmp(partial, fname, partial_len) == 0) {
-                        matches++;
-                        last_match = fname;
-                    }
+                char dir_to_open[256];
+                const char* prefix = partial_path;
+                char* last_slash = nullptr;
+                
+                // Find last slash in the partial path
+                for (char* p = partial_path; *p; p++) {
+                    if (*p == '/') last_slash = p;
                 }
                 
-                if (matches == 1 && last_match) {
-                    // Complete the filename
-                    int fname_len = strlen(last_match);
-                    // Replace partial with full filename
-                    for (int i = 0; i < fname_len; i++) {
-                        cmd_buffer[last_space + 1 + i] = last_match[i];
+                if (last_slash) {
+                    prefix = last_slash + 1;
+                    char saved = *last_slash;
+                    if (last_slash == partial_path) {
+                        kstring::strncpy(dir_to_open, "/", 255);
+                    } else {
+                        *last_slash = '\0';
+                        shell_resolve_path(partial_path, dir_to_open);
+                        *last_slash = saved;
                     }
-                    cmd_len = last_space + 1 + fname_len;
-                    cursor_pos = cmd_len;
-                    int col, row;
-                    g_terminal.get_cursor_pos(&col, &row);
-                    redraw_line_at(row, cursor_pos);
-                } else if (matches > 1) {
-                    // Show matching files
-                    g_terminal.write("\n");
-                    for (uint64_t i = 0; i < file_count; i++) {
-                        const char* fname = unifs_get_file_name(i);
-                        if (fname && strncmp(partial, fname, partial_len) == 0) {
-                            g_terminal.write(fname);
-                            g_terminal.write("  ");
+                } else {
+                    Process* cur_p = process_get_current();
+                    kstring::strncpy(dir_to_open, cur_p->cwd, 255);
+                }
+                
+                int prefix_len = strlen(prefix);
+                bool is_cd = (strncmp(cmd_buffer, "cd ", 3) == 0);
+                
+                int matches = 0;
+                char last_match[256];
+                bool last_match_is_dir = false;
+                
+                int fd = vfs_open(dir_to_open, O_RDONLY);
+                if (fd >= 0) {
+                char entry_name[256];
+                    while (vfs_readdir(fd, entry_name) == 0) {
+                        if (kstring::strcmp(entry_name, ".") == 0 || kstring::strcmp(entry_name, "..") == 0) continue;
+                        
+                        if (strncmp(prefix, entry_name, prefix_len) == 0) {
+                            // Match! Check if it's a dir
+                            bool is_dir = false;
+                            char full_entry_path[512];
+                            kstring::strncpy(full_entry_path, dir_to_open, 511);
+                            if (full_entry_path[strlen(full_entry_path)-1] != '/') {
+                                kstring::strncat(full_entry_path, "/", 511 - kstring::strlen(full_entry_path));
+                            }
+                            kstring::strncat(full_entry_path, entry_name, 511 - kstring::strlen(full_entry_path));
+                            
+                            VNodeStat st;
+                            if (vfs_stat(full_entry_path, &st) == 0) {
+                                is_dir = st.is_dir;
+                            }
+                            
+                            matches++;
+                            kstring::strncpy(last_match, entry_name, 255);
+                            last_match_is_dir = is_dir;
                         }
                     }
-                    g_terminal.write("\n");
-                    print_prompt();
-                    for (int i = 0; i < cmd_len; i++) {
-                        g_terminal.put_char(cmd_buffer[i]);
+                    
+                    if (matches == 1) {
+                        // Complete the filename/path
+                        int mlen = strlen(last_match);
+                        int arg_start = last_space + 1;
+                        int prefix_start_in_arg = last_slash ? (last_slash - partial_path + 1) : 0;
+                        int replace_start = arg_start + prefix_start_in_arg;
+                        
+                        for (int i = 0; i < mlen && replace_start + i < 254; i++) {
+                            cmd_buffer[replace_start + i] = last_match[i];
+                        }
+                        cmd_len = replace_start + mlen;
+                        if (last_match_is_dir) {
+                            cmd_buffer[cmd_len++] = '/';
+                        } else {
+                            cmd_buffer[cmd_len++] = ' ';
+                        }
+                        cmd_buffer[cmd_len] = '\0';
+                        cursor_pos = cmd_len;
+                        
+                        int col, row;
+                        g_terminal.get_cursor_pos(&col, &row);
+                        redraw_line_at(row, cursor_pos);
+                    } else if (matches > 1) {
+                        // Show matching entries in a grid
+                        g_terminal.write("\n");
+                        vfs_close(fd);
+                        fd = vfs_open(dir_to_open, O_RDONLY);
+                        
+                        const int column_width = 20;
+                        int col, row;
+
+                        while (fd >= 0 && vfs_readdir(fd, entry_name) == 0) {
+                            if (kstring::strcmp(entry_name, ".") == 0 || kstring::strcmp(entry_name, "..") == 0) continue;
+                            
+                            if (strncmp(prefix, entry_name, prefix_len) == 0) {
+                                bool is_dir = false;
+                                char full_entry_path[512];
+                                kstring::strncpy(full_entry_path, dir_to_open, 511);
+                                if (full_entry_path[strlen(full_entry_path)-1] != '/') {
+                                    kstring::strncat(full_entry_path, "/", 511 - kstring::strlen(full_entry_path));
+                                }
+                                kstring::strncat(full_entry_path, entry_name, 511 - kstring::strlen(full_entry_path));
+                                
+                                VNodeStat st;
+                                if (vfs_stat(full_entry_path, &st) == 0) {
+                                    is_dir = st.is_dir;
+                                }
+                                
+                                if (is_dir) {
+                                    g_terminal.set_color(COLOR_CYAN, COLOR_BG);
+                                    g_terminal.write(entry_name);
+                                    g_terminal.write("/");
+                                } else {
+                                    g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+                                    g_terminal.write(entry_name);
+                                }
+                                g_terminal.set_color(COLOR_WHITE, COLOR_BG);
+                                
+                                // Grid padding
+                                g_terminal.get_cursor_pos(&col, &row);
+                                if (col % column_width != 0) {
+                                    int spaces = column_width - (col % column_width);
+                                    for (int s = 0; s < spaces; s++) g_terminal.write(" ");
+                                }
+                                
+                                // Wrap
+                                g_terminal.get_cursor_pos(&col, &row);
+                                if (col >= 80) g_terminal.write("\n");
+                            }
+                        }
+                        
+                        g_terminal.get_cursor_pos(&col, &row);
+                        if (col != 0) g_terminal.write("\n");
+                        
+                        print_prompt();
+                        for (int i = 0; i < cmd_len; i++) g_terminal.put_char(cmd_buffer[i]);
                     }
+                    if (fd >= 0) vfs_close(fd);
                 }
             }
         } else if (cmd_len > 0) {
@@ -3698,7 +3669,7 @@ void shell_process_char(char c) {
             
             if (matches == 1 && last_match) {
                 // Complete the command
-                strcpy(cmd_buffer, last_match);
+                kstring::strncpy(cmd_buffer, last_match, 255);
                 cmd_len = strlen(cmd_buffer);
                 cursor_pos = cmd_len;
                 cmd_buffer[cmd_len++] = ' ';  // Add space after
@@ -3707,15 +3678,31 @@ void shell_process_char(char c) {
                 g_terminal.get_cursor_pos(&col, &row);
                 redraw_line_at(row, cursor_pos);
             } else if (matches > 1) {
-                // Show options
+                // Show matching commands in a grid
                 g_terminal.write("\n");
+                const int column_width = 20;
+                int col, row;
+                
                 for (int i = 0; commands[i]; i++) {
                     if (strncmp(cmd_buffer, commands[i], cmd_len) == 0) {
                         g_terminal.write(commands[i]);
-                        g_terminal.write("  ");
+                        
+                        // Grid padding
+                        g_terminal.get_cursor_pos(&col, &row);
+                        if (col % column_width != 0) {
+                            int spaces = column_width - (col % column_width);
+                            for (int s = 0; s < spaces; s++) g_terminal.write(" ");
+                        }
+                        
+                        // Wrap
+                        g_terminal.get_cursor_pos(&col, &row);
+                        if (col >= 80) g_terminal.write("\n");
                     }
                 }
-                g_terminal.write("\n");
+                
+                g_terminal.get_cursor_pos(&col, &row);
+                if (col != 0) g_terminal.write("\n");
+                
                 print_prompt();
                 for (int i = 0; i < cmd_len; i++) {
                     g_terminal.put_char(cmd_buffer[i]);
@@ -3746,4 +3733,3 @@ void shell_process_char(char c) {
 void shell_tick() {
     g_terminal.update_cursor();
 }
-

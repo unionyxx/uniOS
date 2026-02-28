@@ -12,6 +12,7 @@
 #define SYS_EXEC   59
 #define SYS_EXIT   60
 #define SYS_WAIT4  61
+#define SYS_GETDENTS 78
 
 // File descriptor constants
 #define STDIN_FD   0
@@ -19,16 +20,28 @@
 #define STDERR_FD  2
 
 // Max open files per process
-#define MAX_OPEN_FILES 16
+#define MAX_OPEN_FILES 32
+
+struct VNode;
 
 // File descriptor entry
 struct FileDescriptor {
-    bool in_use;
-    const char* filename;
-    uint64_t position;
-    uint64_t size;
-    const uint8_t* data;
+    bool used;
+    struct VNode* vnode;
+    uint64_t offset;
+    uint64_t dir_pos;
+    
+    // Performance optimization cache
+    uint32_t last_cluster;
+    uint64_t last_offset;
 };
+
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR   2
+#define O_CREAT  64
+#define O_TRUNC  512
+#define O_APPEND 1024
 
 // Represents the stack frame passed to syscall_handler
 struct SyscallFrame {

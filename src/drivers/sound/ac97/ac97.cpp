@@ -9,7 +9,10 @@
 #include <drivers/sound/ac97/ac97.h>
 #include <drivers/sound/wav.h>
 #include <kernel/debug.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/fs/unifs.h>
+#include <kernel/syscall.h>
+#include <kernel/mm/heap.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/arch/x86_64/io.h>
@@ -176,9 +179,10 @@ void ac97_play_wav_file(const char* filename) {
     uint32_t data_size;
     uint32_t sample_rate;
     uint32_t channels;
+    uint8_t* wav_buffer;
 
     // Try to open WAV file.
-    if (!wav_open(filename, &data_ptr, &data_size, &sample_rate, &channels)) {
+    if (!wav_open(filename, &data_ptr, &data_size, &sample_rate, &channels, &wav_buffer)) {
         DEBUG_ERROR("wav_open failed");
         return;
     }
@@ -188,6 +192,9 @@ void ac97_play_wav_file(const char* filename) {
 
     // Play it!
     ac97_play(data_ptr, data_size);
+    
+    // wav_open allocates memory for wav_buffer, so we should free it.
+    free(wav_buffer);
 }
 
 // Play raw .pcm audio file.
@@ -199,20 +206,43 @@ void ac97_play_pcm_file(const char* filename) {
 
     DEBUG_INFO("trying to play %s", filename);
 
-    UniFSFile file;
-    if (!unifs_open_into(filename, &file)) {
-        DEBUG_ERROR("unifs_open_into failed");
+    VNodeStat st;
+    if (vfs_stat(filename, &st) < 0) {
+        DEBUG_ERROR("ac97: failed to stat %s", filename);
         return;
     }
 
-    uint8_t* data_ptr = (uint8_t*)(uint64_t)file.data;
-    uint32_t data_size = file.size;
+    int fd = vfs_open(filename, O_RDONLY);
+    if (fd < 0) {
+        DEBUG_ERROR("ac97: failed to open %s", filename);
+        return;
+    }
+
+    uint8_t* data_ptr = (uint8_t*)malloc(st.size);
+    if (!data_ptr) {
+        vfs_close(fd);
+        DEBUG_ERROR("ac97: out of memory");
+        return;
+    }
+
+    if (vfs_read(fd, data_ptr, st.size) < (int64_t)st.size) {
+        free(data_ptr);
+        vfs_close(fd);
+        DEBUG_ERROR("ac97: failed to read %s", filename);
+        return;
+    }
+    vfs_close(fd);
+
+    uint32_t data_size = (uint32_t)st.size;
 
     // FIXME: hard-coded sample rate value for ffmpeg .pcm files.
     ac97_set_sample_rate(22050);
 
     // Play it!
     ac97_play(data_ptr, data_size);
+    
+    // ac97_play copies to DMA buffer
+    free(data_ptr);
 }
 
 // Play PCM byte array.

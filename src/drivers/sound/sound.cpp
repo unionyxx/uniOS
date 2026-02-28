@@ -6,7 +6,9 @@
 #include <drivers/sound/wav.h>
 #include <drivers/sound/mp3.h>
 
-#include <kernel/fs/unifs.h>
+#include <kernel/fs/vfs.h>
+#include <kernel/syscall.h>
+#include <kernel/mm/heap.h>
 #include <kernel/debug.h>
 
 static bool sound_available = false;
@@ -160,8 +162,9 @@ void sound_play_wav_file(const char* filename) {
     uint32_t data_size;
     uint32_t sample_rate;
     uint32_t channels;
+    uint8_t* buffer_ptr;
 
-    if (!wav_open(filename, &data_ptr, &data_size, &sample_rate, &channels)) {
+    if (!wav_open(filename, &data_ptr, &data_size, &sample_rate, &channels, &buffer_ptr)) {
         DEBUG_ERROR("Failed to open WAV file: %s", filename);
         return;
     }
@@ -173,6 +176,7 @@ void sound_play_wav_file(const char* filename) {
     sound_set_channels(channels);
     sound_set_sample_rate(sample_rate);
     sound_play(data_ptr, data_size);
+    // TODO: free buffer_ptr after playback
 }
 
 void sound_play_pcm_file(const char* filename) {
@@ -181,21 +185,41 @@ void sound_play_pcm_file(const char* filename) {
         return;
     }
 
-    UniFSFile file;
-    if (!unifs_open_into(filename, &file)) {
+    VNodeStat st;
+    if (vfs_stat(filename, &st) < 0) {
+        DEBUG_ERROR("Failed to stat PCM file: %s", filename);
+        return;
+    }
+
+    int fd = vfs_open(filename, O_RDONLY);
+    if (fd < 0) {
         DEBUG_ERROR("Failed to open PCM file: %s", filename);
         return;
     }
 
-    uint8_t* data_ptr = (uint8_t*)(uint64_t)file.data;
-    uint32_t data_size = file.size;
+    uint8_t* data_ptr = (uint8_t*)malloc(st.size);
+    if (!data_ptr) {
+        vfs_close(fd);
+        DEBUG_ERROR("Out of memory for PCM file");
+        return;
+    }
 
-    DEBUG_INFO("Playing raw PCM: %s (%lu bytes)", filename, data_size);
+    int64_t bytes_read = vfs_read(fd, data_ptr, st.size);
+    vfs_close(fd);
+
+    if (bytes_read < (int64_t)st.size) {
+        free(data_ptr);
+        DEBUG_ERROR("Failed to read PCM file");
+        return;
+    }
+
+    DEBUG_INFO("Playing raw PCM: %s (%lu bytes)", filename, st.size);
 
     sound_set_bits_per_sample(16);
     sound_set_channels(2);
     sound_set_sample_rate(22050);
-    sound_play(data_ptr, data_size);
+    sound_play(data_ptr, (uint32_t)st.size);
+    // TODO: free data_ptr after playback
 }
 
 void sound_play(uint8_t* data, uint32_t size) {

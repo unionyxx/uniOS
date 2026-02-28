@@ -57,6 +57,9 @@ struct Process {
     uint64_t cursor_x;
     uint64_t cursor_y;
 
+    // Current working directory
+    char cwd[256];
+
     // Per-process exec state (temporary until exec replaces current process properly)
     uint64_t exec_entry;
     bool     exec_done;

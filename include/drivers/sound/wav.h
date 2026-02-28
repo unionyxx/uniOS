@@ -32,4 +32,4 @@ struct WavHeader {
     WavDataChunk* data_chunk;
 };
 
-bool wav_open(const char* filename, uint8_t** data, uint32_t* data_size, uint32_t* sample_rate, uint32_t* channels);
+bool wav_open(const char* filename, uint8_t** data, uint32_t* data_size, uint32_t* sample_rate, uint32_t* channels, uint8_t** buffer_out);

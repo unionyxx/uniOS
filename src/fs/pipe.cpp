@@ -1,5 +1,39 @@
 #include <kernel/fs/pipe.h>
+#include <kernel/fs/vfs.h>
 #include <stddef.h>
+
+static int64_t pipe_vfs_read(VNode* node, void* buf, uint64_t size, uint64_t, FileDescriptor* fd) {
+    return pipe_read((int)(uintptr_t)node->fs_data, (char*)buf, size);
+}
+
+static int64_t pipe_vfs_write(VNode* node, const void* buf, uint64_t size, uint64_t, FileDescriptor* fd) {
+    return pipe_write((int)(uintptr_t)node->fs_data, (const char*)buf, size);
+}
+
+static void pipe_vfs_close(VNode* node) {
+    int pipe_id = (int)(uintptr_t)node->fs_data;
+    // We need to know if it was the read or write end.
+    // We can store this in node->inode_id (0 for read, 1 for write).
+    if (node->inode_id == 0) {
+        pipe_close_read(pipe_id);
+    } else {
+        pipe_close_write(pipe_id);
+    }
+}
+
+static VNodeOps pipe_ops = {
+    .read = pipe_vfs_read,
+    .write = pipe_vfs_write,
+    .readdir = nullptr,
+    .lookup = nullptr,
+    .create = nullptr,
+    .unlink = nullptr,
+    .close = pipe_vfs_close
+};
+
+VNode* pipe_get_vnode(int pipe_id, bool is_write) {
+    return vfs_create_vnode(is_write ? 1 : 0, 0, false, &pipe_ops, (void*)(uintptr_t)pipe_id);
+}
 
 static Pipe pipes[MAX_PIPES];
 static bool pipes_initialized = false;

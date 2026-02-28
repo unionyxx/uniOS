@@ -42,6 +42,7 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 #include <kernel/mm/heap.h>
 #include <kernel/scheduler.h>
 #include <kernel/fs/unifs.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/shell.h>
 #include <kernel/debug.h>
 #include <drivers/bus/pci/pci.h>
@@ -156,9 +157,23 @@ extern "C" void _start(void) {
     asm("sti");
     DEBUG_SUCCESS("Boot Sequence Complete");
 
+    vfs_init();
+
     if (module_request.response && module_request.response->module_count > 0) {
         unifs_init(module_request.response->modules[0]->address);
+        vfs_mount("/", unifs_get_root());
     }
+
+    // Example: Mount FAT32 from first block device if found
+    /*
+    BlockDevice* hdd = block_dev_get("ata0");
+    if (hdd) {
+        static FAT32Filesystem fs;
+        if (fat32_init(hdd, &fs)) {
+            vfs_mount("/", fat32_get_root(&fs));
+        }
+    }
+    */
 
 #ifdef DEBUG
     serial_puts("[DEBUG] Boot complete!\r\n");

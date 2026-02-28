@@ -85,13 +85,15 @@ void scheduler_init() {
     current_process->exec_entry  = 0;
     current_process->exec_done   = false;
     current_process->exec_exit_status = 0;
+    current_process->cwd[0] = '/';
+    current_process->cwd[1] = '\0';
 
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        current_process->fd_table[i].in_use = false;
+        current_process->fd_table[i].used = false;
     }
-    current_process->fd_table[0].in_use = true;
-    current_process->fd_table[1].in_use = true;
-    current_process->fd_table[2].in_use = true;
+    current_process->fd_table[0].used = true;
+    current_process->fd_table[1].used = true;
+    current_process->fd_table[2].used = true;
 
     init_fpu_state(current_process->fpu_state);
     current_process->fpu_initialized = true;
@@ -141,13 +143,15 @@ void scheduler_create_task(void (*entry)(), const char* name) {
     new_process->exec_entry  = 0;
     new_process->exec_done   = false;
     new_process->exec_exit_status = 0;
+    new_process->cwd[0] = '/';
+    new_process->cwd[1] = '\0';
 
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        new_process->fd_table[i].in_use = false;
+        new_process->fd_table[i].used = false;
     }
-    new_process->fd_table[0].in_use = true;
-    new_process->fd_table[1].in_use = true;
-    new_process->fd_table[2].in_use = true;
+    new_process->fd_table[0].used = true;
+    new_process->fd_table[1].used = true;
+    new_process->fd_table[2].used = true;
 
     // Initialize FPU state
     init_fpu_state(new_process->fpu_state);

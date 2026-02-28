@@ -31,18 +31,20 @@ inline size_t strlen(const char* s) {
     return len;
 }
 
-// String copy (unsafe - caller must ensure dst is large enough)
-inline char* strcpy(char* dst, const char* src) {
-    char* ret = dst;
-    while ((*dst++ = *src++));
-    return ret;
-}
-
 // String copy with length limit
 inline char* strncpy(char* dst, const char* src, size_t n) {
     char* ret = dst;
     while (n && (*dst++ = *src++)) n--;
     while (n--) *dst++ = '\0';
+    return ret;
+}
+
+// String concatenation with length limit
+inline char* strncat(char* dst, const char* src, size_t n) {
+    char* ret = dst;
+    while (*dst) dst++;
+    while (n && (*dst++ = *src++)) n--;
+    if (n == 0) *dst = '\0';
     return ret;
 }
 
@@ -100,7 +102,7 @@ inline int itoa(int64_t value, char* buf, int base = 10) {
     p1 = buf;
     while (p1 < p) {
         char tmp = *p1;
-        *p1++ = *p--;
+        *p1++ = *p;
         *p-- = tmp;
     }
     
