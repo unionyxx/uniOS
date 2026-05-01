@@ -1,18 +1,48 @@
 ## Description
-Summary of the change. Link to fixed issues (e.g., "Fixes #42").
+
+What changed?
+
+Fixes #
 
 ## Type of Change
+
 - [ ] Bug fix
-- [ ] New feature
-- [ ] Refactoring / Cleanup
-- [ ] Documentation update
+- [ ] Feature
+- [ ] Refactor / cleanup
+- [ ] Documentation
+- [ ] Tooling / build
+- [ ] Asset update
+
+## Area
+
+- [ ] Meridian / boot image
+- [ ] Kernel
+- [ ] Memory management
+- [ ] Filesystems / storage
+- [ ] USB / input
+- [ ] Display / window manager
+- [ ] Userspace / shell
+- [ ] App
+- [ ] Networking
+- [ ] Audio
+- [ ] Documentation / website
+- [ ] Tools / generated assets
 
 ## Checklist
-- [ ] Code builds with `make` (Release)
-- [ ] Code builds with `make debug` (Debug)
-- [ ] Tested in QEMU (boots and reaches shell)
-- [ ] Adheres to style (no `std::`, no exceptions, named constants)
-- [ ] No regressions in existing shell commands
 
-## Testing Strategy
-How did you validate this change? (e.g., "Ran `ping 8.8.8.8` in QEMU with e1000 NIC")
+- [ ] Built release: `meson compile -C build/release boot-disk iso`
+- [ ] Built debug: `meson compile -C build/debug boot-disk iso`
+- [ ] Ran smoke tests when applicable: `meson test -C build/debug --suite smoke --print-errorlogs`
+- [ ] Tested the affected QEMU target or hardware path
+- [ ] Checked serial output when changing boot, kernel, drivers, shutdown, or panic paths
+- [ ] Tested `/data` persistence when changing storage, FAT32, USB storage, rootfs staging, or image generation
+- [ ] Included screenshots for visible desktop, app, website, cursor, icon, font, or wallpaper changes
+- [ ] Kept generated files and source assets in sync when changing runtime assets
+
+## Validation
+
+List the exact commands and manual tests performed.
+
+```text
+[paste commands and results here]
+```

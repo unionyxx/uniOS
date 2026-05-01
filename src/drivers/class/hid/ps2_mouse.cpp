@@ -1,87 +1,132 @@
+#include <boot/boot_info.h>
+#include <drivers/apic/ioapic.h>
 #include <drivers/class/hid/ps2_mouse.h>
-#include <kernel/arch/x86_64/pic.h>
 #include <kernel/arch/x86_64/io.h>
-#include <boot/limine.h>
+#include <kernel/arch/x86_64/pic.h>
+#include <kernel/irq.h>
+#include <kernel/scheduler.h>
 
-extern struct limine_framebuffer* g_framebuffer;
+extern const BootFramebuffer *g_framebuffer;
 
-static MouseState state = {0, 0, false, false, false};
+static MouseState state = {0, 0, false, false, false, 0};
 static uint8_t mouse_cycle = 0;
-static int8_t mouse_byte[3];
+static uint8_t mouse_packet_size = 3;
+static int8_t mouse_byte[4];
 
 // PS/2 mouse ports
-#define MOUSE_DATA    0x60
-#define MOUSE_STATUS  0x64
+#define MOUSE_DATA 0x60
+#define MOUSE_STATUS 0x64
 #define MOUSE_COMMAND 0x64
 
-static void mouse_wait(uint8_t type) {
+static void mouse_wait(uint8_t type)
+{
     uint32_t timeout = 100000;
     if (type == 0) {
         // Wait for data
         while (timeout--) {
-            if ((inb(MOUSE_STATUS) & 1) == 1) return;
+            if ((inb(MOUSE_STATUS) & 1) == 1)
+                return;
         }
     } else {
         // Wait to send
         while (timeout--) {
-            if ((inb(MOUSE_STATUS) & 2) == 0) return;
+            if ((inb(MOUSE_STATUS) & 2) == 0)
+                return;
         }
     }
 }
 
-static void mouse_write(uint8_t data) {
+static void mouse_write(uint8_t data)
+{
     mouse_wait(1);
-    outb(MOUSE_COMMAND, 0xD4);  // Tell controller we're sending to mouse
+    outb(MOUSE_COMMAND, 0xD4); // Tell controller we're sending to mouse
     mouse_wait(1);
     outb(MOUSE_DATA, data);
 }
 
-static uint8_t mouse_read() {
+static uint8_t mouse_read()
+{
     mouse_wait(0);
     return inb(MOUSE_DATA);
 }
 
-void ps2_mouse_init() {
+static bool mouse_expect_ack()
+{
+    return mouse_read() == 0xFA;
+}
+
+static bool mouse_set_sample_rate(uint8_t rate)
+{
+    mouse_write(0xF3);
+    if (!mouse_expect_ack())
+        return false;
+    mouse_write(rate);
+    return mouse_expect_ack();
+}
+
+static uint8_t mouse_get_device_id()
+{
+    mouse_write(0xF2);
+    if (!mouse_expect_ack())
+        return 0;
+    return mouse_read();
+}
+
+void ps2_mouse_init()
+{
     // Enable auxiliary device (mouse)
     mouse_wait(1);
     outb(MOUSE_COMMAND, 0xA8);
-    
+
     // Enable interrupts
     mouse_wait(1);
-    outb(MOUSE_COMMAND, 0x20);  // Get compaq status
+    outb(MOUSE_COMMAND, 0x20); // Get compaq status
     mouse_wait(0);
-    uint8_t status = inb(MOUSE_DATA) | 2;  // Enable IRQ12
+    uint8_t status = inb(MOUSE_DATA) | 2; // Enable IRQ12
     mouse_wait(1);
-    outb(MOUSE_COMMAND, 0x60);  // Set compaq status
+    outb(MOUSE_COMMAND, 0x60); // Set compaq status
     mouse_wait(1);
     outb(MOUSE_DATA, status);
-    
+
     // Use default settings
     mouse_write(0xF6);
-    mouse_read();  // Acknowledge
-    
+    mouse_expect_ack();
+
+    // IntelliMouse-compatible devices switch to 4-byte packets after this sample-rate sequence.
+    if (mouse_set_sample_rate(200) && mouse_set_sample_rate(100) && mouse_set_sample_rate(80)) {
+        uint8_t id = mouse_get_device_id();
+        if (id == 3 || id == 4)
+            mouse_packet_size = 4;
+    }
+
     // Enable mouse
     mouse_write(0xF4);
-    mouse_read();  // Acknowledge
-    
+    mouse_expect_ack();
+
     // Initialize position to center of screen
     if (g_framebuffer) {
         state.x = g_framebuffer->width / 2;
         state.y = g_framebuffer->height / 2;
     }
-    
+
+    if (apic_is_enabled() && ioapic_is_ready()) {
+        ioapic_set_entry(12, irq_isa_to_vector(12));
+        return;
+    }
+
     // Unmask IRQ2 (cascade) and IRQ12 (mouse) in PIC
-    pic_clear_mask(2);   // Enable cascade from slave PIC
-    pic_clear_mask(12);  // Enable mouse IRQ
+    pic_clear_mask(2);  // Enable cascade from slave PIC
+    pic_clear_mask(12); // Enable mouse IRQ
 }
 
-void ps2_mouse_handler() {
+void ps2_mouse_handler()
+{
     uint8_t data = inb(MOUSE_DATA);
-    
+
     switch (mouse_cycle) {
         case 0:
             mouse_byte[0] = data;
-            if (data & 0x08) {  // Validate byte (bit 3 always set)
+            if (data & 0x08) { // Validate byte (bit 3 always set)
                 mouse_cycle++;
             }
             break;
@@ -91,37 +136,65 @@ void ps2_mouse_handler() {
             break;
         case 2:
             mouse_byte[2] = data;
+            if (mouse_packet_size > 3) {
+                mouse_cycle++;
+                break;
+            }
+            [[fallthrough]];
+        case 3:
+            if (mouse_packet_size > 3)
+                mouse_byte[3] = data;
             mouse_cycle = 0;
-            
+
             // Parse mouse packet
             state.left_button = mouse_byte[0] & 0x01;
             state.right_button = mouse_byte[0] & 0x02;
             state.middle_button = mouse_byte[0] & 0x04;
-            
+
             // Update position
             int32_t dx = mouse_byte[1];
             int32_t dy = mouse_byte[2];
-            
+
             // Handle sign extension
-            if (mouse_byte[0] & 0x10) dx |= 0xFFFFFF00;
-            if (mouse_byte[0] & 0x20) dy |= 0xFFFFFF00;
-            
+            if (mouse_byte[0] & 0x10)
+                dx |= 0xFFFFFF00;
+            if (mouse_byte[0] & 0x20)
+                dy |= 0xFFFFFF00;
+
             state.x += dx;
-            state.y -= dy;  // Y is inverted
-            
+            state.y -= dy; // Y is inverted
+
+            if (mouse_packet_size > 3) {
+                int8_t wheel = mouse_byte[3] & 0x0F;
+                if (wheel & 0x08)
+                    wheel |= (int8_t)0xF0;
+                state.scroll_delta += wheel;
+            }
+
             // Clamp to screen bounds
             if (g_framebuffer) {
-                if (state.x < 0) state.x = 0;
-                if (state.y < 0) state.y = 0;
-                if (state.x >= (int32_t)g_framebuffer->width) 
+                if (state.x < 0)
+                    state.x = 0;
+                if (state.y < 0)
+                    state.y = 0;
+                if (state.x >= (int32_t)g_framebuffer->width)
                     state.x = g_framebuffer->width - 1;
-                if (state.y >= (int32_t)g_framebuffer->height) 
+                if (state.y >= (int32_t)g_framebuffer->height)
                     state.y = g_framebuffer->height - 1;
             }
+            scheduler_notify_input_waiters();
             break;
     }
 }
 
-const MouseState* ps2_mouse_get_state() {
+const MouseState *ps2_mouse_get_state()
+{
     return &state;
+}
+
+int8_t ps2_mouse_get_scroll()
+{
+    int8_t delta = state.scroll_delta;
+    state.scroll_delta = 0;
+    return delta;
 }

@@ -16,10 +16,16 @@ void serial_init_port(uint16_t port, uint32_t baud);
 void serial_putc(char c);
 
 // Write a null-terminated string
-void serial_puts(const char* str);
+void serial_puts(const char *str);
 
 // Write formatted output (simple printf-like)
-void serial_printf(const char* fmt, ...);
+void serial_printf(const char *fmt, ...);
 
 // Check if serial is ready to transmit
 bool serial_is_ready();
+
+// Check if serial data is available to read
+bool serial_has_char();
+
+// Read a single character from serial
+char serial_getc();

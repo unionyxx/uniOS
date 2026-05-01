@@ -1,48 +1,38 @@
 #pragma once
 #include <stdint.h>
+#include <uapi/fs.h>
+#include <uapi/syscalls.h>
 
-constexpr uint64_t SYS_READ     = 0;
-constexpr uint64_t SYS_WRITE    = 1;
-constexpr uint64_t SYS_OPEN     = 2;
-constexpr uint64_t SYS_CLOSE    = 3;
-constexpr uint64_t SYS_PIPE     = 22;
-constexpr uint64_t SYS_GETPID   = 39;
-constexpr uint64_t SYS_FORK     = 57;
-constexpr uint64_t SYS_EXEC     = 59;
-constexpr uint64_t SYS_EXIT     = 60;
-constexpr uint64_t SYS_WAIT4    = 61;
-constexpr uint64_t SYS_GETDENTS = 78;
-
-constexpr int STDIN_FD  = 0;
-constexpr int STDOUT_FD = 1;
-constexpr int STDERR_FD = 2;
-
-constexpr int MAX_OPEN_FILES = 32;
+constexpr int MAX_OPEN_FILES = 128;
 
 struct VNode;
+struct Process;
 
-struct FileDescriptor {
+struct FileDescriptor
+{
     bool used;
-    struct VNode* vnode;
+    uint8_t flags;
+    uint8_t reserved[6];
+    struct VNode *vnode;
     uint64_t offset;
     uint64_t dir_pos;
-    uint32_t last_cluster;
-    uint64_t last_offset;
 };
 
-constexpr int O_RDONLY = 0;
-constexpr int O_WRONLY = 1;
-constexpr int O_RDWR   = 2;
-constexpr int O_CREAT  = 64;
-constexpr int O_TRUNC  = 512;
-constexpr int O_APPEND = 1024;
+#define FD_FLAG_STORAGE_GUARDED_WRITE 0x01
+#define FD_FLAG_STORAGE_GUARDED 0x02
 
-struct SyscallFrame {
+struct SyscallFrame
+{
     uint64_t r15, r14, r13, r12, rbp, rbx;
+    uint64_t arg6, arg5, arg4; // r9, r8, r10
     uint64_t rip, cs, rflags, rsp, ss;
 };
 
-extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2, uint64_t arg3, SyscallFrame* frame);
+extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2, uint64_t arg3,
+                                    SyscallFrame *frame);
+extern "C" void signal_check(SyscallFrame *frame);
+extern "C" void signal_send_current(int sig);
 
-[[nodiscard]] int64_t kernel_exec(const char* path);
-[[nodiscard]] bool is_file_open(const char* filename);
+[[nodiscard]] int64_t kernel_exec(const char *path);
+[[nodiscard]] bool is_file_open(const char *filename);
+void shm_cleanup_process(struct Process *proc);

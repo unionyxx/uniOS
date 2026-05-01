@@ -1,0 +1,66 @@
+name: uniOS CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          clang \
+          clang-format \
+          clang-tidy \
+          cppcheck \
+          lld \
+          llvm \
+          nasm \
+          ovmf \
+          qemu-system-x86
+        python -m pip install --upgrade pip
+        python -m pip install 'meson>=1.4.0' ninja pillow cairosvg
+
+    - name: Show tool versions
+      run: |
+        meson --version
+        ninja --version
+        clang --version
+        ld.lld --version
+        lld-link --version
+        nasm --version
+        qemu-system-x86_64 --version
+
+    - name: Build uniOS (Debug)
+      run: |
+        meson setup build/debug --cross-file toolchains/llvm.ini --buildtype debug
+        meson compile -C build/debug boot-disk iso
+        meson test -C build/debug --suite smoke --print-errorlogs
+
+    - name: Build uniOS (Release)
+      run: |
+        meson setup build/release --cross-file toolchains/llvm.ini --buildtype release
+        meson compile -C build/release boot-disk iso
+
+    - name: Lint (cppcheck)
+      run: meson compile -C build/debug lint || true
+
+    - name: Format Check
+      run: |
+        meson compile -C build/debug format
+        git diff --exit-code

@@ -1,9 +1,8 @@
 #pragma once
-#include <stdint.h>
-#include <stdbool.h>
-
 #include <drivers/bus/pci/pci.h>
 #include <kernel/mm/vmm.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 // NAM registers.
 #define AC97_NAM_RESET 0x00
@@ -47,24 +46,27 @@
 #define AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE 0x8000
 #define AC97_BUFFER_ENTRY_COUNT 32
 
-struct Ac97BufferEntry {
-    uint32_t buffer; // Physical address (!) to sound data in memory.
-    uint16_t samples; // Number of samples in this buffer.
+struct Ac97BufferEntry
+{
+    uint32_t buffer;   // Physical address (!) to sound data in memory.
+    uint16_t samples;  // Number of samples in this buffer.
     uint16_t reserved; // Not needed right now. We don't use interrupts.
 };
 
-struct Ac97Device {
+struct Ac97Device
+{
     // Sound card data.
-    uint64_t nam; // Native Audio Mixer base address.
+    uint64_t nam;  // Native Audio Mixer base address.
     uint64_t nabm; // Native Audio Bus Master base address.
 
     uint16_t capabilities; // Extended capabilities of sound card.
 
     // Flags.
     bool is_playing; // Is playing something?
-    bool is_paused; // Is paused?
+    bool is_paused;  // Is paused?
 
     bool free_sound_data_on_stop; // Free sound data memory when playback is finished?
+    void *buffer_to_free;         // Base pointer to free (differs from sound_data if header is present)
 
     bool is_initialized; // Is sound card initialized and ready to play?
 
@@ -72,16 +74,18 @@ struct Ac97Device {
 
     // Memory stuff.
     DMAAllocation buffer_entries_dma; // DMA allocation for buffer entries.
-    DMAAllocation sound_buffers_dma; // DMA allocation for sound buffers.
+    DMAAllocation sound_buffers_dma;  // DMA allocation for sound buffers.
 
-    Ac97BufferEntry* buffer_entries; // Buffer entries array (should be virtual address of DMA allocation for buffer entries)
+    Ac97BufferEntry
+        *buffer_entries; // Buffer entries array (should be virtual address of DMA allocation for buffer entries)
 
-    uint8_t* sound_data; // Byte array of entire PCM sound data (virtual address from filesystem!).
+    uint8_t *sound_data;      // Byte array of entire PCM sound data (virtual address from filesystem!).
     uint32_t sound_data_size; // Size of entire PCM sound data.
 
     // Buffer refilling.
     uint32_t current_buffer_entry; // Current buffer entry for refilling.
-    uint32_t buffer_entry_offset; // Buffers offset (how many times sound card went back to first buffer since playback start).
+    uint32_t buffer_entry_offset;  // Buffers offset (how many times sound card went back to first buffer since playback
+                                   // start).
 
     uint32_t played_bytes; // Total amount of played bytes (out of sound_data_size).
 };
@@ -100,10 +104,10 @@ uint8_t ac97_get_volume();
 void ac97_set_channels(uint8_t channels);
 void ac97_set_sample_rate(uint16_t sample_rate);
 
-void ac97_play_wav_file(const char* filename);
-void ac97_play_pcm_file(const char* filename);
+void ac97_play_wav_file(const char *filename);
+void ac97_play_pcm_file(const char *filename);
 
-void ac97_play(uint8_t* data, uint32_t size);
+void ac97_play(uint8_t *data, uint32_t size);
 void ac97_resume();
 void ac97_pause();
 void ac97_stop();

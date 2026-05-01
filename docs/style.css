@@ -2,26 +2,35 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+    transition: background-color 0.5s ease-in-out, 
+                color 0.5s ease-in-out, 
+                border-color 0.5s ease-in-out, 
+                opacity 0.5s ease-in-out, 
+                backdrop-filter 0.5s ease-in-out, 
+                box-shadow 0.5s ease-in-out, 
+                transform 0.5s ease-in-out;
 }
 
 :root {
     --bg: #ffffff;
-    --card: #ffffff;
-    --text: #111111;
-    --muted: #666666;
-    --accent: #000000;
-    --border: #e5e5e5;
-    --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
+    --text: #1d1d1f;
+    --muted: #86868b;
+    --link: #0066cc;
+    --border: #d2d2d7;
+    --nav-bg: rgba(255, 255, 255, 0.8);
+    --surface: #f5f5f7;
+    --surface-border: #e5e5ea;
 }
 
 [data-theme="dark"] {
-    --bg: #0a0a0a;
-    --card: #111111;
-    --text: #ededed;
-    --muted: #888888;
-    --accent: #ffffff;
-    --border: #222222;
+    --bg: #000000;
+    --text: #f5f5f7;
+    --muted: #86868b;
+    --link: #2997ff;
+    --border: #333336;
+    --nav-bg: rgba(0, 0, 0, 0.8);
+    --surface: #111111;
+    --surface-border: #222222;
 }
 
 html {
@@ -29,29 +38,41 @@ html {
 }
 
 body {
-    font-family: var(--font-main);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: var(--bg);
     color: var(--text);
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.015em;
 }
 
 .wrapper {
-    max-width: 900px;
+    max-width: 980px;
     margin: 0 auto;
     padding: 0 2rem;
 }
 
-/* Navigation */
 nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--nav-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(134, 134, 139, 0.15);
+}
+
+.nav-content {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 1rem 2rem;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 3rem 0;
 }
 
 .logo {
-    font-weight: 700;
+    font-weight: 600;
     font-size: 1.1rem;
     letter-spacing: -0.02em;
 }
@@ -65,148 +86,211 @@ nav {
 .nav-links a {
     color: var(--text);
     text-decoration: none;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     font-weight: 500;
 }
 
-.btn-github {
+.nav-links a:hover {
+    color: var(--muted);
+}
+
+.nav-github {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.4rem 0.8rem;
-    border-radius: 6px;
-    background: var(--text);
-    color: var(--bg) !important;
-    font-size: 0.85rem !important;
 }
 
-/* Hero */
 .hero {
-    padding: 4rem 0 6rem;
+    padding: 7rem 0 5rem;
+    text-align: center;
 }
 
 .hero h1 {
-    font-size: 3rem;
-    font-weight: 800;
+    font-size: clamp(3rem, 6vw, 4.5rem);
+    font-weight: 700;
     letter-spacing: -0.04em;
-    line-height: 1.1;
-    margin-bottom: 1.5rem;
+    line-height: 1.05;
+    margin-bottom: 1.25rem;
 }
 
 .hero p {
     font-size: 1.25rem;
     color: var(--muted);
-    max-width: 600px;
-    margin-bottom: 3rem;
+    max-width: 540px;
+    margin: 0 auto 2.5rem;
+    font-weight: 400;
+    line-height: 1.45;
+    text-wrap: balance;
 }
 
 .hero-actions {
     display: flex;
-    gap: 1rem;
+    gap: 2rem;
     align-items: center;
-}
-
-.btn {
-    padding: 0.6rem 1.2rem;
-    border-radius: 6px;
-    font-weight: 600;
-    font-size: 0.95rem;
-    text-decoration: none;
-    transition: opacity 0.2s;
-}
-
-.btn:hover {
-    opacity: 0.8;
+    justify-content: center;
 }
 
 .btn-primary {
     background: var(--text);
     color: var(--bg);
+    padding: 0.8rem 1.75rem;
+    border-radius: 980px;
+    font-weight: 500;
+    font-size: 1rem;
+    text-decoration: none;
 }
 
-.btn-secondary {
-    border: 1px solid var(--border);
+.btn-primary:hover {
+    opacity: 0.9;
+    transform: scale(0.98);
+}
+
+.btn-link {
+    color: var(--link);
+    text-decoration: none;
+    font-size: 1.05rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.btn-link:hover .chevron {
+    transform: translateX(3px);
+}
+
+.chevron {
+    font-size: 1.2rem;
+}
+
+.showcase {
+    max-width: 1040px;
+    margin: 0 auto 6rem;
+    padding: 0 2rem;
+}
+
+.screenshot-container {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background-color: var(--surface);
+    border: 1px solid var(--surface-border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 24px 48px rgba(0,0,0,0.2);
+}
+
+.desktop-shot {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.desktop-shot.light {
+    opacity: 0;
+    z-index: 2;
+}
+
+.desktop-shot.dark {
+    opacity: 0;
+    z-index: 1;
+}
+
+[data-theme="light"] .desktop-shot.light {
+    opacity: 1;
+}
+
+[data-theme="dark"] .desktop-shot.dark {
+    opacity: 1;
+}
+
+.theme-controls {
+    display: flex;
+    justify-content: center;
+    margin-top: 2rem;
+    gap: 1rem;
+}
+
+.theme-switch {
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    padding: 0.25rem;
+    border-radius: 32px;
+    display: flex;
+    position: relative;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.theme-btn {
+    padding: 0.5rem 2rem;
+    border-radius: 28px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    font-family: inherit;
+    color: var(--muted);
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    z-index: 2;
+}
+
+.theme-btn.active {
     color: var(--text);
 }
 
-/* Terminal Section */
-.terminal-container {
-    margin-bottom: 8rem;
+.theme-switch::before {
+    content: '';
+    position: absolute;
+    top: 0.25rem;
+    left: 0.25rem;
+    width: calc(50% - 0.25rem);
+    height: calc(100% - 0.5rem);
+    background: var(--bg);
+    border-radius: 28px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    z-index: 1;
 }
 
-.terminal-window {
-    background: #111111;
-    border-radius: 8px;
-    overflow: hidden;
-    border: 1px solid #333;
-    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+[data-theme="dark"] .theme-switch::before {
+    transform: translateX(100%);
 }
 
-.terminal-header {
-    background: #1a1a1a;
-    padding: 0.75rem 1rem;
-    display: flex;
-    gap: 6px;
-}
-
-.terminal-header span {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #333;
-}
-
-.terminal-content {
-    padding: 1.5rem;
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    color: #aaa;
-    min-height: 280px;
-}
-
-.prompt { color: #fff; }
-.cursor {
-    display: inline-block;
-    width: 8px;
-    height: 15px;
-    background: #fff;
-    vertical-align: middle;
-    animation: blink 1s step-start infinite;
-}
-
-@keyframes blink { 50% { opacity: 0; } }
-
-/* Features Section */
 .section-title {
-    font-size: 0.85rem;
-    font-weight: 700;
+    font-size: 0.75rem;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
     color: var(--muted);
-    margin-bottom: 3rem;
+    margin-bottom: 2rem;
+    text-align: left;
 }
 
-.feature-list {
+.feature-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4rem;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 3.5rem 4rem;
     margin-bottom: 8rem;
 }
 
 .feature-item h3 {
-    font-size: 1.1rem;
-    font-weight: 700;
-    margin-bottom: 0.75rem;
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    letter-spacing: -0.01em;
+    color: var(--text);
 }
 
 .feature-item p {
     color: var(--muted);
-    font-size: 0.95rem;
+    font-size: 1rem;
+    line-height: 1.5;
 }
 
-/* Footer */
 footer {
-    padding: 4rem 0;
+    padding: 3rem 0;
     border-top: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
@@ -215,17 +299,23 @@ footer {
     font-size: 0.85rem;
 }
 
+.footer-logo {
+    font-weight: 600;
+    color: var(--text);
+}
+
 @media (max-width: 768px) {
-    .feature-list {
+    .feature-grid {
         grid-template-columns: 1fr;
         gap: 2.5rem;
     }
-    
-    .hero h1 {
-        font-size: 2.25rem;
+
+    .hero {
+        padding: 5rem 0 3rem;
     }
-    
-    nav {
-        padding: 2rem 0;
+
+    .hero-actions {
+        flex-direction: column;
+        gap: 1.5rem;
     }
 }

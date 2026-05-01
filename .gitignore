@@ -1,8 +1,10 @@
-# Build Directory
+# Build directories
 build/
+clean/
 iso_root/
+out/
 
-# Build Artifacts (Legacy/Root)
+# Build Artifacts
 *.o
 *.d
 *.map
@@ -11,21 +13,20 @@ iso_root/
 *.img
 *.bin
 
-# Logs and Errors
-build_log.txt
-build_error.txt
-
 # OS Specific
 .DS_Store
 Thumbs.db
 
 # Editor/IDE
+.cache/
 .vscode/
 .idea/
 *.swp
 *.swo
+__pycache__/
+env/
+NUL.exe
 
-# Limine
-limine/
-limine-deploy-linux-x86_64
-limine-version
+# Generated runtime assets
+rootfs/bin/
+rootfs/usr/share/wallpapers/default.uowp

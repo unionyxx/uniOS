@@ -16,7 +16,6 @@ extern exception_handler
         push %1             ; Push interrupt number
         jmp isr_common_stub
 %endmacro
-
 isr_common_stub:
     push rax
     push rbx
@@ -34,8 +33,37 @@ isr_common_stub:
     push r14
     push r15
 
+    ; Robust swapgs logic:
+    ; 1. If CS was RPL 3, we definitely need swapgs.
+    ; 2. If CS was RPL 0, we might still need swapgs if we were in syscall transition.
+    test qword [rsp + 144], 3
+    jnz .do_swap
+
+    ; Paranoid check: is GS base a user address?
+    ; We can check IA32_GS_BASE MSR (0xC0000101)
+    mov ecx, 0xC0000101
+    rdmsr
+    test edx, edx
+    js .no_swap ; If high bit of EDX (bit 63 of GS_BASE) is 1, it's kernel
+
+.do_swap:
+    swapgs
+    push qword 1 ; Flag that we swapped
+    jmp .handler
+.no_swap:
+    push qword 0 ; Flag that we didn't swap
+
+.handler:
     mov rdi, rsp
+    add rdi, 8   ; Adjust RDI to point to the saved registers (skip the flag)
     call exception_handler
+
+    ; Restore GS if we swapped it
+    pop rax
+    cmp rax, 1
+    jne .no_swap_back
+    swapgs
+.no_swap_back:
 
     pop r15
     pop r14
@@ -118,8 +146,33 @@ irq_common_stub:
     push r14
     push r15
 
+    ; Robust swapgs logic
+    test qword [rsp + 144], 3
+    jnz .do_swap
+
+    mov ecx, 0xC0000101
+    rdmsr
+    test edx, edx
+    js .no_swap
+
+.do_swap:
+    swapgs
+    push qword 1
+    jmp .handler
+.no_swap:
+    push qword 0
+
+.handler:
     mov rdi, rsp
+    add rdi, 8
     call irq_handler
+
+    ; Restore GS if we swapped it
+    pop rax
+    cmp rax, 1
+    jne .no_swap_back
+    swapgs
+.no_swap_back:
 
     pop r15
     pop r14
@@ -140,24 +193,14 @@ irq_common_stub:
     add rsp, 16
     iretq
 
-; Define IRQs (IRQ0-15 -> vectors 32-47)
-IRQ 0, 32
-IRQ 1, 33
-IRQ 2, 34
-IRQ 3, 35
-IRQ 4, 36
-IRQ 5, 37
-IRQ 6, 38
-IRQ 7, 39
-IRQ 8, 40
-IRQ 9, 41
-IRQ 10, 42
-IRQ 11, 43
-IRQ 12, 44
-IRQ 13, 45
-IRQ 14, 46
-IRQ 15, 47
+; Define hardware interrupt stubs for vectors 32-255.
+%assign i 0
+%rep 224
+IRQ i, (32 + i)
+%assign i i + 1
+%endrep
 
+section .rodata
 global isr_stub_table
 isr_stub_table:
     dq isr0, isr1, isr2, isr3, isr4, isr5, isr6, isr7
@@ -167,8 +210,13 @@ isr_stub_table:
 
 global irq_stub_table
 irq_stub_table:
-    dq irq0, irq1, irq2, irq3, irq4, irq5, irq6, irq7
-    dq irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
+%assign i 0
+%rep 224
+    dq irq%+i
+%assign i i + 1
+%endrep
+
+section .text
 
 global load_idt
 load_idt:
@@ -180,13 +228,20 @@ extern syscall_handler
 
 global isr128
 isr128:
+    test qword [rsp + 8], 3 ; Check if CS requested Ring 3
+    jz .no_swap
+    swapgs                  ; Only swap if coming from userspace
+.no_swap:
+    push r10 ; arg4
+    push r8  ; arg5
+    push r9  ; arg6
     push rbx
     push rbp
     push r12
     push r13
     push r14
     push r15
-    
+
     mov r10, rdi
     mov r11, rsi
     mov rdi, rax
@@ -194,19 +249,42 @@ isr128:
     mov rcx, rdx
     mov rdx, r11
     mov r8, rsp
-    
+
     call syscall_handler
-    
+
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbp
     pop rbx
+    add rsp, 24 ; Skip arg6, 5, 4
+
+    test qword [rsp + 8], 3
+    jz .no_swap_back
+    swapgs
+
+    ; Clear volatile registers to prevent kernel state leakage
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+
+.no_swap_back:
     iretq
+
+extern scheduler_unlock_after_switch
 
 global fork_ret
 fork_ret:
+    sub rsp, 8 ; Align for call
+    call scheduler_unlock_after_switch
+    add rsp, 8
+
     mov rax, 0      ; Child returns 0
     pop r15
     pop r14
@@ -214,6 +292,19 @@ fork_ret:
     pop r12
     pop rbp
     pop rbx
-    iretq
 
+    add rsp, 24 ; Skip arg6, 5, 4 (newly added to SyscallFrame)
+
+    ; Clear volatile registers to prevent kernel state leakage
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+
+    swapgs          ; Switch to user GS
+    iretq
 

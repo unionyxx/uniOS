@@ -10,6 +10,7 @@ PHDRS
 {
     text    PT_LOAD    FLAGS((1 << 0) | (1 << 2)) ; /* Execute + Read */
     rodata  PT_LOAD    FLAGS((1 << 2)) ;            /* Read only */
+    requests PT_LOAD   FLAGS((1 << 2)) ;            /* Read only */
     data    PT_LOAD    FLAGS((1 << 1) | (1 << 2)) ; /* Write + Read */
 }
 
@@ -18,35 +19,61 @@ SECTIONS
     /* We want to be loaded in the high half of memory */
     . = 0xffffffff80000000;
 
-    .text : {
+    .text ALIGN(4096) : {
+        __text_start = .;
         *(.text .text.*)
+        __text_end = .;
     } :text
 
-    . = ALIGN(0x1000);
-
-    .rodata : {
+    .rodata ALIGN(4096) : {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        __rodata_end = .;
     } :rodata
 
-    . = ALIGN(0x1000);
-
-    .data : {
-        *(.data .data.*)
-        
-        /* C++ global constructors */
-        __init_array_start = .;
-        KEEP(*(.init_array .init_array.*))
-        __init_array_end = .;
-        
+    .requests ALIGN(4096) : {
+        __requests_start = .;
         KEEP(*(.requests_start))
         KEEP(*(.requests))
         KEEP(*(.requests_end))
+        __requests_end = .;
+    } :requests
+
+    /* Add a full page of padding to guarantee separation from writable data */
+    . = ALIGN(4096);
+    . += 4096;
+
+    .data ALIGN(4096) : {
+        __data_start = .;
+        *(.data .data.*)
+        *(.got .got.*)
+        *(.data.rel.ro .data.rel.ro.*)
+
+        /* C++ global constructors */
+        . = ALIGN(8);
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        . = ALIGN(8);
+        __init_array_end = .;
+
+        /* Kernel Unit Tests */
+        . = ALIGN(16);
+        __ktests_start = .;
+        KEEP(*(.ktests))
+        __ktests_end = .;
+
+        __data_end = .;
     } :data
 
-    .bss : {
+    .bss ALIGN(4096) : {
+        __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+        __bss_end = .;
     } :data
+
+    . = ALIGN(4096);
+    __kernel_end = .;
 
     /* Discard .note.* and .eh_frame since they may cause issues on some hosts. */
     /DISCARD/ : {

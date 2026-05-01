@@ -8,7 +8,7 @@ section .text
 ; enter_user_mode(uint64_t entry_point, uint64_t user_stack)
 ; =============================================================================
 ; Transitions from Ring 0 to Ring 3 by building an iretq stack frame
-; 
+;
 ; Parameters:
 ;   RDI = user entry point (code address to jump to)
 ;   RSI = user stack pointer (top of user stack)
@@ -19,54 +19,142 @@ global enter_user_mode
 enter_user_mode:
     ; Disable interrupts during transition
     cli
-    
-    ; Set up user data segment selectors (0x20 | 3 = 0x23)
-    mov ax, 0x23        ; User data selector
+
+    ; Set up user data segment selectors (0x18 | 3 = 0x1B)
+    ; New GDT order: 3=Data, 4=Code
+    mov ax, 0x1B        ; User data selector
     mov ds, ax
     mov es, ax
     mov fs, ax
-    
-    ; Note: GS is handled specially via swapgs
-    ; We don't load GS here - swapgs will do it
-    
+
     ; Build iretq stack frame (in reverse order):
-    ; [SS]     - Stack segment selector
-    ; [RSP]    - User stack pointer
-    ; [RFLAGS] - Flags (with IF=1 for interrupts)
-    ; [CS]     - Code segment selector
-    ; [RIP]    - User entry point
-    
-    push 0x23           ; SS (user data selector: GDT index 4 | RPL 3)
+    push 0x1B           ; SS (user data selector: GDT index 3 | RPL 3)
     push rsi            ; RSP (user stack pointer)
-    
-    ; Push RFLAGS with IF set (bit 9 = interrupts enabled)
-    ; Also set bit 1 which is always 1 in x86 RFLAGS
+
     pushfq
     pop rax
     or rax, 0x202       ; Set IF and reserved bit 1
     push rax            ; RFLAGS
-    
-    push 0x1B           ; CS (user code selector: GDT index 3 | RPL 3)
+
+    push 0x23           ; CS (user code selector: GDT index 4 | RPL 3)
     push rdi            ; RIP (entry point)
-    
-    ; TODO: swapgs requires proper GS base initialization
-    ; For now, skip it - user code doesn't need GS
-    ; swapgs
-    
+
+    ; Move kernel GS base to KERNEL_GS_BASE MSR and clear active GS
+    swapgs
+
+    ; Clear volatile registers so we don't leak kernel state
+    xor eax, eax
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+
     ; Transition to Ring 3
     iretq
 
 
 ; =============================================================================
-; return_to_kernel()
+; syscall_entry()
 ; =============================================================================
-; Called when a user process exits (via exception or explicit return)
-; This is a placeholder - actual return is via syscall or exception
+; Entry point for the 'syscall' instruction
+;
+; RCX = User RIP (saved by CPU)
+; R11 = User RFLAGS (saved by CPU)
+; RAX = Syscall number
+; RDI, RSI, RDX, R10, R8, R9 = Arguments
 ; =============================================================================
-global return_to_kernel
-return_to_kernel:
-    ; This shouldn't be called directly
-    ; User programs should use SYS_EXIT syscall
+extern syscall_handler
+global syscall_entry
+
+syscall_entry:
+    ; 1. Swap to kernel GS base
+    swapgs
+
+    ; 2. Save user stack and switch to kernel stack
+    ; [gs:0] is kernel_stack (TSS.RSP0 equivalent)
+    ; [gs:8] is user_stack scratch area
+    mov [gs:8], rsp
+    mov rsp, [gs:0]
+
+    ; 3. Build a frame on kernel stack matching SyscallFrame struct
+    ; We push 14 values total (5 fixed + 3 extra args + 6 GP regs) = 112 bytes
+    ; 112 is a multiple of 16, so alignment is maintained.
+
+    push qword 0x1B     ; SS (User Data)
+    push qword [gs:8]   ; User RSP
+    push r11            ; RFLAGS (saved by CPU)
+    push qword 0x23     ; CS (User Code)
+    push rcx            ; User RIP (saved by CPU)
+
+    push r10            ; Arg 4
+    push r8             ; Arg 5
+    push r9             ; Arg 6
+
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+
+    ; 4. Enable interrupts (they were masked by SFMASK)
+    ; This allows timer/mouse IRQs to fire during long syscalls (like blit)
+    sti
+
+    ; 5. Call C++ handler with System V ABI arguments
+    mov r8, rsp     ; 5th arg: SyscallFrame* (current RSP)
+    mov rcx, rdx    ; 4th arg: a3 (from RDX in Syscall ABI)
+    mov rdx, rsi    ; 3rd arg: a2 (from RSI)
+    mov rsi, rdi    ; 2nd arg: a1 (from RDI)
+    mov rdi, rax    ; 1st arg: syscall_num (from RAX)
+
+    call syscall_handler
+
+    ; RAX now contains the return value
+
+    ; Signal check
+    push rax            ; Save return value
+    mov rdi, rsp
+    add rdi, 8          ; RDI = SyscallFrame* (it's above the saved RAX)
+    extern signal_check
+    call signal_check
+    pop rax             ; Restore return value
+
+    ; 6. Disable interrupts before stack restore and sysret
     cli
-    hlt
-    jmp return_to_kernel
+
+    ; 7. Restore state
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+
+    add rsp, 24 ; Skip r9, r8, r10 (arg6, arg5, arg4)
+
+    pop rcx    ; Restore user RIP for sysret
+    add rsp, 8 ; Skip CS
+    pop r11    ; Restore user RFLAGS for sysret
+    pop qword [gs:8] ; Pop user RSP directly into scratch storage, PRESERVING r12!
+    add rsp, 8 ; Skip SS
+
+    cli             ; Disable interrupts before switching to user RSP
+    mov rsp, [gs:8]
+
+    ; Clear volatile registers to prevent kernel state leakage
+    ; RCX and R11 are already holding user RIP and RFLAGS for sysret
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+
+    ; 7. Final swap back to user GS and return
+    swapgs
+    o64 sysret

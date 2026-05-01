@@ -1,21 +1,24 @@
 #pragma once
 #include <stdint.h>
 
-struct gdt_descriptor {
+struct gdt_descriptor
+{
     uint16_t size;
     uint64_t offset;
 } __attribute__((packed));
 
-struct gdt_entry {
+struct gdt_entry
+{
     uint16_t limit_low;
     uint16_t base_low;
-    uint8_t  base_middle;
-    uint8_t  access;
-    uint8_t  granularity;
-    uint8_t  base_high;
+    uint8_t base_middle;
+    uint8_t access;
+    uint8_t granularity;
+    uint8_t base_high;
 } __attribute__((packed));
 
-struct tss_entry {
+struct tss_entry
+{
     uint32_t reserved1;
     uint64_t rsp0;
     uint64_t rsp1;

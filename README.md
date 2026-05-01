@@ -1,208 +1,109 @@
-<p align="center">
-  <img src="docs/screenshot.png" alt="uniOS Screenshot" width="600">
-</p>
+# uniOS
 
-<h1 align="center">uniOS</h1>
+`uniOS` is a custom x86-64 operating system written in freestanding C++20. It boots through the in-tree Meridian UEFI bootloader and starts a native desktop userspace session.
 
-<p align="center">
-  A scratch-built x86-64 operating system kernel written in C++20.
-  <br>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
-  <img src="https://img.shields.io/badge/platform-x86__64-lightgrey.svg?style=flat-square" alt="Platform">
-  <img src="https://img.shields.io/badge/language-C%2B%2B20-orange.svg?style=flat-square" alt="Language">
-</p>
+![uniOS](docs/assets/site/screenshot_dark.jpg)
 
----
+## Current System
 
-**uniOS** is a hobby operating system built from scratch. It features a working shell with command piping, TCP/IP networking, USB support, and runs on real x86-64 hardware.
+- **Bootloader**: Meridian, an in-tree x86-64 UEFI loader.
+- **Boot handoff**: Repo-owned `BootInfo` structure passed from Meridian to the kernel.
+- **Build system**: Meson + LLVM using `toolchains/llvm.ini`.
+- **Default boot image**: `boot.img`, a raw disk image with an EFI system partition and a writable `UNI_DATA` FAT32 partition.
+- **Desktop session**: `/bin/init.elf` launches the window manager, menubar, dock, and userspace applications.
+- **Userspace**: Native ELF programs under `src/usr/`, with libc wrappers, a GUI library, shell, terminal, and desktop apps.
+- **Filesystems**: Boot content from `unifs.img`; persistent data from FAT32 mounted at `/data` when available.
+- **Drivers and subsystems**: Paging, heap allocation, preemptive scheduling, syscalls, VFS, PCI, ACPI/APIC, PS/2 input, USB/xHCI, USB HID, USB mass storage, e1000, RTL8139, IPv4, TCP, UDP, DHCP, DNS, AC97, HDA, and framebuffer display output.
 
----
+## Repository Layout
 
-## Features
+- `src/bootloader/`: Meridian UEFI bootloader.
+- `src/kernel/`, `src/mm/`, `src/fs/`, `src/net/`, `src/drivers/`: Kernel and subsystem code.
+- `src/usr/`: Userspace runtime, libc subset, GUI library, shell, window manager, desktop services, and apps.
+- `include/`: Kernel, driver, boot, and UAPI headers.
+- `rootfs/`: Authored runtime files and config templates staged into `unifs.img`.
+- `appicons/`, `assets/`, `cursors/`: Source assets used by the asset tools.
+- `docs/`: Project site.
+- `docs/reference/`: Architecture, shell scripting, and asset format notes.
+- `tools/`: Image, filesystem, rootfs staging, asset conversion, and QEMU helper scripts.
+- `toolchains/`: Meson cross-file configuration.
 
-- **Modular windowing system (GUI)** — Desktop environment with draggable windows, taskbar, and icons. Now moved to a dedicated subsystem with a new **8x16 premium terminal font**.
+## Runtime Asset Formats
 
-- **SSE-Accelerated Renderer** — High-performance graphics primitives (fills, gradients, copies) utilizing SSE2 SIMD instructions. Features **dirty rectangle tracking** and double buffering.
+uniOS uses generated binary asset formats in the runtime image:
 
-- **Initial FAT32 Support** — Early infrastructure for **FAT32** filesystem parsing (boot sectors and block device abstraction).
+- `.uoic`: Icon packages.
+- `.uocu`: Cursor packages.
+- `.uof`: Font files.
+- `.uowp`: Wallpaper packages.
 
-- **C++20 Kernel** — Built with `-fno-exceptions` and `-fno-rtti`. Uses `kstring::` utilities instead of `std::` to avoid libc dependencies.
+The default wallpaper package is generated from `assets/wallpapers/wp_light.svg` and `assets/wallpapers/wp_dark.svg`, staged as `/usr/share/wallpapers/default.uowp`.
 
-- **Bitmap PMM & 4-Level Paging** — Physical memory tracked via dynamic bitmap allocator. Recursive 4-level paging for virtual memory. Support for systems with any amount of RAM.
+## Build Requirements
 
-- **Preemptive Multitasking** — 1000Hz timer-based scheduling. 16KB kernel stacks per process. Features **O(1) task insertion** for improved scalability.
-
-- **Heap Page Coalescing** — Bucket-based allocator with automatic page coalescing. Fully freed pages are returned to the PMM to prevent memory fragmentation.
-
-- **Scratch-built TCP/IP Stack** — Hand-written Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, and DNS.
-
-- **Interrupt-driven USB Stack** — USB 3.0 (xHCI) support with initial **USB Hub** detection. Switched to efficient interrupt-driven event handling.
-
-- **Audio Stack** — Dual support for **Intel HD Audio (HDA)** and **AC97**. Play WAV/PCM files directly from the shell with per-channel volume control.
-
-- **MSI-X Support** — Support for Message Signaled Interrupts (MSI-X), providing significantly lower interrupt latency compared to traditional I/O APIC.
-
-- **Modern Debug System** — Overhauled logging with module-based filtering and severity levels.
-
-## Known Limitations
-
-> [!WARNING]
-> These are architectural constraints, not bugs.
-
-| Limitation | Details |
-|------------|---------|
-| **Experimental user-mode** | Basic syscall interface (exit, read, write). No memory protection between processes yet. |
-| **USB polling** | HID devices polled on timer, not via hardware interrupts. |
-| **QEMU-first** | Tested primarily on QEMU. Real hardware may have driver issues. |
-
-## Getting Started
-
-### Prerequisites
-
-- `gcc` (cross-compiler for `x86_64-elf`)
+- `meson` and `ninja`
+- `clang`, `clang++`, `ld.lld`, `llvm-ar`, and `llvm-strip`
 - `nasm`
-- `xorriso`
-- `qemu-system-x86_64`
-- `python3` (for uniFS image generation)
+- `qemu-system-x86_64` and OVMF UEFI firmware
+- `python3` with `Pillow` and `CairoSVG` packages
 
-### Build & Run
+### Configure and Build
+
+**Release image:**
+```bash
+meson setup build/release --cross-file toolchains/llvm.ini --buildtype release
+meson compile -C build/release boot-disk iso
+```
+
+**Debug image:**
+```bash
+meson setup build/debug --cross-file toolchains/llvm.ini --buildtype debug
+meson compile -C build/debug boot-disk iso
+meson test -C build/debug --suite smoke --print-errorlogs
+```
+
+### Common Run Targets
 
 ```bash
-# Clone the repository
-git clone https://github.com/unionyxx/uniOS.git
-cd uniOS
-
-# Build Limine (one-time setup)
-git clone https://github.com/limine-bootloader/limine.git --branch=v8.x-binary --depth=1
-make -C limine
-
-# Build and run
-make run
-
-# Or with networking
-make run-net
+meson compile -C build/release run          # Standard QEMU run
+meson compile -C build/release run-serial   # Run with serial console
+meson compile -C build/release run-headless # Run without VGA output
+meson compile -C build/release run-usb      # Run with USB storage emulation
+meson compile -C build/release run-qemu-net # Run with network bridge
+meson compile -C build/release run-qemu-full # Run with all features
 ```
 
-### Make Targets
+### Developer Checks
 
-| Target | Description |
-|--------|-------------|
-| `make` | Build release (optimized, no debug output) |
-| `make debug` | Build with `DEBUG_*` logging enabled |
-| `make run` | Run in QEMU |
-| `make run-net` | Run with e1000 networking |
-| `make run-usb` | Run with xHCI USB (keyboard/mouse) |
-| `make run-sound` | Run with AC97 sound card |
-| `make run-serial` | Run with serial output to stdio |
-| `make run-gdb` | Run with GDB stub on `localhost:1234` |
-| `make clean` | Remove build artifacts |
-
-> [!TIP]
-> Use `make run-gdb` to attach a debugger to QEMU on localhost:1234.
-
-## Shell Commands
-
-| Category | Command | Description |
-|----------|---------|-------------|
-| **Files** | `ls` | List files with type and size |
-| | `cat <file>` | Display text file contents |
-| | `stat <file>` | Show file information |
-| | `hexdump <file>` | Hex dump of file |
-| | `touch <file>` | Create empty file |
-| | `rm <file>` | Delete file |
-| | `write <file> <text>` | Write text to file |
-| | `append <file> <text>` | Append text to file |
-| | `df` | Show filesystem usage |
-| **Text** | `grep <pattern> [file]` | Search for pattern |
-| | `wc [file]` | Count lines, words, characters |
-| | `head [n] [file]` | Show first N lines (default 10) |
-| | `tail [n] [file]` | Show last N lines (default 10) |
-| | `sort [file]` | Sort lines alphabetically |
-| | `uniq [file]` | Remove consecutive duplicates |
-| | `rev [file]` | Reverse each line |
-| | `tac [file]` | Reverse line order |
-| | `nl [file]` | Number lines |
-| | `tr <from> <to>` | Translate characters |
-| | `echo <text>` | Print text |
-| **System** | `mem` | Show memory usage |
-| | `uptime` | Show system uptime |
-| | `date` | Show current date/time |
-| | `cpuinfo` | Show CPU information |
-| | `lspci` | List PCI devices |
-| | `version` | Show kernel version |
-| | `uname` | Show system name |
-| | `clear` | Clear screen |
-| | `reboot` | Restart system |
-| | `poweroff` | Shutdown system |
-| **Network** | `ifconfig` | Show network configuration |
-| | `dhcp` | Request IP via DHCP |
-| | `ping <host>` | Ping an IP or hostname |
-| **Audio** | `audio status` | Show audio device status |
-| | `audio play <file>` | Play WAV file |
-| | `audio pause` | Pause playback |
-| | `audio resume` | Resume playback |
-| | `audio stop` | Stop playback |
-| | `audio volume [0-100]` | Get/set volume |
-| **Scripting** | `run <file>` | Execute script file |
-| | `source <file>` | Execute in current context |
-| | `set NAME=value` | Set variable |
-| | `unset NAME` | Unset variable |
-| | `env` | List all variables |
-| | `test <expr>` | Evaluate expression |
-| | `expr <math>` | Arithmetic expression |
-| | `read <var>` | Read user input |
-| | `sleep <ms>` | Sleep milliseconds |
-| | `time <cmd>` | Time command execution |
-| | `true` / `false` | Exit status 0 / 1 |
-
-> [!NOTE]
-> Commands can be piped: `ls | grep elf | wc`
-> 
-> The shell parser splits by spaces. Pipes use a fixed 4KB buffer.
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| <kbd>Tab</kbd> | Command/filename completion |
-| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Move to start of line |
-| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Move to end of line |
-| <kbd>Ctrl</kbd>+<kbd>U</kbd> | Cut text before cursor |
-| <kbd>Ctrl</kbd>+<kbd>K</kbd> | Cut text after cursor |
-| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Delete word before cursor |
-| <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Paste (yank) |
-| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy selection / cancel line |
-| <kbd>Ctrl</kbd>+<kbd>L</kbd> | Clear screen |
-| <kbd>↑</kbd>/<kbd>↓</kbd> | Navigate command history |
-| <kbd>←</kbd>/<kbd>→</kbd> | Move cursor |
-| <kbd>Home</kbd>/<kbd>End</kbd> | Jump to start/end |
-| <kbd>Delete</kbd> | Delete character at cursor |
-| <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> | Select text |
-
-## Project Structure
-
-```text
-├── include/      # Header files
-│   ├── boot/     # Limine boot protocol
-│   ├── kernel/   # Kernel core headers
-│   ├── drivers/  # Driver interfaces
-│   └── libk/     # Kernel library
-├── src/          # Source files
-│   ├── kernel/   # Core kernel logic
-│   │   ├── core/ # Entry (kmain), CPU, IRQ, GUI, Syscalls
-│   │   ├── sched/# Task scheduler
-│   │   ├── shell/# Command interpreter
-│   │   ├── sync/ # Mutex, Spinlock
-│   │   └── time/ # PIT Timer
-│   ├── arch/     # CPU/Arch specific code (x86_64)
-│   ├── mm/       # Memory management (PMM, VMM, Heap, VMA)
-│   ├── drivers/  # Hardware drivers (Net, USB, Audio, Video, PCI, ACPI)
-│   ├── fs/       # Filesystems (uniFS, FAT32, Block Dev)
-│   └── net/      # TCP/IP stack
-└── tools/        # Build and sync utilities
+```bash
+meson compile -C build/debug lint
+meson compile -C build/debug analyze
 ```
+
+## Boot Images
+
+The build system generates two primary boot targets:
+
+- **`boot.img`**: A raw disk image with an EFI system partition and a pre-allocated, writable `UNI_DATA` FAT32 partition. This is the recommended image for most users.
+- **`uniOS.iso`**: A UEFI-bootable ISO9660 image intended for CD/DVD or VM ISO boot testing.
+
+Both images use the same Meridian loader and kernel. While the ISO media itself is read-only, uniOS will automatically discover and mount any accessible `UNI_DATA` partition for persistent storage.
+
+For real hardware, write `boot.img` to a USB drive as a raw disk image.
+
+## Runtime Paths
+
+- **System settings**: `/data/SYSTEM.CFG` (fallback: `/etc/system.conf`)
+- **Wallpaper settings**: `/data/WALLPAPR.CFG` (fallback: `/etc/wallpaper.conf`)
+- **Default wallpaper**: `/usr/share/wallpapers/default.uowp`
+- **Persistent data**: Mounted at `/data` from FAT32 volume `UNI_DATA`
+
+## Documentation
+
+- [Architecture](docs/reference/architecture.md)
+- [Shell scripting](docs/reference/scripting.md)
+- [Asset formats](docs/reference/formats/)
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
+MIT

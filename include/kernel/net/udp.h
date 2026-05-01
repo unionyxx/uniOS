@@ -2,10 +2,11 @@
 #include <stdint.h>
 
 // UDP Header
-struct UdpHeader {
+struct UdpHeader
+{
     uint16_t src_port;
     uint16_t dst_port;
-    uint16_t length;        // Header + data
+    uint16_t length; // Header + data
     uint16_t checksum;
 } __attribute__((packed));
 
@@ -13,10 +14,12 @@ struct UdpHeader {
 #define UDP_MAX_SOCKETS 16
 
 // UDP Socket (simplified)
-struct UdpSocket {
+struct UdpSocket
+{
+    bool in_use;
     uint16_t port;
     bool bound;
-    
+
     // Receive buffer (simple single packet)
     uint8_t rx_buffer[1500];
     uint16_t rx_length;
@@ -25,14 +28,22 @@ struct UdpSocket {
     bool rx_ready;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // UDP functions
 void udp_init();
-void udp_receive(const void* data, uint16_t length, uint32_t src_ip, uint32_t dst_ip);
-bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void* data, uint16_t length);
+void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t dst_ip);
+bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void *data, uint16_t length);
 
 // Socket-like API
 int udp_socket();
 bool udp_bind(int sock, uint16_t port);
-bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void* data, uint16_t length);
-int udp_recvfrom(int sock, void* buffer, uint16_t max_len, uint32_t* src_ip, uint16_t* src_port);
+bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void *data, uint16_t length);
+int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uint16_t *src_port);
 void udp_close(int sock);
+
+#ifdef __cplusplus
+}
+#endif

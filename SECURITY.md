@@ -1,28 +1,41 @@
 # Security Policy
 
-## Supported Versions
+## Supported Branch
 
-Security support is provided for the latest commit on the `main` branch.
+Security fixes are applied on `main`.
 
-## Reporting a Vulnerability
+## Scope
 
-We take the security of uniOS seriously. If you discover a security vulnerability, please report it to us responsibly.
+Reports may cover:
 
-### How to Report
+- Kernel memory safety issues.
+- Syscall validation bugs.
+- Userspace process isolation bugs.
+- VFS, FAT32, uniFS, or block-device bugs.
+- Bootloader parsing or memory map bugs.
+- USB, storage, network, display, input, or audio driver bugs.
+- Persistent `/data` handling bugs.
+- Rootfs or image-generation bugs.
 
-Please do NOT report security vulnerabilities via public GitHub issues.
+## Reporting
 
-Instead, please report them by:
+Send reports to `uniosdev@proton.me`.
 
-1.  Emailing us at uniosdev@proton.me
-2.  Using GitHub's "Report a vulnerability" feature if enabled on the repository.
+Include:
 
-### What to Include
+- A clear description of the issue.
+- Steps to reproduce it.
+- A proof of concept if available.
+- The affected commit hash.
+- Build type: release, debug, or debugoptimized.
+- Boot target: `boot.img`, ISO, QEMU disk, QEMU USB, or hardware.
+- QEMU command or Meson run target used.
+- Firmware details when relevant.
+- Disk image or `/data` state when relevant.
+- Serial logs when available.
 
-*   A description of the vulnerability.
-*   Steps to reproduce the issue.
-*   Any relevant code snippets or proof-of-concept code.
+## Process
 
-### Response
-
-We will acknowledge your report within 48 hours and provide an estimated timeline for addressing the issue. We appreciate your efforts to make uniOS more secure.
+- Initial acknowledgment target: 48 hours.
+- Follow-up and disclosure timing are coordinated per report.
+- Avoid public disclosure until a fix or mitigation is ready.

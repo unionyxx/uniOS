@@ -1,414 +1,856 @@
-#include <kernel/mm/vmm.h>
+#include <boot/boot_info.h>
+#include <kernel/arch/x86_64/serial.h>
+#include <kernel/debug.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vma.h>
-#include <kernel/process.h>
-#include <kernel/debug.h>
+#include <kernel/mm/vmm.h>
 #include <kernel/panic.h>
-#include <boot/limine.h>
+#include <kernel/process.h>
+#include <kernel/scheduler.h>
 #include <libk/kstring.h>
+#include <stddef.h>
+
+STATIC_ASSERT(sizeof(FileDescriptor) == 32, "FileDescriptor size mismatch");
+STATIC_ASSERT(offsetof(Process, fpu_state) == 64, "Process::fpu_state offset mismatch");
+STATIC_ASSERT(offsetof(Process, pid) == 4160, "Process::pid offset mismatch");
+STATIC_ASSERT(offsetof(Process, sp) == 4216, "Process::sp offset mismatch");
+STATIC_ASSERT(offsetof(Process, page_table) == 4240, "Process::page_table offset mismatch");
+STATIC_ASSERT(offsetof(Process, vma_list) == 8464, "Process::vma_list offset mismatch");
 
 using kstring::memcpy;
 
-__attribute__((used, section(".requests")))
-static volatile struct limine_hhdm_request hhdm_request = {
-    .id = LIMINE_HHDM_REQUEST,
-    .revision = 0,
-    .response = nullptr
-};
-
-__attribute__((used, section(".requests")))
-static volatile struct limine_kernel_address_request kernel_address_request = {
-    .id = LIMINE_KERNEL_ADDRESS_REQUEST,
-    .revision = 0,
-    .response = nullptr
-};
-
-static uint64_t* g_pml4 = nullptr;
+static uint64_t *g_pml4 = nullptr;
 static uint64_t g_hhdm_offset = 0;
 
-[[nodiscard]] static bool split_huge_page(uint64_t* pd, uint64_t index) {
-    uint64_t huge_entry = pd[index];
-    if (!(huge_entry & PTE_PAT)) return false;
+[[nodiscard]] static bool split_huge_page(uint64_t *table, uint64_t index, int level)
+{
+    uint64_t entry = table[index];
+    if (!(entry & PTE_PRESENT) || !(entry & (1ULL << 7)))
+        return false;
 
-    void* pt_frame = pmm_alloc_frame();
-    if (!pt_frame) return false;
+    void *next_table_frame = pmm_alloc_frame();
+    if (!next_table_frame)
+        return false;
 
-    uint64_t pt_phys = reinterpret_cast<uint64_t>(pt_frame);
-    uint64_t* pt_virt = reinterpret_cast<uint64_t*>(pt_phys + g_hhdm_offset);
+    uint64_t next_table_phys = reinterpret_cast<uint64_t>(next_table_frame);
+    uint64_t *next_table_virt = reinterpret_cast<uint64_t *>(next_table_phys + g_hhdm_offset);
+    kstring::zero_memory(next_table_virt, 512 * sizeof(uint64_t));
 
-    uint64_t base_phys = huge_entry & 0x000FFFFFFFE00000ULL;
-    uint64_t flags = huge_entry & 0xFFF;
-    flags &= ~PTE_PAT;
+    uint64_t flags = (entry & 0xFFF) | (entry & (1ULL << 63));
+    flags &= ~(1ULL << 7); // Clear PS bit
 
-    for (int i = 0; i < 512; i++) {
-        pt_virt[i] = (base_phys + (i * 0x1000)) | flags;
+    if (level == 3) { // Splitting 1GB into 2MB pages
+        uint64_t base_phys = entry & 0x000FFFFFC0000000ULL;
+        for (int i = 0; i < 512; i++) {
+            next_table_virt[i] = (base_phys + ((uint64_t)i * 0x200000)) | flags | (1ULL << 7);
+        }
+    } else if (level == 2) { // Splitting 2MB into 4KB pages
+        uint64_t base_phys = entry & 0x000FFFFFFFE00000ULL;
+        for (int i = 0; i < 512; i++) {
+            next_table_virt[i] = (base_phys + ((uint64_t)i * 0x1000)) | flags;
+        }
+    } else {
+        // Level 4 (PML4) doesn't have PS, and Level 1 (PT) is already 4KB.
+        pmm_free_frame(next_table_frame);
+        return false;
     }
 
-    pd[index] = pt_phys | (flags & ~PTE_PAT);
+    // Update the original entry to point to the new table
+    // For x86_64, the PAT bit moves from bit 7 (in huge pages) to bit 12 (in PTEs).
+    // In PDPTE/PDE that point to tables, bit 7 must be 0 (PS).
+    table[index] = next_table_phys | (flags & ~0x80ULL);
+
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
     return true;
 }
 
-[[nodiscard]] static uint64_t* get_next_level(uint64_t* current_level, uint64_t index, bool alloc) {
+[[nodiscard]] static uint64_t *get_next_level(uint64_t *current_level, uint64_t index, int level, bool alloc,
+                                              uint64_t virt)
+{
     if (current_level[index] & PTE_PRESENT) {
-        if (current_level[index] & PTE_PAT) {
-            if (!split_huge_page(current_level, index)) return nullptr;
+        if (current_level[index] & (1ULL << 7)) { // PS bit
+            if (!split_huge_page(current_level, index, level))
+                return nullptr;
         }
         uint64_t phys = current_level[index] & 0x000FFFFFFFFFF000ULL;
-        return reinterpret_cast<uint64_t*>(phys + g_hhdm_offset);
+        return reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
     }
 
-    if (!alloc) return nullptr;
+    if (!alloc)
+        return nullptr;
 
-    void* frame = pmm_alloc_frame();
-    if (!frame) return nullptr;
+    void *frame = pmm_alloc_frame();
+    if (!frame)
+        return nullptr;
 
     uint64_t phys = reinterpret_cast<uint64_t>(frame);
-    current_level[index] = phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
-    
-    uint64_t* next_level = reinterpret_cast<uint64_t*>(phys + g_hhdm_offset);
+    // Only set PTE_USER on directories if we are mapping a user address (lower half)
+    uint64_t flags = PTE_PRESENT | PTE_WRITABLE;
+    if (virt < 0x0000800000000000ULL)
+        flags |= PTE_USER;
+
+    uint64_t *next_level = reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
     kstring::zero_memory(next_level, 512 * sizeof(uint64_t));
+    asm volatile("sfence" ::: "memory");
+
+    current_level[index] = phys | flags;
     return next_level;
 }
 
-void vmm_init() {
-    if (!hhdm_request.response) return;
-    g_hhdm_offset = hhdm_request.response->offset;
-
-    uint64_t cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(cr3));
-    g_pml4 = reinterpret_cast<uint64_t*>(cr3 + g_hhdm_offset);
+void vmm_early_init()
+{
+    const BootInfo *boot_info = boot_get_info();
+    if (boot_info) {
+        g_hhdm_offset = boot_info->hhdm_offset;
+    }
 }
 
-uint64_t vmm_phys_to_virt(uint64_t phys) {
+void vmm_init()
+{
+    uint64_t cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    g_pml4 = reinterpret_cast<uint64_t *>(cr3 + g_hhdm_offset);
+}
+
+uint64_t vmm_phys_to_virt(uint64_t phys)
+{
     return phys + g_hhdm_offset;
 }
 
-void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
-    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER)) panic("vmm: Kernel address with PTE_USER");
-    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER)) panic("vmm: Userspace address without PTE_USER");
+Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
+{
+    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
+        panic("vmm: kernel address with PTE_USER");
+    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER))
+        panic("vmm: userspace address without PTE_USER");
 
-    uint64_t* pdpt = get_next_level(g_pml4, (virt >> 39) & 0x1FF, true);
-    if (!pdpt) return;
+    uint64_t *pml4 = g_pml4;
+    Process *curr = process_get_current();
+    if (curr && curr->page_table)
+        pml4 = curr->page_table;
 
-    uint64_t* pd = get_next_level(pdpt, (virt >> 30) & 0x1FF, true);
-    if (!pd) return;
+    uint64_t *pdpt = get_next_level(pml4, (virt >> 39) & 0x1FF, 4, true, virt);
+    if (!pdpt)
+        return Error::NoMemory;
 
-    uint64_t* pt = get_next_level(pd, (virt >> 21) & 0x1FF, true);
-    if (!pt) return;
+    uint64_t *pd = get_next_level(pdpt, (virt >> 30) & 0x1FF, 3, true, virt);
+    if (!pd)
+        return Error::NoMemory;
 
-    pt[(virt >> 12) & 0x1FF] = phys | flags;
-    asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
-}
-
-static void vmm_map_page_no_flush(uint64_t virt, uint64_t phys, uint64_t flags) {
-    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER)) panic("vmm: Kernel address with PTE_USER");
-    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER)) panic("vmm: Userspace address without PTE_USER");
-
-    uint64_t* pdpt = get_next_level(g_pml4, (virt >> 39) & 0x1FF, true);
-    if (!pdpt) return;
-
-    uint64_t* pd = get_next_level(pdpt, (virt >> 30) & 0x1FF, true);
-    if (!pd) return;
-
-    uint64_t* pt = get_next_level(pd, (virt >> 21) & 0x1FF, true);
-    if (!pt) return;
+    uint64_t *pt = get_next_level(pd, (virt >> 21) & 0x1FF, 2, true, virt);
+    if (!pt)
+        return Error::NoMemory;
 
     pt[(virt >> 12) & 0x1FF] = phys | flags;
+    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+    return Result<void>::success();
 }
 
-static inline void vmm_flush_tlb_all() {
+[[nodiscard]] static bool vmm_map_page_no_flush(uint64_t virt, uint64_t phys, uint64_t flags)
+{
+    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
+        panic("vmm: kernel address with PTE_USER");
+    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER))
+        panic("vmm: userspace address without PTE_USER");
+
+    uint64_t *pdpt = get_next_level(g_pml4, (virt >> 39) & 0x1FF, 4, true, virt);
+    if (!pdpt)
+        return false;
+
+    uint64_t *pd = get_next_level(pdpt, (virt >> 30) & 0x1FF, 3, true, virt);
+    if (!pd)
+        return false;
+
+    uint64_t *pt = get_next_level(pd, (virt >> 21) & 0x1FF, 2, true, virt);
+    if (!pt)
+        return false;
+
+    pt[(virt >> 12) & 0x1FF] = phys | flags;
+    return true;
+}
+
+static inline void vmm_flush_tlb_all()
+{
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
 }
 
-uint64_t vmm_virt_to_phys(uint64_t virt) {
+uint64_t vmm_virt_to_phys_in(uint64_t *pml4, uint64_t virt)
+{
+    if (!pml4)
+        return 0;
     uint64_t pml4_index = (virt >> 39) & 0x1FF;
     uint64_t pdpt_index = (virt >> 30) & 0x1FF;
-    uint64_t pd_index   = (virt >> 21) & 0x1FF;
-    uint64_t pt_index   = (virt >> 12) & 0x1FF;
+    uint64_t pd_index = (virt >> 21) & 0x1FF;
+    uint64_t pt_index = (virt >> 12) & 0x1FF;
 
-    if (!(g_pml4[pml4_index] & PTE_PRESENT)) return 0;
-    
-    uint64_t* pdpt = reinterpret_cast<uint64_t*>((g_pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
-    if (!(pdpt[pdpt_index] & PTE_PRESENT)) return 0;
-    if (pdpt[pdpt_index] & PTE_PAT) {
+    if (!(pml4[pml4_index] & PTE_PRESENT))
+        return 0;
+
+    uint64_t *pdpt = reinterpret_cast<uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    if (!(pdpt[pdpt_index] & PTE_PRESENT))
+        return 0;
+    if (pdpt[pdpt_index] & (1ULL << 7)) { // PS bit
         return (pdpt[pdpt_index] & 0x000FFFFFC0000000ULL) + (virt & 0x3FFFFFFFULL);
     }
-    
-    uint64_t* pd = reinterpret_cast<uint64_t*>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
-    if (!(pd[pd_index] & PTE_PRESENT)) return 0;
-    if (pd[pd_index] & PTE_PAT) {
+
+    uint64_t *pd = reinterpret_cast<uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    if (!(pd[pd_index] & PTE_PRESENT))
+        return 0;
+    if (pd[pd_index] & (1ULL << 7)) { // PS bit
         return (pd[pd_index] & 0x000FFFFFFFE00000ULL) + (virt & 0x1FFFFFULL);
     }
-    
-    uint64_t* pt = reinterpret_cast<uint64_t*>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
-    if (!(pt[pt_index] & PTE_PRESENT)) return 0;
-    
+
+    uint64_t *pt = reinterpret_cast<uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    if (!(pt[pt_index] & PTE_PRESENT))
+        return 0;
+
     return (pt[pt_index] & 0x000FFFFFFFFFF000ULL) + (virt & 0xFFFULL);
 }
 
-uint64_t* vmm_get_kernel_pml4() {
+uint64_t vmm_virt_to_phys(uint64_t virt)
+{
+    uint64_t *pml4 = g_pml4;
+    Process *curr = process_get_current();
+    if (curr && curr->page_table)
+        pml4 = curr->page_table;
+    return vmm_virt_to_phys_in(pml4, virt);
+}
+
+uint64_t vmm_get_page_flags_in(uint64_t *pml4, uint64_t virt)
+{
+    if (!pml4)
+        return 0;
+
+    uint64_t pml4_index = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
+    uint64_t pd_index = (virt >> 21) & 0x1FF;
+    uint64_t pt_index = (virt >> 12) & 0x1FF;
+
+    if (!(pml4[pml4_index] & PTE_PRESENT))
+        return 0;
+
+    uint64_t *pdpt = reinterpret_cast<uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    if (!(pdpt[pdpt_index] & PTE_PRESENT) || (pdpt[pdpt_index] & (1ULL << 7)))
+        return 0;
+
+    uint64_t *pd = reinterpret_cast<uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    if (!(pd[pd_index] & PTE_PRESENT) || (pd[pd_index] & (1ULL << 7)))
+        return 0;
+
+    uint64_t *pt = reinterpret_cast<uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    if (!(pt[pt_index] & PTE_PRESENT))
+        return 0;
+
+    return pt[pt_index] & (0xFFFULL | PTE_NX | PTE_SHARED);
+}
+
+uint64_t *vmm_get_kernel_pml4()
+{
     return g_pml4;
 }
 
-[[nodiscard]] static uint64_t* get_next_level_in(uint64_t* current_level, uint64_t index, bool alloc) {
+[[nodiscard]] static uint64_t *get_next_level_in(uint64_t *current_level, uint64_t index, bool alloc, uint64_t virt)
+{
     if (current_level[index] & PTE_PRESENT) {
         uint64_t phys = current_level[index] & 0x000FFFFFFFFFF000ULL;
-        return reinterpret_cast<uint64_t*>(phys + g_hhdm_offset);
+        return reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
     }
 
-    if (!alloc) return nullptr;
+    if (!alloc)
+        return nullptr;
 
-    void* frame = pmm_alloc_frame();
-    if (!frame) return nullptr;
+    void *frame = pmm_alloc_frame();
+    if (!frame)
+        return nullptr;
 
     uint64_t phys = reinterpret_cast<uint64_t>(frame);
-    current_level[index] = phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
-    
-    uint64_t* next_level = reinterpret_cast<uint64_t*>(phys + g_hhdm_offset);
+    // Only set PTE_USER on directories if we are mapping a user address (lower half)
+    uint64_t flags = PTE_PRESENT | PTE_WRITABLE;
+    if (virt < 0x0000800000000000ULL)
+        flags |= PTE_USER;
+
+    uint64_t *next_level = reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
     kstring::zero_memory(next_level, 512 * sizeof(uint64_t));
+    asm volatile("sfence" ::: "memory");
+
+    current_level[index] = phys | flags;
     return next_level;
 }
 
-void vmm_map_page_in(uint64_t* target_pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
-    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER)) panic("vmm: Kernel address with PTE_USER");
-    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER)) panic("vmm: Userspace address without PTE_USER");
+Result<void> vmm_map_page_in(uint64_t *target_pml4, uint64_t virt, uint64_t phys, uint64_t flags)
+{
+    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
+        panic("vmm: kernel address with PTE_USER");
+    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER))
+        panic("vmm: userspace address without PTE_USER");
 
-    uint64_t* pdpt = get_next_level_in(target_pml4, (virt >> 39) & 0x1FF, true);
-    if (!pdpt) return;
+    uint64_t *pdpt = get_next_level_in(target_pml4, (virt >> 39) & 0x1FF, true, virt);
+    if (!pdpt)
+        return Error::NoMemory;
 
-    uint64_t* pd = get_next_level_in(pdpt, (virt >> 30) & 0x1FF, true);
-    if (!pd) return;
+    uint64_t *pd = get_next_level_in(pdpt, (virt >> 30) & 0x1FF, true, virt);
+    if (!pd)
+        return Error::NoMemory;
 
-    uint64_t* pt = get_next_level_in(pd, (virt >> 21) & 0x1FF, true);
-    if (!pt) return;
+    uint64_t *pt = get_next_level_in(pd, (virt >> 21) & 0x1FF, true, virt);
+    if (!pt)
+        return Error::NoMemory;
 
     pt[(virt >> 12) & 0x1FF] = phys | flags;
+
+    // FIX: Force a memory barrier to ensure the PTE is committed to RAM
+    asm volatile("mfence" ::: "memory");
+    // FIX: Explicitly invalidate this specific page in the TLB
+    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+
+    return Result<void>::success();
 }
 
-uint64_t* vmm_create_address_space() {
-    void* frame = pmm_alloc_frame();
-    if (!frame) return nullptr;
-    
-    uint64_t* new_pml4 = reinterpret_cast<uint64_t*>(reinterpret_cast<uint64_t>(frame) + g_hhdm_offset);
+void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
+{
+    uint64_t *pdpt = get_next_level_in(target_pml4, (virt >> 39) & 0x1FF, false, virt);
+    if (!pdpt)
+        return;
+
+    uint64_t *pd = get_next_level_in(pdpt, (virt >> 30) & 0x1FF, false, virt);
+    if (!pd)
+        return;
+
+    uint64_t *pt = get_next_level_in(pd, (virt >> 21) & 0x1FF, false, virt);
+    if (!pt)
+        return;
+
+    pt[(virt >> 12) & 0x1FF] = 0;
+    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+}
+
+uint64_t *vmm_create_address_space()
+{
+    void *frame = pmm_alloc_frame();
+    if (!frame)
+        return nullptr;
+
+    uint64_t *new_pml4 = reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(frame) + g_hhdm_offset);
     kstring::zero_memory(new_pml4, 512 * sizeof(uint64_t));
-    
+
     for (int i = 256; i < 512; i++) {
         new_pml4[i] = g_pml4[i];
     }
-    
+
     return new_pml4;
 }
 
-uint64_t vmm_get_hhdm_offset() {
+uint64_t vmm_get_hhdm_offset()
+{
     return g_hhdm_offset;
 }
 
-static void clone_page_table_level(uint64_t* src, uint64_t* dst, int level) {
+static void free_page_table_level(uint64_t *table, int level);
+
+[[nodiscard]] static bool clone_page_table_level(uint64_t *src, uint64_t *dst, int level)
+{
     for (int i = 0; i < 512; i++) {
         if (!(src[i] & PTE_PRESENT)) {
             dst[i] = 0;
             continue;
         }
-        
-        uint64_t src_phys = src[i] & 0x000FFFFFFFFFF000ULL;
-        uint64_t flags = src[i] & 0xFFF;
-        
+
+        uint64_t src_phys = src[i] & 0x000FFFFFFFFFF000ULL; // Mask flags and NX bit
+        uint64_t flags = src[i] & (0xFFFULL | PTE_NX | PTE_SHARED);
+
         if (level == 1) {
-            pmm_refcount_inc(reinterpret_cast<void*>(src_phys));
-            if (flags & PTE_WRITABLE) {
-                flags &= ~PTE_WRITABLE;
-                src[i] &= ~PTE_WRITABLE;
+            if (flags & PTE_SHARED) {
+                pmm_refcount_inc(reinterpret_cast<void *>(src_phys));
+                dst[i] = src_phys | flags;
+            } else {
+                pmm_refcount_inc(reinterpret_cast<void *>(src_phys));
+                if (flags & PTE_WRITABLE) {
+                    flags &= ~PTE_WRITABLE;
+                    src[i] &= ~PTE_WRITABLE;
+                }
+                dst[i] = src_phys | flags;
             }
-            dst[i] = src_phys | flags;
         } else {
-            void* new_table = pmm_alloc_frame();
-            if (!new_table) {
-                dst[i] = 0;
-                continue;
+            if (src[i] & (1ULL << 7)) { // PS bit
+                panic("vmm_clone: huge pages in userspace not supported yet!");
             }
-            
-            uint64_t* new_table_virt = reinterpret_cast<uint64_t*>(reinterpret_cast<uint64_t>(new_table) + g_hhdm_offset);
-            uint64_t* src_table = reinterpret_cast<uint64_t*>(src_phys + g_hhdm_offset);
-            kstring::zero_memory(new_table_virt, 512 * sizeof(uint64_t));
-            
-            clone_page_table_level(src_table, new_table_virt, level - 1);
-            dst[i] = reinterpret_cast<uint64_t>(new_table) | flags;
+
+            void *next_level_frame = pmm_alloc_frame();
+            if (!next_level_frame) {
+                DEBUG_ERROR("clone_page_table_level: pmm_alloc_frame failed at level %d", level);
+                free_page_table_level(dst, level);
+                return false;
+            }
+
+            uint64_t *next_level_virt =
+                reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(next_level_frame) + g_hhdm_offset);
+            uint64_t *src_table = reinterpret_cast<uint64_t *>(src_phys + g_hhdm_offset);
+            kstring::zero_memory(next_level_virt, 512 * sizeof(uint64_t));
+
+            if (!clone_page_table_level(src_table, next_level_virt, level - 1)) {
+                pmm_free_frame(next_level_frame);
+                free_page_table_level(dst, level);
+                return false;
+            }
+            dst[i] = reinterpret_cast<uint64_t>(next_level_frame) | flags;
         }
     }
+    return true;
 }
 
-uint64_t* vmm_clone_address_space(uint64_t* src_pml4) {
-    if (!src_pml4) return nullptr;
-    
-    void* frame = pmm_alloc_frame();
-    if (!frame) return nullptr;
-    
-    uint64_t* new_pml4 = reinterpret_cast<uint64_t*>(reinterpret_cast<uint64_t>(frame) + g_hhdm_offset);
+uint64_t *vmm_clone_address_space(uint64_t *src_pml4)
+{
+    if (!src_pml4)
+        return nullptr;
+
+    void *frame = pmm_alloc_frame();
+    if (!frame)
+        return nullptr;
+
+    uint64_t *new_pml4 = reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(frame) + g_hhdm_offset);
     kstring::zero_memory(new_pml4, 512 * sizeof(uint64_t));
-    
+
     for (int i = 256; i < 512; i++) {
         new_pml4[i] = src_pml4[i];
     }
-    
+
     for (int i = 0; i < 256; i++) {
         if (!(src_pml4[i] & PTE_PRESENT)) {
             new_pml4[i] = 0;
             continue;
         }
-        
+
         uint64_t src_phys = src_pml4[i] & 0x000FFFFFFFFFF000ULL;
-        uint64_t flags = src_pml4[i] & 0xFFF;
-        
-        void* new_pdpt = pmm_alloc_frame();
+        uint64_t flags = src_pml4[i] & (0xFFFULL | PTE_NX);
+
+        void *new_pdpt = pmm_alloc_frame();
         if (!new_pdpt) {
-            new_pml4[i] = 0;
-            continue;
+            DEBUG_ERROR("vmm_clone_address_space: failed to allocate PDPT for index %d", i);
+            vmm_free_address_space(new_pml4);
+            return nullptr;
         }
-        
-        uint64_t* new_pdpt_virt = reinterpret_cast<uint64_t*>(reinterpret_cast<uint64_t>(new_pdpt) + g_hhdm_offset);
-        uint64_t* src_pdpt = reinterpret_cast<uint64_t*>(src_phys + g_hhdm_offset);
+
+        uint64_t *new_pdpt_virt = reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(new_pdpt) + g_hhdm_offset);
+        uint64_t *src_pdpt = reinterpret_cast<uint64_t *>(src_phys + g_hhdm_offset);
         kstring::zero_memory(new_pdpt_virt, 512 * sizeof(uint64_t));
-        
-        clone_page_table_level(src_pdpt, new_pdpt_virt, 3);
+
+        if (!clone_page_table_level(src_pdpt, new_pdpt_virt, 3)) {
+            pmm_free_frame(new_pdpt);
+            vmm_free_address_space(new_pml4);
+            return nullptr;
+        }
         new_pml4[i] = reinterpret_cast<uint64_t>(new_pdpt) | flags;
     }
-    
+
+    // Synchronize page table writes
+    asm volatile("mfence" ::: "memory");
+
+    // Flush the TLB so the CoW write-protection takes effect immediately
+    uint64_t current_cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(current_cr3));
+    if ((current_cr3 & ~0xFFFULL) == (reinterpret_cast<uint64_t>(src_pml4) - g_hhdm_offset)) {
+        asm volatile("mov %0, %%cr3" ::"r"(current_cr3) : "memory");
+    }
+
     return new_pml4;
 }
 
-static void free_page_table_level(uint64_t* table, int level) {
+static void free_page_table_level(uint64_t *table, int level)
+{
     for (int i = 0; i < 512; i++) {
-        if (!(table[i] & PTE_PRESENT)) continue;
-        
+        if (!(table[i] & PTE_PRESENT))
+            continue;
+
         uint64_t phys = table[i] & 0x000FFFFFFFFFF000ULL;
         if (level == 1) {
-            pmm_free_frame(reinterpret_cast<void*>(phys));
+            if (pmm_is_managed(reinterpret_cast<void *>(phys))) {
+                pmm_refcount_dec(reinterpret_cast<void *>(phys));
+            }
         } else {
-            uint64_t* sub_table = reinterpret_cast<uint64_t*>(phys + g_hhdm_offset);
+            uint64_t *sub_table = reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
             free_page_table_level(sub_table, level - 1);
-            pmm_free_frame(reinterpret_cast<void*>(phys));
+            pmm_free_frame(reinterpret_cast<void *>(phys));
         }
     }
 }
 
-void vmm_free_address_space(uint64_t* target_pml4) {
-    if (!target_pml4 || target_pml4 == g_pml4) return;
-    
+void vmm_free_address_space(uint64_t *target_pml4)
+{
+    if (!target_pml4 || target_pml4 == g_pml4)
+        return;
+
     for (int i = 0; i < 256; i++) {
-        if (!(target_pml4[i] & PTE_PRESENT)) continue;
-        
+        if (!(target_pml4[i] & PTE_PRESENT))
+            continue;
+
         uint64_t phys = target_pml4[i] & 0x000FFFFFFFFFF000ULL;
-        uint64_t* pdpt = reinterpret_cast<uint64_t*>(phys + g_hhdm_offset);
+        uint64_t *pdpt = reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
         free_page_table_level(pdpt, 3);
-        pmm_free_frame(reinterpret_cast<void*>(phys));
+        pmm_free_frame(reinterpret_cast<void *>(phys));
     }
-    
-    pmm_free_frame(reinterpret_cast<void*>(reinterpret_cast<uint64_t>(target_pml4) - g_hhdm_offset));
+
+    pmm_free_frame(reinterpret_cast<void *>(reinterpret_cast<uint64_t>(target_pml4) - g_hhdm_offset));
 }
 
-void vmm_switch_address_space(uint64_t* new_pml4_phys) {
-    asm volatile("mov %0, %%cr3" :: "r"(new_pml4_phys) : "memory");
+void vmm_switch_address_space(uint64_t *new_pml4_phys)
+{
+    asm volatile("mov %0, %%cr3" ::"r"(new_pml4_phys) : "memory");
 }
 
-static uint64_t g_mmio_next_virt = 0xFFFFFFFF90000000ULL;
+void vmm_set_page_flags(uint64_t virt, uint64_t flags)
+{
+    uint64_t *pml4 = g_pml4;
+    Process *curr = process_get_current();
+    if (curr && curr->page_table)
+        pml4 = curr->page_table;
 
-uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size) {
-    if (size == 0) return 0;
-    
+    uint64_t *pdpt = get_next_level(pml4, (virt >> 39) & 0x1FF, 4, false, virt);
+    if (!pdpt)
+        return;
+
+    uint64_t *pd = get_next_level(pdpt, (virt >> 30) & 0x1FF, 3, false, virt);
+    if (!pd)
+        return;
+
+    uint64_t *pt = get_next_level(pd, (virt >> 21) & 0x1FF, 2, false, virt);
+    if (!pt)
+        return;
+
+    uint64_t index = (virt >> 12) & 0x1FF;
+    if (!(pt[index] & PTE_PRESENT))
+        return; // Only update existing mappings
+
+    uint64_t old_entry = pt[index];
+    uint64_t phys = old_entry & 0x000FFFFFFFFFF000ULL;
+    uint64_t preserved = old_entry & (PTE_PRESENT | PTE_USER | PTE_SHARED);
+    pt[index] = phys | flags | preserved;
+    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+}
+
+void vmm_protect_kernel()
+{
+    const BootInfo *boot_info = boot_get_info();
+    if (!boot_info)
+        return;
+
+    extern char __text_start[], __text_end[];
+    extern char __rodata_start[], __rodata_end[];
+    extern char __requests_start[], __requests_end[];
+    extern char __data_start[], __kernel_end[];
+
+    auto protect_range = [](uintptr_t start, uintptr_t end, uint64_t flags) {
+        uintptr_t start_aligned = start & ~0xFFFULL;
+        uintptr_t end_aligned = (end + 0xFFF) & ~0xFFFULL;
+        for (uintptr_t virt = start_aligned; virt < end_aligned; virt += 0x1000) {
+            vmm_set_page_flags(virt, flags);
+        }
+    };
+
+    DEBUG_INFO("Protecting kernel sections...");
+
+    // 1. .text: Read + Execute (No NX)
+    protect_range((uintptr_t)__text_start, (uintptr_t)__text_end, PTE_PRESENT);
+
+    // 2. .rodata: Read-Only + NX
+    protect_range((uintptr_t)__rodata_start, (uintptr_t)__rodata_end, PTE_PRESENT | PTE_NX);
+
+    // 3. .requests: Read-Only + NX
+    protect_range((uintptr_t)__requests_start, (uintptr_t)__requests_end, PTE_PRESENT | PTE_NX);
+
+    // 4. Everything from .data to kernel end: Read + Write + NX
+    protect_range((uintptr_t)__data_start, (uintptr_t)__kernel_end, PTE_PRESENT | PTE_WRITABLE | PTE_NX);
+
+    DEBUG_SUCCESS("Kernel sections protected");
+}
+
+// Relocated to a larger hole in the higher half to prevent wrap-around panics.
+// From 0xFFFFFE0000000000 to 0xFFFFFF8000000000 (1.5 TB)
+static uint64_t g_mmio_next_virt = 0xFFFFFE0000000000ULL;
+static const uint64_t g_mmio_limit_virt = 0xFFFFFF8000000000ULL;
+
+// Sanity limit: 16 GB per single mapping request
+static constexpr uint64_t MASSIVE_MAPPING_THRESHOLD = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+
+struct DMAVirtRange
+{
+    uint64_t virt;
+    uint64_t size;
+};
+
+static constexpr size_t MAX_DMA_FREE_RANGES = 64;
+static DMAVirtRange g_dma_free_ranges[MAX_DMA_FREE_RANGES] = {};
+
+static uint64_t dma_alloc_virt_range(uint64_t size)
+{
+    for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
+        if (g_dma_free_ranges[i].size < size)
+            continue;
+
+        uint64_t virt = g_dma_free_ranges[i].virt;
+        g_dma_free_ranges[i].virt += size;
+        g_dma_free_ranges[i].size -= size;
+        if (g_dma_free_ranges[i].size == 0)
+            g_dma_free_ranges[i] = {};
+        return virt;
+    }
+
+    if (size == 0 || size > MASSIVE_MAPPING_THRESHOLD)
+        panic("vmm: sanity check failed: massive/invalid dma allocation requested");
+
+    if (g_mmio_next_virt > g_mmio_limit_virt || (g_mmio_limit_virt - g_mmio_next_virt) < size)
+        panic("vmm: mmio/dma virtual address space exhausted");
+
+    uint64_t virt = g_mmio_next_virt;
+    g_mmio_next_virt += size;
+    return virt;
+}
+
+static void dma_free_virt_range(uint64_t virt, uint64_t size)
+{
+    if (virt == 0 || size == 0)
+        return;
+
+    for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
+        if (g_dma_free_ranges[i].size == 0) {
+            g_dma_free_ranges[i] = {virt, size};
+            break;
+        }
+    }
+
+    for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
+        if (g_dma_free_ranges[i].size == 0)
+            continue;
+        for (size_t j = i + 1; j < MAX_DMA_FREE_RANGES; j++) {
+            if (g_dma_free_ranges[j].size == 0)
+                continue;
+
+            if (g_dma_free_ranges[i].virt + g_dma_free_ranges[i].size == g_dma_free_ranges[j].virt) {
+                g_dma_free_ranges[i].size += g_dma_free_ranges[j].size;
+                g_dma_free_ranges[j] = {};
+                j = i;
+                continue;
+            }
+            if (g_dma_free_ranges[j].virt + g_dma_free_ranges[j].size == g_dma_free_ranges[i].virt) {
+                g_dma_free_ranges[i].virt = g_dma_free_ranges[j].virt;
+                g_dma_free_ranges[i].size += g_dma_free_ranges[j].size;
+                g_dma_free_ranges[j] = {};
+                j = i;
+            }
+        }
+    }
+}
+
+uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
+{
+    if (size == 0)
+        return 0;
+
     uint64_t phys_page = phys_addr & ~0xFFFULL;
     uint64_t offset = phys_addr & 0xFFF;
-    uint64_t pages = (size + offset + 0xFFF) / 0x1000;
-    
+    if (size > UINT64_MAX - offset || size + offset > UINT64_MAX - 0xFFFULL)
+        return 0;
+    uint64_t pages = (size + offset + 0xFFFULL) / 0x1000ULL;
+    if (pages == 0 || pages > UINT64_MAX / 0x1000ULL)
+        return 0;
+
+    uint64_t map_size = pages * 0x1000ULL;
+    if (map_size > MASSIVE_MAPPING_THRESHOLD)
+        panic("vmm: sanity check failed: massive mmio mapping requested");
+
+    if (g_mmio_next_virt > g_mmio_limit_virt || (g_mmio_limit_virt - g_mmio_next_virt) < map_size)
+        panic("vmm: mmio virtual address space exhausted");
+
     uint64_t virt_base = g_mmio_next_virt;
-    g_mmio_next_virt += pages * 0x1000;
-    
-    for (uint64_t i = 0; i < pages; i++) {
-        vmm_map_page_no_flush(virt_base + i * 0x1000, phys_page + i * 0x1000, PTE_MMIO);
+    g_mmio_next_virt += map_size;
+
+    if (pages > 1024) {
+        BOOT_LOG("VMM: Mapping large MMIO region: %llu pages (0x%lx -> 0x%lx)", pages, phys_page, virt_base);
     }
-    
+
+    for (uint64_t i = 0; i < pages; i++) {
+        if (pages > 16384 && (i % 8192 == 0)) {
+            BOOT_LOG("VMM: Mapping progress: %llu/%llu pages...", i, pages);
+        }
+        if (!vmm_map_page_no_flush(virt_base + i * 0x1000, phys_page + i * 0x1000, PTE_MMIO)) {
+            while (i > 0) {
+                i--;
+                vmm_unmap_page_in(g_pml4, virt_base + i * 0x1000);
+            }
+            g_mmio_next_virt = virt_base;
+            vmm_flush_tlb_all();
+            return 0;
+        }
+    }
+
     vmm_flush_tlb_all();
     return virt_base + offset;
 }
 
-DMAAllocation vmm_alloc_dma(size_t pages) {
+DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
+{
     DMAAllocation alloc = {0, 0, 0};
-    
-    void* phys_ptr = pmm_alloc_frames(pages);
-    if (!phys_ptr) return alloc;
-    
-    uint64_t phys = reinterpret_cast<uint64_t>(phys_ptr);
-    uint64_t virt_base = g_mmio_next_virt;
-    g_mmio_next_virt += pages * 0x1000;
-    
-    for (size_t i = 0; i < pages; i++) {
-        vmm_map_page_no_flush(virt_base + i * 0x1000, phys + i * 0x1000, PTE_MMIO);
+    if (pages == 0)
+        return alloc;
+
+    void *phys_ptr = pmm_alloc_frames(pages);
+    if (!phys_ptr)
+        return alloc;
+
+    if (pages > UINT64_MAX / 0x1000ULL) {
+        for (size_t frame = 0; frame < pages; frame++)
+            pmm_free_frame(reinterpret_cast<void *>(reinterpret_cast<uint64_t>(phys_ptr) + frame * 0x1000ULL));
+        return alloc;
     }
-    
+
+    uint64_t phys = reinterpret_cast<uint64_t>(phys_ptr);
+    uint64_t size = (uint64_t)pages * 0x1000ULL;
+    uint64_t virt_base = dma_alloc_virt_range(size);
+
+    for (size_t i = 0; i < pages; i++) {
+        if (!vmm_map_page_no_flush(virt_base + i * 0x1000, phys + i * 0x1000, flags)) {
+            while (i > 0) {
+                i--;
+                vmm_unmap_page_in(g_pml4, virt_base + i * 0x1000);
+            }
+            for (size_t frame = 0; frame < pages; frame++) {
+                pmm_free_frame(reinterpret_cast<void *>(phys + frame * 0x1000));
+            }
+            dma_free_virt_range(virt_base, size);
+            vmm_flush_tlb_all();
+            return alloc;
+        }
+    }
+
     vmm_flush_tlb_all();
-    
+
     alloc.virt = virt_base;
     alloc.phys = phys;
-    alloc.size = pages * 0x1000;
-    
+    alloc.size = size;
+
     return alloc;
 }
 
-void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size) {
-    if (size == 0) return;
-    
-    uint64_t virt_start = virt_addr & ~0xFFFULL;
-    uint64_t virt_end = (virt_addr + size + 0xFFF) & ~0xFFFULL;
-    uint64_t pages = (virt_end - virt_start) / 0x1000;
-    
-    for (uint64_t i = 0; i < pages; i++) {
-        uint64_t virt = virt_start + i * 0x1000;
-        uint64_t phys = vmm_virt_to_phys(virt);
-        if (phys == 0) continue;
-        vmm_map_page(virt, phys & ~0xFFFULL, PTE_WC);
-    }
+DMAAllocation vmm_alloc_dma(size_t pages)
+{
+    return vmm_alloc_dma_with_flags(pages, PTE_UC);
 }
 
-void vmm_free_dma(DMAAllocation alloc) {
-    if (alloc.size == 0) return;
+void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
+{
+    if (size == 0)
+        return;
+
+    if (virt_addr > UINT64_MAX - size || virt_addr + size > UINT64_MAX - 0xFFFULL)
+        return;
+
+    uint64_t virt_start = virt_addr & ~0xFFFULL;
+    uint64_t virt_end = (virt_addr + size + 0xFFFULL) & ~0xFFFULL;
+    if (virt_end < virt_start)
+        return;
+    uint64_t pages = (virt_end - virt_start) / 0x1000ULL;
+
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t v = virt_start + i * 0x1000;
+        uint64_t phys = vmm_virt_to_phys(v);
+        if (phys == 0)
+            continue;
+
+        uint64_t pml4_index = (v >> 39) & 0x1FF;
+        // MUST include PRESENT and WRITABLE flags!
+        uint64_t flags = PTE_PRESENT | PTE_WRITABLE | PTE_WC | PTE_SHARED;
+        if (g_pml4[pml4_index] & PTE_USER)
+            flags |= PTE_USER;
+
+        vmm_map_page(v, phys & ~0xFFFULL, flags);
+    }
+    vmm_flush_tlb_all();
+}
+
+void vmm_free_dma(DMAAllocation alloc)
+{
+    if (alloc.size == 0)
+        return;
     size_t pages = (alloc.size + 4095) / 4096;
     for (size_t i = 0; i < pages; i++) {
-        pmm_free_frame(reinterpret_cast<void*>(alloc.phys + i * 4096));
+        vmm_unmap_page_in(g_pml4, alloc.virt + i * 4096);
     }
+    for (size_t i = 0; i < pages; i++) {
+        pmm_free_frame(reinterpret_cast<void *>(alloc.phys + i * 4096));
+    }
+    dma_free_virt_range(alloc.virt, alloc.size);
+    vmm_flush_tlb_all();
 }
 
-bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code) {
-    if (!(error_code & 2)) return false;
-    
-    Process* curr = process_get_current();
-    if (!curr || !curr->vma_list) return false;
-    
-    VMA* vma = vma_find(curr->vma_list, fault_addr);
-    if (!vma || !(vma->flags & PTE_WRITABLE)) return false;
-    
+bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
+{
+    const bool present_fault = (error_code & 0x1) != 0;
+    const bool write_fault = (error_code & 0x2) != 0;
+
+    if (present_fault && !write_fault)
+        return false;
+
+    if (fault_addr >= 0x0000800000000000ULL)
+        return false;
+
+    Process *curr = process_get_current();
+    if (!curr || !curr->vma_list || !curr->page_table)
+        return false;
+
+    VMA *vma = vma_find(curr->vma_list, fault_addr);
+    if (!vma)
+        return false;
+
+    uint64_t vma_flags = vma->flags;
+    VMAType vma_type = vma->type;
     uint64_t page_vaddr = fault_addr & ~0xFFFULL;
-    uint64_t phys = vmm_virt_to_phys(page_vaddr);
-    
-    if (phys == 0) return false;
-    
-    uint16_t refcount = pmm_get_refcount(reinterpret_cast<void*>(phys));
-    
-    if (refcount > 1) {
-        void* new_frame = pmm_alloc_frame();
-        if (!new_frame) panic("OOM during CoW page fault!");
-        
-        uint8_t* src_virt = reinterpret_cast<uint8_t*>(vmm_phys_to_virt(phys));
-        uint8_t* dst_virt = reinterpret_cast<uint8_t*>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame)));
-        
-        kstring::memcpy(dst_virt, src_virt, 4096);
-        vmm_map_page(page_vaddr, reinterpret_cast<uint64_t>(new_frame), vma->flags | PTE_PRESENT | PTE_USER);
-        pmm_refcount_dec(reinterpret_cast<void*>(phys));
-        
-        DEBUG_INFO("CoW: PID %d duplicated page at 0x%llx (frame 0x%llx -> 0x%llx)", curr->pid, page_vaddr, phys, reinterpret_cast<uint64_t>(new_frame));
-    } else {
-        vmm_map_page(page_vaddr, phys, vma->flags | PTE_PRESENT | PTE_USER);
-        DEBUG_INFO("CoW: PID %d restored write permission on page 0x%llx", curr->pid, page_vaddr);
+    uint64_t map_flags = vma_flags | PTE_PRESENT;
+    if (page_vaddr < 0x0000800000000000ULL)
+        map_flags |= PTE_USER;
+
+    if (write_fault && !(vma_flags & PTE_WRITABLE)) {
+        return false;
     }
-    
+
+    uint64_t phys = vmm_virt_to_phys(page_vaddr);
+
+    if (phys == 0) {
+        void *new_frame = pmm_alloc_frame();
+        if (!new_frame)
+            return false;
+
+        if (!vmm_map_page(page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
+            pmm_free_frame(new_frame);
+            return false;
+        }
+        return true;
+    }
+
+    if (vma_type == VMAType::Shared) {
+        vmm_set_page_flags(page_vaddr, map_flags);
+        return true;
+    }
+
+    uint16_t refcount = pmm_get_refcount(reinterpret_cast<void *>(phys));
+
+    if (refcount > 1) {
+        void *new_frame = pmm_alloc_frame();
+        if (!new_frame)
+            return false;
+
+        uint8_t *src_virt = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(phys));
+        uint8_t *dst_virt = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame)));
+
+        kstring::memcpy(dst_virt, src_virt, 4096);
+        if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
+            pmm_free_frame(new_frame);
+            return false;
+        }
+        pmm_refcount_dec(reinterpret_cast<void *>(phys));
+    } else {
+        if (!vmm_map_page_in(curr->page_table, page_vaddr, phys, map_flags).ok())
+            return false;
+    }
+
+    asm volatile("invlpg (%0)" ::"r"(page_vaddr) : "memory");
     return true;
 }

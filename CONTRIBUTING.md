@@ -1,89 +1,95 @@
-# Contributing to uniOS
+# Contributing
 
-uniOS is a hobby project. I welcome PRs, but keep in mind this is a learning OS, not a production kernel. If you're interested in kernel development, this is a good codebase to experiment with.
+## Development Baseline
 
-## Development Environment
+- Target: x86-64.
+- Bootloader: in-tree Meridian UEFI loader.
+- Kernel language: freestanding C++20.
+- Userspace languages: C and C++.
+- Build system: Meson + LLVM.
+- Runtime image: `boot.img` with an EFI system partition and optional persistent `UNI_DATA` FAT32 partition.
+- Userspace model: native ELF programs under `src/usr/`.
+- Desktop model: userspace init starts the window manager, menubar, dock, and apps.
 
-I develop on **Ubuntu/WSL** and test primarily in **QEMU**. If it breaks on your specific hardware, I probably can't fix it without serial logs.
+## Required Tools
 
-### Build Requirements
+Install:
 
-- GCC cross-compiler for `x86_64-elf`
-- NASM assembler
-- xorriso (for ISO creation)
-- QEMU (for testing)
-- Python 3 (for uniFS generation)
+- `meson`
+- `ninja`
+- `clang`
+- `clang++`
+- `ld.lld`
+- `llvm-ar`
+- `llvm-strip`
+- `nasm`
+- `qemu-system-x86_64`
+- OVMF UEFI firmware
+- `python3`
+- Pillow
+- CairoSVG
 
 ## Code Style
 
-This is a **freestanding C++20 kernel**. That means:
+- Match surrounding formatting.
+- Keep names descriptive.
+- Prefer `constexpr` over magic numbers.
+- Do not use `std::` in kernel code.
+- Do not use exceptions or RTTI.
+- Keep comments for hardware behavior, ordering constraints, invariants, and non-obvious code.
+- Remove comments that restate the code.
 
-- **No exceptions** (`-fno-exceptions`) — We can't unwind the stack in a kernel.
-- **No RTTI** (`-fno-rtti`) — `dynamic_cast` and `typeid` don't exist.
-- **No `std::`** — We use `kstring::` for string operations to avoid libc.
-- **No `new`/`delete`** — Use `malloc()`/`free()` from the kernel heap.
+## Build and Test
 
-### Logging
+Release build:
 
-Use the `DEBUG_*` macros in `debug.h`:
-
-```cpp
-DEBUG_INFO("Initialized device %s\n", name);
-DEBUG_WARN("Timeout after %d ms\n", timeout);
-DEBUG_ERROR("Failed to allocate buffer\n");
+```sh
+meson setup build/release --cross-file toolchains/llvm.ini --buildtype release
+meson compile -C build/release boot-disk iso
 ```
 
-These only print in debug builds (`make debug`). Release builds strip them.
+Debug build:
 
-### Constants
-
-Use named constants. Magic numbers make debugging painful:
-
-```cpp
-// Bad
-if (status & 0x10) { ... }
-
-// Good
-#define STATUS_READY (1 << 4)
-if (status & STATUS_READY) { ... }
+```sh
+meson setup build/debug --cross-file toolchains/llvm.ini --buildtype debug
+meson compile -C build/debug boot-disk iso
+meson test -C build/debug --suite smoke --print-errorlogs
 ```
 
-## Testing
+Useful run targets:
 
-```bash
-make clean && make debug  # Build with logging
-make run                  # Test in QEMU
-make run-gdb              # Debug with GDB on localhost:1234
+```sh
+meson compile -C build/debug run
+meson compile -C build/debug run-serial
+meson compile -C build/debug run-headless
+meson compile -C build/debug run-usb
+meson compile -C build/debug run-qemu-net
+meson compile -C build/debug run-qemu-full
 ```
 
-Before submitting a PR:
-1. Verify it builds with both `make` and `make debug`
-2. Test your feature in QEMU
-3. Check that existing commands still work
+Static checks when relevant:
 
-> [!WARNING]
-> I can't test on real hardware for every PR. If your change requires specific hardware, document how to test it.
+```sh
+meson compile -C build/debug lint
+meson compile -C build/debug analyze
+```
 
-## Areas for Contribution
+## Validation Expectations
 
-| Area | Notes |
-|------|-------|
-| **Network** | TCP improvements, new protocols |
-| **Shell** | New commands (must use existing uniFS/kernel APIs) |
-| **Drivers** | QEMU-compatible devices preferred |
-| **Docs** | Fix errors, add examples |
+Before opening a pull request:
 
-## Out of Scope
+1. Build the touched configuration.
+2. Boot the affected path in QEMU.
+3. Run the smoke test when the change touches boot, kernel startup, display, userspace init, or the desktop session.
+4. Test both serial and graphical paths when changing boot, display, panic, or logging code.
+5. Test persistent `/data` behavior when changing storage, FAT32, USB mass storage, rootfs staging, or image generation.
+6. Include the exact commands you ran in the pull request.
 
-Please do not open PRs for:
+## Pull Request Notes
 
-- **Alternative Languages** — This is a pure C++20 project (no Rust, Zig, etc.)
-- **C++ Standard Library** — We do not use `std::` to keep the kernel freestanding
-- **32-bit (i386) support** — x86-64 only
-- **UEFI runtime services** — We boot via Limine and don't use UEFI after
-- **SMP (multicore)** — Single-core design for simplicity
-- **Complex Filesystems** — Ext4, NTFS, or ZFS are beyond this project's goals
-
-## Questions?
-
-Open an issue. I read them regularly.
+- Use an imperative subject.
+- Conventional Commit style is preferred.
+- Start with user-visible behavior changes when there are any.
+- Mention boot, image layout, or persistent storage changes explicitly.
+- Include screenshots for visible desktop, app, website, wallpaper, cursor, or icon changes.
+- Keep a pull request scoped to one logical change.

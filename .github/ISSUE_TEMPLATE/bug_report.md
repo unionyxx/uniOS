@@ -1,38 +1,49 @@
 ---
 name: Bug Report
-about: Create a report to help us improve uniOS
+about: Report a bug in uniOS
 title: ''
 labels: bug
 assignees: ''
 ---
 
-**Describe the Bug**
-A clear description of the kernel panic, freeze, or incorrect behavior.
+**Describe the bug**
+A clear description of the panic, freeze, incorrect behavior, driver issue, desktop issue, app issue, or tooling issue.
 
-**To Reproduce**
-1. Run `make run`
-2. Execute command '...'
-3. See error
+**To reproduce**
+1. Build with `meson compile -C build/debug boot-disk iso` or describe the build you used.
+2. Run the exact target, for example `meson compile -C build/debug run-serial`.
+3. Describe the exact boot path, app, shell command, driver path, or tool command involved.
+4. Describe the failure.
 
-**Expected Behavior**
+**Expected behavior**
 What you expected to happen.
 
-**Environment:**
- - Distro/OS: [e.g. Ubuntu 22.04 / Windows WSL2]
- - Emulator: [e.g. QEMU 7.0]
- - Hardware (if applicable): [e.g. ThinkPad X220]
+**Environment**
+- Host OS: [for example Ubuntu 24.04, Fedora, macOS, WSL2]
+- Build type: [release / debug / debugoptimized]
+- Target: [QEMU disk / QEMU USB / QEMU network / ISO / hardware]
+- QEMU version, if applicable:
+- Firmware/OVMF package, if applicable:
+- Hardware, if applicable:
 
-**Serial Log (Required)**
-Please paste the serial output here.
-1. Run `make run-serial` (or check `serial.log`)
-2. Paste the output below between the backticks.
+**Disk image and persistence**
+- Did the issue involve `boot.img`?
+- Did the issue involve `/data` or the `UNI_DATA` partition?
+- Was this a fresh image or an image reused across rebuilds?
+
+**Serial log**
+If the bug happens during boot, driver initialization, session startup, or shutdown, include serial output from:
+
+```sh
+meson compile -C build/debug run-serial
+```
 
 ```text
-[INFO] uniOS Kernel v0.x.x Starting...
-[INFO] GDT Initialized
-...
-(Paste log here)
+[paste serial log here]
 ```
 
 **Screenshots**
-If it's a visual glitch in the shell/GUI, add screenshots here.
+If this is a visible desktop, app, cursor, wallpaper, font, compositor, or website issue, attach screenshots.
+
+**Additional context**
+Add any relevant notes about recent changes, connected USB devices, network mode, sound mode, or filesystem state.

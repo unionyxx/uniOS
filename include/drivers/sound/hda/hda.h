@@ -1,9 +1,8 @@
 #pragma once
-#include <stdint.h>
-#include <stdbool.h>
-
 #include <drivers/bus/pci/pci.h>
 #include <kernel/mm/vmm.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 // Control definitions.
 #define HDA_GLOBAL_CAPABILITIES 0x0
@@ -55,11 +54,11 @@
 #define HDA_RIRB_SIZE_NUMBER_OF_RING_ENTRIES 0
 
 // Immediate Command Interface (for QEMU compatibility - bypasses CORB/RIRB)
-#define HDA_IMMEDIATE_COMMAND 0x60      // Immediate Command Output (IC)
-#define HDA_IMMEDIATE_RESPONSE 0x64     // Immediate Response Input (IR)
-#define HDA_IMMEDIATE_STATUS 0x68       // Immediate Command Status (ICS)
-#define HDA_ICS_BUSY (1 << 0)           // ICB - Immediate Command Busy
-#define HDA_ICS_VALID (1 << 1)          // IRV - Immediate Result Valid
+#define HDA_IMMEDIATE_COMMAND 0x60  // Immediate Command Output (IC)
+#define HDA_IMMEDIATE_RESPONSE 0x64 // Immediate Response Input (IR)
+#define HDA_IMMEDIATE_STATUS 0x68   // Immediate Command Status (ICS)
+#define HDA_ICS_BUSY (1 << 0)       // ICB - Immediate Command Busy
+#define HDA_ICS_VALID (1 << 1)      // IRV - Immediate Result Valid
 
 // Stream descriptor definitions.
 #define HDA_STREAM_DESCRIPTOR_BASE 0x80
@@ -138,7 +137,8 @@
 
 #define HDA_INVALID 0xFFFFFFFF
 
-struct HdAudioNode {
+struct HdAudioNode
+{
     uint32_t node;
     uint32_t node_type;
 
@@ -149,25 +149,28 @@ struct HdAudioNode {
     uint32_t supported_formats;
     uint32_t output_amplifier_capabilities;
 
-    inline void init(uint32_t node, uint32_t node_type, uint32_t parent_node, uint32_t parent_node_type) {
-        this->node = node;
-        this->node_type = node_type;
+    inline void init(uint32_t node_id, uint32_t type, uint32_t parent_id, uint32_t parent_type)
+    {
+        node = node_id;
+        node_type = type;
 
-        this->parent_node = parent_node;
-        this->parent_node_type = parent_node_type;
+        parent_node = parent_id;
+        parent_node_type = parent_type;
     }
 };
 
-struct HdAudioBufferEntry {
-    uint64_t buffer; // Physical address (!) to sound data in memory.
+struct HdAudioBufferEntry
+{
+    uint64_t buffer;      // Physical address (!) to sound data in memory.
     uint32_t buffer_size; // Sound data size.
-    uint16_t reserved; // Not needed right now.
+    uint16_t reserved;    // Not needed right now.
 };
 
-struct HdAudioDevice {
+struct HdAudioDevice
+{
     // Flags.
     bool is_playing; // Is playing something?
-    bool is_paused; // Is paused?
+    bool is_paused;  // Is paused?
 
     bool free_sound_data_on_stop; // Free sound data memory when playback is finished?
 
@@ -176,13 +179,13 @@ struct HdAudioDevice {
     uint8_t sound_volume; // Current sound volume.
 
     // Stream parameters.
-    uint8_t channels; // Sound buffer channels.
+    uint8_t channels;        // Sound buffer channels.
     uint8_t bits_per_sample; // Sound buffer bits per sample.
 
     uint32_t sample_rate; // Sound buffer sample rate.
 
     // Sound card data.
-    uint64_t base; // PCI BAR0 virtual address for communication.
+    uint64_t base;          // PCI BAR0 virtual address for communication.
     uint64_t output_stream; // Address of output stream.
 
     uint32_t codec; // CODEC ID.
@@ -196,38 +199,40 @@ struct HdAudioDevice {
 
     // Memory stuff.
     DMAAllocation buffer_entries_dma; // DMA allocation for buffer entries.
-    DMAAllocation sound_buffers_dma; // DMA allocation for sound buffers.
+    DMAAllocation sound_buffers_dma;  // DMA allocation for sound buffers.
 
-    HdAudioBufferEntry* buffer_entries; // Buffer entries array (should be virtual address of DMA allocation for buffer entries)
+    HdAudioBufferEntry
+        *buffer_entries; // Buffer entries array (should be virtual address of DMA allocation for buffer entries)
 
-    uint8_t* sound_data; // Byte array of entire PCM sound data (virtual address from filesystem!).
+    uint8_t *sound_data;      // Byte array of entire PCM sound data (virtual address from filesystem!).
     uint32_t sound_data_size; // Size of entire PCM sound data.
 
     // CORB/RIRB for hardware command transfer (DMA-based)
-    DMAAllocation corb_dma;     // DMA allocation for CORB entries.
-    DMAAllocation rirb_dma;     // DMA allocation for RIRB entries.
+    DMAAllocation corb_dma; // DMA allocation for CORB entries.
+    DMAAllocation rirb_dma; // DMA allocation for RIRB entries.
 
-    uint32_t* corb;             // Virtual address of CORB entries.
-    uint32_t* rirb;             // Virtual address of RIRB entries.
+    uint32_t *corb; // Virtual address of CORB entries.
+    uint32_t *rirb; // Virtual address of RIRB entries.
 
-    uint32_t corb_entry;        // Current CORB entry.
-    uint32_t rirb_entry;        // Current RIRB entry.
+    uint32_t corb_entry; // Current CORB entry.
+    uint32_t rirb_entry; // Current RIRB entry.
 
     // Buffer refilling.
     uint32_t current_buffer_entry; // Current buffer entry for refilling.
-    uint32_t buffer_entry_offset; // Buffers offset (how many times sound card went back to first buffer since playback start).
+    uint32_t buffer_entry_offset;  // Buffers offset (how many times sound card went back to first buffer since playback
+                                   // start).
 
     uint32_t played_bytes; // Total amount of played bytes (out of sound_data_size).
 
     // Input/Recording support.
-    uint64_t input_stream;        // Address of input stream descriptor.
-    DMAAllocation input_buffer_entries_dma; // DMA allocation for input buffer entries.
-    DMAAllocation input_buffers_dma;        // DMA allocation for input sound buffers.
-    HdAudioBufferEntry* input_buffer_entries; // Input buffer entries array.
-    uint8_t* input_data;          // Recorded audio data destination.
-    uint32_t input_data_size;     // Size of recorded data.
-    bool is_recording;            // Is currently recording?
-    uint32_t recorded_bytes;      // Total amount of recorded bytes.
+    uint64_t input_stream;                    // Address of input stream descriptor.
+    DMAAllocation input_buffer_entries_dma;   // DMA allocation for input buffer entries.
+    DMAAllocation input_buffers_dma;          // DMA allocation for input sound buffers.
+    HdAudioBufferEntry *input_buffer_entries; // Input buffer entries array.
+    uint8_t *input_data;                      // Recorded audio data destination.
+    uint32_t input_data_size;                 // Size of recorded data.
+    bool is_recording;                        // Is currently recording?
+    uint32_t recorded_bytes;                  // Total amount of recorded bytes.
 };
 
 bool hda_is_initialized();
@@ -245,7 +250,7 @@ void hda_set_channels(uint8_t channels);
 void hda_set_bits_per_sample(uint8_t bits_per_sample);
 void hda_set_sample_rate(uint32_t sample_rate);
 
-void hda_play(uint8_t* data, uint32_t size);
+void hda_play(uint8_t *data, uint32_t size);
 void hda_resume();
 void hda_pause();
 void hda_stop();
@@ -256,24 +261,23 @@ uint32_t hda_get_played_bytes();
 uint32_t hda_get_stream_position();
 
 // Internal usage only.
-uint16_t hda_get_node_connection_entry(HdAudioNode* node, uint32_t connection_entry_number);
-void hda_power_on_node(HdAudioNode* node);
+uint16_t hda_get_node_connection_entry(HdAudioNode *node, uint32_t connection_entry_number);
+void hda_power_on_node(HdAudioNode *node);
 
-void hda_init_pin(HdAudioNode* node);
-void hda_init_mixer(HdAudioNode* node);
-void hda_init_output(HdAudioNode* node);
+void hda_init_pin(HdAudioNode *node);
+void hda_init_mixer(HdAudioNode *node);
+void hda_init_output(HdAudioNode *node);
 
 uint32_t hda_send_command(uint32_t codec, uint32_t node, uint32_t verb, uint32_t command);
-void hda_set_node_volume(HdAudioNode* node, uint32_t volume);
+void hda_set_node_volume(HdAudioNode *node, uint32_t volume);
 
 // Per-channel volume control.
 void hda_set_channel_volume(uint32_t node_id, uint8_t left, uint8_t right);
 
 // Input/Recording support.
-void hda_init_input_pin(HdAudioNode* node);
+void hda_init_input_pin(HdAudioNode *node);
 bool hda_is_recording();
-void hda_record_start(uint8_t* buffer, uint32_t size);
+void hda_record_start(uint8_t *buffer, uint32_t size);
 void hda_record_stop();
 void hda_record_poll();
 uint32_t hda_get_recorded_bytes();
-

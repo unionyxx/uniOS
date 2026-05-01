@@ -2,11 +2,12 @@
 #include <stdint.h>
 
 // ICMP types
-#define ICMP_TYPE_ECHO_REPLY    0
-#define ICMP_TYPE_ECHO_REQUEST  8
+#define ICMP_TYPE_ECHO_REPLY 0
+#define ICMP_TYPE_ECHO_REQUEST 8
 
 // ICMP Header
-struct IcmpHeader {
+struct IcmpHeader
+{
     uint8_t type;
     uint8_t code;
     uint16_t checksum;
@@ -18,7 +19,7 @@ struct IcmpHeader {
 
 // ICMP functions
 void icmp_init();
-void icmp_receive(const void* data, uint16_t length, uint32_t src_ip);
+void icmp_receive(const void *data, uint16_t length, uint32_t src_ip);
 bool icmp_send_echo_request(uint32_t dst_ip, uint16_t id, uint16_t seq);
 
 // Ping callback

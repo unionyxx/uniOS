@@ -4,7 +4,7 @@ global load_gdt
 
 load_gdt:
     lgdt [rdi]
-    
+
     push 0x08       ; Kernel code segment
     lea rax, [rel .reload_CS]
     push rax
@@ -15,7 +15,7 @@ load_gdt:
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
+    ; mov gs, ax    ; DO NOT load GS - it clobbers GS_BASE set by MSRs
     mov ss, ax
     ret
 
@@ -32,18 +32,18 @@ global jump_to_user_mode
 ; RSI = user stack pointer
 ; RDX = entry point
 jump_to_user_mode:
-    mov ax, 0x23       ; User data segment (0x20 | 3)
+    mov ax, 0x1B       ; User data segment (0x18 | 3)
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
-    
+    ; mov gs, ax       ; DO NOT load GS
+
     ; Build iretq frame
-    push 0x23          ; SS (user data)
+    push 0x1B          ; SS (user data)
     push rsi           ; RSP (user stack)
     pushfq             ; RFLAGS
     or qword [rsp], 0x200 ; Enable interrupts
-    push 0x1B          ; CS (user code = 0x18 | 3)
+    push 0x23          ; CS (user code = 0x20 | 3)
     push rdx           ; RIP (entry point)
-    
+
     iretq

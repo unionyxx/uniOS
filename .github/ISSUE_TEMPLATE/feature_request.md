@@ -1,20 +1,38 @@
 ---
 name: Feature request
-about: Suggest an idea for this project
+about: Suggest a change for uniOS
 title: ''
 labels: enhancement
 assignees: ''
-
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex: I'm always frustrated when [...]
+**Area**
+Choose the main area:
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+- Bootloader / boot image
+- Kernel
+- Memory management
+- Filesystems / storage
+- USB / input
+- Display / window manager
+- Userspace / shell
+- App
+- Networking
+- Audio
+- Build / tooling
+- Documentation
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+**Problem**
+Describe the current limitation or missing behavior.
+
+**Proposed change**
+Describe the behavior you want.
+
+**Alternatives**
+Describe alternatives you considered, if any.
+
+**Validation**
+How should this be tested? Include QEMU target, app, command, driver path, or disk image state if relevant.
 
 **Additional context**
-Add any other context or screenshots about the feature request here.
+Add screenshots, logs, examples, or links if useful.
