@@ -423,6 +423,15 @@ static inline void gui_draw_panel_inset(Surface *s, int x, int y, int w, int h, 
     }
 }
 
+static inline void gui_fill_top_rounded_panel(Surface *s, int x, int y, int w, int h, int r, uint32_t color)
+{
+    if (h <= 0 || w <= 0)
+        return;
+    gui_fill_rounded_rect(s, x, y, w, h, r, color);
+    if (r > 0 && h > r)
+        gui_fill_rect(s, x, y + r, w, h - r, color);
+}
+
 static inline void gui_draw_card(Surface *s, int x, int y, int w, int h, const char *title)
 {
     int header_h = gui_card_header_h();
@@ -430,8 +439,8 @@ static inline void gui_draw_card(Surface *s, int x, int y, int w, int h, const c
     gui_fill_rounded_rect(s, x, y + 1, w, h, r, g_gui_style.chrome_bg);
     gui_draw_panel_inset(s, x, y, w, h, g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
     if (header_h > 0 && w > 2) {
-        gui_fill_rounded_rect(s, x + 1, y + 1, w - 2, header_h, gui_corner_radius(w - 2, header_h, r - 1),
-                              g_gui_style.chrome_bg);
+        gui_fill_top_rounded_panel(s, x + 1, y + 1, w - 2, header_h, gui_corner_radius(w - 2, header_h, r - 1),
+                                   g_gui_style.chrome_bg);
         gui_draw_separator_h(s, x + 1, y + header_h + 1, w - 2, g_gui_style.chrome_edge);
     }
     if (title) {
@@ -445,7 +454,7 @@ static inline void gui_draw_card_header(Surface *s, int x, int y, int w, const c
 {
     int header_h = gui_card_header_h();
     int r = gui_panel_radius(w, header_h);
-    gui_fill_rounded_rect(s, x, y, w, header_h, gui_corner_radius(w, header_h, r), g_gui_style.chrome_bg);
+    gui_fill_top_rounded_panel(s, x, y, w, header_h, gui_corner_radius(w, header_h, r), g_gui_style.chrome_bg);
     gui_draw_separator_h(s, x, y + header_h, w, g_gui_style.chrome_edge);
     int title_y = gui_align_text_y(gui_font_title(), y, header_h);
     if (title)

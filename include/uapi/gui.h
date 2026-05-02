@@ -119,6 +119,11 @@ typedef struct Registry
     volatile uint32_t theme_mode;
     volatile uint32_t settings_generation;
     volatile uint32_t system_flags;
+    volatile bool ethernet_enabled;
+    volatile bool ethernet_use_dhcp;
+    volatile bool animations_enabled;
+    volatile uint32_t transparency_level;
+    volatile uint32_t volume_level;
     volatile uint32_t storage_mode;
     volatile uint32_t storage_request_generation;
     volatile uint32_t storage_request_mode;

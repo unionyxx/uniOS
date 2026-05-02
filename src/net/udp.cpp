@@ -62,7 +62,7 @@ static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *udp_d
 // Receive UDP packet
 void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t dst_ip)
 {
-    if (length < UDP_HEADER_SIZE) {
+    if (!data || length < UDP_HEADER_SIZE) {
         return;
     }
 
@@ -82,10 +82,13 @@ void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
             const uint8_t *payload = (const uint8_t *)data + UDP_HEADER_SIZE;
             uint16_t payload_len = udp_len - UDP_HEADER_SIZE;
 
-            for (uint16_t j = 0; j < payload_len && j < sizeof(sockets[i].rx_buffer); j++) {
+            uint16_t stored_len = payload_len;
+            if (stored_len > sizeof(sockets[i].rx_buffer))
+                stored_len = sizeof(sockets[i].rx_buffer);
+            for (uint16_t j = 0; j < stored_len; j++) {
                 sockets[i].rx_buffer[j] = payload[j];
             }
-            sockets[i].rx_length = payload_len;
+            sockets[i].rx_length = stored_len;
             sockets[i].rx_src_ip = src_ip;
             sockets[i].rx_src_port = src_port;
             sockets[i].rx_ready = true;
@@ -108,6 +111,8 @@ void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
 // Send UDP packet
 bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void *data, uint16_t length)
 {
+    if ((!data && length > 0) || dst_ip == 0 || src_port == 0 || dst_port == 0)
+        return false;
     if (length > 1472) { // MTU - IP - UDP headers
         return false;
     }
@@ -192,6 +197,8 @@ bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void *data, 
 // Receive into socket
 int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uint16_t *src_port)
 {
+    if (!buffer && max_len > 0)
+        return -1;
     if (sock < 0 || sock >= UDP_MAX_SOCKETS || !sockets[sock].in_use || !sockets[sock].bound) {
         return -1;
     }

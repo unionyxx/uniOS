@@ -49,6 +49,11 @@ int waitpid(int pid, int *status)
     return (int)syscall3(SYS_WAIT4, (uint64_t)pid, (uint64_t)status, 0);
 }
 
+int waitpid_nohang(int pid, int *status)
+{
+    return (int)syscall3(SYS_WAIT4, (uint64_t)pid, (uint64_t)status, WNOHANG);
+}
+
 int mkdir(const char *pathname)
 {
     return (int)syscall1(SYS_MKDIR, (uint64_t)pathname);

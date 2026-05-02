@@ -50,6 +50,8 @@ uint32_t ip_make(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 // Format IP address to string
 void ip_format(uint32_t ip, char *buf)
 {
+    if (!buf)
+        return;
     int i = 0;
 
     auto append_num = [&](uint8_t n) {
@@ -73,7 +75,7 @@ void ip_format(uint32_t ip, char *buf)
 // Receive IPv4 packet
 void ipv4_receive(const void *data, uint16_t length)
 {
-    if (length < IPV4_HEADER_SIZE) {
+    if (!data || length < IPV4_HEADER_SIZE) {
         return;
     }
 
@@ -114,13 +116,13 @@ void ipv4_receive(const void *data, uint16_t length)
         return;
     }
 
+    uint16_t total_length = ntohs(hdr->total_length);
+    if (total_length < ihl || total_length > length)
+        return;
+
     // Get payload
     const uint8_t *payload = (const uint8_t *)data + ihl;
-    uint16_t payload_len = ntohs(hdr->total_length) - ihl;
-
-    if (payload_len > length - ihl) {
-        payload_len = length - ihl;
-    }
+    uint16_t payload_len = total_length - ihl;
 
     // Demultiplex by protocol
     switch (hdr->protocol) {
@@ -145,12 +147,39 @@ static uint8_t tx_buffer[1600];
 
 bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t length)
 {
+    if ((!data && length > 0) || dst_ip == 0)
+        return false;
     if (length > 1480) { // MTU - IP header
         DEBUG_WARN("ipv4: payload too large");
         return false;
     }
 
-    // Allocate packet buffer on heap to avoid stack overflow in deep call chains
+    // Resolve MAC before taking the IPv4 TX lock. ARP resolution can poll the
+    // network and may re-enter IPv4 receive paths. Holding tx_lock across that
+    // poll would make ICMP/TCP replies able to deadlock this sender.
+    uint8_t dst_mac[6];
+    uint32_t our_ip = net_get_ip();
+    uint32_t netmask = net_get_netmask();
+    uint32_t gateway = net_get_gateway();
+
+    uint32_t resolve_ip;
+    if (dst_ip == 0xFFFFFFFF) {
+        resolve_ip = dst_ip;
+    } else if ((dst_ip & netmask) == (our_ip & netmask)) {
+        resolve_ip = dst_ip;
+    } else if (gateway != 0) {
+        resolve_ip = gateway;
+    } else {
+        resolve_ip = dst_ip;
+    }
+
+    if (!arp_resolve(resolve_ip, dst_mac)) {
+        DEBUG_WARN("ipv4: failed to resolve MAC for %d.%d.%d.%d", resolve_ip & 0xFF, (resolve_ip >> 8) & 0xFF,
+                   (resolve_ip >> 16) & 0xFF, (resolve_ip >> 24) & 0xFF);
+        return false;
+    }
+
+    // Static TX buffer avoids large stack frames in deep network call chains.
     spinlock_acquire(&tx_lock);
     uint8_t *packet = tx_buffer;
 
@@ -175,33 +204,6 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len
     const uint8_t *src = (const uint8_t *)data;
     for (uint16_t i = 0; i < length; i++) {
         payload[i] = src[i];
-    }
-
-    // Resolve MAC address
-    uint8_t dst_mac[6];
-
-    // Check if destination is on local network or needs gateway
-    uint32_t our_ip = net_get_ip();
-    uint32_t netmask = net_get_netmask();
-    uint32_t gateway = net_get_gateway();
-
-    uint32_t resolve_ip;
-    if ((dst_ip & netmask) == (our_ip & netmask)) {
-        // Same network - resolve directly
-        resolve_ip = dst_ip;
-    } else if (gateway != 0) {
-        // Different network - send to gateway
-        resolve_ip = gateway;
-    } else {
-        // No gateway configured - try direct
-        resolve_ip = dst_ip;
-    }
-
-    if (!arp_resolve(resolve_ip, dst_mac)) {
-        DEBUG_WARN("ipv4: failed to resolve MAC for %d.%d.%d.%d", resolve_ip & 0xFF, (resolve_ip >> 8) & 0xFF,
-                   (resolve_ip >> 16) & 0xFF, (resolve_ip >> 24) & 0xFF);
-        spinlock_release(&tx_lock);
-        return false;
     }
 
     // Send via Ethernet

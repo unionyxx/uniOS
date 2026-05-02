@@ -22,6 +22,13 @@ struct DockItem
     uint32_t fallback_color;
 };
 
+static void reap_exited_children()
+{
+    int status = 0;
+    while (waitpid_nohang(-1, &status) > 0) {
+    }
+}
+
 struct DockIconAsset
 {
     Surface surface;
@@ -265,8 +272,8 @@ static void blit_blur_rounded_rect(Surface *canvas, Surface *blur, int x, int y,
 static void draw_dock_glass(Surface *canvas, Registry *registry, int panel_x, int panel_y, int panel_w, int panel_h,
                             int radius)
 {
-    bool blur_ready = ensure_blur_surface(registry, canvas->width, canvas->height);
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
+    bool solid = registry && registry->transparency_level >= 255;
 
     uint32_t soft_shadow = is_light ? 0x10000000u : 0x12000000u;
     uint32_t key_shadow = is_light ? 0x18000000u : 0x1A000000u;
@@ -277,6 +284,20 @@ static void draw_dock_glass(Surface *canvas, Registry *registry, int panel_x, in
     gui_fill_rounded_rect(canvas, panel_x, panel_y + gui_scaled_metric(5), panel_w, panel_h, radius, soft_shadow);
     gui_fill_rounded_rect(canvas, panel_x, panel_y + gui_scaled_metric(2), panel_w, panel_h, radius, key_shadow);
 
+    if (solid) {
+        uint32_t fill = is_light ? 0xFFF7F9FCu : 0xFF141820u;
+        uint32_t stroke = is_light ? 0xFFD8DEE8u : 0xFF333842u;
+        uint32_t inner = is_light ? 0xFFFFFFFFu : 0xFF242A33u;
+        gui_fill_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, fill);
+        gui_draw_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, stroke);
+        if (panel_w > 4 && panel_h > 4) {
+            gui_draw_rounded_rect(canvas, panel_x + 1, panel_y + 1, panel_w - 2, panel_h - 2,
+                                  gui_corner_radius(panel_w - 2, panel_h - 2, radius - 1), inner);
+        }
+        return;
+    }
+
+    bool blur_ready = ensure_blur_surface(registry, canvas->width, canvas->height);
     if (blur_ready)
         blit_blur_rounded_rect(canvas, &g_blur_surface, panel_x, panel_y, panel_w, panel_h, radius);
 
@@ -796,6 +817,7 @@ extern "C" int main(int argc, char **argv)
             }
         }
 
+        reap_exited_children();
         sleep_ms(16);
     }
 }

@@ -935,7 +935,7 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
     gui_draw_card_header(win, sidebar_x + 1, sticky_sidebar_y + 1, sidebar_w - 2, "Places", nullptr);
     int sy = sticky_sidebar_y + gui_card_header_h() + gui_space_1();
     gui_draw_text_clipped(win, gui_font_default(), sidebar_x + gui_space_2(), sy, sidebar_w - gui_space_4(),
-                          storage_mode_label(state->storage_mode), g_gui_style.text_dim, g_gui_style.app_surface);
+                          storage_mode_label(state->storage_mode), g_gui_style.text_dim, 0);
     sy += gui_line_height() + gui_space_1();
     int data_index = find_data_volume_index(state);
     if (data_index >= 0 && state->storage_mode != STORAGE_MODE_OFF) {

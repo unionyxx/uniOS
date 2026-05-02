@@ -13,6 +13,19 @@ static uint32_t arp_waiting_ip = 0;
 static uint8_t arp_waiting_mac[6];
 static bool arp_resolved = false;
 
+static bool arp_mac_is_unusable(const uint8_t *mac)
+{
+    if (!mac)
+        return true;
+    bool all_zero = true;
+    bool all_ff = true;
+    for (int i = 0; i < 6; i++) {
+        all_zero = all_zero && mac[i] == 0;
+        all_ff = all_ff && mac[i] == 0xFF;
+    }
+    return all_zero || all_ff;
+}
+
 void arp_init()
 {
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
@@ -23,6 +36,9 @@ void arp_init()
 // Add entry to ARP table
 void arp_add_entry(uint32_t ip, const uint8_t *mac)
 {
+    if (ip == 0 || ip == 0xFFFFFFFF || arp_mac_is_unusable(mac))
+        return;
+
     // Check if already exists
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
@@ -51,6 +67,8 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
 // Lookup IP in ARP table
 bool arp_lookup(uint32_t ip, uint8_t *out_mac)
 {
+    if (!out_mac || ip == 0)
+        return false;
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
             eth_mac_copy(out_mac, arp_table[i].mac);
@@ -63,6 +81,8 @@ bool arp_lookup(uint32_t ip, uint8_t *out_mac)
 // Send ARP request
 void arp_send_request(uint32_t target_ip)
 {
+    if (target_ip == 0 || target_ip == 0xFFFFFFFF)
+        return;
     ArpPacket arp;
 
     arp.hw_type = htons(ARP_HW_ETHERNET);
@@ -87,6 +107,8 @@ void arp_send_request(uint32_t target_ip)
 // Send ARP reply
 static void arp_send_reply(uint32_t target_ip, const uint8_t *target_mac)
 {
+    if (target_ip == 0 || arp_mac_is_unusable(target_mac))
+        return;
     ArpPacket arp;
 
     arp.hw_type = htons(ARP_HW_ETHERNET);
@@ -112,7 +134,7 @@ void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac)
 {
     (void)src_mac;
 
-    if (length < sizeof(ArpPacket)) {
+    if (!data || length < sizeof(ArpPacket)) {
         return;
     }
 
@@ -146,14 +168,17 @@ void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac)
 // Resolve IP to MAC (blocking with timeout)
 bool arp_resolve(uint32_t ip, uint8_t *out_mac)
 {
-    // Check cache first
-    if (arp_lookup(ip, out_mac)) {
-        return true;
-    }
+    if (!out_mac || ip == 0)
+        return false;
 
     // Broadcast address - use broadcast MAC
     if (ip == 0xFFFFFFFF) {
         eth_mac_copy(out_mac, ETH_BROADCAST_MAC);
+        return true;
+    }
+
+    // Check cache first
+    if (arp_lookup(ip, out_mac)) {
         return true;
     }
 

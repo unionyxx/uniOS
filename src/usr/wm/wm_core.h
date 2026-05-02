@@ -21,8 +21,8 @@
 #include "../shell_layout.h"
 
 #define MAX_WINDOWS 32
-#define MAX_DIRTY_RECTS 32
-#define MAX_VISIBLE_REGIONS 64
+#define MAX_DIRTY_RECTS 128
+#define MAX_VISIBLE_REGIONS 256
 #define CURSOR_WIDTH 16
 #define CURSOR_HEIGHT 16
 #define CURSOR_DAMAGE_PAD 4
@@ -52,6 +52,7 @@ static constexpr uint32_t WM_FRAME_STATS_HISTORY = 120;
 static constexpr int WM_SNAP_THRESHOLD_BASE = 14;
 static constexpr int WM_SNAP_ESCAPE_BASE = 28;
 static constexpr uint64_t WM_RESIZE_CONFIGURE_RETRY_TICKS = 8;
+static constexpr int INDEX_MAX_RESULTS = 10;
 
 static constexpr uint32_t GUI_ROUNDED_EDGE_TOP = 1u;
 static constexpr uint32_t GUI_ROUNDED_EDGE_BOTTOM = 2u;
@@ -84,6 +85,7 @@ struct Window
     uint32_t *buffer;
     uint32_t owner_pid;
     int x, y, w, h;
+    int target_x, target_y, target_w, target_h;
     int buffer_w, buffer_h;
     int content_w, content_h;
     int scroll_x, scroll_y;
@@ -165,6 +167,11 @@ struct RuntimeGuiSettings
 {
     GuiThemeMode theme_mode;
     uint32_t system_flags;
+    bool ethernet_enabled;
+    bool ethernet_use_dhcp;
+    bool animations_enabled;
+    uint32_t transparency_level;
+    uint32_t volume_level;
 };
 
 struct ContextMenuState
@@ -190,6 +197,70 @@ struct StoragePromptLayout
     DirtyRect off_button;
     DirtyRect readonly_button;
     DirtyRect writable_button;
+};
+
+enum IndexActionKind
+{
+    INDEX_ACTION_NONE = 0,
+    INDEX_ACTION_LAUNCH_APP,
+    INDEX_ACTION_OPEN_CONTROL_PANEL,
+    INDEX_ACTION_OPEN_STORAGE_PROMPT,
+    INDEX_ACTION_SHOW_DESKTOP,
+    INDEX_ACTION_TOGGLE_THEME,
+    INDEX_ACTION_TOGGLE_DESKTOP_GRID,
+    INDEX_ACTION_TOGGLE_CLOCK_SECONDS,
+    INDEX_ACTION_TOGGLE_ANIMATIONS,
+    INDEX_ACTION_TOGGLE_TRANSPARENCY,
+};
+
+enum ControlPanelItem
+{
+    CONTROL_ITEM_NONE = -1,
+    CONTROL_ITEM_NETWORK = 0,
+    CONTROL_ITEM_DARK_MODE,
+    CONTROL_ITEM_DESKTOP_GRID,
+    CONTROL_ITEM_CLOCK_SECONDS,
+    CONTROL_ITEM_ANIMATIONS,
+    CONTROL_ITEM_TRANSPARENCY,
+    CONTROL_ITEM_VOLUME,
+    CONTROL_ITEM_STORAGE,
+    CONTROL_ITEM_SETTINGS,
+};
+
+struct IndexResult
+{
+    char title[64];
+    char path[128];
+    char detail[96];
+    bool is_app;
+    IndexActionKind action;
+    int score;
+};
+
+struct IndexState
+{
+    bool active;
+    char query[64];
+    int query_len;
+    IndexResult results[INDEX_MAX_RESULTS];
+    int result_count;
+    int selected_index;
+    int hovered_index;
+    uint64_t open_ticks;
+};
+
+struct ControlCenterState
+{
+    bool open;
+    int hovered_item;
+    uint32_t volume;
+    bool network_enabled;
+    bool dark_mode;
+    bool desktop_grid;
+    bool clock_seconds;
+    bool animations_enabled;
+    uint32_t transparency_level;
+    bool volume_dragging;
 };
 
 struct WmInputState
@@ -241,13 +312,47 @@ extern int g_add_fail_logs;
 extern uint32_t g_system_flags;
 
 extern DirtyRect g_dirty_rects[MAX_DIRTY_RECTS];
+extern int g_dirty_count;
 extern DirtyRect g_window_outer_cache[MAX_WINDOWS];
 extern DirtyRect g_window_client_cache[MAX_WINDOWS];
 extern bool g_window_visible_cache[MAX_WINDOWS];
 extern DirtyRect g_window_visible_regions[MAX_WINDOWS][MAX_VISIBLE_REGIONS];
 extern int g_window_visible_region_count[MAX_WINDOWS];
 extern bool g_window_visible_region_overflow;
-extern int g_dirty_count;
+
+extern IndexState g_index;
+extern ControlCenterState g_control_center;
+
+// Overlays
+DirtyRect index_overlay_bounds();
+DirtyRect control_center_bounds();
+void open_index();
+void close_index();
+void update_index_search();
+bool activate_index_selection(Registry *registry);
+bool handle_index_pointer_down(Registry *registry, int mouse_x, int mouse_y);
+void update_index_hover(int mouse_x, int mouse_y);
+void toggle_control_center();
+void close_control_center();
+bool handle_control_center_pointer_down(Registry *registry, int mouse_x, int mouse_y);
+void handle_control_center_pointer_up();
+void update_control_center_hover(int mouse_x, int mouse_y);
+bool update_control_center_drag(int mouse_x, int mouse_y);
+bool handle_control_center_scroll(Registry *registry, int mouse_x, int mouse_y, int scroll_y);
+void sync_control_center_state_from_registry(const Registry *registry);
+
+void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry);
+void draw_control_center_overlay_clipped(const DirtyRect &clip);
+
+// Special key codes (matching ps2_keyboard.cpp)
+#define KEY_UP_ARROW 0x80
+#define KEY_DOWN_ARROW 0x81
+#define KEY_LEFT_ARROW 0x82
+#define KEY_RIGHT_ARROW 0x83
+
+void persist_wm_settings();
+void load_wm_settings();
+void enqueue_damage_rect(int x, int y, int w, int h);
 extern bool g_window_visibility_cache_dirty;
 extern bool g_dirty_frame_ready;
 
@@ -550,8 +655,10 @@ bool point_in_button(const Window &w, int px, int py, int button_index);
 int system_window_hit(int px, int py);
 bool pointer_blocked_by_shell_overlay(int px, int py);
 void post_mouse_event_to_window(const Window &w, EventType type, int px, int py, uint8_t button, int8_t scroll_y = 0);
+void post_key_event_to_window(const Window &w, EventType type, char c, uint8_t scancode);
 void mark_window_frame_damage(const Window &w);
 void mark_window_chrome_damage(const Window &w);
+void invalidate_window_decoration_cache(Window &w);
 void mark_window_transition_damage(const Window &old_w, const Window &new_w);
 bool post_window_resize_configure(Window &w);
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
@@ -577,3 +684,4 @@ bool activate_context_menu_item(Registry *registry, int index);
 DirtyRect context_menu_bounds();
 int build_context_menu_items(const Registry *registry, GuiMenuItem *items, int max_items);
 RuntimeGuiSettings load_runtime_settings();
+bool persist_runtime_settings(const Registry *registry);

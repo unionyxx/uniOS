@@ -36,7 +36,8 @@ using kstring::string_view;
 
 extern "C" void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 extern bool display_buffer_set_wm_access(DisplayBufferHandle handle, bool allow);
-extern bool display_import_surface(uint64_t owner_pid, const DisplaySurfaceImport &request, DisplaySurface *out_surface);
+extern bool display_import_surface(uint64_t owner_pid, const DisplaySurfaceImport &request,
+                                   DisplaySurface *out_surface);
 
 static constexpr uint64_t USER_SPACE_MAX = 0x0000800000000000ULL;
 static constexpr uint64_t USER_STACK_TOP = 0x0000700000000000ULL;
@@ -123,8 +124,8 @@ static uint64_t g_random_state = 0x7F4A7C15D39E2B41ULL;
 {
     uint64_t hw = 0;
     const bool have_hw = rdrand64(&hw);
-    uint64_t x = g_random_state ^ read_tsc_counter() ^ timer_get_ticks() ^
-                 reinterpret_cast<uint64_t>(&g_random_state) ^ 0x9E3779B97F4A7C15ULL;
+    uint64_t x = g_random_state ^ read_tsc_counter() ^ timer_get_ticks() ^ reinterpret_cast<uint64_t>(&g_random_state) ^
+                 0x9E3779B97F4A7C15ULL;
     if (have_hw)
         x ^= hw;
 
@@ -1587,7 +1588,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (arg2 != 0 && !validate_user_ptr(reinterpret_cast<void *>(arg2), sizeof(int32_t), true))
                 return static_cast<uint64_t>(-1);
             int32_t status = 0;
-            int64_t waited = process_waitpid(static_cast<int64_t>(arg1), arg2 != 0 ? &status : nullptr);
+            int64_t waited =
+                process_waitpid(static_cast<int64_t>(arg1), arg2 != 0 ? &status : nullptr, static_cast<int>(arg3));
             if (waited >= 0 && arg2 != 0) {
                 STAC();
                 *reinterpret_cast<int32_t *>(arg2) = status;

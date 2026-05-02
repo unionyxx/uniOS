@@ -79,7 +79,6 @@ static bool theme_tables_initialized()
     return g_gui_style.text != 0 && g_gui_chrome.desktop_bg != 0;
 }
 
-
 static bool gui_clip_rect_to_bounds(int32_t *x, int32_t *y, int32_t *w, int32_t *h, int32_t max_w, int32_t max_h)
 {
     if (!x || !y || !w || !h || *w <= 0 || *h <= 0 || max_w <= 0 || max_h <= 0)
@@ -479,27 +478,33 @@ void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color)
 
 void gui_fill_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 {
-    if (!s || !s->buffer || s->pitch == 0)
+    if (!s || !s->buffer || s->pitch == 0 || w <= 0 || h <= 0)
         return;
     if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, (int32_t)s->width, (int32_t)s->height))
         return;
 
     uint32_t pitch_u32 = s->pitch / 4;
     uint32_t *first_row = &s->buffer[(size_t)y * pitch_u32 + (size_t)x];
+
     int32_t i = 0;
-    for (; i + 3 < w; i += 4) {
+    for (; i + 7 < w; i += 8) {
         first_row[i + 0] = color;
         first_row[i + 1] = color;
         first_row[i + 2] = color;
         first_row[i + 3] = color;
+        first_row[i + 4] = color;
+        first_row[i + 5] = color;
+        first_row[i + 6] = color;
+        first_row[i + 7] = color;
     }
     for (; i < w; i++)
         first_row[i] = color;
 
-    size_t row_bytes = (size_t)w * sizeof(uint32_t);
-    for (int32_t py = 1; py < h; py++) {
-        uint32_t *row = &s->buffer[(size_t)(y + py) * pitch_u32 + (size_t)x];
-        memcpy(row, first_row, row_bytes);
+    if (h > 1) {
+        size_t row_bytes = (size_t)w * sizeof(uint32_t);
+        for (int32_t py = 1; py < h; py++) {
+            memcpy(&s->buffer[(size_t)(y + py) * pitch_u32 + (size_t)x], first_row, row_bytes);
+        }
     }
 }
 
@@ -518,50 +523,48 @@ static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
 
 static inline uint32_t blend_pixel(uint32_t dst, uint32_t src, uint8_t coverage)
 {
-    uint8_t src_alpha = scale_alpha_u8((uint8_t)(src >> 24), coverage);
-    if (src_alpha == 0)
+    uint32_t src_a = (src >> 24) & 0xFFu;
+    if (coverage < 255)
+        src_a = (src_a * coverage + 127u) / 255u;
+    if (src_a == 0)
         return dst;
-
-    uint8_t dst_alpha = (uint8_t)(dst >> 24);
-    if (dst_alpha == 0)
-        return ((uint32_t)src_alpha << 24) | (src & 0x00FFFFFFu);
-    if (src_alpha == 255)
+    if (src_a == 255)
         return 0xFF000000u | (src & 0x00FFFFFFu);
-    if (dst_alpha == 255) {
-        uint32_t inv = 255u - src_alpha;
-        uint32_t dr = (dst >> 16) & 0xFFu;
-        uint32_t dg = (dst >> 8) & 0xFFu;
-        uint32_t db = dst & 0xFFu;
-        uint32_t sr = (src >> 16) & 0xFFu;
-        uint32_t sg = (src >> 8) & 0xFFu;
-        uint32_t sb = src & 0xFFu;
 
-        uint32_t r = (dr * inv + sr * src_alpha + 127u) / 255u;
-        uint32_t g = (dg * inv + sg * src_alpha + 127u) / 255u;
-        uint32_t b = (db * inv + sb * src_alpha + 127u) / 255u;
-        return 0xFF000000u | (r << 16) | (g << 8) | b;
+    uint32_t dst_a = (dst >> 24) & 0xFFu;
+    if (dst_a == 0)
+        return (src_a << 24) | (src & 0x00FFFFFFu);
+
+    if (dst_a == 255) {
+        uint32_t inv_a = 255u - src_a;
+        uint32_t s_rb = src & 0x00FF00FFu;
+        uint32_t d_rb = dst & 0x00FF00FFu;
+
+        uint32_t rb = (s_rb * src_a + d_rb * inv_a + 0x00800080u);
+        rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+        rb &= 0x00FF00FFu;
+
+        uint32_t s_g = (src >> 8) & 0xFFu;
+        uint32_t d_g = (dst >> 8) & 0xFFu;
+        uint32_t g = (s_g * src_a + d_g * inv_a + 127u) / 255u;
+
+        return 0xFF000000u | rb | (g << 8);
     }
 
-    uint32_t inv = 255u - src_alpha;
-    uint32_t out_alpha = (uint32_t)src_alpha + ((uint32_t)dst_alpha * inv + 127u) / 255u;
-    if (out_alpha == 0)
+    // Full ARGB blend
+    uint32_t inv_a = 255u - src_a;
+    uint32_t out_a = src_a + (dst_a * inv_a + 127u) / 255u;
+    if (out_a == 0)
         return 0;
 
-    uint32_t dr_p = ((dst >> 16) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t dg_p = ((dst >> 8) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t db_p = (dst & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t sr_p = ((src >> 16) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sg_p = ((src >> 8) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sb_p = (src & 0xFFu) * (uint32_t)src_alpha;
+    auto blend_ch = [&](uint32_t s, uint32_t d, uint32_t sa, uint32_t da) {
+        return (s * sa * 255u + d * da * inv_a + (out_a * 127u)) / (out_a * 255u);
+    };
 
-    uint32_t out_r_p = sr_p + (dr_p * inv + 127u) / 255u;
-    uint32_t out_g_p = sg_p + (dg_p * inv + 127u) / 255u;
-    uint32_t out_b_p = sb_p + (db_p * inv + 127u) / 255u;
-
-    uint32_t r = (out_r_p + out_alpha / 2u) / out_alpha;
-    uint32_t g = (out_g_p + out_alpha / 2u) / out_alpha;
-    uint32_t b = (out_b_p + out_alpha / 2u) / out_alpha;
-    return (out_alpha << 24) | (r << 16) | (g << 8) | b;
+    uint32_t r = blend_ch((src >> 16) & 0xFFu, (dst >> 16) & 0xFFu, src_a, dst_a);
+    uint32_t g = blend_ch((src >> 8) & 0xFFu, (dst >> 8) & 0xFFu, src_a, dst_a);
+    uint32_t b = blend_ch(src & 0xFFu, dst & 0xFFu, src_a, dst_a);
+    return (out_a << 24) | (r << 16) | (g << 8) | b;
 }
 
 static inline void paint_pixel_coverage(uint32_t *dst, uint32_t color, uint8_t coverage, uint8_t base_alpha)
@@ -1347,8 +1350,7 @@ void gui_blit_rect(Surface *dest, Surface *src, int32_t dx, int32_t dy, int32_t 
     bool same_buffer = dest->buffer == src->buffer;
     bool overlap = false;
     if (same_buffer) {
-        overlap = !((int64_t)dx + w <= sx || (int64_t)sx + w <= dx ||
-                    (int64_t)dy + h <= sy || (int64_t)sy + h <= dy);
+        overlap = !((int64_t)dx + w <= sx || (int64_t)sx + w <= dx || (int64_t)dy + h <= sy || (int64_t)sy + h <= dy);
     }
 
     size_t row_bytes = (size_t)w * sizeof(uint32_t);
@@ -1881,12 +1883,10 @@ void gui_app_draw_header(Surface *s, const GuiAppLayout *layout, const char *tit
         title_max_w = r.w - pad_x - right_pad;
 
     if (title) {
-        gui_draw_text_clipped(s, gui_font_title(), text_x, title_y, title_max_w, title, g_gui_style.text,
-                              g_gui_style.app_surface);
+        gui_draw_text_clipped(s, gui_font_title(), text_x, title_y, title_max_w, title, g_gui_style.text, 0);
     }
     if (subtitle && *subtitle) {
-        gui_draw_text_clipped(s, gui_font_default(), text_x, subtitle_y, title_max_w, subtitle, g_gui_style.text_dim,
-                              g_gui_style.app_surface);
+        gui_draw_text_clipped(s, gui_font_default(), text_x, subtitle_y, title_max_w, subtitle, g_gui_style.text_dim, 0);
     }
     if (detail && *detail) {
         int detail_w = gui_measure_text(gui_font_default(), detail);
@@ -1895,7 +1895,7 @@ void gui_app_draw_header(Surface *s, const GuiAppLayout *layout, const char *tit
             detail_x = text_x + gui_scaled_metric(120);
         int detail_y = gui_align_text_y(gui_font_default(), r.y, r.h);
         gui_draw_text_clipped(s, gui_font_default(), detail_x, detail_y, r.x + r.w - right_pad - detail_x, detail,
-                              g_gui_style.text_muted, g_gui_style.app_surface);
+                              g_gui_style.text_muted, 0);
     }
 }
 
@@ -2103,16 +2103,16 @@ void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *lab
         bg = g_gui_style.border_hover;
     uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
     int r = gui_corner_radius(w, h, gui_radius_sm());
-    
+
     // Shadow (only if not maximized/fullscreen logic, but here simple)
     gui_fill_rounded_rect(s, x, y + 1, w, h, r, primary ? 0x18000000u : 0x10000000u);
-    
+
     // Main surface
     gui_fill_rounded_rect(s, x, y, w, h, r, bg);
-    
+
     // Outer border
     gui_draw_rounded_rect(s, x, y, w, h, r, border);
-    
+
     // Inner highlight / polish (Unified logic)
     if (w > 4 && h > 4) {
         int ir = r > 0 ? r - 1 : 0;

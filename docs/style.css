@@ -254,7 +254,7 @@ nav {
     z-index: 1;
 }
 
-[data-theme="dark"] .theme-switch::before {
+[data-theme="light"] .theme-switch::before {
     transform: translateX(100%);
 }
 

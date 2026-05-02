@@ -4,6 +4,8 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <libk/kstring.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #define MAX_DIRTY_RECTS 128
 static GfxRect dirty_rects[MAX_DIRTY_RECTS];
@@ -18,6 +20,59 @@ static uint32_t target_width = 0;
 static uint32_t target_height = 0;
 static uint32_t target_pitch_u32 = 0; // Framebuffer pitch in uint32_t units (handles framebuffer padding)
 bool g_gfx_double_buffered = false;
+
+static inline int32_t clamp_i64_to_i32(int64_t value);
+
+static bool framebuffer_geometry_valid(const BootFramebuffer *fb)
+{
+    if (!fb || fb->bpp != 32 || fb->address == 0 || fb->width == 0 || fb->height == 0)
+        return false;
+    if (fb->width > (uint64_t)INT32_MAX || fb->height > (uint64_t)INT32_MAX)
+        return false;
+    if ((fb->pitch & 3u) != 0)
+        return false;
+    if ((uint64_t)fb->pitch < (uint64_t)fb->width * sizeof(uint32_t))
+        return false;
+    if ((uint64_t)fb->pitch / sizeof(uint32_t) > (uint64_t)UINT32_MAX)
+        return false;
+    if ((uint64_t)fb->pitch * (uint64_t)fb->height > (uint64_t)SIZE_MAX)
+        return false;
+    return true;
+}
+
+static inline bool clip_rect_to_bounds(int32_t *x, int32_t *y, int32_t *w, int32_t *h, uint32_t bounds_w,
+                                       uint32_t bounds_h)
+{
+    if (!x || !y || !w || !h || *w <= 0 || *h <= 0 || bounds_w == 0 || bounds_h == 0)
+        return false;
+
+    int64_t x1 = *x;
+    int64_t y1 = *y;
+    int64_t x2 = x1 + (int64_t)*w;
+    int64_t y2 = y1 + (int64_t)*h;
+
+    if (x1 < 0)
+        x1 = 0;
+    if (y1 < 0)
+        y1 = 0;
+    if (x2 > (int64_t)bounds_w)
+        x2 = bounds_w;
+    if (y2 > (int64_t)bounds_h)
+        y2 = bounds_h;
+    if (x2 <= x1 || y2 <= y1)
+        return false;
+
+    *x = clamp_i64_to_i32(x1);
+    *y = clamp_i64_to_i32(y1);
+    *w = clamp_i64_to_i32(x2 - x1);
+    *h = clamp_i64_to_i32(y2 - y1);
+    return true;
+}
+
+static inline bool clip_rect_to_target(int32_t *x, int32_t *y, int32_t *w, int32_t *h)
+{
+    return clip_rect_to_bounds(x, y, w, h, target_width, target_height);
+}
 
 static void restore_default_target()
 {
@@ -89,22 +144,9 @@ static inline void mark_dirty_rect(int32_t x, int32_t y, int32_t w, int32_t h)
     if (full_redraw_needed || w <= 0 || h <= 0)
         return;
 
-    if (framebuffer) {
-        if (x < 0) {
-            w += x;
-            x = 0;
-        }
-        if (y < 0) {
-            h += y;
-            y = 0;
-        }
-        if (x + w > (int32_t)framebuffer->width)
-            w = (int32_t)framebuffer->width - x;
-        if (y + h > (int32_t)framebuffer->height)
-            h = (int32_t)framebuffer->height - y;
-        if (w <= 0 || h <= 0)
-            return;
-    }
+    if (framebuffer && !clip_rect_to_bounds(&x, &y, &w, &h, (uint32_t)framebuffer->width,
+                                            (uint32_t)framebuffer->height))
+        return;
 
     GfxRect candidate = {x, y, w, h};
     for (int i = 0; i < num_dirty_rects; i++) {
@@ -142,25 +184,28 @@ void gfx_mark_dirty(int32_t x, int32_t y, int32_t w, int32_t h)
 
 void gfx_copy_line(uint32_t *dst, const uint32_t *src, uint32_t count)
 {
-    // SSE2 optimized 128-bit copy
-    uint32_t bytes = count * 4;
-    uint32_t i = 0;
+    if (!dst || !src || count == 0)
+        return;
+
+    // SSE2 optimized 128-bit copy. The public count is 32-bit pixels, but byte
+    // math is kept in size_t so large pitch copies cannot wrap before clipping.
+    size_t bytes = (size_t)count * sizeof(uint32_t);
+    size_t i = 0;
     while (i + 16 <= bytes) {
         asm volatile("movdqu (%1, %2), %%xmm0\n\t"
                      "movdqu %%xmm0, (%0, %2)\n\t"
                      :
-                     : "r"(dst), "r"(src), "r"((uint64_t)i)
+                     : "r"(dst), "r"(src), "r"((uintptr_t)i)
                      : "memory", "xmm0");
         i += 16;
     }
-    for (; i < bytes; i++) {
+    for (; i < bytes; i++)
         ((uint8_t *)dst)[i] = ((const uint8_t *)src)[i];
-    }
 }
 
 void gfx_copy_line_nt(uint32_t *dst, const uint32_t *src, uint32_t count)
 {
-    if (count == 0)
+    if (!dst || !src || count == 0)
         return;
 
     uintptr_t dst_addr = (uintptr_t)dst;
@@ -222,9 +267,21 @@ static void init_font_mask()
 
 void gfx_init(const BootFramebuffer *fb)
 {
-    if (!fb || fb->bpp != 32) {
+    if (backbuffer) {
+        free(backbuffer);
+        backbuffer = nullptr;
+    }
+    g_gfx_double_buffered = false;
+
+    if (!framebuffer_geometry_valid(fb)) {
         framebuffer = nullptr;
+        g_front_buffer = nullptr;
         target_buffer = nullptr;
+        target_width = 0;
+        target_height = 0;
+        target_pitch_u32 = 0;
+        num_dirty_rects = 0;
+        full_redraw_needed = true;
         return;
     }
 
@@ -232,8 +289,6 @@ void gfx_init(const BootFramebuffer *fb)
 
     framebuffer = fb;
     g_front_buffer = (uint32_t *)fb->address;
-    backbuffer = nullptr;
-    g_gfx_double_buffered = false;
     restore_default_target();
 
     num_dirty_rects = 0;
@@ -242,20 +297,30 @@ void gfx_init(const BootFramebuffer *fb)
 
 void gfx_enable_double_buffering()
 {
-    if (!framebuffer || g_gfx_double_buffered)
+    if (!framebuffer || !g_front_buffer || g_gfx_double_buffered)
         return;
-    uint64_t bytes = framebuffer->pitch * framebuffer->height;
-    backbuffer = (uint32_t *)malloc(bytes);
-    if (backbuffer) {
-        gfx_copy_line(backbuffer, g_front_buffer, bytes / 4);
-        g_gfx_double_buffered = true;
-        restore_default_target();
-    }
+
+    uint64_t bytes64 = (uint64_t)framebuffer->pitch * (uint64_t)framebuffer->height;
+    if (bytes64 == 0 || bytes64 > (uint64_t)SIZE_MAX)
+        return;
+
+    uint32_t pitch_u32 = (uint32_t)(framebuffer->pitch / sizeof(uint32_t));
+    uint32_t *new_backbuffer = (uint32_t *)malloc((size_t)bytes64);
+    if (!new_backbuffer)
+        return;
+
+    for (uint32_t y = 0; y < (uint32_t)framebuffer->height; y++)
+        gfx_copy_line(new_backbuffer + (size_t)y * pitch_u32, g_front_buffer + (size_t)y * pitch_u32, pitch_u32);
+
+    backbuffer = new_backbuffer;
+    g_gfx_double_buffered = true;
+    restore_default_target();
+    full_redraw_needed = true;
 }
 
 void gfx_swap_buffers(bool force)
 {
-    if (!g_gfx_double_buffered || !backbuffer || !g_front_buffer)
+    if (!g_gfx_double_buffered || !framebuffer || !backbuffer || !g_front_buffer)
         return;
 
     uint32_t pitch_u32 = framebuffer->pitch / 4;
@@ -268,7 +333,7 @@ void gfx_swap_buffers(bool force)
 
     if (full) {
         for (uint32_t y = 0; y < height; y++) {
-            uint32_t offset = y * pitch_u32;
+            size_t offset = (size_t)y * pitch_u32;
             gfx_copy_line_wc_aware(&g_front_buffer[offset], &backbuffer[offset], width);
         }
     } else {
@@ -293,7 +358,7 @@ void gfx_swap_buffers(bool force)
                 continue;
 
             for (int32_t y = y1; y <= y2; y++) {
-                uint32_t offset = y * pitch_u32 + x1;
+                size_t offset = (size_t)y * pitch_u32 + (size_t)x1;
                 gfx_copy_line_wc_aware(&g_front_buffer[offset], &backbuffer[offset], copy_width);
             }
         }
@@ -323,17 +388,21 @@ bool gfx_is_double_buffered()
 
 void gfx_set_target_buffer(uint32_t *buf)
 {
-    if (buf == nullptr) {
+    if (buf == nullptr || !framebuffer) {
         restore_default_target();
         return;
     }
 
     target_buffer = buf;
+    target_width = (uint32_t)framebuffer->width;
+    target_height = (uint32_t)framebuffer->height;
+    target_pitch_u32 = (uint32_t)(framebuffer->pitch / sizeof(uint32_t));
 }
 
 void gfx_set_target_surface(uint32_t *buf, uint32_t w, uint32_t h)
 {
-    if (buf == nullptr) {
+    if (buf == nullptr || w == 0 || h == 0 || w > (uint32_t)INT32_MAX || h > (uint32_t)INT32_MAX ||
+        (uint64_t)w * (uint64_t)h > ((uint64_t)SIZE_MAX / sizeof(uint32_t))) {
         restore_default_target();
         return;
     }
@@ -348,7 +417,7 @@ void gfx_put_pixel(int32_t x, int32_t y, uint32_t color)
 {
     if (!target_buffer || x < 0 || y < 0 || x >= (int32_t)target_width || y >= (int32_t)target_height)
         return;
-    uint32_t &pixel = target_buffer[y * target_pitch_u32 + x];
+    uint32_t &pixel = target_buffer[(size_t)y * target_pitch_u32 + (size_t)x];
     if (pixel == color)
         return;
     pixel = color;
@@ -358,9 +427,9 @@ void gfx_put_pixel(int32_t x, int32_t y, uint32_t color)
 
 void gfx_clear(uint32_t color)
 {
-    if (!target_buffer)
+    if (!target_buffer || target_width == 0 || target_height == 0)
         return;
-    gfx_fill_rect(0, 0, target_width, target_height, color);
+    gfx_fill_rect(0, 0, (int32_t)target_width, (int32_t)target_height, color);
 
     if (target_buffer == backbuffer)
         full_redraw_needed = true;
@@ -368,21 +437,7 @@ void gfx_clear(uint32_t color)
 
 void gfx_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 {
-    if (!target_buffer)
-        return;
-    if (x < 0) {
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        h += y;
-        y = 0;
-    }
-    if (x + w > (int32_t)target_width)
-        w = (int32_t)target_width - x;
-    if (y + h > (int32_t)target_height)
-        h = (int32_t)target_height - y;
-    if (w <= 0 || h <= 0)
+    if (!target_buffer || !clip_rect_to_target(&x, &y, &w, &h))
         return;
 
     uint32_t pitch = target_pitch_u32;
@@ -410,21 +465,8 @@ void gfx_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 
 void gfx_fill_rect_to_buffer(uint32_t *buf, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 {
-    if (!buf || !framebuffer)
-        return;
-    if (x < 0) {
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        h += y;
-        y = 0;
-    }
-    if (x + w > (int32_t)framebuffer->width)
-        w = (int32_t)framebuffer->width - x;
-    if (y + h > (int32_t)framebuffer->height)
-        h = (int32_t)framebuffer->height - y;
-    if (w <= 0 || h <= 0)
+    if (!buf || !framebuffer || !clip_rect_to_bounds(&x, &y, &w, &h, (uint32_t)framebuffer->width,
+                                                     (uint32_t)framebuffer->height))
         return;
 
     uint32_t pitch = static_cast<uint32_t>(framebuffer->pitch / 4);
@@ -444,10 +486,16 @@ void gfx_fill_rect_to_buffer(uint32_t *buf, int32_t x, int32_t y, int32_t w, int
 
 void gfx_draw_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 {
+    if (w <= 0 || h <= 0)
+        return;
+    int32_t right = clamp_i64_to_i32((int64_t)x + w - 1);
+    int32_t bottom = clamp_i64_to_i32((int64_t)y + h - 1);
     gfx_fill_rect(x, y, w, 1, color);
-    gfx_fill_rect(x, y + h - 1, w, 1, color);
+    if (h > 1)
+        gfx_fill_rect(x, bottom, w, 1, color);
     gfx_fill_rect(x, y, 1, h, color);
-    gfx_fill_rect(x + w - 1, y, 1, h, color);
+    if (w > 1)
+        gfx_fill_rect(right, y, 1, h, color);
 }
 
 static inline uint32_t blend_rgb888(uint32_t dst, uint32_t src, uint8_t alpha)
@@ -557,7 +605,18 @@ void gfx_fill_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r
         r = h / 2;
 
     uint32_t pitch = target_pitch_u32;
-    for (int32_t row = 0; row < h; row++) {
+    int32_t row_start = y < 0 ? -y : 0;
+    int32_t row_end = h;
+    if ((int64_t)y + row_end > (int64_t)target_height)
+        row_end = (int32_t)target_height - y;
+    if (row_start < 0)
+        row_start = 0;
+    if (row_end > h)
+        row_end = h;
+    if (row_start >= row_end)
+        return;
+
+    for (int32_t row = row_start; row < row_end; row++) {
         int32_t left = 0;
         int32_t right = w - 1;
         uint8_t edge_alpha = 255;
@@ -602,13 +661,24 @@ void gfx_draw_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r
         r = h / 2;
 
     uint32_t pitch = target_pitch_u32;
+    int32_t row_start = y < 0 ? -y : 0;
+    int32_t row_end = h;
+    if ((int64_t)y + row_end > (int64_t)target_height)
+        row_end = (int32_t)target_height - y;
+    if (row_start < 0)
+        row_start = 0;
+    if (row_end > h)
+        row_end = h;
+    if (row_start >= row_end)
+        return;
+
     int32_t inner_w = w - 2;
     int32_t inner_h = h - 2;
     int32_t inner_r = r - 1;
     if (inner_r < 0)
         inner_r = 0;
 
-    for (int32_t row = 0; row < h; row++) {
+    for (int32_t row = row_start; row < row_end; row++) {
         int32_t outer_l = 0;
         int32_t outer_r = w - 1;
         uint8_t outer_edge = 255;
@@ -656,30 +726,24 @@ void gfx_draw_gradient_v(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t to
 {
     if (!target_buffer || h <= 0 || w <= 0)
         return;
-    if (x < 0) {
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        h += y;
-        y = 0;
-    }
-    if (x + w > (int32_t)target_width)
-        w = (int32_t)target_width - x;
-    if (y + h > (int32_t)target_height)
-        h = (int32_t)target_height - y;
-    if (w <= 0 || h <= 0)
+
+    int32_t original_y = y;
+    int32_t original_h = h;
+    if (!clip_rect_to_target(&x, &y, &w, &h))
         return;
 
     int32_t tr = (top_color >> 16) & 0xFF, tg = (top_color >> 8) & 0xFF, tb = top_color & 0xFF;
     int32_t br = (bottom_color >> 16) & 0xFF, bg = (bottom_color >> 8) & 0xFF, bb = bottom_color & 0xFF;
 
-    int32_t r_fixed = tr << 16, g_fixed = tg << 16, b_fixed = tb << 16;
-    int32_t steps = h > 1 ? (h - 1) : 1;
+    int32_t steps = original_h > 1 ? (original_h - 1) : 1;
     int32_t dr = ((br - tr) << 16) / steps, dg = ((bg - tg) << 16) / steps, db = ((bb - tb) << 16) / steps;
 
     uint32_t pitch = target_pitch_u32;
     for (int32_t row = 0; row < h; row++) {
+        int32_t source_row = (y - original_y) + row;
+        int32_t r_fixed = (tr << 16) + dr * source_row;
+        int32_t g_fixed = (tg << 16) + dg * source_row;
+        int32_t b_fixed = (tb << 16) + db * source_row;
         uint32_t color = (static_cast<uint32_t>(0xFF) << 24) | (static_cast<uint32_t>(r_fixed >> 16) << 16) |
                          (static_cast<uint32_t>(g_fixed >> 16) << 8) | static_cast<uint32_t>(b_fixed >> 16);
         uint32_t *row_ptr = &target_buffer[static_cast<uint32_t>(y + row) * pitch + static_cast<uint32_t>(x)];
@@ -693,9 +757,6 @@ void gfx_draw_gradient_v(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t to
         for (; i < w; i++)
             row_ptr[i] = color;
 
-        r_fixed += dr;
-        g_fixed += dg;
-        b_fixed += db;
     }
 
     if (target_buffer == backbuffer)
@@ -735,8 +796,12 @@ static void gfx_draw_char_no_dirty(int32_t x, int32_t y, char c, uint32_t color)
 
 void gfx_draw_char_to_buffer(uint32_t *buf, int32_t x, int32_t y, char c, uint32_t color)
 {
-    if (!buf || x >= (int32_t)target_width || y >= (int32_t)target_height || x + 8 <= 0 || y + 16 <= 0)
+    if (!buf || target_width == 0 || target_height == 0 || target_pitch_u32 == 0 ||
+        x >= (int32_t)target_width || y >= (int32_t)target_height ||
+        (int64_t)x + 8 <= 0 || (int64_t)y + 16 <= 0)
         return;
+
+    init_font_mask();
 
     const uint8_t *glyph = font8x16[(uint8_t)c];
     uint32_t pitch_u32 = target_pitch_u32;
@@ -792,8 +857,12 @@ void gfx_draw_char(int32_t x, int32_t y, char c, uint32_t color)
 
 void gfx_draw_char_fixed(int32_t x, int32_t y, char c, uint32_t fg, uint32_t bg)
 {
-    if (!target_buffer || x >= (int32_t)target_width || y >= (int32_t)target_height || x + 8 <= 0 || y + 16 <= 0)
+    if (!target_buffer || target_width == 0 || target_height == 0 || target_pitch_u32 == 0 ||
+        x >= (int32_t)target_width || y >= (int32_t)target_height ||
+        (int64_t)x + 8 <= 0 || (int64_t)y + 16 <= 0)
         return;
+
+    init_font_mask();
 
     const uint8_t *glyph = font8x16[(uint8_t)c];
     uint32_t pitch_u32 = target_pitch_u32;
@@ -839,25 +908,34 @@ void gfx_draw_string(int32_t x, int32_t y, const char *str, uint32_t color)
 {
     if (!target_buffer || !str || !*str)
         return;
-    int32_t cx = x, cy = y, mx = x, my = y + 16;
+
+    int64_t cx = x;
+    int64_t cy = y;
+    int64_t mx = x;
+    int64_t my = (int64_t)y + 16;
     while (*str) {
         if (*str == '\n') {
             cx = x;
             cy += 18;
-            if (cy + 16 > my)
-                my = cy + 16;
         } else {
-            gfx_draw_char_no_dirty(cx, cy, *str, color);
+            if (cx >= INT32_MIN && cx <= INT32_MAX && cy >= INT32_MIN && cy <= INT32_MAX)
+                gfx_draw_char_no_dirty((int32_t)cx, (int32_t)cy, *str, color);
             cx += 9;
             if (cx > mx)
                 mx = cx;
-            if (cy + 16 > my)
-                my = cy + 16;
         }
+        if (cy + 16 > my)
+            my = cy + 16;
+        if (cx > (int64_t)INT32_MAX + 1024 || cy > (int64_t)INT32_MAX + 1024 ||
+            cx < (int64_t)INT32_MIN - 1024 || cy < (int64_t)INT32_MIN - 1024)
+            break;
         str++;
     }
-    if (target_buffer == backbuffer)
-        mark_dirty_rect(x, y, mx - x, my - y);
+    if (target_buffer == backbuffer) {
+        int32_t dx = clamp_i64_to_i32(mx - x);
+        int32_t dy = clamp_i64_to_i32(my - y);
+        mark_dirty_rect(x, y, dx, dy);
+    }
 }
 
 void gfx_draw_centered_text(const char *text, uint32_t color)
@@ -866,8 +944,10 @@ void gfx_draw_centered_text(const char *text, uint32_t color)
         return;
     int32_t len = 0;
     const char *p = text;
-    while (*p++)
+    while (*p && len < (INT32_MAX / 9)) {
         len++;
+        p++;
+    }
     int32_t cx = (static_cast<int32_t>(target_width) - (len * 9)) / 2;
     int32_t cy = (static_cast<int32_t>(target_height) - 16) / 2;
     gfx_draw_string(cx, cy, text, color);
@@ -877,6 +957,8 @@ void gfx_scroll_up_rect(int32_t x, int32_t y, int32_t w, int32_t h, int pixels, 
 {
     if (!target_buffer || pixels <= 0 || w <= 0 || h <= 0)
         return;
+    if (!clip_rect_to_target(&x, &y, &w, &h))
+        return;
     if (pixels >= h) {
         gfx_fill_rect(x, y, w, h, fill_color);
         return;
@@ -884,10 +966,10 @@ void gfx_scroll_up_rect(int32_t x, int32_t y, int32_t w, int32_t h, int pixels, 
 
     uint32_t pitch = target_pitch_u32;
     for (int32_t py = y; py < y + h - pixels; py++) {
-        uint32_t *dst = &target_buffer[(static_cast<uint32_t>(py) * pitch) + static_cast<uint32_t>(x)];
-        uint32_t *src = &target_buffer[(static_cast<uint32_t>(py + pixels) * pitch) + static_cast<uint32_t>(x)];
+        uint32_t *dst = &target_buffer[(size_t)py * pitch + (size_t)x];
+        uint32_t *src = &target_buffer[(size_t)(py + pixels) * pitch + (size_t)x];
         // The scrolled region overlaps in-place, so this must be memmove rather than memcpy.
-        kstring::memmove(dst, src, static_cast<uint32_t>(w) * 4);
+        kstring::memmove(dst, src, (size_t)w * sizeof(uint32_t));
     }
     gfx_fill_rect(x, y + h - pixels, w, pixels, fill_color);
     if (target_buffer == backbuffer)
@@ -907,10 +989,13 @@ void gfx_scroll_up(int pixels, uint32_t fill_color)
     }
 
     uint64_t rows = height - static_cast<uint64_t>(pixels);
+    uint64_t move_words = rows * pitch;
+    if (pitch == 0 || move_words > ((uint64_t)SIZE_MAX / sizeof(uint32_t)))
+        return;
     uint32_t *dst = target_buffer;
     uint32_t *src = target_buffer + (static_cast<uint64_t>(pixels) * pitch);
 
-    kstring::memmove(dst, src, rows * pitch * sizeof(uint32_t));
+    kstring::memmove(dst, src, (size_t)(move_words * sizeof(uint32_t)));
     gfx_fill_rect(0, static_cast<int32_t>(rows), static_cast<int32_t>(target_width), pixels, fill_color);
 
     if (target_buffer == backbuffer)
@@ -925,26 +1010,32 @@ void gfx_scroll_up_buffer(uint32_t *buf, int pixels, uint32_t fill_color)
     uint32_t height = static_cast<uint32_t>(framebuffer->height);
     if (static_cast<uint32_t>(pixels) >= height) {
         uint64_t total = (uint64_t)pitch * height;
+        if (total > ((uint64_t)SIZE_MAX / sizeof(uint32_t)))
+            return;
         for (uint64_t i = 0; i < total; i++)
             buf[i] = fill_color;
         return;
     }
     uint32_t rows = height - static_cast<uint32_t>(pixels);
+    uint64_t move_words = (uint64_t)rows * pitch;
+    if (move_words > ((uint64_t)SIZE_MAX / sizeof(uint32_t)))
+        return;
     uint32_t *dst = buf;
     uint32_t *src = buf + (static_cast<uint64_t>(pixels) * pitch);
 
-    kstring::memmove(dst, src, (uint64_t)rows * pitch * 4);
+    kstring::memmove(dst, src, (size_t)(move_words * sizeof(uint32_t)));
     gfx_fill_rect_to_buffer(buf, 0, (int32_t)rows, (int32_t)framebuffer->width, pixels, fill_color);
 }
 
 void gfx_copy_rect(uint32_t *dst, uint32_t dst_pitch, int32_t dx, int32_t dy, const uint32_t *src, uint32_t src_pitch,
                    int32_t sx, int32_t sy, int32_t w, int32_t h)
 {
-    if (w <= 0 || h <= 0)
+    if (!dst || !src || dst_pitch == 0 || src_pitch == 0 || w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 ||
+        sy < 0)
         return;
     for (int32_t row = 0; row < h; row++) {
-        uint32_t *d = &dst[(static_cast<uint32_t>(dy + row) * dst_pitch) + static_cast<uint32_t>(dx)];
-        const uint32_t *s = &src[(static_cast<uint32_t>(sy + row) * src_pitch) + static_cast<uint32_t>(sx)];
+        uint32_t *d = &dst[(size_t)(dy + row) * dst_pitch + (size_t)dx];
+        const uint32_t *s = &src[(size_t)(sy + row) * src_pitch + (size_t)sx];
         gfx_copy_line(d, s, static_cast<uint32_t>(w));
     }
 }
@@ -952,11 +1043,12 @@ void gfx_copy_rect(uint32_t *dst, uint32_t dst_pitch, int32_t dx, int32_t dy, co
 void gfx_copy_rect_nt(uint32_t *dst, uint32_t dst_pitch, int32_t dx, int32_t dy, const uint32_t *src,
                       uint32_t src_pitch, int32_t sx, int32_t sy, int32_t w, int32_t h)
 {
-    if (w <= 0 || h <= 0)
+    if (!dst || !src || dst_pitch == 0 || src_pitch == 0 || w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 ||
+        sy < 0)
         return;
     for (int32_t row = 0; row < h; row++) {
-        uint32_t *d = &dst[(static_cast<uint32_t>(dy + row) * dst_pitch) + static_cast<uint32_t>(dx)];
-        const uint32_t *s = &src[(static_cast<uint32_t>(sy + row) * src_pitch) + static_cast<uint32_t>(sx)];
+        uint32_t *d = &dst[(size_t)(dy + row) * dst_pitch + (size_t)dx];
+        const uint32_t *s = &src[(size_t)(sy + row) * src_pitch + (size_t)sx];
         gfx_copy_line_nt(d, s, static_cast<uint32_t>(w));
     }
 }

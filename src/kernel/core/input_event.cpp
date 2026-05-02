@@ -119,7 +119,7 @@ void pump_events()
     }
 
     while (input_keyboard_has_char()) {
-        event_push(key_target->event_queue, {EVT_KEY_DOWN, {.key = {input_keyboard_get_char(), 0}}});
+        event_push(wm->event_queue, {EVT_KEY_DOWN, {.key = {input_keyboard_get_char(), 0}}});
     }
 
     s_prev_left = ms.left;

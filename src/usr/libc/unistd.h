@@ -13,6 +13,7 @@ void close(int fd);
 int fork(void);
 int exec(const char *path);
 int waitpid(int pid, int *status);
+int waitpid_nohang(int pid, int *status);
 int mkdir(const char *pathname);
 int unlink(const char *pathname);
 int rmdir(const char *pathname);

@@ -53,6 +53,10 @@ static int nic_receive(void *buffer, uint16_t max_length)
 
 static void nic_get_mac(uint8_t *out_mac)
 {
+    if (!out_mac)
+        return;
+    for (int i = 0; i < 6; i++)
+        out_mac[i] = 0;
     switch (g_active_nic) {
         case NIC_E1000:
             e1000_get_mac(out_mac);
@@ -137,13 +141,18 @@ bool net_init()
 
 void net_poll()
 {
+    if (g_active_nic == NIC_NONE)
+        return;
+
     // Poll the active NIC
     nic_poll();
 
-    // Receive packets
+    // Receive packets, but bound the batch to avoid starving the scheduler if a driver
+    // keeps reporting packets continuously.
     int len;
-    while ((len = nic_receive(rx_buffer, sizeof(rx_buffer))) > 0) {
-        ethernet_receive(rx_buffer, len);
+    int budget = 32;
+    while (budget-- > 0 && (len = nic_receive(rx_buffer, sizeof(rx_buffer))) > 0) {
+        ethernet_receive(rx_buffer, (uint16_t)len);
     }
 }
 
@@ -173,6 +182,11 @@ void net_set_ip(uint32_t ip)
 {
     g_net_config.ip = ip;
     g_net_config.configured = (ip != 0);
+    if (ip == 0) {
+        g_net_config.netmask = 0;
+        g_net_config.gateway = 0;
+        g_net_config.dns = 0;
+    }
 }
 
 void net_set_netmask(uint32_t mask)
@@ -204,6 +218,8 @@ bool net_link_up()
 // Export unified NIC functions for use by other modules
 bool net_send_raw(const void *data, uint16_t length)
 {
+    if (g_active_nic == NIC_NONE || !data || length == 0)
+        return false;
     return nic_send(data, length);
 }
 

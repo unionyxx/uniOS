@@ -22,13 +22,41 @@ static bool dhcp_got_ack = false;
 void dhcp_init()
 {
     dhcp_xid = timer_get_ticks() & 0xFFFFFFFF;
+    dhcp_server_ip = 0;
+    dhcp_offered_ip = 0;
+    dhcp_subnet_mask = 0;
+    dhcp_gateway = 0;
+    dhcp_dns = 0;
     dhcp_got_offer = false;
     dhcp_got_ack = false;
+}
+
+static bool dhcp_put_option(uint8_t *opt, int *idx, int opt_capacity, uint8_t code, const uint8_t *data, uint8_t len)
+{
+    if (!opt || !idx || *idx < 0 || !data)
+        return false;
+    if (*idx + 2 + len > opt_capacity)
+        return false;
+    opt[(*idx)++] = code;
+    opt[(*idx)++] = len;
+    for (uint8_t i = 0; i < len; i++)
+        opt[(*idx)++] = data[i];
+    return true;
+}
+
+static bool dhcp_put_u32_le_wire(uint8_t *opt, int *idx, int opt_capacity, uint8_t code, uint32_t value)
+{
+    uint8_t bytes[4] = {(uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF),
+                        (uint8_t)((value >> 16) & 0xFF), (uint8_t)((value >> 24) & 0xFF)};
+    return dhcp_put_option(opt, idx, opt_capacity, code, bytes, 4);
 }
 
 // Build DHCP packet
 static uint16_t dhcp_build_packet(DhcpPacket *pkt, uint8_t msg_type)
 {
+    if (!pkt)
+        return 0;
+
     // Clear packet
     uint8_t *p = (uint8_t *)pkt;
     for (int i = 0; i < (int)sizeof(DhcpPacket); i++)
@@ -51,38 +79,26 @@ static uint16_t dhcp_build_packet(DhcpPacket *pkt, uint8_t msg_type)
     // Options
     uint8_t *opt = pkt->options;
     int idx = 0;
+    const int opt_capacity = (int)sizeof(pkt->options);
 
-    // Message type
-    opt[idx++] = DHCP_OPT_MSG_TYPE;
-    opt[idx++] = 1;
-    opt[idx++] = msg_type;
+    uint8_t msg_data[1] = {msg_type};
+    if (!dhcp_put_option(opt, &idx, opt_capacity, DHCP_OPT_MSG_TYPE, msg_data, 1))
+        return 0;
 
     if (msg_type == DHCP_REQUEST) {
-        // Requested IP
-        opt[idx++] = DHCP_OPT_REQUESTED_IP;
-        opt[idx++] = 4;
-        opt[idx++] = (uint8_t)(dhcp_offered_ip & 0xFF);
-        opt[idx++] = (uint8_t)((dhcp_offered_ip >> 8) & 0xFF);
-        opt[idx++] = (uint8_t)((dhcp_offered_ip >> 16) & 0xFF);
-        opt[idx++] = (uint8_t)((dhcp_offered_ip >> 24) & 0xFF);
-
-        // Server ID
-        opt[idx++] = DHCP_OPT_SERVER_ID;
-        opt[idx++] = 4;
-        opt[idx++] = (uint8_t)(dhcp_server_ip & 0xFF);
-        opt[idx++] = (uint8_t)((dhcp_server_ip >> 8) & 0xFF);
-        opt[idx++] = (uint8_t)((dhcp_server_ip >> 16) & 0xFF);
-        opt[idx++] = (uint8_t)((dhcp_server_ip >> 24) & 0xFF);
+        if (!dhcp_put_u32_le_wire(opt, &idx, opt_capacity, DHCP_OPT_REQUESTED_IP, dhcp_offered_ip))
+            return 0;
+        if (dhcp_server_ip != 0 &&
+            !dhcp_put_u32_le_wire(opt, &idx, opt_capacity, DHCP_OPT_SERVER_ID, dhcp_server_ip))
+            return 0;
     }
 
-    // Parameter request list
-    opt[idx++] = DHCP_OPT_PARAM_REQ;
-    opt[idx++] = 3;
-    opt[idx++] = DHCP_OPT_SUBNET_MASK;
-    opt[idx++] = DHCP_OPT_ROUTER;
-    opt[idx++] = DHCP_OPT_DNS;
+    uint8_t params[3] = {DHCP_OPT_SUBNET_MASK, DHCP_OPT_ROUTER, DHCP_OPT_DNS};
+    if (!dhcp_put_option(opt, &idx, opt_capacity, DHCP_OPT_PARAM_REQ, params, sizeof(params)))
+        return 0;
 
-    // End
+    if (idx >= opt_capacity)
+        return 0;
     opt[idx++] = DHCP_OPT_END;
 
     return (uint16_t)(sizeof(DhcpPacket) - sizeof(pkt->options) + (size_t)idx);
@@ -94,6 +110,9 @@ static uint8_t tx_buffer[1600];
 
 static bool dhcp_send(DhcpPacket *pkt, uint16_t length)
 {
+    if (!pkt || length == 0 || 20u + 8u + length > ETH_DATA_LEN)
+        return false;
+
     // Build UDP + IP packet manually since we don't have an IP yet
     // Actually, we need to send with src_ip=0 and dst_ip=broadcast
 
@@ -164,6 +183,8 @@ static bool dhcp_send(DhcpPacket *pkt, uint16_t length)
 // Parse DHCP options
 void dhcp_parse_options(const uint8_t *options, uint16_t length)
 {
+    if (!options)
+        return;
     uint16_t i = 0;
 
     while (i < length) {
@@ -177,7 +198,7 @@ void dhcp_parse_options(const uint8_t *options, uint16_t length)
         if (i >= length)
             break;
         uint8_t len = options[i++];
-        if (i + len > length)
+        if ((uint16_t)(length - i) < len)
             break;
 
         switch (opt) {
@@ -214,7 +235,7 @@ void dhcp_receive(const void *data, uint16_t length, uint32_t src_ip)
 {
     (void)src_ip;
 
-    if (length < sizeof(DhcpPacket) - 308) { // Minimum DHCP size
+    if (!data || length < sizeof(DhcpPacket) - 308) { // Minimum DHCP size
         return;
     }
 
@@ -225,6 +246,12 @@ void dhcp_receive(const void *data, uint16_t length, uint32_t src_ip)
         return; // Must be BOOTREPLY
     if (ntohl(pkt->xid) != dhcp_xid)
         return; // Transaction ID mismatch
+    uint8_t our_mac[6];
+    net_get_mac(our_mac);
+    for (int i = 0; i < 6; i++) {
+        if (pkt->chaddr[i] != our_mac[i])
+            return;
+    }
 
     // Check magic cookie
     if (ntohl(pkt->magic) != DHCP_MAGIC_COOKIE)
@@ -233,7 +260,10 @@ void dhcp_receive(const void *data, uint16_t length, uint32_t src_ip)
     // Find message type
     uint8_t msg_type = 0;
     const uint8_t *opt = pkt->options;
-    uint16_t opt_len = length - ((uint8_t *)pkt->options - (uint8_t *)pkt);
+    uint16_t opt_offset = (uint16_t)((const uint8_t *)pkt->options - (const uint8_t *)pkt);
+    if (length < opt_offset)
+        return;
+    uint16_t opt_len = length - opt_offset;
 
     for (uint16_t i = 0; i < opt_len;) {
         if (opt[i] == DHCP_OPT_PAD) {
@@ -247,7 +277,7 @@ void dhcp_receive(const void *data, uint16_t length, uint32_t src_ip)
 
         uint8_t code = opt[i++];
         uint8_t len = opt[i++];
-        if (i + len > opt_len)
+        if ((uint16_t)(opt_len - i) < len)
             break;
 
         if (code == DHCP_OPT_MSG_TYPE && len >= 1) {
@@ -277,11 +307,16 @@ bool dhcp_request()
     // Reset state
     dhcp_got_offer = false;
     dhcp_got_ack = false;
+    dhcp_server_ip = 0;
+    dhcp_offered_ip = 0;
+    dhcp_subnet_mask = 0;
+    dhcp_gateway = 0;
+    dhcp_dns = 0;
     dhcp_xid = timer_get_ticks() & 0xFFFFFFFF;
 
     // Send DISCOVER
     uint16_t len = dhcp_build_packet(&pkt, DHCP_DISCOVER);
-    if (!dhcp_send(&pkt, len)) {
+    if (len == 0 || !dhcp_send(&pkt, len)) {
         DEBUG_ERROR("dhcp: failed to send DISCOVER");
         return false;
     }
@@ -302,7 +337,7 @@ bool dhcp_request()
 
     // Send REQUEST
     len = dhcp_build_packet(&pkt, DHCP_REQUEST);
-    if (!dhcp_send(&pkt, len)) {
+    if (len == 0 || !dhcp_send(&pkt, len)) {
         DEBUG_ERROR("dhcp: failed to send REQUEST");
         return false;
     }

@@ -17,7 +17,8 @@ static int g_icons_scale = -1;
 
 static void scale_surface_alpha(Surface *s, uint8_t scale)
 {
-    if (!s || !s->buffer) return;
+    if (!s || !s->buffer)
+        return;
     uint32_t count = s->width * s->height;
     for (uint32_t i = 0; i < count; i++) {
         uint32_t p = s->buffer[i];
@@ -35,18 +36,21 @@ static void ensure_button_icons()
     if (g_icons_scale == scale && g_icon_close.buffer)
         return;
 
-    if (g_icon_close.buffer) gui_destroy_surface(&g_icon_close);
-    if (g_icon_minimize.buffer) gui_destroy_surface(&g_icon_minimize);
-    if (g_icon_maximize.buffer) gui_destroy_surface(&g_icon_maximize);
+    if (g_icon_close.buffer)
+        gui_destroy_surface(&g_icon_close);
+    if (g_icon_minimize.buffer)
+        gui_destroy_surface(&g_icon_minimize);
+    if (g_icon_maximize.buffer)
+        gui_destroy_surface(&g_icon_maximize);
 
     gui_load_uoic("/usr/share/wm/close.uoic", (uint32_t)BTN_SIZE, (uint32_t)scale, &g_icon_close);
     gui_load_uoic("/usr/share/wm/minimize.uoic", (uint32_t)BTN_SIZE, (uint32_t)scale, &g_icon_minimize);
     gui_load_uoic("/usr/share/wm/maximize.uoic", (uint32_t)BTN_SIZE, (uint32_t)scale, &g_icon_maximize);
-    
+
     scale_surface_alpha(&g_icon_close, 166);
     scale_surface_alpha(&g_icon_minimize, 166);
     scale_surface_alpha(&g_icon_maximize, 166);
-    
+
     g_icons_scale = scale;
 }
 
@@ -122,46 +126,49 @@ static uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
 static void blit_alpha_blend_rect(uint32_t *dst, uint32_t dst_stride, const uint32_t *src, uint32_t src_stride, int w,
                                   int h)
 {
+    if (w <= 0 || h <= 0)
+        return;
     for (int y = 0; y < h; y++) {
-        uint32_t *drow = &dst[y * dst_stride];
-        const uint32_t *srow = &src[y * src_stride];
-        int x = 0;
-        for (; x + 3 < w; x += 4) {
-            uint32_t p0 = srow[x], p1 = srow[x + 1], p2 = srow[x + 2], p3 = srow[x + 3];
-            uint32_t a_mask = (p0 | p1 | p2 | p3) >> 24;
-            if (a_mask == 0)
+        uint32_t *drow = &dst[(size_t)y * dst_stride];
+        const uint32_t *srow = &src[(size_t)y * src_stride];
+        for (int x = 0; x < w; x++) {
+            uint32_t s = srow[x];
+            uint32_t sa = s >> 24;
+            if (sa == 0)
                 continue;
+            if (sa == 255) {
+                drow[x] = s;
+                continue;
+            }
 
-            uint32_t a0 = p0 >> 24, a1 = p1 >> 24, a2 = p2 >> 24, a3 = p3 >> 24;
-            if (a0 >= 255 && a1 >= 255 && a2 >= 255 && a3 >= 255) {
-                drow[x] = p0;
-                drow[x + 1] = p1;
-                drow[x + 2] = p2;
-                drow[x + 3] = p3;
-                continue;
+            uint32_t d = drow[x];
+            uint32_t da = d >> 24;
+            if (da == 255) {
+                uint32_t inv_sa = 255u - sa;
+                uint32_t s_rb = s & 0x00FF00FFu;
+                uint32_t s_g = (s >> 8) & 0xFFu;
+                uint32_t d_rb = d & 0x00FF00FFu;
+                uint32_t d_g = (d >> 8) & 0xFFu;
+
+                uint32_t rb = (s_rb * sa + d_rb * inv_sa + 0x00800080u);
+                rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+                rb &= 0x00FF00FFu;
+
+                uint32_t g = (s_g * sa + d_g * inv_sa + 127u) / 255u;
+                drow[x] = 0xFF000000u | rb | (g << 8);
+            } else {
+                drow[x] = blend_rgb(d, s, 255);
             }
-            for (int i = 0; i < 4; i++) {
-                uint32_t pixel = srow[x + i];
-                uint32_t alpha = pixel >> 24;
-                if (alpha == 0)
-                    continue;
-                if (alpha == 255)
-                    drow[x + i] = pixel;
-                else
-                    drow[x + i] = blend_rgb(drow[x + i], pixel, 255);
-            }
-        }
-        for (; x < w; x++) {
-            uint32_t pixel = srow[x];
-            uint32_t alpha = pixel >> 24;
-            if (alpha == 0)
-                continue;
-            if (alpha == 255)
-                drow[x] = pixel;
-            else
-                drow[x] = blend_rgb(drow[x], pixel, 255);
         }
     }
+}
+
+void invalidate_window_decoration_cache(Window &w)
+{
+    w.decoration_cache_theme_sig = 0;
+    w.button_cache_theme_sig = 0;
+    w.decoration_cache_w = 0;
+    w.decoration_cache_h = 0;
 }
 
 static void copy_surface_rect(Surface *dst, int dst_x, int dst_y, const Surface *src, int src_x, int src_y, int w,
@@ -222,8 +229,8 @@ static void copy_surface_rect(Surface *dst, int dst_x, int dst_y, const Surface 
     uint32_t dst_stride = dst->pitch / 4u;
     uint32_t src_stride = src->pitch / 4u;
     const bool same_buffer = dst->buffer == src->buffer;
-    const bool overlap = same_buffer && !((dst_x + w) <= src_x || (src_x + w) <= dst_x ||
-                                          (dst_y + h) <= src_y || (src_y + h) <= dst_y);
+    const bool overlap =
+        same_buffer && !((dst_x + w) <= src_x || (src_x + w) <= dst_x || (dst_y + h) <= src_y || (src_y + h) <= dst_y);
     int start_y = 0, end_y = h, step_y = 1;
     if (overlap && dst_y > src_y) {
         start_y = h - 1;
@@ -430,8 +437,10 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
         for (uint32_t x = 0; x < w; x++) {
             tmp_row[x] = 0xFF000000u | ((sum_r / window) << 16) | ((sum_g / window) << 8) | (sum_b / window);
             int ri = (int)x - radius, ai = (int)x + radius + 1;
-            if (ri < 0) ri = 0;
-            if (ai >= (int)w) ai = (int)w - 1;
+            if (ri < 0)
+                ri = 0;
+            if (ai >= (int)w)
+                ai = (int)w - 1;
             uint32_t rp = src_row[ri], ap = src_row[ai];
             sum_r += ((ap >> 16) & 0xFFu) - ((rp >> 16) & 0xFFu);
             sum_g += ((ap >> 8) & 0xFFu) - ((rp >> 8) & 0xFFu);
@@ -459,13 +468,15 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
                 r = luma + ((r - luma) * saturation_pct + 50) / 100 + brightness_bias;
                 g = luma + ((g - luma) * saturation_pct + 50) / 100 + brightness_bias;
                 b = luma + ((b - luma) * saturation_pct + 50) / 100 + brightness_bias;
-                dst->buffer[(size_t)y * dst_stride + x] =
-                    0xFF000000u | ((uint32_t)clamp_material_channel(r) << 16) |
-                    ((uint32_t)clamp_material_channel(g) << 8) | clamp_material_channel(b);
+                dst->buffer[(size_t)y * dst_stride + x] = 0xFF000000u | ((uint32_t)clamp_material_channel(r) << 16) |
+                                                          ((uint32_t)clamp_material_channel(g) << 8) |
+                                                          clamp_material_channel(b);
 
                 int ri = (int)y - radius, ai = (int)y + radius + 1;
-                if (ri < 0) ri = 0;
-                if (ai >= (int)h) ai = (int)h - 1;
+                if (ri < 0)
+                    ri = 0;
+                if (ai >= (int)h)
+                    ai = (int)h - 1;
                 uint32_t rp = g_blur_scratch.buffer[(size_t)ri * tmp_stride + x];
                 uint32_t ap = g_blur_scratch.buffer[(size_t)ai * tmp_stride + x];
                 sum_r += ((ap >> 16) & 0xFFu) - ((rp >> 16) & 0xFFu);
@@ -536,6 +547,88 @@ static void downsample_box(const Surface *src, Surface *dst, int factor)
     }
 }
 
+static void blur_surface_box(Surface *s, int radius)
+{
+    if (!s || !s->buffer || radius <= 0)
+        return;
+    uint32_t w = s->width, h = s->height, stride = s->pitch / 4;
+    uint32_t *tmp = (uint32_t *)malloc(w * h * 4);
+    if (!tmp)
+        return;
+
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t *src = &s->buffer[y * stride];
+        uint32_t *dst = &tmp[y * w];
+        uint32_t r = 0, g = 0, b = 0;
+        int count = 0;
+
+        auto add = [&](int x) {
+            if (x >= 0 && x < (int)w) {
+                uint32_t p = src[x];
+                r += (p >> 16) & 0xFF;
+                g += (p >> 8) & 0xFF;
+                b += p & 0xFF;
+                count++;
+            }
+        };
+        auto sub = [&](int x) {
+            if (x >= 0 && x < (int)w) {
+                uint32_t p = src[x];
+                r -= (p >> 16) & 0xFF;
+                g -= (p >> 8) & 0xFF;
+                b -= p & 0xFF;
+                count--;
+            }
+        };
+
+        for (int x = -radius; x < (int)w; x++) {
+            add(x + radius);
+            if (x >= 0) {
+                dst[x] = 0xFF000000u | ((r / count) << 16) | ((g / count) << 8) | (b / count);
+                sub(x - radius);
+            }
+        }
+    }
+
+    static constexpr uint32_t TILE = 16;
+    for (uint32_t x0 = 0; x0 < w; x0 += TILE) {
+        uint32_t x_end = (x0 + TILE > w) ? w : x0 + TILE;
+        for (uint32_t x = x0; x < x_end; x++) {
+            uint32_t r = 0, g = 0, b = 0;
+            int count = 0;
+
+            auto add = [&](int y) {
+                if (y >= 0 && y < (int)h) {
+                    uint32_t p = tmp[y * w + x];
+                    r += (p >> 16) & 0xFF;
+                    g += (p >> 8) & 0xFF;
+                    b += p & 0xFF;
+                    count++;
+                }
+            };
+            auto sub = [&](int y) {
+                if (y >= 0 && y < (int)h) {
+                    uint32_t p = tmp[y * w + x];
+                    r -= (p >> 16) & 0xFF;
+                    g -= (p >> 8) & 0xFF;
+                    b -= p & 0xFF;
+                    count--;
+                }
+            };
+
+            for (int y = -radius; y < (int)h; y++) {
+                add(y + radius);
+                if (y >= 0) {
+                    s->buffer[y * stride + x] = 0xFF000000u | ((r / count) << 16) | ((g / count) << 8) | (b / count);
+                    sub(y - radius);
+                }
+            }
+        }
+    }
+
+    free(tmp);
+}
+
 static void upsample_bilinear(const Surface *src, Surface *dst, float factor)
 {
     if (!src || !src->buffer || !dst || !dst->buffer || factor <= 0.0f)
@@ -577,7 +670,8 @@ static void upsample_bilinear(const Surface *src, Surface *dst, float factor)
 
             auto interp = [&](int shift) {
                 return (uint32_t)((((p00 >> shift) & 0xFF) * w00 + ((p10 >> shift) & 0xFF) * w10 +
-                                   ((p01 >> shift) & 0xFF) * w01 + ((p11 >> shift) & 0xFF) * w11 + 32768u) >> 16);
+                                   ((p01 >> shift) & 0xFF) * w01 + ((p11 >> shift) & 0xFF) * w11 + 32768u) >>
+                                  16);
             };
 
             drow[x] = (interp(24) << 24) | (interp(16) << 16) | (interp(8) << 8) | interp(0);
@@ -714,7 +808,6 @@ void paint_desktop_base(Surface *surface)
     }
 }
 
-
 static void publish_wallpaper_state(Registry *registry, uint32_t status, const char *path)
 {
     if (!registry)
@@ -776,8 +869,9 @@ void reload_wallpaper(Registry *registry, bool prefer_requested)
         requested[sizeof(requested) - 1] = '\0';
     } else {
         VNodeStat st = {};
-        const char *config_path =
-            (stat(WALLPAPER_CONFIG_PATH, &st) == 0 && !st.is_dir) ? WALLPAPER_CONFIG_PATH : WALLPAPER_BOOTSTRAP_CONFIG_PATH;
+        const char *config_path = (stat(WALLPAPER_CONFIG_PATH, &st) == 0 && !st.is_dir)
+                                      ? WALLPAPER_CONFIG_PATH
+                                      : WALLPAPER_BOOTSTRAP_CONFIG_PATH;
         if (cfg_read_first_line(config_path, requested, sizeof(requested)) && registry) {
             strncpy(registry->wallpaper_requested, requested, sizeof(registry->wallpaper_requested) - 1);
             registry->wallpaper_requested[sizeof(registry->wallpaper_requested) - 1] = '\0';
@@ -860,13 +954,20 @@ void flush_shell_blur_updates(Registry *registry)
 {
     if (!registry)
         return;
+    if (registry->transparency_level >= 255) {
+        registry->mb_blur_generation = 0;
+        registry->dk_blur_generation = 0;
+        g_menubar_blur_dirty = false;
+        g_dock_blur_dirty = false;
+        asm volatile("sfence" ::: "memory");
+        return;
+    }
 
     bool active_drag = g_input.pointer_down && g_input.drag_index >= 2;
     bool hover_resize = g_input.hover_resize_edges != RESIZE_NONE;
     if (active_drag || hover_resize)
         return;
 
-    // Remove throttle to eliminate flicker during movement
     g_last_blur_vblank = g_display_queue.vblank_count;
 
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
@@ -1047,7 +1148,6 @@ static void draw_window_decoration_buttons(Surface *dst, const Window &w, bool f
     }
 }
 
-
 static void ensure_window_decoration_cache(Window &w, bool focused, bool hovered_frame, int hovered_button)
 {
     (void)hovered_frame;
@@ -1057,39 +1157,37 @@ static void ensure_window_decoration_cache(Window &w, bool focused, bool hovered
     DirtyRect outer = window_outer_bounds(w);
     uint32_t theme_sig = window_decoration_theme_signature();
 
-    bool frame_needs_rebuild = !w.decoration_cache.buffer ||
-                               w.decoration_cache_w != outer.w ||
-                               w.decoration_cache_h != outer.h ||
-                               w.decoration_cache_theme_sig != theme_sig ||
-                               w.decoration_cache_focused != focused ||
-                               strcmp(w.decoration_cache_title, w.title) != 0;
+    bool frame_needs_rebuild = !w.decoration_cache.buffer || w.decoration_cache_w != outer.w ||
+                               w.decoration_cache_h != outer.h || w.decoration_cache_theme_sig != theme_sig ||
+                               w.decoration_cache_focused != focused || strcmp(w.decoration_cache_title, w.title) != 0;
 
     if (frame_needs_rebuild) {
-        bool needs_alloc = !w.decoration_cache.buffer ||
-                           outer.w > w.decoration_cache_alloc_w ||
-                           outer.h > w.decoration_cache_alloc_h ||
-                           outer.w < w.decoration_cache_alloc_w / 2 ||
-                           outer.h < w.decoration_cache_alloc_h / 2;
+        bool needs_alloc =
+            !w.decoration_cache.buffer || outer.w > w.decoration_cache_alloc_w || outer.h > w.decoration_cache_alloc_h;
 
         if (needs_alloc) {
             gui_destroy_surface(&w.decoration_cache);
-            w.decoration_cache_alloc_w = outer.w + outer.w / 5;
-            w.decoration_cache_alloc_h = outer.h + outer.h / 5;
-            w.decoration_cache = gui_create_surface((uint32_t)w.decoration_cache_alloc_w, (uint32_t)w.decoration_cache_alloc_h);
+            int aw = (outer.w + 63) & ~63;
+            int ah = (outer.h + 31) & ~31;
+            w.decoration_cache = gui_create_surface((uint32_t)aw, (uint32_t)ah);
+            w.decoration_cache_alloc_w = aw;
+            w.decoration_cache_alloc_h = ah;
         }
 
         w.decoration_cache_w = outer.w;
         w.decoration_cache_h = outer.h;
 
         if (w.decoration_cache.buffer) {
-            for (int y = 0; y < outer.h; y++) {
-                memset(&w.decoration_cache.buffer[y * (w.decoration_cache.pitch / 4)], 0, outer.w * 4);
-            }
+            Surface view = w.decoration_cache;
+            view.width = outer.w;
+            view.height = outer.h;
+            gui_fill_rect(&view, 0, 0, outer.w, outer.h, 0);
+
             Window local = w;
-            local.x -= outer.x;
-            local.y -= outer.y;
+            local.x = 0;
+            local.y = wm_title_bar_h();
             DirtyRect full = {0, 0, outer.w, outer.h};
-            draw_window_decoration_frame(&w.decoration_cache, local, full, focused);
+            draw_window_decoration_frame(&view, local, full, focused);
 
             w.decoration_cache_theme_sig = theme_sig;
             w.decoration_cache_focused = focused;
@@ -1103,32 +1201,30 @@ static void ensure_window_decoration_cache(Window &w, bool focused, bool hovered
     int buttons_w = (b2.x + b2.w) - b0.x;
     int buttons_h = b0.h;
 
-    bool buttons_needs_rebuild = !w.button_cache.buffer ||
-                                 w.button_cache_w != buttons_w ||
-                                 w.button_cache_h != buttons_h ||
-                                 w.button_cache_theme_sig != theme_sig ||
-                                 w.button_cache_focused != focused ||
-                                 w.button_cache_hovered_button != hovered_button;
+    bool buttons_needs_rebuild = !w.button_cache.buffer || w.button_cache_w != buttons_w ||
+                                 w.button_cache_h != buttons_h || w.button_cache_theme_sig != theme_sig ||
+                                 w.button_cache_focused != focused || w.button_cache_hovered_button != hovered_button;
 
     if (buttons_needs_rebuild) {
-        bool needs_alloc = !w.button_cache.buffer ||
-                           buttons_w > w.button_cache_alloc_w ||
-                           buttons_h > w.button_cache_alloc_h ||
-                           buttons_w < w.button_cache_alloc_w / 2;
+        bool needs_alloc =
+            !w.button_cache.buffer || buttons_w > w.button_cache_alloc_w || buttons_h > w.button_cache_alloc_h;
         if (needs_alloc) {
             gui_destroy_surface(&w.button_cache);
-            w.button_cache_alloc_w = buttons_w + 10;
-            w.button_cache_alloc_h = buttons_h + 10;
-            w.button_cache = gui_create_surface((uint32_t)w.button_cache_alloc_w, (uint32_t)w.button_cache_alloc_h);
+            int aw = (buttons_w + 15) & ~15;
+            int ah = (buttons_h + 15) & ~15;
+            w.button_cache = gui_create_surface((uint32_t)aw, (uint32_t)ah);
+            w.button_cache_alloc_w = aw;
+            w.button_cache_alloc_h = ah;
         }
         w.button_cache_w = buttons_w;
         w.button_cache_h = buttons_h;
 
         if (w.button_cache.buffer) {
-            for (int y = 0; y < buttons_h; y++) {
-                memset(&w.button_cache.buffer[y * (w.button_cache.pitch / 4)], 0, buttons_w * 4);
-            }
-            draw_window_decoration_buttons(&w.button_cache, w, focused, hovered_button);
+            Surface view = w.button_cache;
+            view.width = buttons_w;
+            view.height = buttons_h;
+            gui_fill_rect(&view, 0, 0, buttons_w, buttons_h, 0);
+            draw_window_decoration_buttons(&view, w, focused, hovered_button);
             w.button_cache_theme_sig = theme_sig;
             w.button_cache_focused = focused;
             w.button_cache_hovered_button = hovered_button;
@@ -1151,8 +1247,8 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
             int src_x = visible.x - outer.x, src_y = visible.y - outer.y;
             uint32_t cache_stride = w.decoration_cache.pitch / 4;
             blit_alpha_blend_rect(&dst->buffer[(size_t)visible.y * (dst->pitch / 4) + visible.x], dst->pitch / 4,
-                                  &w.decoration_cache.buffer[(size_t)src_y * cache_stride + src_x], cache_stride, visible.w,
-                                  visible.h);
+                                  &w.decoration_cache.buffer[(size_t)src_y * cache_stride + src_x], cache_stride,
+                                  visible.w, visible.h);
         }
     }
 
@@ -1207,7 +1303,8 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         return;
 
     if (inner_r <= 0) {
-        Surface src_surface = {w.buffer, (uint32_t)w.buffer_w, (uint32_t)w.buffer_h, (uint32_t)w.buffer_w * 4, false, 0};
+        Surface src_surface = {w.buffer, (uint32_t)w.buffer_w, (uint32_t)w.buffer_h, (uint32_t)w.buffer_w * 4, false,
+                               0};
         copy_surface_rect(dst, rx, ry, &src_surface, src_x + (rx - ix), src_y + (ry - iy), rw, rh);
     } else {
         const int rounded_start_y = inner_top + inner_h - inner_r;
@@ -1226,10 +1323,11 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             if (dst_y < rounded_start_y) {
                 memcpy(&dst_ptr[rx], &src_ptr[src_x + (rx - ix)], (size_t)rw * 4u);
             } else {
-                for (int dst_x = rx; dst_x < rx + rw; ) {
+                for (int dst_x = rx; dst_x < rx + rw;) {
                     if (dst_x >= center_start_x && dst_x < center_end_x) {
                         int run_end = center_end_x;
-                        if (run_end > rx + rw) run_end = rx + rw;
+                        if (run_end > rx + rw)
+                            run_end = rx + rw;
                         int run_len = run_end - dst_x;
                         if (run_len > 0) {
                             memcpy(&dst_ptr[dst_x], &src_ptr[src_x + (dst_x - ix)], (size_t)run_len * 4u);
@@ -1237,20 +1335,20 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                             continue;
                         }
                     }
-                    
+
                     int src_col = src_x + (dst_x - ix);
                     if (src_col < 0 || src_col >= w.buffer_w) {
                         dst_x++;
                         continue;
                     }
-                    uint8_t coverage = gui_rounded_rect_coverage_local(dst_x - inner_left, dst_y - inner_top, inner_w, inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
+                    uint8_t coverage = gui_rounded_rect_coverage_local(dst_x - inner_left, dst_y - inner_top, inner_w,
+                                                                       inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
                     if (coverage > 0) {
                         uint32_t &dp = dst_ptr[dst_x];
                         uint32_t sp = src_ptr[src_col];
                         if (coverage == 255) {
                             dp = sp;
                         } else {
-                            // Inlined blend for opaque backbuffer
                             uint32_t inv = 255u - coverage;
                             uint32_t dr = (dp >> 16) & 0xFFu, dg = (dp >> 8) & 0xFFu, db = dp & 0xFFu;
                             uint32_t sr = (sp >> 16) & 0xFFu, sg = (sp >> 8) & 0xFFu, sb = sp & 0xFFu;
@@ -1312,6 +1410,10 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
         draw_context_menu_overlay(registry);
     if (g_storage_prompt.visible)
         draw_storage_prompt_overlay_clipped(r);
+    if (g_index.active)
+        draw_index_overlay_clipped(r, registry);
+    if (g_control_center.open)
+        draw_control_center_overlay_clipped(r);
 }
 
 bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
@@ -1330,13 +1432,13 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         Window &w = g_windows[i];
         if (!g_window_visible_cache[i] || !w.buffer || w.transparent)
             continue;
-        
-        // Early exit: if the dirty rect doesn't even touch the window, skip it.
+
         if (!dirty_rects_intersect(r, g_window_outer_cache[i]))
             continue;
 
         int region_count = g_window_visible_region_count[i];
-        if (region_count > MAX_VISIBLE_REGIONS) region_count = MAX_VISIBLE_REGIONS;
+        if (region_count > MAX_VISIBLE_REGIONS)
+            region_count = MAX_VISIBLE_REGIONS;
         for (int region = 0; region < region_count; region++) {
             DirtyRect visible = {};
             if (!rect_intersection(g_window_visible_regions[i][region], r, &visible))
@@ -1358,7 +1460,6 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         if (!g_window_visible_cache[i] || !w.buffer || !w.transparent)
             continue;
 
-        // Early exit: if the dirty rect doesn't touch the window, skip transparent pass too
         if (!dirty_rects_intersect(r, g_window_outer_cache[i]))
             continue;
 
@@ -1369,6 +1470,10 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         draw_context_menu_overlay(registry);
     if (g_storage_prompt.visible)
         draw_storage_prompt_overlay_clipped(r);
+    if (g_index.active)
+        draw_index_overlay_clipped(r, registry);
+    if (g_control_center.open)
+        draw_control_center_overlay_clipped(r);
     return true;
 }
 
@@ -1408,7 +1513,6 @@ static uint32_t storage_prompt_scrim_color()
     uint8_t alpha = light ? 96 : 156;
     return ((uint32_t)alpha << 24) | (material & 0x00FFFFFFu);
 }
-
 
 void draw_context_menu_overlay(const Registry *registry)
 {
@@ -1457,9 +1561,11 @@ static void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
     int content_y = layout.box.y + gui_card_header_h() + gui_space_2();
     int text_w = layout.box.w - gui_space_4();
 
-    content_y += gui_draw_wrapped_value(&g_backbuffer, text_x, content_y, text_w,
-                                        "Off hides persistent storage from apps. Read-Only allows browsing without disk writes. Writable enables normal file changes and seeds standard user folders in /data.",
-                                        g_gui_style.text, g_gui_style.app_surface);
+    content_y +=
+        gui_draw_wrapped_value(&g_backbuffer, text_x, content_y, text_w,
+                               "Off hides persistent storage from apps. Read-Only allows browsing without disk writes. "
+                               "Writable enables normal file changes and seeds standard user folders in /data.",
+                               g_gui_style.text, g_gui_style.app_surface);
 
     int note_y = content_y + gui_space_1_5();
     int note_h = gui_scaled_metric(52);
@@ -1469,10 +1575,10 @@ static void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
         gui_draw_badge(&g_backbuffer, text_x + gui_space_1(), note_y + gui_scaled_metric(8), "CAUTION",
                        g_gui_style.warning, g_gui_style.app_surface);
         int note_text_x = text_x + gui_scaled_metric(92);
-        gui_draw_wrapped_value(&g_backbuffer, note_text_x, note_y + gui_scaled_metric(8),
-                               text_w - (note_text_x - text_x) - gui_space_1(),
-                               "Choose Writable only if you are intentionally testing on hardware you are prepared to modify.",
-                               g_gui_style.text_dim, g_gui_style.chrome_bg);
+        gui_draw_wrapped_value(
+            &g_backbuffer, note_text_x, note_y + gui_scaled_metric(8), text_w - (note_text_x - text_x) - gui_space_1(),
+            "Choose Writable only if you are intentionally testing on hardware you are prepared to modify.",
+            g_gui_style.text_dim, g_gui_style.chrome_bg);
     }
 
     int footer_y = layout.off_button.y - gui_space_1();
@@ -1486,9 +1592,224 @@ static void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
                         layout.writable_button.h, "Writable", true, false, g_storage_prompt.hovered_button == 2);
 }
 
-
 void draw_storage_prompt_overlay()
 {
     DirtyRect full = {0, 0, (int)g_backbuffer.width, (int)g_backbuffer.height};
     draw_storage_prompt_overlay_clipped(full);
+}
+
+static int wm_index_result_item_h()
+{
+    int h = gui_scaled_metric(52);
+    return h < gui_scaled_metric(40) ? gui_scaled_metric(40) : h;
+}
+
+static DirtyRect wm_index_search_bounds()
+{
+    DirtyRect box = index_overlay_bounds();
+    int pad = gui_space_2();
+    int h = gui_scaled_metric(44);
+    return {box.x + pad, box.y + pad, box.w - pad * 2, h};
+}
+
+static int wm_index_results_start_y()
+{
+    DirtyRect search = wm_index_search_bounds();
+    return search.y + search.h + gui_space_1();
+}
+
+void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
+{
+    (void)registry;
+    if (!g_index.active || !g_backbuffer.buffer)
+        return;
+
+    DirtyRect box = index_overlay_bounds();
+    DirtyRect damage = rect_expand(box, gui_scaled_metric(14));
+    if (!rect_intersection(clip, damage, nullptr))
+        return;
+
+    int radius = gui_radius_lg();
+    int shadow = gui_scaled_metric(6);
+    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow, box.w, box.h, radius, g_gui_chrome.frame_shadow);
+    gui_draw_panel_inset(&g_backbuffer, box.x, box.y, box.w, box.h, g_gui_style.app_surface, g_gui_style.border_focus,
+                         g_gui_style.chrome_bg_alt);
+
+    DirtyRect search = wm_index_search_bounds();
+    const char *query = g_index.query_len > 0 ? g_index.query : "";
+    gui_app_draw_text_field(&g_backbuffer, search.x, search.y, search.w, search.h, query, g_index.query_len > 0, false);
+    if (g_index.query_len == 0) {
+        int placeholder_y = gui_align_text_y(gui_font_default(), search.y, search.h);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), search.x + gui_space_1(), placeholder_y,
+                              search.w - gui_space_2(), "Search apps, commands, settings", g_gui_style.text_muted,
+                              g_gui_style.app_surface);
+    }
+
+    int hint_w = gui_measure_text(gui_font_default(), "Enter");
+    int hint_x = search.x + search.w - hint_w - gui_space_1();
+    if (hint_x > search.x + search.w / 2) {
+        int hint_y = gui_align_text_y(gui_font_default(), search.y, search.h);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), hint_x, hint_y,
+                              search.x + search.w - hint_x - gui_space_1(), "Enter", g_gui_style.text_muted,
+                              g_gui_style.app_surface);
+    }
+
+    int pad = gui_space_2();
+    int row_y = wm_index_results_start_y();
+    int row_h = wm_index_result_item_h();
+    int row_gap = gui_scaled_metric(2);
+    int bottom = box.y + box.h - pad;
+
+    if (g_index.result_count <= 0) {
+        int empty_y = row_y + gui_space_2();
+        gui_draw_text_clipped(&g_backbuffer, gui_font_title(), box.x + pad, empty_y, box.w - pad * 2, "No matches",
+                              g_gui_style.text_dim, g_gui_style.app_surface);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), box.x + pad,
+                              empty_y + gui_line_height() + gui_scaled_metric(4), box.w - pad * 2,
+                              "Try an app name, setting, or command.", g_gui_style.text_muted, g_gui_style.app_surface);
+        return;
+    }
+
+    for (int i = 0; i < g_index.result_count; i++) {
+        if (row_y + row_h > bottom)
+            break;
+        bool selected = i == g_index.selected_index;
+        bool hovered = i == g_index.hovered_index;
+        const IndexResult &result = g_index.results[i];
+        const char *badge = result.is_app ? "APP" : "CMD";
+        const char *detail = result.detail[0] ? result.detail : result.path;
+        gui_app_draw_list_row(&g_backbuffer, box.x + pad, row_y, box.w - pad * 2, row_h, badge, result.title, detail,
+                              selected, hovered, false);
+        row_y += row_h + row_gap;
+    }
+}
+
+static int wm_control_panel_card_h()
+{
+    int h = gui_scaled_metric(58);
+    return h < gui_scaled_metric(46) ? gui_scaled_metric(46) : h;
+}
+
+static DirtyRect wm_control_item_rect(ControlPanelItem item)
+{
+    DirtyRect box = control_center_bounds();
+    int pad = gui_space_2();
+    int gap = gui_space_1();
+    int header_h = gui_card_header_h();
+    int card_h = wm_control_panel_card_h();
+    int half_w = (box.w - pad * 2 - gap) / 2;
+    int y = box.y + header_h + pad;
+
+    if (item == CONTROL_ITEM_NETWORK)
+        return {box.x + pad, y, half_w, card_h};
+    if (item == CONTROL_ITEM_DARK_MODE)
+        return {box.x + pad + half_w + gap, y, half_w, card_h};
+
+    y += card_h + gap;
+    if (item == CONTROL_ITEM_DESKTOP_GRID)
+        return {box.x + pad, y, half_w, card_h};
+    if (item == CONTROL_ITEM_CLOCK_SECONDS)
+        return {box.x + pad + half_w + gap, y, half_w, card_h};
+
+    y += card_h + gap;
+    if (item == CONTROL_ITEM_VOLUME)
+        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(72)};
+
+    int action_h = gui_app_control_h();
+    int action_y = box.y + box.h - pad - action_h;
+    int action_w = (box.w - pad * 2 - gap) / 2;
+    if (item == CONTROL_ITEM_STORAGE)
+        return {box.x + pad, action_y, action_w, action_h};
+    if (item == CONTROL_ITEM_SETTINGS)
+        return {box.x + pad + action_w + gap, action_y, action_w, action_h};
+
+    return {0, 0, 0, 0};
+}
+
+static void draw_control_toggle(ControlPanelItem item, const char *label, const char *detail, bool on)
+{
+    DirtyRect r = wm_control_item_rect(item);
+    gui_app_draw_toggle_row(&g_backbuffer, r.x, r.y, r.w, r.h, label, detail, on, false,
+                            g_control_center.hovered_item == item);
+}
+
+static void draw_control_volume_card()
+{
+    DirtyRect r = wm_control_item_rect(CONTROL_ITEM_VOLUME);
+    bool hovered = g_control_center.hovered_item == CONTROL_ITEM_VOLUME || g_control_center.volume_dragging;
+    uint32_t bg = hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface;
+    gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, gui_radius_md(), bg);
+    gui_draw_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, gui_radius_md(),
+                          hovered ? g_gui_style.border_hover : g_gui_style.border);
+
+    char value[16];
+    snprintf(value, sizeof(value), "%u%%", (unsigned)g_control_center.volume);
+    int pad = gui_space_2();
+    int label_y = r.y + gui_space_1();
+    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), r.x + pad, label_y, r.w / 2, "Volume", g_gui_style.text,
+                          bg);
+    int value_w = gui_measure_text(gui_font_default(), value);
+    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), r.x + r.w - pad - value_w, label_y, value_w, value,
+                          g_gui_style.text_dim, bg);
+
+    int track_h = gui_scaled_metric(18);
+    int track_x = r.x + pad;
+    int track_y = r.y + r.h - pad - track_h;
+    int track_w = r.w - pad * 2;
+    int track_r = gui_corner_radius(track_w, track_h, track_h / 2);
+    gui_fill_rounded_rect(&g_backbuffer, track_x, track_y, track_w, track_h, track_r, g_gui_style.chrome_bg_alt);
+    gui_draw_rounded_rect(&g_backbuffer, track_x, track_y, track_w, track_h, track_r, g_gui_style.border);
+    int fill_w = (int)((uint64_t)track_w * g_control_center.volume / 100u);
+    if (fill_w > 0)
+        gui_fill_rounded_rect(&g_backbuffer, track_x, track_y, fill_w, track_h, track_r, g_gui_style.accent);
+    int knob_d = track_h + gui_scaled_metric(4);
+    int knob_x = track_x + fill_w - knob_d / 2;
+    if (knob_x < track_x)
+        knob_x = track_x;
+    if (knob_x + knob_d > track_x + track_w)
+        knob_x = track_x + track_w - knob_d;
+    gui_fill_rounded_rect(&g_backbuffer, knob_x, track_y - gui_scaled_metric(2), knob_d, knob_d, knob_d / 2,
+                          g_gui_style.app_surface);
+    gui_draw_rounded_rect(&g_backbuffer, knob_x, track_y - gui_scaled_metric(2), knob_d, knob_d, knob_d / 2,
+                          g_gui_style.border_focus);
+}
+
+void draw_control_center_overlay_clipped(const DirtyRect &clip)
+{
+    if (!g_control_center.open || !g_backbuffer.buffer)
+        return;
+
+    DirtyRect box = control_center_bounds();
+    DirtyRect damage = rect_expand(box, gui_scaled_metric(14));
+    if (!rect_intersection(clip, damage, nullptr))
+        return;
+
+    int radius = gui_radius_lg();
+    int shadow = gui_scaled_metric(6);
+    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow, box.w, box.h, radius, g_gui_chrome.frame_shadow);
+    gui_draw_panel_inset(&g_backbuffer, box.x, box.y, box.w, box.h, g_gui_style.app_surface, g_gui_style.border,
+                         g_gui_style.chrome_bg_alt);
+    gui_draw_card_header(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, "Control Panel", "uniOS");
+
+    draw_control_toggle(CONTROL_ITEM_NETWORK, "Network", g_control_center.network_enabled ? "Ethernet" : "Disconnected",
+                        g_control_center.network_enabled);
+    draw_control_toggle(CONTROL_ITEM_DARK_MODE, "Dark", g_control_center.dark_mode ? "On" : "Off",
+                        g_control_center.dark_mode);
+    draw_control_toggle(CONTROL_ITEM_DESKTOP_GRID, "Grid", g_control_center.desktop_grid ? "Shown" : "Hidden",
+                        g_control_center.desktop_grid);
+    draw_control_toggle(CONTROL_ITEM_CLOCK_SECONDS, "Seconds", g_control_center.clock_seconds ? "Show" : "Hide",
+                        g_control_center.clock_seconds);
+    draw_control_toggle(CONTROL_ITEM_ANIMATIONS, "Motion", g_control_center.animations_enabled ? "On" : "Off",
+                        g_control_center.animations_enabled);
+    draw_control_toggle(CONTROL_ITEM_TRANSPARENCY, "Transparency",
+                        g_control_center.transparency_level < 255 ? "On" : "Off",
+                        g_control_center.transparency_level < 255);
+    draw_control_volume_card();
+
+    DirtyRect storage = wm_control_item_rect(CONTROL_ITEM_STORAGE);
+    DirtyRect settings = wm_control_item_rect(CONTROL_ITEM_SETTINGS);
+    gui_app_draw_button(&g_backbuffer, storage.x, storage.y, storage.w, storage.h, "Storage", false, false,
+                        g_control_center.hovered_item == CONTROL_ITEM_STORAGE);
+    gui_app_draw_button(&g_backbuffer, settings.x, settings.y, settings.w, settings.h, "Settings", true, false,
+                        g_control_center.hovered_item == CONTROL_ITEM_SETTINGS);
 }

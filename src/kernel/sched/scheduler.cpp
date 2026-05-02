@@ -14,6 +14,7 @@
 #include <kernel/sync/spinlock.h>
 #include <kernel/time/timer.h>
 #include <libk/kstring.h>
+#include <uapi/syscalls.h>
 
 extern "C" void load_idt(void *);
 extern "C" void init_fpu_state(uint8_t *fpu_buffer);
@@ -26,6 +27,89 @@ static Process *g_proc_tail = nullptr;
 static uint64_t g_next_pid = 1;
 static volatile uint32_t g_shutdown_action = 0;
 extern "C" void scheduler_unlock_after_switch();
+
+static void process_free_reaped(Process *target)
+{
+    if (!target)
+        return;
+    if (target->stack_phys) {
+        for (size_t i = 0; i < KERNEL_STACK_SIZE / 4096; i++)
+            pmm_free_frame(reinterpret_cast<void *>(target->stack_phys + i * 4096));
+    }
+    if (target->page_table)
+        vmm_free_address_space(target->page_table);
+    if (target->vma_list)
+        vma_free_all(target->vma_list);
+    aligned_free(target);
+}
+
+static Process *detach_kernel_zombie_locked()
+{
+    if (!g_proc_list)
+        return nullptr;
+
+    Process *target = nullptr;
+    Process *prev = g_proc_tail;
+    Process *p = g_proc_list;
+    do {
+        if (p != g_current_proc && p->pid != 0 && p->parent_pid == 0 && p->state == ProcessState_Zombie) {
+            target = p;
+            break;
+        }
+        prev = p;
+        p = p->next;
+    } while (p != g_proc_list);
+
+    if (!target)
+        return nullptr;
+
+    Process *kernel = g_proc_list;
+    if (kernel && kernel->pid == 0) {
+        Process *prev_child = nullptr;
+        Process *child = kernel->children_list;
+        while (child) {
+            if (child == target) {
+                if (prev_child)
+                    prev_child->sibling_next = child->sibling_next;
+                else
+                    kernel->children_list = child->sibling_next;
+                break;
+            }
+            prev_child = child;
+            child = child->sibling_next;
+        }
+    }
+
+    if (target->next == target) {
+        g_proc_list = nullptr;
+        g_proc_tail = nullptr;
+    } else {
+        prev->next = target->next;
+        if (g_proc_list == target)
+            g_proc_list = target->next;
+        if (g_proc_tail == target)
+            g_proc_tail = prev;
+    }
+
+    target->next = nullptr;
+    target->sibling_next = nullptr;
+    return target;
+}
+
+static void reap_kernel_zombies()
+{
+    while (true) {
+        const uint64_t flags = interrupts_save_disable();
+        spinlock_acquire(&g_sched_lock);
+        Process *target = detach_kernel_zombie_locked();
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        if (!target)
+            return;
+        DEBUG_INFO("Reaped detached zombie PID %d", target->pid);
+        process_free_reaped(target);
+    }
+}
 
 static void process_release_private_fds(Process *proc)
 {
@@ -623,6 +707,7 @@ void scheduler_schedule()
     spinlock_acquire(&g_sched_lock);
     scheduler_schedule_internal();
     interrupts_restore(flags);
+    reap_kernel_zombies();
 }
 
 void scheduler_yield()
@@ -828,8 +913,9 @@ void process_exit(int32_t status)
         ;
 }
 
-[[nodiscard]] int64_t process_waitpid(int64_t pid, int32_t *status)
+[[nodiscard]] int64_t process_waitpid(int64_t pid, int32_t *status, int options)
 {
+    const bool nohang = (options & WNOHANG) != 0;
     while (true) {
         const uint64_t flags = interrupts_save_disable();
         spinlock_acquire(&g_sched_lock);
@@ -873,18 +959,31 @@ void process_exit(int32_t status)
             spinlock_release(&g_sched_lock);
             interrupts_restore(flags);
 
-            if (target->stack_phys) {
-                for (size_t i = 0; i < KERNEL_STACK_SIZE / 4096; i++) {
-                    pmm_free_frame(reinterpret_cast<void *>(target->stack_phys + i * 4096));
-                }
-            }
-            if (target->page_table)
-                vmm_free_address_space(target->page_table);
-            if (target->vma_list)
-                vma_free_all(target->vma_list);
-            aligned_free(target);
+            process_free_reaped(target);
             DEBUG_INFO("Reaped zombie PID %d", child_pid);
             return static_cast<int64_t>(child_pid);
+        }
+
+        if (nohang) {
+            if (pid != -1) {
+                Process *child = nullptr;
+                Process *c = g_current_proc->children_list;
+                while (c) {
+                    if (c->pid == static_cast<uint64_t>(pid)) {
+                        child = c;
+                        break;
+                    }
+                    c = c->sibling_next;
+                }
+                if (!child) {
+                    spinlock_release(&g_sched_lock);
+                    interrupts_restore(flags);
+                    return -1;
+                }
+            }
+            spinlock_release(&g_sched_lock);
+            interrupts_restore(flags);
+            return 0;
         }
 
         // Reverted to 0 for wildcard representation as initially architected

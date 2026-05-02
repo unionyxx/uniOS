@@ -38,6 +38,8 @@
 #include <kernel/time/timer.h>
 
 static TcpSocket sockets[TCP_MAX_SOCKETS];
+static Spinlock tcp_checksum_lock = SPINLOCK_INIT;
+static uint8_t tcp_checksum_buffer[1600];
 
 // Ephemeral port range (IANA recommended: 49152-65535)
 #define EPHEMERAL_PORT_MIN 49152
@@ -46,6 +48,8 @@ static uint16_t next_ephemeral_port = EPHEMERAL_PORT_MIN;
 
 static uint16_t get_ephemeral_port()
 {
+    if (next_ephemeral_port < EPHEMERAL_PORT_MIN)
+        next_ephemeral_port = EPHEMERAL_PORT_MIN;
     uint16_t start_port = next_ephemeral_port;
     while (true) {
         uint16_t port = next_ephemeral_port++;
@@ -88,10 +92,11 @@ struct TcpPseudoHeader
 // Calculate TCP checksum (reentrant - dynamically allocated buffer)
 static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *tcp_data, uint16_t length)
 {
-    uint8_t *buffer = static_cast<uint8_t *>(malloc(sizeof(TcpPseudoHeader) + length));
-    if (!buffer)
+    if (!tcp_data || length == 0 || sizeof(TcpPseudoHeader) + length > sizeof(tcp_checksum_buffer))
         return 0;
 
+    spinlock_acquire(&tcp_checksum_lock);
+    uint8_t *buffer = tcp_checksum_buffer;
     TcpPseudoHeader *pseudo = (TcpPseudoHeader *)buffer;
 
     pseudo->src_ip = src_ip;
@@ -106,13 +111,15 @@ static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *tcp_d
     }
 
     uint16_t cksum = ipv4_checksum(buffer, sizeof(TcpPseudoHeader) + length);
-    free(buffer);
+    spinlock_release(&tcp_checksum_lock);
     return cksum;
 }
 
 // Send TCP segment
 static bool tcp_send_segment(TcpSocket *sock, uint8_t flags, const void *data, uint16_t length)
 {
+    if (!sock || (!data && length > 0) || length > 1460)
+        return false;
     uint8_t *packet = static_cast<uint8_t *>(malloc(TCP_HEADER_SIZE + length));
     if (!packet)
         return false;
@@ -178,7 +185,7 @@ static TcpSocket *tcp_find_socket(uint32_t src_ip, uint16_t src_port, uint16_t d
 // Receive TCP segment
 void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t dst_ip)
 {
-    if (length < TCP_HEADER_SIZE) {
+    if (!data || length < TCP_HEADER_SIZE) {
         return;
     }
 
@@ -371,8 +378,12 @@ int tcp_socket()
 // Bind socket
 bool tcp_bind(int sock, uint16_t port)
 {
-    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
+    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || port == 0) {
         return false;
+    }
+    for (int i = 0; i < TCP_MAX_SOCKETS; i++) {
+        if (i != sock && sockets[i].in_use && sockets[i].local_port == port && sockets[i].state != TCP_CLOSED)
+            return false;
     }
     sockets[sock].local_port = port;
     return true;
@@ -381,7 +392,7 @@ bool tcp_bind(int sock, uint16_t port)
 // Listen on socket
 bool tcp_listen(int sock)
 {
-    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
+    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || sockets[sock].local_port == 0) {
         return false;
     }
     sockets[sock].state = TCP_LISTEN;
@@ -409,7 +420,7 @@ int tcp_accept(int sock)
 // Connect to remote host
 bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
 {
-    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
+    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || dst_ip == 0 || dst_port == 0) {
         return false;
     }
 
@@ -427,7 +438,11 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
     s->state = TCP_SYN_SENT;
 
     // Send SYN
-    tcp_send_segment(s, TCP_FLAG_SYN, nullptr, 0);
+    if (!tcp_send_segment(s, TCP_FLAG_SYN, nullptr, 0)) {
+        s->state = TCP_CLOSED;
+        s->local_port = 0;
+        return false;
+    }
 
     // Wait for connection (with timeout)
     uint64_t start = timer_get_ticks();
@@ -438,13 +453,19 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
         scheduler_yield(); // Yield CPU instead of busy-wait
     }
 
-    return s->state == TCP_ESTABLISHED;
+    if (s->state != TCP_ESTABLISHED) {
+        s->state = TCP_CLOSED;
+        s->local_port = 0;
+        return false;
+    }
+    return true;
 }
 
 // Send data
 int tcp_send(int sock, const void *data, uint16_t length)
 {
-    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || sockets[sock].state != TCP_ESTABLISHED) {
+    if ((!data && length > 0) || sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use ||
+        sockets[sock].state != TCP_ESTABLISHED) {
         return -1;
     }
 
@@ -465,7 +486,7 @@ int tcp_send(int sock, const void *data, uint16_t length)
 // Receive data
 int tcp_recv(int sock, void *buffer, uint16_t max_len)
 {
-    if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
+    if ((!buffer && max_len > 0) || sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
         return -1;
     }
 

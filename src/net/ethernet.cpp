@@ -8,6 +8,7 @@
 
 // Broadcast MAC
 const uint8_t ETH_BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static constexpr uint16_t ETH_MIN_PAYLOAD_LEN = 46;
 
 // Byte order conversion
 uint16_t htons(uint16_t value)
@@ -33,6 +34,8 @@ uint32_t ntohl(uint32_t value)
 // MAC address helpers
 bool eth_mac_equals(const uint8_t *mac1, const uint8_t *mac2)
 {
+    if (!mac1 || !mac2)
+        return false;
     for (int i = 0; i < 6; i++) {
         if (mac1[i] != mac2[i])
             return false;
@@ -45,8 +48,26 @@ bool eth_mac_is_broadcast(const uint8_t *mac)
     return eth_mac_equals(mac, ETH_BROADCAST_MAC);
 }
 
+static bool eth_mac_is_zero(const uint8_t *mac)
+{
+    if (!mac)
+        return true;
+    for (int i = 0; i < 6; i++) {
+        if (mac[i] != 0)
+            return false;
+    }
+    return true;
+}
+
 void eth_mac_copy(uint8_t *dst, const uint8_t *src)
 {
+    if (!dst)
+        return;
+    if (!src) {
+        for (int i = 0; i < 6; i++)
+            dst[i] = 0;
+        return;
+    }
     for (int i = 0; i < 6; i++) {
         dst[i] = src[i];
     }
@@ -62,13 +83,18 @@ static uint8_t tx_buffer[1600];
 
 bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype, const void *data, uint16_t length)
 {
+    if (!dst_mac || (!data && length > 0))
+        return false;
+    if (eth_mac_is_zero(dst_mac))
+        return false;
     if (length > ETH_DATA_LEN) {
         DEBUG_WARN("ethernet: payload too large (%d > %d)", length, ETH_DATA_LEN);
         return false;
     }
 
-    // Allocate frame on heap to prevent stack overflow
-    // (Network call chains can be deep: socket -> tcp -> ipv4 -> ethernet -> driver)
+    uint16_t payload_length = length < ETH_MIN_PAYLOAD_LEN ? ETH_MIN_PAYLOAD_LEN : length;
+
+    // Static TX buffer avoids large stack frames in deep network call chains.
     spinlock_acquire(&tx_lock);
     uint8_t *frame = tx_buffer;
 
@@ -83,15 +109,18 @@ bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype, const void *data,
     // Set EtherType (network byte order)
     hdr->ethertype = htons(ethertype);
 
-    // Copy payload
+    // Copy payload and pad short Ethernet II frames to the minimum payload size.
     uint8_t *payload = frame + ETH_HLEN;
     const uint8_t *src = (const uint8_t *)data;
     for (uint16_t i = 0; i < length; i++) {
         payload[i] = src[i];
     }
+    for (uint16_t i = length; i < payload_length; i++) {
+        payload[i] = 0;
+    }
 
     // Send via unified NIC layer
-    bool result = net_send_raw(frame, ETH_HLEN + length);
+    bool result = net_send_raw(frame, ETH_HLEN + payload_length);
     spinlock_release(&tx_lock);
     return result;
 }
@@ -99,7 +128,7 @@ bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype, const void *data,
 // Process received Ethernet frame
 void ethernet_receive(const void *frame, uint16_t length)
 {
-    if (length < ETH_HLEN) {
+    if (!frame || length < ETH_HLEN) {
         return; // Too short
     }
 

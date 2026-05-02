@@ -23,6 +23,13 @@ int g_window_count = 0;
 int g_add_fail_logs = 0;
 uint32_t g_system_flags = SYSTEM_FLAG_SHOW_DESKTOP_GRID;
 
+static void reap_exited_children()
+{
+    int status = 0;
+    while (waitpid_nohang(-1, &status) > 0) {
+    }
+}
+
 DirtyRect g_dirty_rects[MAX_DIRTY_RECTS];
 DirtyRect g_window_outer_cache[MAX_WINDOWS];
 DirtyRect g_window_client_cache[MAX_WINDOWS];
@@ -159,11 +166,10 @@ static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
 
 static bool window_entry_snapshot_equal_for_commit(const WindowEntrySnapshot &a, const WindowEntrySnapshot &b)
 {
-    return a.shm_id == b.shm_id && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h &&
-           a.buffer_w == b.buffer_w && a.buffer_h == b.buffer_h && a.content_w == b.content_w &&
-           a.content_h == b.content_h && a.min_w == b.min_w && a.min_h == b.min_h &&
-           a.scroll_x == b.scroll_x && a.scroll_y == b.scroll_y && a.flags == b.flags && a.state == b.state &&
-           a.owner_pid == b.owner_pid && a.buffer_generation == b.buffer_generation &&
+    return a.shm_id == b.shm_id && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h && a.buffer_w == b.buffer_w &&
+           a.buffer_h == b.buffer_h && a.content_w == b.content_w && a.content_h == b.content_h && a.min_w == b.min_w &&
+           a.min_h == b.min_h && a.scroll_x == b.scroll_x && a.scroll_y == b.scroll_y && a.flags == b.flags &&
+           a.state == b.state && a.owner_pid == b.owner_pid && a.buffer_generation == b.buffer_generation &&
            a.buffer_ack_generation == b.buffer_ack_generation && a.active == b.active && a.ready == b.ready &&
            memcmp(a.title, b.title, sizeof(a.title)) == 0;
 }
@@ -517,28 +523,6 @@ static void mark_titlebar_dirty(const Window &w)
         enqueue_damage_rect(outer.x, outer.y, outer.w, title_h);
 }
 
-static void invalidate_window_decoration_cache(Window &w)
-{
-    gui_destroy_surface(&w.decoration_cache);
-    w.decoration_cache_alloc_w = 0;
-    w.decoration_cache_alloc_h = 0;
-    w.decoration_cache_w = 0;
-    w.decoration_cache_h = 0;
-    w.decoration_cache_theme_sig = 0;
-    w.decoration_cache_focused = false;
-    memset(w.decoration_cache_title, 0, sizeof(w.decoration_cache_title));
-
-    gui_destroy_surface(&w.button_cache);
-    w.button_cache_alloc_w = 0;
-    w.button_cache_alloc_h = 0;
-    w.button_cache_w = 0;
-    w.button_cache_h = 0;
-    w.button_cache_theme_sig = 0;
-    w.button_cache_focused = false;
-    w.button_cache_hovered_frame = false;
-    w.button_cache_hovered_button = -1;
-}
-
 static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &entry)
 {
     if (!w.entry)
@@ -548,15 +532,33 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
     const int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
     if (desired_buffer_w > 0 && desired_buffer_h > 0 &&
         (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h)) {
+        Window old = w;
         w.buffer_w = desired_buffer_w;
         w.buffer_h = desired_buffer_h;
+
+        // Finalize geometry sync if buffer matches target
+        if (w.buffer_w == w.target_w && w.buffer_h == w.target_h) {
+            w.x = w.target_x;
+            w.y = w.target_y;
+            w.w = w.target_w;
+            w.h = w.target_h;
+            w.resize_configure_pending = false;
+        } else {
+            // App provided a buffer that doesn't match our latest target yet,
+            // but we must update w/h to match buffer for rendering integrity.
+            w.w = w.buffer_w;
+            w.h = w.buffer_h;
+        }
+
         if (clamp_window_scroll(w) && w.entry) {
             w.entry->scroll_x = w.scroll_x;
             w.entry->scroll_y = w.scroll_y;
             asm volatile("sfence" ::: "memory");
         }
         w.needs_full_redraw = true;
-        mark_window_frame_damage(w);
+        invalidate_window_decoration_cache(w);
+        mark_window_transition_damage(old, w);
+        invalidate_window_visibility_cache();
     }
 
     const int new_content_w = entry.content_w;
@@ -631,6 +633,10 @@ extern "C" int main(int argc, char **argv)
     syscall1(SYS_GUI_REGISTER_WM, 0);
     RuntimeGuiSettings runtime_settings = load_runtime_settings();
     g_system_flags = runtime_settings.system_flags;
+    g_control_center.network_enabled = runtime_settings.ethernet_enabled;
+    g_control_center.animations_enabled = runtime_settings.animations_enabled;
+    g_control_center.transparency_level = runtime_settings.transparency_level;
+    g_control_center.volume = runtime_settings.volume_level;
     gui_apply_theme(runtime_settings.theme_mode);
 
     g_backbuffer = gui_create_surface(g_screen.width, g_screen.height);
@@ -701,6 +707,11 @@ extern "C" int main(int argc, char **argv)
     registry->dk_blur_shm_id = dk_blur_shm;
     registry->theme_mode = runtime_settings.theme_mode;
     registry->system_flags = runtime_settings.system_flags;
+    registry->ethernet_enabled = runtime_settings.ethernet_enabled;
+    registry->ethernet_use_dhcp = runtime_settings.ethernet_use_dhcp;
+    registry->animations_enabled = runtime_settings.animations_enabled;
+    registry->transparency_level = runtime_settings.transparency_level;
+    registry->volume_level = runtime_settings.volume_level;
     registry->storage_mode = get_storage_mode();
     registry->storage_request_mode = registry->storage_mode;
     registry->wallpaper_status = WALLPAPER_STATUS_SOLID;
@@ -787,6 +798,8 @@ extern "C" int main(int argc, char **argv)
     LOG_INFO("wm", "first desktop frame submitted at %llu ms", (unsigned long long)get_ticks());
 
     uint32_t last_settings_gen = registry->settings_generation, last_storage_gen = registry->storage_request_generation;
+    GuiThemeMode applied_theme_mode = runtime_settings.theme_mode;
+    sync_control_center_state_from_registry(registry);
     Event ev;
 
     while (true) {
@@ -818,6 +831,49 @@ extern "C" int main(int argc, char **argv)
                 }
             }
 
+            if (g_index.active) {
+                if (ev.type == EVT_MOUSE_DOWN) {
+                    g_input.pointer_down = false;
+                    g_input.drag_index = -1;
+                    g_input.drag_edges = RESIZE_NONE;
+                    if (ev.mouse.button == 1) {
+                        if (!handle_index_pointer_down(registry, g_input.mouse_x, g_input.mouse_y))
+                            close_index();
+                    } else {
+                        close_index();
+                    }
+                    continue;
+                }
+                if (ev.type == EVT_MOUSE_UP) {
+                    g_input.pointer_down = false;
+                    g_input.drag_index = -1;
+                    g_input.drag_edges = RESIZE_NONE;
+                    continue;
+                }
+            }
+
+            if (g_control_center.open) {
+                if (ev.type == EVT_MOUSE_DOWN) {
+                    g_input.pointer_down = false;
+                    g_input.drag_index = -1;
+                    g_input.drag_edges = RESIZE_NONE;
+                    if (ev.mouse.button == 1) {
+                        if (!handle_control_center_pointer_down(registry, g_input.mouse_x, g_input.mouse_y))
+                            close_control_center();
+                    } else {
+                        close_control_center();
+                    }
+                    continue;
+                }
+                if (ev.type == EVT_MOUSE_UP) {
+                    g_input.pointer_down = false;
+                    g_input.drag_index = -1;
+                    g_input.drag_edges = RESIZE_NONE;
+                    handle_control_center_pointer_up();
+                    continue;
+                }
+            }
+
             if ((ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) && g_input.mouse_y >= registry->windows[0].h) {
                 registry->mb_menu_dismiss_requested = true;
                 asm volatile("sfence" ::: "memory");
@@ -843,6 +899,13 @@ extern "C" int main(int argc, char **argv)
                 int sys_hit = system_window_hit(g_input.mouse_x, g_input.mouse_y);
                 if (sys_hit >= 0) {
                     if (sys_hit == 0) {
+                        if (g_input.mouse_x > (int)g_screen.width - 120) {
+                            g_input.pointer_down = false;
+                            g_input.drag_index = -1;
+                            g_input.drag_edges = RESIZE_NONE;
+                            toggle_control_center();
+                            continue;
+                        }
                         registry->mb_click_x = g_input.mouse_x;
                         registry->mb_click_y = g_input.mouse_y;
                         registry->mb_clicked = true;
@@ -999,7 +1062,86 @@ extern "C" int main(int argc, char **argv)
                         post_mouse_event_to_window(g_windows[focus], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,
                                                    ev.mouse.button);
                 }
+            } else if (ev.type == EVT_KEY_DOWN) {
+                if (ev.key.c == 29) { // Alt+Space / Index trigger
+                    if (g_index.active)
+                        close_index();
+                    else
+                        open_index();
+                    continue;
+                }
+
+                if (g_index.active) {
+                    if (ev.key.c == 27) { // ESC
+                        close_index();
+                    } else if (ev.key.c == '\b') {
+                        if (g_index.query_len > 0) {
+                            g_index.query[--g_index.query_len] = '\0';
+                            update_index_search();
+                        }
+                    } else if (ev.key.c == '\n') {
+                        activate_index_selection(registry);
+                    } else if ((uint8_t)ev.key.c == KEY_UP_ARROW) {
+                        if (g_index.result_count > 0) {
+                            if (g_index.selected_index <= 0)
+                                g_index.selected_index = g_index.result_count - 1;
+                            else
+                                g_index.selected_index--;
+                            DirtyRect r = index_overlay_bounds();
+                            enqueue_damage_rect(r.x, r.y, r.w, r.h);
+                        }
+                    } else if ((uint8_t)ev.key.c == KEY_DOWN_ARROW) {
+                        if (g_index.result_count > 0) {
+                            if (g_index.selected_index >= g_index.result_count - 1)
+                                g_index.selected_index = 0;
+                            else
+                                g_index.selected_index++;
+                            DirtyRect r = index_overlay_bounds();
+                            enqueue_damage_rect(r.x, r.y, r.w, r.h);
+                        }
+                    } else if (ev.key.c >= 32 && ev.key.c < 127) {
+                        if (g_index.query_len < 63) {
+                            g_index.query[g_index.query_len++] = ev.key.c;
+                            g_index.query[g_index.query_len] = '\0';
+                            update_index_search();
+                        }
+                    }
+                    continue;
+                }
+
+                if (g_control_center.open) {
+                    if (ev.key.c == 27)
+                        close_control_center();
+                    continue;
+                }
+
+                int focus = find_registry_focused_user_window(registry);
+                if (focus >= 2) {
+                    post_key_event_to_window(g_windows[focus], EVT_KEY_DOWN, ev.key.c, ev.key.scancode);
+                }
             } else if (ev.type == EVT_MOUSE_SCROLL) {
+                if (g_index.active) {
+                    if (g_index.result_count > 0) {
+                        if (ev.mouse.scroll_y > 0) {
+                            if (g_index.selected_index <= 0)
+                                g_index.selected_index = g_index.result_count - 1;
+                            else
+                                g_index.selected_index--;
+                        } else if (ev.mouse.scroll_y < 0) {
+                            if (g_index.selected_index >= g_index.result_count - 1)
+                                g_index.selected_index = 0;
+                            else
+                                g_index.selected_index++;
+                        }
+                        DirtyRect r = index_overlay_bounds();
+                        enqueue_damage_rect(r.x, r.y, r.w, r.h);
+                    }
+                    continue;
+                }
+                if (g_control_center.open) {
+                    handle_control_center_scroll(registry, g_input.mouse_x, g_input.mouse_y, ev.mouse.scroll_y);
+                    continue;
+                }
                 if (g_input.pointer_down || g_storage_prompt.visible || g_context_menu.open)
                     continue;
                 int tgt = -1;
@@ -1059,10 +1201,29 @@ extern "C" int main(int argc, char **argv)
 
         if (registry->settings_generation != last_settings_gen) {
             last_settings_gen = registry->settings_generation;
+            GuiThemeMode next_theme = registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+            bool theme_changed = next_theme != applied_theme_mode;
+            bool flags_changed = registry->system_flags != g_system_flags;
+            bool transparency_changed = registry->transparency_level != g_control_center.transparency_level;
             g_system_flags = registry->system_flags;
-            gui_apply_theme(registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK);
-            reload_wallpaper(registry, true);
-            enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+            sync_control_center_state_from_registry(registry);
+            if (!persist_runtime_settings(registry))
+                LOG_WARN("wm", "failed to persist system settings");
+            if (theme_changed) {
+                applied_theme_mode = next_theme;
+                gui_apply_theme(next_theme);
+                reload_wallpaper(registry, true);
+                enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+            } else if (flags_changed) {
+                enqueue_damage_rect(0, 0, g_screen.width, wm_menubar_h());
+                if (registry->window_count > 1)
+                    enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                                        registry->windows[1].h);
+            }
+            if (transparency_changed) {
+                capture_shell_backdrop_for_rect({0, 0, (int)g_screen.width, (int)g_screen.height}, registry);
+                enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+            }
         }
 
         if (registry->storage_request_generation != last_storage_gen) {
@@ -1128,29 +1289,36 @@ extern "C" int main(int argc, char **argv)
                     w.needs_full_redraw = true;
                     continue;
                 }
+                if (gui_shm_id_is_valid(entry_snapshot.shm_id) && entry_snapshot.shm_id != w.shm_id) {
+                    uint64_t mapped = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
+                    if (mapped == 0 || mapped == (uint64_t)-1) {
+                        w.needs_full_redraw = true;
+                        continue;
+                    }
+
+                    int old_shm_id = w.shm_id;
+                    w.shm_id = entry_snapshot.shm_id;
+                    w.buffer = (uint32_t *)mapped;
+                    if (gui_shm_id_is_valid(old_shm_id))
+                        syscall1(SYS_SHM_UNMAP, old_shm_id);
+
+                    w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
+                    w.buffer_generation_acked = entry_snapshot.buffer_generation;
+                    w.buffer_generation_seen = entry_snapshot.buffer_generation;
+                    asm volatile("sfence" ::: "memory");
+                    w.needs_full_redraw = true;
+                    invalidate_window_decoration_cache(w);
+                    mark_window_frame_damage(w);
+                    invalidate_window_visibility_cache();
+                }
+
                 sync_window_runtime_metadata(w, entry_snapshot);
                 int nx = entry_snapshot.x, ny = entry_snapshot.y, nw = entry_snapshot.w, nh = entry_snapshot.h;
                 // Clamp snapshots to sanity
-                if (nw > (int)g_screen.width * 2) nw = (int)g_screen.width * 2;
-                if (nh > (int)g_screen.height * 2) nh = (int)g_screen.height * 2;
-                if (gui_shm_id_is_valid(entry_snapshot.shm_id) && entry_snapshot.shm_id != w.shm_id) {
-                    uint64_t m = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
-                    if (m != 0 && m != (uint64_t)-1) {
-                        int old = w.shm_id;
-                        w.shm_id = entry_snapshot.shm_id;
-                        w.buffer = (uint32_t *)m;
-                        if (gui_shm_id_is_valid(old))
-                            syscall1(SYS_SHM_UNMAP, old);
-                        sync_window_runtime_metadata(w, entry_snapshot);
-                        w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
-                        w.buffer_generation_acked = entry_snapshot.buffer_generation;
-                        w.buffer_generation_seen = entry_snapshot.buffer_generation;
-                        asm volatile("sfence" ::: "memory");
-                        w.needs_full_redraw = true;
-                        mark_window_frame_damage(w);
-                        invalidate_window_visibility_cache();
-                    }
-                }
+                if (nw > (int)g_screen.width * 2)
+                    nw = (int)g_screen.width * 2;
+                if (nh > (int)g_screen.height * 2)
+                    nh = (int)g_screen.height * 2;
                 w.min_w = entry_snapshot.min_w > 0 ? entry_snapshot.min_w : 0;
                 w.min_h = entry_snapshot.min_h > 0 ? entry_snapshot.min_h : 0;
                 if (nw > 0 && nh > 0 && (w.x != nx || w.y != ny || w.w != nw || w.h != nh)) {
@@ -1311,9 +1479,8 @@ extern "C" int main(int argc, char **argv)
                                        inter, g_display_copy_path, manip});
 
         if (g_dirty_frame_ready && action == wm::PresentPolicyDecision::Submit) {
-            uint32_t sub =
-                present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count), frame_seq,
-                              g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
+            uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
+                                         frame_seq, g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
             if (sub) {
                 if (g_presentbuffer_slot_count)
                     g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = sub;
@@ -1343,6 +1510,7 @@ extern "C" int main(int argc, char **argv)
                 drain_display_events();
             }
         }
+        reap_exited_children();
     }
     return 0;
 }

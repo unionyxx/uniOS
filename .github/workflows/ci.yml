@@ -58,7 +58,8 @@ jobs:
         meson compile -C build/release boot-disk iso
 
     - name: Lint (cppcheck)
-      run: meson compile -C build/debug lint || true
+      continue-on-error: true
+      run: meson compile -C build/debug lint
 
     - name: Format Check
       run: |

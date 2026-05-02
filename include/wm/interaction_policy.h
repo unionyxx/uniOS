@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits.h>
 #include <stdint.h>
 
 namespace wm {
@@ -55,35 +56,63 @@ constexpr int non_interactive_dirty_collapse_limit()
     return 6;
 }
 
+constexpr int clamp_i64_to_i32(int64_t value)
+{
+    return value < INT32_MIN ? INT32_MIN : (value > INT32_MAX ? INT32_MAX : (int)value);
+}
+
+constexpr int64_t rect_right_i64(const DirtyRect &rect)
+{
+    return (int64_t)rect.x + (int64_t)rect.w;
+}
+
+constexpr int64_t rect_bottom_i64(const DirtyRect &rect)
+{
+    return (int64_t)rect.y + (int64_t)rect.h;
+}
+
 constexpr bool rect_touch_or_overlap(const DirtyRect &a, const DirtyRect &b)
 {
-    return !((a.x + a.w) < b.x || (b.x + b.w) < a.x || (a.y + a.h) < b.y || (b.y + b.h) < a.y);
+    if (a.w <= 0 || a.h <= 0 || b.w <= 0 || b.h <= 0)
+        return false;
+    return !(rect_right_i64(a) < (int64_t)b.x || rect_right_i64(b) < (int64_t)a.x ||
+             rect_bottom_i64(a) < (int64_t)b.y || rect_bottom_i64(b) < (int64_t)a.y);
 }
 
 constexpr DirtyRect rect_union(const DirtyRect &a, const DirtyRect &b)
 {
-    int x1 = (a.x < b.x) ? a.x : b.x;
-    int y1 = (a.y < b.y) ? a.y : b.y;
-    int x2 = ((a.x + a.w) > (b.x + b.w)) ? (a.x + a.w) : (b.x + b.w);
-    int y2 = ((a.y + a.h) > (b.y + b.h)) ? (a.y + a.h) : (b.y + b.h);
-    return {x1, y1, x2 - x1, y2 - y1};
+    int64_t x1 = ((int64_t)a.x < (int64_t)b.x) ? (int64_t)a.x : (int64_t)b.x;
+    int64_t y1 = ((int64_t)a.y < (int64_t)b.y) ? (int64_t)a.y : (int64_t)b.y;
+    int64_t x2 = (rect_right_i64(a) > rect_right_i64(b)) ? rect_right_i64(a) : rect_right_i64(b);
+    int64_t y2 = (rect_bottom_i64(a) > rect_bottom_i64(b)) ? rect_bottom_i64(a) : rect_bottom_i64(b);
+    return {clamp_i64_to_i32(x1), clamp_i64_to_i32(y1), clamp_i64_to_i32(x2 - x1),
+            clamp_i64_to_i32(y2 - y1)};
 }
 
 inline bool clip_rect_to_screen(DirtyRect &rect, int screen_w, int screen_h)
 {
-    if (rect.x < 0) {
-        rect.w += rect.x;
-        rect.x = 0;
-    }
-    if (rect.y < 0) {
-        rect.h += rect.y;
-        rect.y = 0;
-    }
-    if (rect.x + rect.w > screen_w)
-        rect.w = screen_w - rect.x;
-    if (rect.y + rect.h > screen_h)
-        rect.h = screen_h - rect.y;
-    return rect.w > 0 && rect.h > 0;
+    if (screen_w <= 0 || screen_h <= 0 || rect.w <= 0 || rect.h <= 0)
+        return false;
+
+    int64_t x1 = rect.x;
+    int64_t y1 = rect.y;
+    int64_t x2 = rect_right_i64(rect);
+    int64_t y2 = rect_bottom_i64(rect);
+
+    if (x1 < 0)
+        x1 = 0;
+    if (y1 < 0)
+        y1 = 0;
+    if (x2 > screen_w)
+        x2 = screen_w;
+    if (y2 > screen_h)
+        y2 = screen_h;
+    if (x2 <= x1 || y2 <= y1)
+        return false;
+
+    rect = {clamp_i64_to_i32(x1), clamp_i64_to_i32(y1), clamp_i64_to_i32(x2 - x1),
+            clamp_i64_to_i32(y2 - y1)};
+    return true;
 }
 
 inline void normalize_dirty_rects(DirtyRect *rects, int *count, int screen_w, int screen_h, bool interactive)
@@ -102,29 +131,57 @@ inline void normalize_dirty_rects(DirtyRect *rects, int *count, int screen_w, in
     if (*count <= 1)
         return;
 
-    for (int i = 0; i < *count; i++) {
-        for (int j = i + 1; j < *count;) {
-            if (rect_touch_or_overlap(rects[i], rects[j])) {
-                rects[i] = rect_union(rects[i], rects[j]);
-                rects[j] = rects[*count - 1];
-                (*count)--;
-                continue;
+    // First pass: Merge strictly overlapping or adjacent rects
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (int i = 0; i < *count; i++) {
+            for (int j = i + 1; j < *count;) {
+                if (rect_touch_or_overlap(rects[i], rects[j])) {
+                    rects[i] = rect_union(rects[i], rects[j]);
+                    rects[j] = rects[*count - 1];
+                    (*count)--;
+                    merged = true;
+                    continue;
+                }
+                j++;
             }
-            j++;
         }
     }
+
     if (*count <= 1)
         return;
 
-    DirtyRect bounds = rects[0];
-    uint64_t total_area = 0;
-    for (int i = 0; i < *count; i++) {
-        bounds = rect_union(bounds, rects[i]);
-        total_area += (uint64_t)rects[i].w * (uint64_t)rects[i].h;
+    // Second pass: Heuristic merge for efficiency
+    // Merge if (union_area < (sum_area * 1.5))
+    merged = true;
+    while (merged) {
+        merged = false;
+        for (int i = 0; i < *count; i++) {
+            uint64_t area_i = (uint64_t)rects[i].w * rects[i].h;
+            for (int j = i + 1; j < *count;) {
+                DirtyRect u = rect_union(rects[i], rects[j]);
+                uint64_t area_j = (uint64_t)rects[j].w * rects[j].h;
+                uint64_t area_u = (uint64_t)u.w * u.h;
+
+                if (area_u * 2 < (area_i + area_j) * 3) { // 1.5x threshold
+                    rects[i] = u;
+                    area_i = area_u;
+                    rects[j] = rects[*count - 1];
+                    (*count)--;
+                    merged = true;
+                    continue;
+                }
+                j++;
+            }
+        }
     }
-    uint64_t bound_area = (uint64_t)bounds.w * (uint64_t)bounds.h;
-    int collapse_limit = interactive ? interactive_dirty_collapse_limit() : non_interactive_dirty_collapse_limit();
-    if (*count > collapse_limit || bound_area * dirty_collapse_ratio_den() <= total_area * dirty_collapse_ratio_num()) {
+
+    int collapse_limit = interactive ? 24 : 16;
+    if (*count > collapse_limit) {
+        DirtyRect bounds = rects[0];
+        for (int i = 1; i < *count; i++)
+            bounds = rect_union(bounds, rects[i]);
         rects[0] = bounds;
         *count = 1;
     }
@@ -197,20 +254,25 @@ constexpr uint32_t completion_target_for_available_slot(uint32_t last_submitted_
 
 constexpr bool rect_intersection(const DirtyRect &a, const DirtyRect &b, DirtyRect &out)
 {
-    int x1 = (a.x > b.x) ? a.x : b.x;
-    int y1 = (a.y > b.y) ? a.y : b.y;
-    int x2 = ((a.x + a.w) < (b.x + b.w)) ? (a.x + a.w) : (b.x + b.w);
-    int y2 = ((a.y + a.h) < (b.y + b.h)) ? (a.y + a.h) : (b.y + b.h);
+    if (a.w <= 0 || a.h <= 0 || b.w <= 0 || b.h <= 0)
+        return false;
+    int64_t x1 = ((int64_t)a.x > (int64_t)b.x) ? (int64_t)a.x : (int64_t)b.x;
+    int64_t y1 = ((int64_t)a.y > (int64_t)b.y) ? (int64_t)a.y : (int64_t)b.y;
+    int64_t x2 = (rect_right_i64(a) < rect_right_i64(b)) ? rect_right_i64(a) : rect_right_i64(b);
+    int64_t y2 = (rect_bottom_i64(a) < rect_bottom_i64(b)) ? rect_bottom_i64(a) : rect_bottom_i64(b);
     if (x2 <= x1 || y2 <= y1)
         return false;
-    out = {x1, y1, x2 - x1, y2 - y1};
+    out = {clamp_i64_to_i32(x1), clamp_i64_to_i32(y1), clamp_i64_to_i32(x2 - x1),
+           clamp_i64_to_i32(y2 - y1)};
     return true;
 }
 
 constexpr bool rect_contains(const DirtyRect &outer, const DirtyRect &inner)
 {
-    return inner.x >= outer.x && inner.y >= outer.y && (inner.x + inner.w) <= (outer.x + outer.w) &&
-           (inner.y + inner.h) <= (outer.y + outer.h);
+    if (outer.w <= 0 || outer.h <= 0 || inner.w <= 0 || inner.h <= 0)
+        return false;
+    return inner.x >= outer.x && inner.y >= outer.y && rect_right_i64(inner) <= rect_right_i64(outer) &&
+           rect_bottom_i64(inner) <= rect_bottom_i64(outer);
 }
 
 constexpr ExposedTransitionDamage compute_exposed_transition_damage(const DirtyRect &old_outer,
@@ -231,20 +293,22 @@ constexpr ExposedTransitionDamage compute_exposed_transition_damage(const DirtyR
         out.rects[out.count++] = {old_outer.x, old_outer.y, old_outer.w, overlap.y - old_outer.y};
     }
 
-    int old_bottom = old_outer.y + old_outer.h;
-    int overlap_bottom = overlap.y + overlap.h;
+    int64_t old_bottom = rect_bottom_i64(old_outer);
+    int64_t overlap_bottom = rect_bottom_i64(overlap);
     if (overlap_bottom < old_bottom) {
-        out.rects[out.count++] = {old_outer.x, overlap_bottom, old_outer.w, old_bottom - overlap_bottom};
+        out.rects[out.count++] = {old_outer.x, clamp_i64_to_i32(overlap_bottom), old_outer.w,
+                                  clamp_i64_to_i32(old_bottom - overlap_bottom)};
     }
 
     if (old_outer.x < overlap.x) {
         out.rects[out.count++] = {old_outer.x, overlap.y, overlap.x - old_outer.x, overlap.h};
     }
 
-    int old_right = old_outer.x + old_outer.w;
-    int overlap_right = overlap.x + overlap.w;
+    int64_t old_right = rect_right_i64(old_outer);
+    int64_t overlap_right = rect_right_i64(overlap);
     if (overlap_right < old_right) {
-        out.rects[out.count++] = {overlap_right, overlap.y, old_right - overlap_right, overlap.h};
+        out.rects[out.count++] = {clamp_i64_to_i32(overlap_right), overlap.y,
+                                  clamp_i64_to_i32(old_right - overlap_right), overlap.h};
     }
 
     return out;

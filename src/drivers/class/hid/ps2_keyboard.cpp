@@ -17,6 +17,7 @@ static uint32_t kb_buffer_end = 0;
 // Modifier states
 static uint8_t shift_held = 0;
 static uint8_t ctrl_held = 0;
+static uint8_t alt_held = 0;
 static uint8_t caps_lock = 0;
 static uint8_t extended_scancode = 0; // For 0xE0 prefixed scancodes
 
@@ -95,11 +96,13 @@ void ps2_keyboard_handler()
     if (extended_scancode) {
         extended_scancode = 0;
 
-        // Key release for extended keys - check for Ctrl
+        // Key release for extended keys
         if (scancode & 0x80) {
             uint8_t released = scancode & 0x7F;
             if (released == 0x1D) { // Right Ctrl release
                 ctrl_held = 0;
+            } else if (released == 0x38) { // Right Alt release
+                alt_held = 0;
             }
             return;
         }
@@ -109,6 +112,9 @@ void ps2_keyboard_handler()
             case 0x1D:
                 ctrl_held = 1;
                 return; // Right Ctrl
+            case 0x38:
+                alt_held = 1;
+                return; // Right Alt
             case 0x48:
                 push_char(KEY_UP_ARROW);
                 return; // Up arrow
@@ -142,6 +148,8 @@ void ps2_keyboard_handler()
             shift_held = 0;
         } else if (released == 0x1D) { // Left Ctrl
             ctrl_held = 0;
+        } else if (released == 0x38) { // Left Alt
+            alt_held = 0;
         }
         return;
     }
@@ -157,6 +165,11 @@ void ps2_keyboard_handler()
         return;
     }
 
+    if (scancode == 0x38) { // Left Alt
+        alt_held = 1;
+        return;
+    }
+
     if (scancode == 0x3A) { // Caps Lock
         caps_lock = !caps_lock;
         return;
@@ -167,6 +180,13 @@ void ps2_keyboard_handler()
         c = scancode_to_ascii_shift[scancode];
     } else {
         c = scancode_to_ascii[scancode];
+    }
+
+    // Alt+Space for Index trigger
+    if (alt_held && c == ' ') {
+        push_char(29); // Use GS (Group Separator) as Index trigger
+        scheduler_notify_input_waiters();
+        return;
     }
 
     // Handle Ctrl key combinations - generate control codes
@@ -185,19 +205,9 @@ void ps2_keyboard_handler()
             push_char(c - 'A' + 1);
             return;
         }
-        // Special cases
-        if (c == '[' || c == '{') {
-            push_char(27);
-            return;
-        } // Ctrl+[ = Escape
-        if (c == '\\' || c == '|') {
-            push_char(28);
-            return;
-        } // Ctrl+\
-        if (c == ']' || c == '}') { push_char(29); return; }  // Ctrl+]
     }
 
-    // Handle Caps Lock for letters (not when Ctrl is held)
+    // Handle Caps Lock for letters
     if (caps_lock && !ctrl_held) {
         if (c >= 'a' && c <= 'z') {
             c = c - 'a' + 'A';

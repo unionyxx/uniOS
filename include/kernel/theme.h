@@ -47,8 +47,30 @@ struct Theme
     uint32_t term_bg;
 };
 
-extern const Theme *g_theme;
-extern const Theme THEME_MOCHA;
+inline constexpr Theme THEME_DEFAULT = {
+    .desktop_top = 0xFF111214,
+    .desktop_bottom = 0xFF111214,
+    .window_bg = 0xFF111214,
+    .surface_elevated = 0xFF1C1E21,
+    .title_active = 0xFF2F343A,
+    .title_inactive = 0xFF1A1C20,
+    .border = 0xFF3D444D,
+    .shadow = 0xFF000000,
+    .text_primary = 0xFFF2F2F0,
+    .text_dim = 0xFF9A9FA7,
+    .text_app_name = 0xFFF2F2F0,
+    .menubar_bg = 0xFF15171A,
+    .dock_bg = 0xFF15171A,
+    .accent = 0xFF6E7784,
+    .separator = 0xFF2F343A,
+    .btn_close = 0xFFFF5F57,
+    .btn_minimize = 0xFFFBBE2C,
+    .btn_maximize = 0xFF2AC744,
+    .term_bg = 0xFF000000 // Pure black for classic terminal feel
+};
+
+inline const Theme *g_theme = &THEME_DEFAULT;
+
 #define COLOR_ACCENT g_theme->accent
 #define COLOR_TEXT_PRIMARY g_theme->text_primary
 #define COLOR_TEXT_DIM g_theme->text_dim

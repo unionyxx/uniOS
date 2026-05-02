@@ -188,9 +188,7 @@ static int max_int(int a, int b)
 
 static bool point_in_rect(const Rect &rect, int x, int y)
 {
-    return rect.w > 0 && rect.h > 0 &&
-           x >= rect.x && y >= rect.y &&
-           (int64_t)x < (int64_t)rect.x + rect.w &&
+    return rect.w > 0 && rect.h > 0 && x >= rect.x && y >= rect.y && (int64_t)x < (int64_t)rect.x + rect.w &&
            (int64_t)y < (int64_t)rect.y + rect.h;
 }
 
@@ -1534,16 +1532,17 @@ static bool line_starts_inside_block_comment(const TextBuffer *buffer, int line_
     return in_block_comment;
 }
 
-static void draw_mono_run(Surface *win, const GuiFont *font, const AppState *state, const TextLine &line, int row_start_col,
-                          int start_col, int end_col, int x, int y, int cell_w, int cell_h, uint32_t fg,
-                          uint32_t row_bg)
+static void draw_mono_run(Surface *win, const GuiFont *font, const AppState *state, const TextLine &line,
+                          int row_start_col, int start_col, int end_col, int x, int y, int cell_w, int cell_h,
+                          uint32_t fg, uint32_t row_bg)
 {
     if (!win || !font || !state)
         return;
     for (int col = start_col; col < end_col; col++) {
         if (col >= row_start_col) {
             uint32_t bg = search_covers_col(state, line, col) ? g_gui_style.accent_soft : row_bg;
-            gui_draw_mono_cell(win, font, x + (col - row_start_col) * cell_w, y, cell_w, cell_h, line.text[col], fg, bg);
+            gui_draw_mono_cell(win, font, x + (col - row_start_col) * cell_w, y, cell_w, cell_h, line.text[col], fg,
+                               bg);
         }
     }
 }
@@ -1574,7 +1573,7 @@ static void draw_code_line(Surface *win, const AppState *state, int line_index, 
 
     int start = state->first_col;
     int end = min_int(line.len, start + max_cols);
-    for (int col = 0; col < end; ) {
+    for (int col = 0; col < end;) {
         char c = line.text[col];
         uint32_t fg = syntax_text();
 
@@ -1590,7 +1589,8 @@ static void draw_code_line(Surface *win, const AppState *state, int line_index, 
                 else
                     comment_end = line.len;
                 int draw_end = min_int(comment_end, end);
-                draw_mono_run(win, font, state, line, start, col, draw_end, x, y, cell_w, cell_h, syntax_comment(), row_bg);
+                draw_mono_run(win, font, state, line, start, col, draw_end, x, y, cell_w, cell_h, syntax_comment(),
+                              row_bg);
                 col = draw_end;
                 continue;
             }
@@ -1609,7 +1609,8 @@ static void draw_code_line(Surface *win, const AppState *state, int line_index, 
                         }
                         col++;
                     }
-                    draw_mono_run(win, font, state, line, start, string_start, col, x, y, cell_w, cell_h, syntax_string(), row_bg);
+                    draw_mono_run(win, font, state, line, start, string_start, col, x, y, cell_w, cell_h,
+                                  syntax_string(), row_bg);
                     continue;
                 }
             }
@@ -1627,7 +1628,8 @@ static void draw_code_line(Surface *win, const AppState *state, int line_index, 
             if (in_block_comment) {
                 fg = syntax_comment();
                 if (line.text[col] == '*' && col + 1 < line.len && line.text[col + 1] == '/') {
-                    draw_mono_run(win, font, state, line, start, col, min_int(col + 2, end), x, y, cell_w, cell_h, fg, row_bg);
+                    draw_mono_run(win, font, state, line, start, col, min_int(col + 2, end), x, y, cell_w, cell_h, fg,
+                                  row_bg);
                     col += 2;
                     in_block_comment = false;
                     continue;
@@ -1643,16 +1645,17 @@ static void draw_code_line(Surface *win, const AppState *state, int line_index, 
                     }
                     col++;
                 }
-                draw_mono_run(win, font, state, line, start, string_start, col, x, y, cell_w, cell_h, syntax_string(), row_bg);
+                draw_mono_run(win, font, state, line, start, string_start, col, x, y, cell_w, cell_h, syntax_string(),
+                              row_bg);
                 continue;
             } else if (is_digit(c)) {
                 int number_start = col;
                 int number_end = col + 1;
-                while (number_end < line.len && (is_digit(line.text[number_end]) || line.text[number_end] == '.' ||
-                                                 ascii_lower(line.text[number_end]) == 'x' ||
-                                                 (ascii_lower(line.text[number_end]) >= 'a' &&
-                                                  ascii_lower(line.text[number_end]) <= 'f') ||
-                                                 line.text[number_end] == '_'))
+                while (number_end < line.len &&
+                       (is_digit(line.text[number_end]) || line.text[number_end] == '.' ||
+                        ascii_lower(line.text[number_end]) == 'x' ||
+                        (ascii_lower(line.text[number_end]) >= 'a' && ascii_lower(line.text[number_end]) <= 'f') ||
+                        line.text[number_end] == '_'))
                     number_end++;
                 int draw_end = min_int(number_end, end);
                 draw_mono_run(win, font, state, line, start, number_start, draw_end, x, y, cell_w, cell_h,
@@ -1788,10 +1791,14 @@ static void build_outline(AppState *state)
                 const char *arrow = strstr(text, "=>");
                 if (arrow) {
                     const char *name_start = text;
-                    if (starts_with(text, "const ")) name_start = text + 6;
-                    else if (starts_with(text, "let ")) name_start = text + 4;
-                    else if (starts_with(text, "var ")) name_start = text + 4;
-                    while (*name_start == ' ' || *name_start == '\t') name_start++;
+                    if (starts_with(text, "const "))
+                        name_start = text + 6;
+                    else if (starts_with(text, "let "))
+                        name_start = text + 4;
+                    else if (starts_with(text, "var "))
+                        name_start = text + 4;
+                    while (*name_start == ' ' || *name_start == '\t')
+                        name_start++;
                     copy_symbol(name, sizeof(name), name_start, 80);
                     if (name[0])
                         push_outline(state, "FN", name, i);
@@ -1925,8 +1932,8 @@ static int draw_status_pill(Surface *win, int x, int y, const char *label, bool 
     uint32_t bg = active ? g_gui_style.accent_soft : g_gui_style.chrome_bg;
     uint32_t fg = active ? g_gui_style.text : g_gui_style.text_dim;
     gui_fill_rounded_rect(win, x, y, w, h, h / 2, bg);
-    gui_draw_text_clipped(win, gui_font_default(), x + pad_x, gui_align_text_y(gui_font_default(), y, h), text_w,
-                          label, fg, bg);
+    gui_draw_text_clipped(win, gui_font_default(), x + pad_x, gui_align_text_y(gui_font_default(), y, h), text_w, label,
+                          fg, bg);
     return w;
 }
 
@@ -2001,8 +2008,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
 
     int top_text_y = gui_align_text_y(gui_font_title(), topbar.y, topbar.h);
     int title_text_w = gui_measure_text(gui_font_title(), "Latitude");
-    gui_draw_text_clipped(win, gui_font_title(), topbar.x + gui_space_2(), top_text_y, title_text_w,
-                          "Latitude", g_gui_style.text, g_gui_style.app_surface_alt);
+    gui_draw_text_clipped(win, gui_font_title(), topbar.x + gui_space_2(), top_text_y, title_text_w, "Latitude",
+                          g_gui_style.text, g_gui_style.app_surface_alt);
 
     const char *path_text = state->buffer->path[0] ? state->buffer->path : "Untitled";
     int path_x = topbar.x + max_int(gui_scaled_metric(118), gui_space_2() + title_text_w + gui_space_3());
@@ -2019,7 +2026,7 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     if (path_w < gui_scaled_metric(80)) {
         path_w = gui_scaled_metric(80);
     }
-    
+
     if (pill_x <= path_x + path_w) {
         pill_x = -1;
     } else {
@@ -2099,8 +2106,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
             rects->project_rows[i] =
                 gui_rect_make(rects->sidebar_rect.x + 1, sy, rects->sidebar_rect.w - 2, gui_app_row_h());
             FileKind kind = state->project_rows[i].kind;
-            const char *badge = state->project_rows[i].is_dir ? (state->project_rows[i].parent ? "UP" : "DIR")
-                                                              : file_kind_badge(kind);
+            const char *badge =
+                state->project_rows[i].is_dir ? (state->project_rows[i].parent ? "UP" : "DIR") : file_kind_badge(kind);
             const char *detail_text =
                 state->project_rows[i].is_dir ? "Folder" : file_kind_label(state->project_rows[i].path, kind);
             bool muted = !state->project_rows[i].is_dir && !file_kind_opens_as_text(kind);
@@ -2154,8 +2161,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     int tab_x = panel_x + gui_space_1();
     int tab_w = min_int(gui_scaled_metric(260), max_int(gui_scaled_metric(130), panel_w / 3));
     int tab_radius = gui_radius_sm();
-    gui_fill_rounded_rect(win, tab_x, panel_y + gui_scaled_metric(5), tab_w, tab_h - gui_scaled_metric(5),
-                          tab_radius, g_gui_style.app_surface);
+    gui_fill_rounded_rect(win, tab_x, panel_y + gui_scaled_metric(5), tab_w, tab_h - gui_scaled_metric(5), tab_radius,
+                          g_gui_style.app_surface);
     gui_fill_rect(win, tab_x, panel_y + tab_h - tab_radius, tab_w, tab_radius, g_gui_style.app_surface);
 
     char tab_label[160];
@@ -2184,12 +2191,12 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     } else if (state->path_focused) {
         search_w = gui_scaled_metric(80);
     }
-    
+
     rects->search_field =
         gui_rect_make(panel_x + panel_w - search_w - gui_space_1(), button_y, search_w, gui_app_control_h());
     int path_field_x = rects->reload_button.x + rects->reload_button.w + gui_space_1();
     int path_field_w = rects->search_field.x - path_field_x - gui_space_1();
-    
+
     if (path_field_w < gui_scaled_metric(64) && !state->path_focused) {
         search_w = min_int(gui_scaled_metric(160), max_int(gui_scaled_metric(96), panel_w / 6));
         rects->search_field =
@@ -2224,11 +2231,12 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     rects->editor_rect = edit_area;
 
     gui_fill_rect(win, edit_area.x, edit_area.y, edit_area.w, edit_area.h, editor_bg());
-    gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h, g_gui_style.app_surface_alt);
+    gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h,
+                  g_gui_style.app_surface_alt);
     gui_draw_separator_h(win, edit_area.x, edit_area.y, edit_area.w, g_gui_style.chrome_edge);
     if (edit_area.w > gutter_w)
         gui_fill_rect(win, edit_area.x + gutter_w - 1, edit_area.y, 1, edit_area.h, g_gui_style.chrome_edge);
-        
+
     if (state->focus == FOCUS_EDITOR)
         gui_draw_focus_frame(win, panel_x + 1, edit_y, panel_w - 2, edit_h, true, false);
 
@@ -2281,18 +2289,18 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
 
     char left_status[224];
     snprintf(left_status, sizeof(left_status), "%s%s", state->status, state->buffer->modified ? "  Unsaved" : "");
-    
+
     char right_status[128];
     snprintf(right_status, sizeof(right_status), "%s  Spaces:%d  %d lines", language_label(state->buffer->language),
              DEFAULT_TAB_SPACES, state->buffer->line_count);
-             
+
     int rw = gui_measure_text(gui_font_default(), right_status);
     int right_status_x = panel_x + panel_w - gui_space_1() - rw;
     int max_left_w = max_int(40, right_status_x - (panel_x + gui_space_1()) - gui_space_2());
-    
+
     gui_draw_text_clipped(win, gui_font_default(), panel_x + gui_space_1(),
-                          gui_align_text_y(gui_font_default(), status_y, status_h), max_left_w,
-                          left_status, g_gui_style.text_dim, g_gui_style.chrome_bg);
+                          gui_align_text_y(gui_font_default(), status_y, status_h), max_left_w, left_status,
+                          g_gui_style.text_dim, g_gui_style.chrome_bg);
 
     gui_draw_text_clipped(win, gui_font_default(), right_status_x,
                           gui_align_text_y(gui_font_default(), status_y, status_h), rw, right_status,
@@ -2634,8 +2642,7 @@ extern "C" int main()
                 int previous_project_hovered = state->project_hovered;
                 int previous_outline_hovered = state->outline_hovered;
                 HoverTarget hovered = update_hover(state, rects, ev.mouse.x, ev.mouse.y);
-                bool hover_changed = hovered != previous ||
-                                     state->project_hovered != previous_project_hovered ||
+                bool hover_changed = hovered != previous || state->project_hovered != previous_project_hovered ||
                                      state->outline_hovered != previous_outline_hovered;
                 if (hover_changed) {
                     state->hovered = hovered;

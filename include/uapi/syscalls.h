@@ -14,6 +14,7 @@
 #define SYS_EXEC 59
 #define SYS_EXIT 60
 #define SYS_WAIT4 61
+#define WNOHANG 1
 #define SYS_GETPROCS 62
 #define SYS_GETDENTS 78
 #define SYS_MKDIR 83

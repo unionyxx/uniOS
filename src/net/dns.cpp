@@ -53,6 +53,8 @@ bool dns_is_ip_address(const char *str)
 // Parse IP address string to uint32_t
 uint32_t dns_parse_ip(const char *str)
 {
+    if (!dns_is_ip_address(str))
+        return 0;
     uint32_t ip = 0;
     uint32_t octets[4] = {0, 0, 0, 0};
     int octet_idx = 0;
@@ -75,6 +77,8 @@ uint32_t dns_parse_ip(const char *str)
 // Encode hostname into DNS name format (e.g., "www.google.com" -> "\3www\6google\3com\0")
 static int dns_encode_name(const char *hostname, uint8_t *out)
 {
+    if (!hostname || !*hostname || !out)
+        return 0;
     int pos = 0;
     int label_pos = 0;
     int label_len = 0;
@@ -84,9 +88,13 @@ static int dns_encode_name(const char *hostname, uint8_t *out)
 
     while (*hostname) {
         if (*hostname == '.') {
+            if (label_len == 0)
+                return 0;
             // Write label length at label_pos
             out[label_pos] = label_len;
             label_pos = pos++;
+            if (pos >= DNS_MAX_NAME_LEN)
+                return 0;
             label_len = 0;
         } else {
             if (label_len >= 63 || pos >= DNS_MAX_NAME_LEN)
@@ -96,6 +104,9 @@ static int dns_encode_name(const char *hostname, uint8_t *out)
         }
         hostname++;
     }
+
+    if (label_len == 0)
+        return 0;
 
     // Write final label length
     out[label_pos] = label_len;
@@ -109,6 +120,8 @@ static int dns_encode_name(const char *hostname, uint8_t *out)
 // Build DNS query packet
 static int dns_build_query(const char *hostname, uint8_t *buffer)
 {
+    if (!hostname || !buffer)
+        return 0;
     DnsHeader *hdr = (DnsHeader *)buffer;
 
     // Transaction ID
@@ -192,12 +205,18 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
             }
             if ((len & 0xC0) == 0xC0) {
                 // Compression pointer
+                if (pos + 1 >= length)
+                    return 0;
                 pos += 2;
                 break;
             }
+            if (pos + 1 + len > length)
+                return 0;
             pos += len + 1;
         }
         // Skip type and class
+        if (pos + 4 > length)
+            return 0;
         pos += 4;
     }
 
@@ -212,9 +231,13 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
             }
             if ((len & 0xC0) == 0xC0) {
                 // Compression pointer
+                if (pos + 1 >= length)
+                    return 0;
                 pos += 2;
                 break;
             }
+            if (pos + 1 + len > length)
+                return 0;
             pos += len + 1;
         }
 
@@ -236,6 +259,8 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
         }
 
         // Skip RDATA
+        if (pos + rdlength > length)
+            break;
         pos += rdlength;
     }
 
@@ -245,6 +270,8 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
 // DNS receive callback (called from UDP layer)
 void dns_receive(const void *data, uint16_t length)
 {
+    if (!data)
+        return;
     if (length > sizeof(dns_rx_buffer)) {
         length = sizeof(dns_rx_buffer);
     }
@@ -260,6 +287,9 @@ void dns_receive(const void *data, uint16_t length)
 // Resolve hostname to IP address
 uint32_t dns_resolve(const char *hostname)
 {
+    if (!hostname || !*hostname)
+        return 0;
+
     // Check if it's already an IP
     if (dns_is_ip_address(hostname)) {
         return dns_parse_ip(hostname);
@@ -288,7 +318,10 @@ uint32_t dns_resolve(const char *hostname)
     }
 
     // Bind to ephemeral port
-    udp_bind(sock, 50000 + (dns_transaction_id % 1000));
+    if (!udp_bind(sock, 50000 + (dns_transaction_id % 1000))) {
+        udp_close(sock);
+        return 0;
+    }
 
     // Reset state
     dns_response_received = false;

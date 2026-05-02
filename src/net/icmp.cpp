@@ -26,7 +26,7 @@ void icmp_set_ping_callback(ping_callback_t callback)
 // Receive ICMP packet
 void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
 {
-    if (length < ICMP_HEADER_SIZE) {
+    if (!data || length < ICMP_HEADER_SIZE) {
         return;
     }
 
@@ -36,8 +36,12 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
 
     switch (hdr->type) {
         case ICMP_TYPE_ECHO_REQUEST: {
-            // Reply to ping
-            uint8_t reply[1500];
+            // Reply to ping. Limit to the IPv4 payload budget so checksum and
+            // transmit lengths never exceed the local reply buffer.
+            uint8_t reply[1480];
+            uint16_t reply_payload_len = payload_len;
+            if (reply_payload_len > sizeof(reply) - ICMP_HEADER_SIZE)
+                reply_payload_len = sizeof(reply) - ICMP_HEADER_SIZE;
             IcmpHeader *reply_hdr = (IcmpHeader *)reply;
 
             reply_hdr->type = ICMP_TYPE_ECHO_REPLY;
@@ -47,15 +51,15 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
             reply_hdr->sequence = hdr->sequence;
 
             // Copy payload
-            for (uint16_t i = 0; i < payload_len && i < 1500 - ICMP_HEADER_SIZE; i++) {
+            for (uint16_t i = 0; i < reply_payload_len; i++) {
                 reply[ICMP_HEADER_SIZE + i] = payload[i];
             }
 
             // Calculate checksum
-            reply_hdr->checksum = ipv4_checksum(reply, ICMP_HEADER_SIZE + payload_len);
+            reply_hdr->checksum = ipv4_checksum(reply, ICMP_HEADER_SIZE + reply_payload_len);
 
             // Send reply
-            ipv4_send(src_ip, IP_PROTO_ICMP, reply, ICMP_HEADER_SIZE + payload_len);
+            ipv4_send(src_ip, IP_PROTO_ICMP, reply, ICMP_HEADER_SIZE + reply_payload_len);
             break;
         }
 
@@ -82,6 +86,8 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
 // Send echo request (ping)
 bool icmp_send_echo_request(uint32_t dst_ip, uint16_t id, uint16_t seq)
 {
+    if (dst_ip == 0)
+        return false;
     uint8_t packet[64];
     IcmpHeader *hdr = (IcmpHeader *)packet;
 

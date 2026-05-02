@@ -1,8 +1,26 @@
+#include "../libc/config_utils.h"
+#include "../libc/log.h"
 #include "wm_core.h"
+
+IndexState g_index = {};
+ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true, true, false, true, 180, false};
 
 static int resolve_context_menu_target_index();
 static bool context_menu_targets_window_entry(const WindowEntry *entry);
 static bool ensure_context_menu_target_valid();
+static void launch_or_focus_app(Registry *registry, const char *title, const char *path);
+
+static void copy_dirty_rects_to_policy(wm::DirtyRect *dst, int count)
+{
+    for (int i = 0; i < count; i++)
+        dst[i] = {g_dirty_rects[i].x, g_dirty_rects[i].y, g_dirty_rects[i].w, g_dirty_rects[i].h};
+}
+
+static void copy_dirty_rects_from_policy(const wm::DirtyRect *src, int count)
+{
+    for (int i = 0; i < count; i++)
+        g_dirty_rects[i] = {src[i].x, src[i].y, src[i].w, src[i].h};
+}
 
 void enqueue_damage_rect(int x, int y, int w, int h)
 {
@@ -10,9 +28,16 @@ void enqueue_damage_rect(int x, int y, int w, int h)
     if (!clip_dirty_rect_to_screen(incoming))
         return;
 
+    wm::DirtyRect policy_rects[MAX_DIRTY_RECTS] = {};
+    int policy_count = clamp_dirty_rect_count(g_dirty_count);
+    copy_dirty_rects_to_policy(policy_rects, policy_count);
+
     wm::DirtyRect incoming_policy = {incoming.x, incoming.y, incoming.w, incoming.h};
-    wm::enqueue_damage_rect(reinterpret_cast<wm::DirtyRect *>(g_dirty_rects), &g_dirty_count, MAX_DIRTY_RECTS,
-                            (int)g_screen.width, (int)g_screen.height, incoming_policy);
+    wm::enqueue_damage_rect(policy_rects, &policy_count, MAX_DIRTY_RECTS, (int)g_screen.width, (int)g_screen.height,
+                            incoming_policy);
+
+    g_dirty_count = clamp_dirty_rect_count(policy_count);
+    copy_dirty_rects_from_policy(policy_rects, g_dirty_count);
     invalidate_dirty_frame();
 }
 
@@ -48,8 +73,14 @@ void normalize_dirty_rects(bool interactive)
         return;
     }
 
-    wm::normalize_dirty_rects(reinterpret_cast<wm::DirtyRect *>(g_dirty_rects), &g_dirty_count,
-                              (int)g_screen.width, (int)g_screen.height, interactive);
+    wm::DirtyRect policy_rects[MAX_DIRTY_RECTS] = {};
+    int policy_count = clamp_dirty_rect_count(g_dirty_count);
+    copy_dirty_rects_to_policy(policy_rects, policy_count);
+
+    wm::normalize_dirty_rects(policy_rects, &policy_count, (int)g_screen.width, (int)g_screen.height, interactive);
+
+    g_dirty_count = clamp_dirty_rect_count(policy_count);
+    copy_dirty_rects_from_policy(policy_rects, g_dirty_count);
     if (g_dirty_count > 1)
         sort_dirty_rects();
     invalidate_dirty_frame();
@@ -235,7 +266,8 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
     int count = 0;
 
     int shadow_pad = wm_frame_shadow_offset_y();
-    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, w.w - side_inset * 2, w.h + title_h - radius - radius - shadow_pad};
+    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, w.w - side_inset * 2,
+                      w.h + title_h - radius - radius - shadow_pad};
     if (main.w > 0 && main.h > 0)
         rects[count++] = main;
 
@@ -834,53 +866,56 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         max_y = min_y;
     x = x < wm_desktop_margin() ? wm_desktop_margin() : (x > max_x ? max_x : x);
     y = y < min_y ? min_y : (y > max_y ? max_y : y);
-    if (w.x == x && w.y == y && w.w == width && w.h == height)
-        return;
+    w.target_x = x;
+    w.target_y = y;
+    w.target_w = width;
+    w.target_h = height;
 
-    Window old = w;
-    bool size_changed = (w.w != width) || (w.h != height), moved = (w.x != x) || (w.y != y);
-    w.x = x;
-    w.y = y;
-    w.w = width;
-    w.h = height;
-    w.needs_full_redraw = size_changed;
-    bool scroll_changed = clamp_window_scroll(w);
-    w.entry->x = x;
-    w.entry->y = y;
-    w.entry->w = width;
-    w.entry->h = height;
-    publish_window_scroll(w);
-    w.entry->active = true;
-    asm volatile("sfence" ::: "memory");
+    bool size_changed = (w.w != width) || (w.h != height);
+    bool moved = (w.x != x) || (w.y != y);
 
-    if (size_changed)
-        post_window_resize_configure(w);
+    if (moved || size_changed) {
+        Window old = w;
+        w.x = x;
+        w.y = y;
+        w.w = width;
+        w.h = height;
+        w.entry->x = x;
+        w.entry->y = y;
+        w.entry->w = width;
+        w.entry->h = height;
 
-    DirtyRect old_outer = {};
-    DirtyRect new_outer = {};
-    bool moved_fast = false;
-    if (moved && !size_changed && !w.transparent && g_input.pointer_down && g_input.drag_edges == RESIZE_NONE &&
-        g_input.drag_index == g_window_count - 1 && g_input.drag_index >= 2 &&
-        g_windows[g_input.drag_index].entry == w.entry) {
-        old_outer = window_outer_bounds(old);
-        new_outer = window_outer_bounds(w);
-        if (can_fast_move_window(g_input.drag_index, old_outer, new_outer)) {
-            moved_fast = move_backbuffer_rect(old_outer, new_outer);
+        if (size_changed) {
+            invalidate_window_decoration_cache(w);
+            if (clamp_window_scroll(w))
+                publish_window_scroll(w);
+            post_window_resize_configure(w);
         }
+
+        bool moved_fast = false;
+        if (moved && !size_changed && !w.transparent && g_input.pointer_down && g_input.drag_edges == RESIZE_NONE &&
+            g_input.drag_index >= 2 && g_input.drag_index < g_window_count &&
+            g_windows[g_input.drag_index].entry == w.entry) {
+            DirtyRect old_outer = window_outer_bounds(old);
+            DirtyRect new_outer = window_outer_bounds(w);
+            if (can_fast_move_window(g_input.drag_index, old_outer, new_outer))
+                moved_fast = move_backbuffer_rect(old_outer, new_outer);
+        }
+
+        if (moved_fast) {
+            mark_presentbuffer_slots_stale(rect_union(window_outer_bounds(old), window_outer_bounds(w)));
+            mark_exposed_transition_damage(window_outer_bounds(old), window_outer_bounds(w));
+            mark_window_decoration_damage(w);
+        } else {
+            mark_window_transition_damage(old, w);
+        }
+        invalidate_window_visibility_cache();
     }
 
-    if (moved_fast && !scroll_changed) {
-        mark_presentbuffer_slots_stale(rect_union(old_outer, new_outer));
-        mark_exposed_transition_damage(old_outer, new_outer);
-        mark_window_decoration_damage(w);
-        enqueue_damage_rect(old_outer.x - 2, old_outer.y - 2, old_outer.w + 4, old_outer.h + 4);
-    } else {
-        mark_window_transition_damage(old, w);
-        mark_presentbuffer_slots_stale(rect_expand(rect_union(window_outer_bounds(old), window_outer_bounds(w)), wm_window_damage_pad()));
-    }
+    w.entry->active = true;
     if (context_menu_targets_window_entry(w.entry))
         close_context_menu();
-    invalidate_window_visibility_cache();
+    asm volatile("sfence" ::: "memory");
 }
 
 int focus_window(int index, bool raise)
@@ -1031,6 +1066,7 @@ void close_window(int index)
     if (gui_shm_id_is_valid(doomed.shm_id))
         syscall1(SYS_SHM_UNMAP, (uint64_t)doomed.shm_id);
     gui_destroy_surface(&doomed.decoration_cache);
+    gui_destroy_surface(&doomed.button_cache);
     if (doomed.entry) {
         memset(doomed.entry, 0, sizeof(*doomed.entry));
         doomed.entry->shm_id = WIN_SHM_INVALID;
@@ -1180,7 +1216,8 @@ int system_window_hit(int px, int py)
 
 bool pointer_blocked_by_shell_overlay(int px, int py)
 {
-    return g_storage_prompt.visible || g_context_menu.open || system_window_hit(px, py) >= 0;
+    return g_storage_prompt.visible || g_context_menu.open || g_index.active || g_control_center.open ||
+           system_window_hit(px, py) >= 0;
 }
 
 void post_mouse_event_to_window(const Window &w, EventType type, int px, int py, uint8_t button, int8_t scroll_y)
@@ -1196,7 +1233,704 @@ void post_mouse_event_to_window(const Window &w, EventType type, int px, int py,
     ev.mouse.y = py - w.y + w.scroll_y;
     ev.mouse.button = button;
     ev.mouse.scroll_y = scroll_y;
+    ev.mouse.scroll_y = scroll_y;
     syscall2(SYS_POST_EVENT, owner, (uint64_t)&ev);
+}
+
+void post_key_event_to_window(const Window &w, EventType type, char c, uint8_t scancode)
+{
+    if (!is_user_window(w) || !is_window_visible(w))
+        return;
+    uint32_t owner = (w.entry && w.entry->owner_pid) ? w.entry->owner_pid : w.owner_pid;
+    if (!owner)
+        return;
+    Event ev = {};
+    ev.type = type;
+    ev.key.c = c;
+    ev.key.scancode = scancode;
+    syscall2(SYS_POST_EVENT, owner, (uintptr_t)&ev);
+}
+
+static void copy_cstr(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0)
+        return;
+    if (!src)
+        src = "";
+    size_t i = 0;
+    for (; i + 1 < dst_size && src[i]; i++)
+        dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+static char ascii_lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+static bool ascii_starts_with_ci(const char *text, const char *query)
+{
+    if (!text || !query)
+        return false;
+    while (*query) {
+        if (!*text || ascii_lower(*text) != ascii_lower(*query))
+            return false;
+        text++;
+        query++;
+    }
+    return true;
+}
+
+static bool ascii_contains_ci(const char *text, const char *query)
+{
+    if (!text || !query)
+        return false;
+    if (!*query)
+        return true;
+    for (const char *p = text; *p; p++) {
+        const char *h = p;
+        const char *n = query;
+        while (*h && *n && ascii_lower(*h) == ascii_lower(*n)) {
+            h++;
+            n++;
+        }
+        if (!*n)
+            return true;
+    }
+    return false;
+}
+
+struct IndexCatalogEntry
+{
+    const char *title;
+    const char *detail;
+    const char *path;
+    bool is_app;
+    IndexActionKind action;
+};
+
+static const IndexCatalogEntry k_index_catalog[] = {
+    {"Terminal", "Command-line shell", "/bin/terminal.elf", true, INDEX_ACTION_LAUNCH_APP},
+    {"Files", "Browse files and volumes", "/bin/files.elf", true, INDEX_ACTION_LAUNCH_APP},
+    {"Settings", "System settings", "/bin/preferences.elf", true, INDEX_ACTION_LAUNCH_APP},
+    {"Latitude", "Project editor", "/bin/latitude.elf", true, INDEX_ACTION_LAUNCH_APP},
+    {"About uniOS", "System information", "/bin/about.elf", true, INDEX_ACTION_LAUNCH_APP},
+    {"Control Panel", "Network, appearance, volume", "control", false, INDEX_ACTION_OPEN_CONTROL_PANEL},
+    {"Storage Mode", "Choose storage access", "storage", false, INDEX_ACTION_OPEN_STORAGE_PROMPT},
+    {"Show Desktop", "Hide open windows", "desktop", false, INDEX_ACTION_SHOW_DESKTOP},
+    {"Toggle Dark Mode", "Switch appearance", "appearance", false, INDEX_ACTION_TOGGLE_THEME},
+    {"Toggle Desktop Grid", "Show or hide grid lines", "desktop grid", false, INDEX_ACTION_TOGGLE_DESKTOP_GRID},
+    {"Toggle Clock Seconds", "Show or hide clock seconds", "clock seconds", false, INDEX_ACTION_TOGGLE_CLOCK_SECONDS},
+    {"Toggle Motion", "Turn window motion on or off", "animations", false, INDEX_ACTION_TOGGLE_ANIMATIONS},
+    {"Toggle Transparency", "Use transparent or solid surfaces", "transparency", false,
+     INDEX_ACTION_TOGGLE_TRANSPARENCY},
+};
+
+static constexpr int INDEX_CATALOG_COUNT = (int)(sizeof(k_index_catalog) / sizeof(k_index_catalog[0]));
+
+static int index_catalog_count()
+{
+    return INDEX_CATALOG_COUNT;
+}
+
+static int score_index_entry(const IndexCatalogEntry &entry, const char *query, int query_len, int ordinal)
+{
+    if (query_len <= 0)
+        return 1000 - ordinal;
+
+    int score = 0;
+    if (ascii_starts_with_ci(entry.title, query))
+        score = 1200;
+    else if (ascii_contains_ci(entry.title, query))
+        score = 950;
+    else if (ascii_contains_ci(entry.detail, query))
+        score = 650;
+    else if (ascii_contains_ci(entry.path, query))
+        score = 500;
+    if (score == 0)
+        return 0;
+    if (entry.is_app)
+        score += 24;
+    return score - ordinal;
+}
+
+static void set_index_result(IndexResult &dst, const IndexCatalogEntry &src, int score)
+{
+    copy_cstr(dst.title, sizeof(dst.title), src.title);
+    copy_cstr(dst.detail, sizeof(dst.detail), src.detail);
+    copy_cstr(dst.path, sizeof(dst.path), src.path);
+    dst.is_app = src.is_app;
+    dst.action = src.action;
+    dst.score = score;
+}
+
+DirtyRect index_overlay_bounds()
+{
+    int margin = gui_space_2();
+    int max_w = (int)g_screen.width - margin * 2;
+    int max_h = (int)g_screen.height - wm_menubar_h() - margin * 2;
+    int min_w = gui_scaled_metric(280);
+    int min_h = gui_scaled_metric(220);
+    int bw = gui_scaled_metric(640);
+    int bh = gui_scaled_metric(432);
+    if (max_w > 0 && bw > max_w)
+        bw = max_w;
+    if (max_h > 0 && bh > max_h)
+        bh = max_h;
+    if (bw < min_w && max_w >= min_w)
+        bw = min_w;
+    if (bh < min_h && max_h >= min_h)
+        bh = min_h;
+    if (bw <= 0)
+        bw = (int)g_screen.width;
+    if (bh <= 0)
+        bh = (int)g_screen.height;
+    int x = ((int)g_screen.width - bw) / 2;
+    int y = wm_menubar_h() + gui_scaled_metric(36);
+    int max_y = (int)g_screen.height - bh - margin;
+    if (y > max_y)
+        y = max_y;
+    if (x < margin)
+        x = margin;
+    if (y < wm_menubar_h() + margin)
+        y = wm_menubar_h() + margin;
+    return {x, y, bw, bh};
+}
+
+static DirtyRect index_damage_bounds()
+{
+    return rect_expand(index_overlay_bounds(), gui_scaled_metric(14));
+}
+
+static int index_result_item_h()
+{
+    int h = gui_scaled_metric(52);
+    return h < gui_scaled_metric(40) ? gui_scaled_metric(40) : h;
+}
+
+static DirtyRect index_search_bounds()
+{
+    DirtyRect box = index_overlay_bounds();
+    int pad = gui_space_2();
+    int h = gui_scaled_metric(44);
+    return {box.x + pad, box.y + pad, box.w - pad * 2, h};
+}
+
+static int index_results_start_y()
+{
+    DirtyRect search = index_search_bounds();
+    return search.y + search.h + gui_space_1();
+}
+
+static int index_result_at(int mouse_x, int mouse_y)
+{
+    if (!g_index.active || !point_in_rect(index_overlay_bounds(), mouse_x, mouse_y))
+        return -1;
+    int y = index_results_start_y();
+    int h = index_result_item_h();
+    int pad = gui_space_2();
+    DirtyRect box = index_overlay_bounds();
+    int bottom = box.y + box.h - pad;
+    for (int i = 0; i < g_index.result_count; i++) {
+        DirtyRect row = {box.x + pad, y, box.w - pad * 2, h};
+        if (row.y + row.h > bottom)
+            break;
+        if (point_in_rect(row, mouse_x, mouse_y))
+            return i;
+        y += h + gui_scaled_metric(2);
+    }
+    return -1;
+}
+
+void update_index_search()
+{
+    IndexResult sorted[INDEX_CATALOG_COUNT];
+    int sorted_count = 0;
+
+    for (int i = 0; i < index_catalog_count(); i++) {
+        int score = score_index_entry(k_index_catalog[i], g_index.query, g_index.query_len, i);
+        if (score <= 0)
+            continue;
+        IndexResult candidate = {};
+        set_index_result(candidate, k_index_catalog[i], score);
+
+        int insert_at = sorted_count;
+        while (insert_at > 0 && sorted[insert_at - 1].score < candidate.score) {
+            if (insert_at < INDEX_MAX_RESULTS)
+                sorted[insert_at] = sorted[insert_at - 1];
+            insert_at--;
+        }
+        if (insert_at < INDEX_MAX_RESULTS)
+            sorted[insert_at] = candidate;
+        if (sorted_count < INDEX_MAX_RESULTS)
+            sorted_count++;
+    }
+
+    g_index.result_count = sorted_count;
+    for (int i = 0; i < g_index.result_count; i++)
+        g_index.results[i] = sorted[i];
+    if (g_index.result_count <= 0) {
+        g_index.selected_index = -1;
+        g_index.hovered_index = -1;
+    } else {
+        if (g_index.selected_index < 0 || g_index.selected_index >= g_index.result_count)
+            g_index.selected_index = 0;
+        if (g_index.hovered_index >= g_index.result_count)
+            g_index.hovered_index = -1;
+    }
+
+    DirtyRect damage = index_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+void open_index()
+{
+    if (g_index.active)
+        return;
+    close_control_center();
+    close_context_menu();
+    g_index = {};
+    g_index.active = true;
+    g_index.selected_index = 0;
+    g_index.hovered_index = -1;
+    g_index.open_ticks = get_ticks();
+    update_index_search();
+}
+
+void close_index()
+{
+    if (!g_index.active)
+        return;
+    DirtyRect damage = index_damage_bounds();
+    g_index.active = false;
+    g_index.hovered_index = -1;
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+static void publish_settings_changed(Registry *registry)
+{
+    if (!registry)
+        return;
+    uint32_t next = registry->settings_generation + 1u;
+    if (next == 0)
+        next = 1u;
+    registry->settings_generation = next;
+    asm volatile("sfence" ::: "memory");
+}
+
+static void show_desktop_windows()
+{
+    for (int i = g_window_count - 1; i >= 2; i--)
+        if (is_window_visible(g_windows[i]) && is_user_window(g_windows[i]))
+            minimize_window(i);
+}
+
+bool activate_index_selection(Registry *registry)
+{
+    if (!g_index.active || g_index.selected_index < 0 || g_index.selected_index >= g_index.result_count)
+        return false;
+
+    IndexResult chosen = g_index.results[g_index.selected_index];
+    close_index();
+
+    switch (chosen.action) {
+        case INDEX_ACTION_LAUNCH_APP:
+            launch_or_focus_app(registry, chosen.title, chosen.path);
+            return true;
+        case INDEX_ACTION_OPEN_CONTROL_PANEL:
+            toggle_control_center();
+            return true;
+        case INDEX_ACTION_OPEN_STORAGE_PROMPT:
+            open_storage_prompt();
+            return true;
+        case INDEX_ACTION_SHOW_DESKTOP:
+            show_desktop_windows();
+            return true;
+        case INDEX_ACTION_TOGGLE_THEME:
+            if (registry) {
+                registry->theme_mode = (registry->theme_mode == GUI_THEME_LIGHT) ? GUI_THEME_DARK : GUI_THEME_LIGHT;
+                publish_settings_changed(registry);
+            }
+            enqueue_damage_rect(0, 0, (int)g_screen.width, (int)g_screen.height);
+            return true;
+        case INDEX_ACTION_TOGGLE_DESKTOP_GRID:
+            if (registry) {
+                registry->system_flags ^= SYSTEM_FLAG_SHOW_DESKTOP_GRID;
+                g_system_flags = registry->system_flags;
+                publish_settings_changed(registry);
+            }
+            enqueue_damage_rect(0, 0, (int)g_screen.width, wm_menubar_h());
+            if (registry && registry->window_count > 1)
+                enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                                    registry->windows[1].h);
+            return true;
+        case INDEX_ACTION_TOGGLE_CLOCK_SECONDS:
+            if (registry) {
+                registry->system_flags ^= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
+                g_system_flags = registry->system_flags;
+                publish_settings_changed(registry);
+                persist_wm_settings();
+            }
+            enqueue_damage_rect(0, 0, (int)g_screen.width, wm_menubar_h());
+            return true;
+        case INDEX_ACTION_TOGGLE_ANIMATIONS:
+            g_control_center.animations_enabled = !g_control_center.animations_enabled;
+            if (registry) {
+                registry->animations_enabled = g_control_center.animations_enabled;
+                publish_settings_changed(registry);
+            } else {
+                persist_wm_settings();
+            }
+            enqueue_damage_rect(0, 0, (int)g_screen.width, (int)g_screen.height);
+            return true;
+        case INDEX_ACTION_TOGGLE_TRANSPARENCY:
+            g_control_center.transparency_level = (g_control_center.transparency_level > 200) ? 180 : 255;
+            if (registry) {
+                registry->transparency_level = g_control_center.transparency_level;
+                publish_settings_changed(registry);
+            } else {
+                persist_wm_settings();
+            }
+            enqueue_damage_rect(0, 0, (int)g_screen.width, (int)g_screen.height);
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool handle_index_pointer_down(Registry *registry, int mouse_x, int mouse_y)
+{
+    if (!g_index.active)
+        return false;
+    if (!point_in_rect(index_overlay_bounds(), mouse_x, mouse_y))
+        return false;
+    int hit = index_result_at(mouse_x, mouse_y);
+    if (hit >= 0) {
+        g_index.selected_index = hit;
+        DirtyRect damage = index_damage_bounds();
+        enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+        activate_index_selection(registry);
+    }
+    return true;
+}
+
+void update_index_hover(int mouse_x, int mouse_y)
+{
+    if (!g_index.active)
+        return;
+    int hit = index_result_at(mouse_x, mouse_y);
+    if (hit == g_index.hovered_index)
+        return;
+    g_index.hovered_index = hit;
+    if (hit >= 0)
+        g_index.selected_index = hit;
+    DirtyRect damage = index_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+DirtyRect control_center_bounds()
+{
+    int margin = gui_space_1();
+    int max_w = (int)g_screen.width - margin * 2;
+    int max_h = (int)g_screen.height - wm_menubar_h() - margin * 2;
+    int min_w = gui_scaled_metric(280);
+    int min_h = gui_scaled_metric(300);
+    int bw = gui_scaled_metric(356);
+    int bh = gui_scaled_metric(374);
+    if (max_w > 0 && bw > max_w)
+        bw = max_w;
+    if (max_h > 0 && bh > max_h)
+        bh = max_h;
+    if (bw < min_w && max_w >= min_w)
+        bw = min_w;
+    if (bh < min_h && max_h >= min_h)
+        bh = min_h;
+    if (bw <= 0)
+        bw = (int)g_screen.width;
+    if (bh <= 0)
+        bh = (int)g_screen.height;
+    int x = (int)g_screen.width - bw - margin;
+    int y = wm_menubar_h() + margin;
+    if (x < margin)
+        x = margin;
+    if (y < margin)
+        y = margin;
+    return {x, y, bw, bh};
+}
+
+static DirtyRect control_center_damage_bounds()
+{
+    return rect_expand(control_center_bounds(), gui_scaled_metric(14));
+}
+
+static int control_panel_card_h()
+{
+    int h = gui_scaled_metric(58);
+    return h < gui_scaled_metric(46) ? gui_scaled_metric(46) : h;
+}
+
+static DirtyRect control_panel_item_rect(ControlPanelItem item)
+{
+    DirtyRect box = control_center_bounds();
+    int pad = gui_space_2();
+    int gap = gui_space_1();
+    int header_h = gui_card_header_h();
+    int card_h = control_panel_card_h();
+    int half_w = (box.w - pad * 2 - gap) / 2;
+    int y = box.y + header_h + pad;
+
+    if (item == CONTROL_ITEM_NETWORK)
+        return {box.x + pad, y, half_w, card_h};
+    if (item == CONTROL_ITEM_DARK_MODE)
+        return {box.x + pad + half_w + gap, y, half_w, card_h};
+
+    y += card_h + gap;
+    if (item == CONTROL_ITEM_DESKTOP_GRID)
+        return {box.x + pad, y, half_w, card_h};
+    if (item == CONTROL_ITEM_CLOCK_SECONDS)
+        return {box.x + pad + half_w + gap, y, half_w, card_h};
+
+    y += card_h + gap;
+    if (item == CONTROL_ITEM_ANIMATIONS)
+        return {box.x + pad, y, half_w, card_h};
+    if (item == CONTROL_ITEM_TRANSPARENCY)
+        return {box.x + pad + half_w + gap, y, half_w, card_h};
+
+    y += card_h + gap;
+    if (item == CONTROL_ITEM_VOLUME)
+        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(72)};
+
+    int action_h = gui_app_control_h();
+    int action_y = box.y + box.h - pad - action_h;
+    int action_w = (box.w - pad * 2 - gap) / 2;
+    if (item == CONTROL_ITEM_STORAGE)
+        return {box.x + pad, action_y, action_w, action_h};
+    if (item == CONTROL_ITEM_SETTINGS)
+        return {box.x + pad + action_w + gap, action_y, action_w, action_h};
+
+    return {0, 0, 0, 0};
+}
+
+static ControlPanelItem control_panel_item_at(int mouse_x, int mouse_y)
+{
+    if (!point_in_rect(control_center_bounds(), mouse_x, mouse_y))
+        return CONTROL_ITEM_NONE;
+    ControlPanelItem items[] = {CONTROL_ITEM_NETWORK,       CONTROL_ITEM_DARK_MODE,  CONTROL_ITEM_DESKTOP_GRID,
+                                CONTROL_ITEM_CLOCK_SECONDS, CONTROL_ITEM_ANIMATIONS, CONTROL_ITEM_TRANSPARENCY,
+                                CONTROL_ITEM_VOLUME,        CONTROL_ITEM_STORAGE,    CONTROL_ITEM_SETTINGS};
+    for (unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++)
+        if (point_in_rect(control_panel_item_rect(items[i]), mouse_x, mouse_y))
+            return items[i];
+    return CONTROL_ITEM_NONE;
+}
+
+static DirtyRect control_panel_volume_track_rect()
+{
+    DirtyRect card = control_panel_item_rect(CONTROL_ITEM_VOLUME);
+    int pad = gui_space_2();
+    int h = gui_scaled_metric(18);
+    int y = card.y + card.h - pad - h;
+    return {card.x + pad, y, card.w - pad * 2, h};
+}
+
+static bool set_control_center_volume_from_x(int mouse_x)
+{
+    DirtyRect track = control_panel_volume_track_rect();
+    if (track.w <= 0)
+        return false;
+    int rel = mouse_x - track.x;
+    if (rel < 0)
+        rel = 0;
+    if (rel > track.w)
+        rel = track.w;
+    uint32_t next = (uint32_t)((rel * 100 + track.w / 2) / track.w);
+    if (next > 100)
+        next = 100;
+    if (next == g_control_center.volume)
+        return true;
+    g_control_center.volume = next;
+    Registry *registry = gui_registry();
+    if (registry) {
+        registry->volume_level = next;
+        publish_settings_changed(registry);
+    }
+    DirtyRect damage = control_center_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+    return true;
+}
+
+void sync_control_center_state_from_registry(const Registry *registry)
+{
+    if (!registry)
+        return;
+    g_control_center.dark_mode = registry->theme_mode != GUI_THEME_LIGHT;
+    g_control_center.desktop_grid = (registry->system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) != 0;
+    g_control_center.clock_seconds = (registry->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0;
+    g_control_center.network_enabled = registry->ethernet_enabled;
+    g_control_center.animations_enabled = registry->animations_enabled;
+    g_control_center.transparency_level = registry->transparency_level;
+    g_control_center.volume = registry->volume_level <= 100 ? registry->volume_level : 100;
+}
+
+void toggle_control_center()
+{
+    if (g_control_center.open) {
+        close_control_center();
+        return;
+    }
+    close_index();
+    close_context_menu();
+    sync_control_center_state_from_registry(gui_registry());
+    g_control_center.open = true;
+    g_control_center.hovered_item = CONTROL_ITEM_NONE;
+    g_control_center.volume_dragging = false;
+    DirtyRect damage = control_center_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+void close_control_center()
+{
+    if (!g_control_center.open)
+        return;
+    DirtyRect damage = control_center_damage_bounds();
+    g_control_center.open = false;
+    g_control_center.hovered_item = CONTROL_ITEM_NONE;
+    g_control_center.volume_dragging = false;
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+static void set_theme_from_control_panel(Registry *registry, bool dark)
+{
+    if (!registry)
+        return;
+    registry->theme_mode = dark ? GUI_THEME_DARK : GUI_THEME_LIGHT;
+    g_control_center.dark_mode = dark;
+    publish_settings_changed(registry);
+    enqueue_damage_rect(0, 0, (int)g_screen.width, (int)g_screen.height);
+}
+
+static void set_system_flag_from_control_panel(Registry *registry, uint32_t flag, bool enabled)
+{
+    if (!registry)
+        return;
+    if (enabled)
+        registry->system_flags |= flag;
+    else
+        registry->system_flags &= ~flag;
+    g_system_flags = registry->system_flags;
+    sync_control_center_state_from_registry(registry);
+    publish_settings_changed(registry);
+    enqueue_damage_rect(0, 0, (int)g_screen.width, wm_menubar_h());
+    if (registry->window_count > 1)
+        enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                            registry->windows[1].h);
+}
+
+static void publish_control_center_settings(Registry *registry)
+{
+    if (!registry) {
+        persist_wm_settings();
+        return;
+    }
+    registry->ethernet_enabled = g_control_center.network_enabled;
+    registry->animations_enabled = g_control_center.animations_enabled;
+    registry->transparency_level = g_control_center.transparency_level;
+    registry->volume_level = g_control_center.volume;
+    publish_settings_changed(registry);
+}
+
+bool handle_control_center_pointer_down(Registry *registry, int mouse_x, int mouse_y)
+{
+    if (!g_control_center.open)
+        return false;
+    if (!point_in_rect(control_center_bounds(), mouse_x, mouse_y))
+        return false;
+
+    ControlPanelItem hit = control_panel_item_at(mouse_x, mouse_y);
+    g_control_center.hovered_item = hit;
+    if (hit == CONTROL_ITEM_NETWORK) {
+        g_control_center.network_enabled = !g_control_center.network_enabled;
+        publish_control_center_settings(registry);
+    } else if (hit == CONTROL_ITEM_DARK_MODE) {
+        set_theme_from_control_panel(registry, !g_control_center.dark_mode);
+    } else if (hit == CONTROL_ITEM_DESKTOP_GRID) {
+        set_system_flag_from_control_panel(registry, SYSTEM_FLAG_SHOW_DESKTOP_GRID, !g_control_center.desktop_grid);
+    } else if (hit == CONTROL_ITEM_CLOCK_SECONDS) {
+        set_system_flag_from_control_panel(registry, SYSTEM_FLAG_CLOCK_SHOW_SECONDS, !g_control_center.clock_seconds);
+        persist_wm_settings();
+    } else if (hit == CONTROL_ITEM_ANIMATIONS) {
+        g_control_center.animations_enabled = !g_control_center.animations_enabled;
+        publish_control_center_settings(registry);
+    } else if (hit == CONTROL_ITEM_TRANSPARENCY) {
+        g_control_center.transparency_level = (g_control_center.transparency_level > 200) ? 180 : 255;
+        publish_control_center_settings(registry);
+    } else if (hit == CONTROL_ITEM_VOLUME) {
+        g_control_center.volume_dragging = true;
+        set_control_center_volume_from_x(mouse_x);
+        publish_control_center_settings(registry);
+    } else if (hit == CONTROL_ITEM_STORAGE) {
+        close_control_center();
+        open_storage_prompt();
+        return true;
+    } else if (hit == CONTROL_ITEM_SETTINGS) {
+        close_control_center();
+        launch_or_focus_app(registry, "Settings", "/bin/preferences.elf");
+        return true;
+    }
+
+    DirtyRect damage = control_center_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+    return true;
+}
+
+void handle_control_center_pointer_up()
+{
+    if (!g_control_center.volume_dragging)
+        return;
+    g_control_center.volume_dragging = false;
+    DirtyRect damage = control_center_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+void update_control_center_hover(int mouse_x, int mouse_y)
+{
+    if (!g_control_center.open)
+        return;
+    ControlPanelItem hit = control_panel_item_at(mouse_x, mouse_y);
+    if (hit == g_control_center.hovered_item)
+        return;
+    g_control_center.hovered_item = hit;
+    DirtyRect damage = control_center_damage_bounds();
+    enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+}
+
+bool update_control_center_drag(int mouse_x, int mouse_y)
+{
+    (void)mouse_y;
+    if (!g_control_center.open || !g_control_center.volume_dragging)
+        return false;
+    return set_control_center_volume_from_x(mouse_x);
+}
+
+bool handle_control_center_scroll(Registry *registry, int mouse_x, int mouse_y, int scroll_y)
+{
+    if (!g_control_center.open || !point_in_rect(control_center_bounds(), mouse_x, mouse_y))
+        return false;
+    if (control_panel_item_at(mouse_x, mouse_y) == CONTROL_ITEM_VOLUME) {
+        int delta = scroll_y > 0 ? 5 : (scroll_y < 0 ? -5 : 0);
+        int next = (int)g_control_center.volume + delta;
+        if (next < 0)
+            next = 0;
+        if (next > 100)
+            next = 100;
+        if ((uint32_t)next != g_control_center.volume) {
+            g_control_center.volume = (uint32_t)next;
+            publish_control_center_settings(registry);
+            DirtyRect damage = control_center_damage_bounds();
+            enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
+        }
+    }
+    return true;
 }
 
 StoragePromptLayout storage_prompt_layout()
@@ -1215,7 +1949,6 @@ StoragePromptLayout storage_prompt_layout()
     L.off_button = {L.readonly_button.x - gap - btn_w, by, btn_w, btn_h};
     return L;
 }
-
 
 void sync_storage_prompt_state(bool force)
 {
@@ -1574,34 +2307,104 @@ DirtyRect context_menu_bounds()
             g_context_menu.h + shadow_pad_y};
 }
 
+static bool cfg_value_enabled(const char *value, bool fallback)
+{
+    if (!value || !*value)
+        return fallback;
+    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0)
+        return false;
+    if (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0 || strcmp(value, "yes") == 0)
+        return true;
+    return fallback;
+}
+
+static const char *flag_text(uint32_t flags, uint32_t flag)
+{
+    return (flags & flag) ? "1" : "0";
+}
+
+static uint32_t cfg_uint_clamped(const char *value, uint32_t fallback, uint32_t min, uint32_t max)
+{
+    if (!value || !*value)
+        return fallback;
+    int parsed = atoi(value);
+    if (parsed < (int)min)
+        return min;
+    if (parsed > (int)max)
+        return max;
+    return (uint32_t)parsed;
+}
+
 RuntimeGuiSettings load_runtime_settings()
 {
-    RuntimeGuiSettings s = {GUI_THEME_DARK, SYSTEM_FLAG_SHOW_DESKTOP_GRID};
+    RuntimeGuiSettings s = {GUI_THEME_DARK, SYSTEM_FLAG_SHOW_DESKTOP_GRID, true, true, true, 180, 75};
     char cfg[512], val[64];
     const char *cands[] = {SYSTEM_CONFIG_PATH, SYSTEM_BOOTSTRAP_CONFIG_PATH};
     if (cfg_read_text_from_candidates(cands, 2, cfg, sizeof(cfg))) {
-        if (cfg_line_value(cfg, "theme", val, sizeof(val)))
-            s.theme_mode = (strcmp(val, "light") == 0) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+        if (cfg_line_value(cfg, "theme", val, sizeof(val))) {
+            if (strcmp(val, "light") == 0)
+                s.theme_mode = GUI_THEME_LIGHT;
+            else if (strcmp(val, "dark") == 0)
+                s.theme_mode = GUI_THEME_DARK;
+        }
         if (cfg_line_value(cfg, "show_desktop_grid", val, sizeof(val))) {
-            if (val[0] == '0')
-                s.system_flags &= ~SYSTEM_FLAG_SHOW_DESKTOP_GRID;
-            else
+            if (cfg_value_enabled(val, (s.system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) != 0))
                 s.system_flags |= SYSTEM_FLAG_SHOW_DESKTOP_GRID;
+            else
+                s.system_flags &= ~SYSTEM_FLAG_SHOW_DESKTOP_GRID;
         }
         if (cfg_line_value(cfg, "clock_show_seconds", val, sizeof(val))) {
-            if (val[0] == '0')
-                s.system_flags &= ~SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
-            else
+            if (cfg_value_enabled(val, (s.system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0))
                 s.system_flags |= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
+            else
+                s.system_flags &= ~SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
         }
         if (cfg_line_value(cfg, "launch_terminal_on_boot", val, sizeof(val))) {
-            if (val[0] == '0')
-                s.system_flags &= ~SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
-            else
+            if (cfg_value_enabled(val, (s.system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) != 0))
                 s.system_flags |= SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
+            else
+                s.system_flags &= ~SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
         }
+        if (cfg_line_value(cfg, "ethernet_enabled", val, sizeof(val)))
+            s.ethernet_enabled = cfg_value_enabled(val, s.ethernet_enabled);
+        if (cfg_line_value(cfg, "ethernet_use_dhcp", val, sizeof(val)))
+            s.ethernet_use_dhcp = cfg_value_enabled(val, s.ethernet_use_dhcp);
+        if (cfg_line_value(cfg, "animations_enabled", val, sizeof(val)))
+            s.animations_enabled = cfg_value_enabled(val, s.animations_enabled);
+        if (cfg_line_value(cfg, "transparency_level", val, sizeof(val)))
+            s.transparency_level = cfg_uint_clamped(val, s.transparency_level, 0, 255);
+        if (cfg_line_value(cfg, "volume_level", val, sizeof(val)))
+            s.volume_level = cfg_uint_clamped(val, s.volume_level, 0, 100);
     }
     return s;
+}
+
+bool persist_runtime_settings(const Registry *registry)
+{
+    if (!registry)
+        return false;
+
+    uint32_t flags = registry->system_flags;
+    GuiThemeMode mode = registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+    char contents[384];
+    int n = snprintf(contents, sizeof(contents),
+                     "theme=%s\n"
+                     "show_desktop_grid=%s\n"
+                     "clock_show_seconds=%s\n"
+                     "launch_terminal_on_boot=%s\n"
+                     "ethernet_enabled=%d\n"
+                     "ethernet_use_dhcp=%d\n"
+                     "animations_enabled=%d\n"
+                     "transparency_level=%u\n"
+                     "volume_level=%u\n",
+                     mode == GUI_THEME_LIGHT ? "light" : "dark", flag_text(flags, SYSTEM_FLAG_SHOW_DESKTOP_GRID),
+                     flag_text(flags, SYSTEM_FLAG_CLOCK_SHOW_SECONDS),
+                     flag_text(flags, SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT), registry->ethernet_enabled ? 1 : 0,
+                     registry->ethernet_use_dhcp ? 1 : 0, registry->animations_enabled ? 1 : 0,
+                     registry->transparency_level, registry->volume_level <= 100 ? registry->volume_level : 100);
+    if (n <= 0 || (size_t)n >= sizeof(contents))
+        return false;
+    return cfg_write_text_file(SYSTEM_CONFIG_PATH, contents);
 }
 
 void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
@@ -1645,6 +2448,10 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.y = y;
     win.w = w;
     win.h = h;
+    win.target_x = x;
+    win.target_y = y;
+    win.target_w = w;
+    win.target_h = h;
     win.buffer_w = bw;
     win.buffer_h = bh;
     win.scroll_x = 0;
@@ -1653,7 +2460,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.min_h = entry ? entry->min_h : 0;
     win.active = true;
     win.transparent = transparent;
-    win.needs_full_redraw = false; // Wait for first damage to avoid black flash
+    win.needs_full_redraw = false;       // Wait for first damage to avoid black flash
     win.last_commit_ticks = get_ticks(); // Track birth time for watchdog
     win.damage_ptr = d_ptr;
     win.first_damage_received = false;
@@ -1700,6 +2507,12 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
     g_input.old_mouse_y = g_input.mouse_y;
     g_input.mouse_x = new_x;
     g_input.mouse_y = new_y;
+
+    if (update_control_center_drag(g_input.mouse_x, g_input.mouse_y)) {
+        mark_cursor_transition_damage(g_input.old_mouse_x, g_input.old_mouse_y, g_input.cursor_kind, g_input.mouse_x,
+                                      g_input.mouse_y, g_input.cursor_kind);
+        return;
+    }
 
     if (g_input.pointer_down && g_input.drag_index >= 2 && g_input.drag_index < g_window_count) {
         Window &w = g_windows[g_input.drag_index];
@@ -1752,6 +2565,12 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
                                   g_input.mouse_y, g_input.cursor_kind);
     update_storage_prompt_hover(g_input.mouse_x, g_input.mouse_y);
     if (g_storage_prompt.visible)
+        return;
+    update_index_hover(g_input.mouse_x, g_input.mouse_y);
+    if (g_index.active)
+        return;
+    update_control_center_hover(g_input.mouse_x, g_input.mouse_y);
+    if (g_control_center.open)
         return;
     update_context_menu_hover(registry, g_input.mouse_x, g_input.mouse_y);
     if (pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y))
@@ -1842,5 +2661,55 @@ void update_cursor_kind()
         mark_cursor_transition_damage(g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind, g_input.mouse_x,
                                       g_input.mouse_y, n_k);
         g_input.cursor_kind = n_k;
+    }
+}
+void persist_wm_settings()
+{
+    char config[512];
+    snprintf(config, sizeof(config),
+             "theme=%s\n"
+             "show_desktop_grid=%d\n"
+             "clock_show_seconds=%d\n"
+             "launch_terminal_on_boot=%d\n"
+             "ethernet_enabled=%d\n"
+             "ethernet_use_dhcp=%d\n"
+             "animations_enabled=%d\n"
+             "transparency_level=%u\n"
+             "volume_level=%u\n",
+             g_control_center.dark_mode ? "dark" : "light", g_control_center.desktop_grid ? 1 : 0,
+             g_control_center.clock_seconds ? 1 : 0, (g_system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) ? 1 : 0,
+             g_control_center.network_enabled ? 1 : 0, 1, g_control_center.animations_enabled ? 1 : 0,
+             g_control_center.transparency_level, g_control_center.volume);
+
+    cfg_write_text_file(SYSTEM_CONFIG_PATH, config);
+}
+
+void load_wm_settings()
+{
+    char config[1024];
+    const char *candidates[] = {SYSTEM_CONFIG_PATH, SYSTEM_BOOTSTRAP_CONFIG_PATH};
+    if (cfg_read_text_from_candidates(candidates, 2, config, sizeof(config))) {
+        char value[64];
+        if (cfg_line_value(config, "theme", value, sizeof(value))) {
+            g_control_center.dark_mode = (strcmp(value, "light") != 0);
+        }
+        if (cfg_line_value(config, "show_desktop_grid", value, sizeof(value))) {
+            g_control_center.desktop_grid = (value[0] != '0');
+        }
+        if (cfg_line_value(config, "clock_show_seconds", value, sizeof(value))) {
+            g_control_center.clock_seconds = (value[0] != '0');
+        }
+        if (cfg_line_value(config, "ethernet_enabled", value, sizeof(value))) {
+            g_control_center.network_enabled = cfg_value_enabled(value, g_control_center.network_enabled);
+        }
+        if (cfg_line_value(config, "animations_enabled", value, sizeof(value))) {
+            g_control_center.animations_enabled = cfg_value_enabled(value, g_control_center.animations_enabled);
+        }
+        if (cfg_line_value(config, "transparency_level", value, sizeof(value))) {
+            g_control_center.transparency_level = cfg_uint_clamped(value, g_control_center.transparency_level, 0, 255);
+        }
+        if (cfg_line_value(config, "volume_level", value, sizeof(value))) {
+            g_control_center.volume = cfg_uint_clamped(value, g_control_center.volume, 0, 100);
+        }
     }
 }

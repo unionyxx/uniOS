@@ -105,7 +105,7 @@ extern "C" void switch_to_task(Process *current, Process *next);
 [[nodiscard]] uint64_t process_fork(struct SyscallFrame *frame);
 void process_init();
 void process_exit(int32_t status);
-[[nodiscard]] int64_t process_waitpid(int64_t pid, int32_t *status);
+[[nodiscard]] int64_t process_waitpid(int64_t pid, int32_t *status, int options);
 
 void system_reboot();
 void system_poweroff();

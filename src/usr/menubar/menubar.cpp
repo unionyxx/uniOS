@@ -19,6 +19,13 @@ static int g_last_blur_shm_id = -1;
 
 static constexpr uint32_t TRANSPARENT_BG = 0x00000000u;
 
+static void reap_exited_children()
+{
+    int status = 0;
+    while (waitpid_nohang(-1, &status) > 0) {
+    }
+}
+
 static inline uint8_t menubar_scale_alpha_u8(uint8_t alpha, uint8_t coverage)
 {
     return (uint8_t)(((uint32_t)alpha * (uint32_t)coverage + 127u) / 255u);
@@ -236,7 +243,7 @@ struct MenubarTextShadowPass
 
 static constexpr MenubarTextShadowPass k_menubar_text_shadow_passes[] = {
     {-1, 1, 8}, {0, 1, 12}, {1, 1, 8}, {-1, 2, 7}, {0, 2, 10}, {1, 2, 7},
-    {-2, 3, 4}, {-1, 3, 5}, {0, 3, 6},  {1, 3, 5}, {2, 3, 4},  {0, 4, 3},
+    {-2, 3, 4}, {-1, 3, 5}, {0, 3, 6}, {1, 3, 5},  {2, 3, 4},  {0, 4, 3},
 };
 
 static void draw_menubar_text_shadow(Surface *canvas, const GuiFont *font, int32_t x, int32_t y, const char *text,
@@ -260,14 +267,13 @@ static void draw_menubar_text_shadow_clipped(Surface *canvas, const GuiFont *fon
 
     for (size_t i = 0; i < sizeof(k_menubar_text_shadow_passes) / sizeof(k_menubar_text_shadow_passes[0]); i++) {
         const MenubarTextShadowPass &pass = k_menubar_text_shadow_passes[i];
-        gui_draw_text_clipped(canvas, font, x + menubar_scaled_offset(pass.dx),
-                              y + menubar_scaled_offset(pass.dy), max_width, text,
-                              menubar_text_shadow_color(is_light, pass.alpha), TRANSPARENT_BG);
+        gui_draw_text_clipped(canvas, font, x + menubar_scaled_offset(pass.dx), y + menubar_scaled_offset(pass.dy),
+                              max_width, text, menubar_text_shadow_color(is_light, pass.alpha), TRANSPARENT_BG);
     }
 }
 
-static void draw_menubar_text(Surface *canvas, const GuiFont *font, int32_t x, int32_t y, const char *text,
-                              uint32_t fg, bool is_light)
+static void draw_menubar_text(Surface *canvas, const GuiFont *font, int32_t x, int32_t y, const char *text, uint32_t fg,
+                              bool is_light)
 {
     draw_menubar_text_shadow(canvas, font, x, y, text, is_light);
     gui_draw_text(canvas, font, x, y, text, fg, TRANSPARENT_BG);
@@ -569,7 +575,8 @@ void draw_menubar(Surface *canvas, Registry *reg)
     if (reg) {
         int mx = pointer_local_x(reg);
         int my = pointer_local_y(reg);
-        logo_hot = g_menu_open || (mx >= logo_x0 && mx < logo_x0 + logo_w0 && my >= logo_y() && my < logo_y() + logo_h());
+        logo_hot =
+            g_menu_open || (mx >= logo_x0 && mx < logo_x0 + logo_w0 && my >= logo_y() && my < logo_y() + logo_h());
     }
     if (logo_hot) {
         uint32_t logo_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
@@ -585,8 +592,8 @@ void draw_menubar(Surface *canvas, Registry *reg)
         int title_w = gui_measure_text(app_font, focus.title);
         if (title_w > menubar_title_max_w())
             title_w = menubar_title_max_w();
-        draw_menubar_text_clipped(canvas, app_font, x, app_text_y, menubar_title_max_w(), focus.title,
-                                  g_gui_style.text, is_light);
+        draw_menubar_text_clipped(canvas, app_font, x, app_text_y, menubar_title_max_w(), focus.title, g_gui_style.text,
+                                  is_light);
         x += title_w + gui_scaled_metric(24);
     }
 
@@ -837,6 +844,7 @@ extern "C" int main(int argc, char **argv)
                 last_focused_title[0] = '\0';
             }
         }
+        reap_exited_children();
         if (g_menu_open || current_hovered != -1)
             sleep_ms(4);
         else
