@@ -1114,11 +1114,11 @@ int hit_test_resize(const Window &w, int px, int py)
         return RESIZE_NONE;
     if (px < l + grip)
         edges |= RESIZE_LEFT;
-    if (px >= r - grip && px < r + grip)
+    if (px >= r - grip)
         edges |= RESIZE_RIGHT;
-    if (py >= t - grip && py < t + grip)
+    if (py < t + grip)
         edges |= RESIZE_TOP;
-    if (py < b + grip)
+    if (py >= b - grip)
         edges |= RESIZE_BOTTOM;
     return edges;
 }
@@ -1630,8 +1630,8 @@ DirtyRect control_center_bounds()
     int max_h = (int)g_screen.height - wm_menubar_h() - margin * 2;
     int min_w = gui_scaled_metric(280);
     int min_h = gui_scaled_metric(300);
-    int bw = gui_scaled_metric(356);
-    int bh = gui_scaled_metric(374);
+    int bw = gui_scaled_metric(348);
+    int bh = gui_scaled_metric(366);
     if (max_w > 0 && bw > max_w)
         bw = max_w;
     if (max_h > 0 && bh > max_h)
@@ -1660,14 +1660,14 @@ static DirtyRect control_center_damage_bounds()
 
 static int control_panel_card_h()
 {
-    int h = gui_scaled_metric(58);
-    return h < gui_scaled_metric(46) ? gui_scaled_metric(46) : h;
+    int h = gui_scaled_metric(54);
+    return h < gui_scaled_metric(44) ? gui_scaled_metric(44) : h;
 }
 
 static DirtyRect control_panel_item_rect(ControlPanelItem item)
 {
     DirtyRect box = control_center_bounds();
-    int pad = gui_space_2();
+    int pad = gui_space_1_5();
     int gap = gui_space_1();
     int header_h = gui_card_header_h();
     int card_h = control_panel_card_h();
@@ -1693,7 +1693,7 @@ static DirtyRect control_panel_item_rect(ControlPanelItem item)
 
     y += card_h + gap;
     if (item == CONTROL_ITEM_VOLUME)
-        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(72)};
+        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(62)};
 
     int action_h = gui_app_control_h();
     int action_y = box.y + box.h - pad - action_h;
@@ -1722,8 +1722,8 @@ static ControlPanelItem control_panel_item_at(int mouse_x, int mouse_y)
 static DirtyRect control_panel_volume_track_rect()
 {
     DirtyRect card = control_panel_item_rect(CONTROL_ITEM_VOLUME);
-    int pad = gui_space_2();
-    int h = gui_scaled_metric(18);
+    int pad = gui_space_1_5();
+    int h = gui_scaled_metric(16);
     int y = card.y + card.h - pad - h;
     return {card.x + pad, y, card.w - pad * 2, h};
 }

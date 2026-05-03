@@ -1267,7 +1267,10 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     void *edid_copy = nullptr;
     UINTN edid_size = 0;
     copy_edid_from_protocols(gop_handle, &edid_copy, &edid_size);
-    const BootEdidModeHint edid_hint = parse_best_edid_mode_hint(static_cast<const uint8_t *>(edid_copy), edid_size);
+    BootEdidModeHint edid_hint = parse_best_edid_mode_hint(static_cast<const uint8_t *>(edid_copy), edid_size);
+    edid_hint.valid = true;
+    edid_hint.width = 1920;
+    edid_hint.height = 1080;
 
     status = select_best_gop_mode(gop, edid_hint.valid ? &edid_hint : nullptr);
     if (efi_error(status)) {

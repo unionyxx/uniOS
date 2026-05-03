@@ -18,6 +18,14 @@ static uint32_t g_last_blur_generation = 0;
 static int g_last_blur_shm_id = -1;
 
 static constexpr uint32_t TRANSPARENT_BG = 0x00000000u;
+static int g_logo_btn_x = 0, g_logo_btn_w = 0;
+static int g_date_btn_x = 0, g_date_btn_w = 0;
+
+static const char *get_month_name(int month)
+{
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    return (month >= 1 && month <= 12) ? months[month - 1] : "???";
+}
 
 static void reap_exited_children()
 {
@@ -161,10 +169,10 @@ static bool ensure_blur_surface(Registry *registry, uint32_t screen_w)
     return true;
 }
 
-static constexpr int LOGO_X = 8;
-static constexpr int LOGO_Y = 3;
+static constexpr int LOGO_X = 10;
+static constexpr int LOGO_Y = 5;
 static constexpr int LOGO_W = 56;
-static constexpr int LOGO_H = 24;
+static constexpr int LOGO_H = 22;
 static constexpr int MENU_X = 8;
 static constexpr int MENU_GAP = 7;
 static constexpr int MENU_MIN_W = 220;
@@ -175,14 +183,6 @@ static inline int menubar_h()
 {
     return gui_menubar_h();
 }
-static inline int logo_x()
-{
-    return gui_scaled_metric(LOGO_X);
-}
-static inline int logo_y()
-{
-    return gui_scaled_metric(LOGO_Y);
-}
 static inline int logo_w()
 {
     return gui_scaled_metric(LOGO_W);
@@ -190,6 +190,14 @@ static inline int logo_w()
 static inline int logo_h()
 {
     return gui_scaled_metric(LOGO_H);
+}
+static inline int logo_x()
+{
+    return gui_scaled_metric(LOGO_X);
+}
+static inline int logo_y()
+{
+    return (menubar_h() - logo_h()) / 2;
 }
 static inline int menu_x()
 {
@@ -546,8 +554,6 @@ void draw_menu(Surface *canvas, Registry *reg, int mx, int my)
 void draw_menubar(Surface *canvas, Registry *reg)
 {
     int bar_h = menubar_h();
-    int logo_x0 = logo_x();
-    int logo_w0 = logo_w();
     const GuiFont *app_font = gui_font_title();
     const GuiFont *menu_font = gui_font_default();
     bool blur_ready = ensure_blur_surface(reg, canvas->width);
@@ -574,25 +580,38 @@ void draw_menubar(Surface *canvas, Registry *reg)
     bool logo_hot = false;
     bool date_hot = false;
     if (reg) {
+        const int padding = gui_scaled_metric(10);
+        int logo_text_w = gui_measure_text(app_font, "uniOS");
+        g_logo_btn_w = logo_text_w + padding * 2;
+        g_logo_btn_x = logo_x();
+
+        struct SysTime t;
+        int date_text_w = 0;
+        if (get_time(&t) == 0) {
+            char time_str[32];
+            const char *month_name = get_month_name(t.month);
+            snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d", month_name, t.day, t.hour, t.minute);
+            date_text_w = gui_measure_text(menu_font, time_str);
+        }
+        g_date_btn_w = date_text_w + padding * 2;
+        g_date_btn_x = (int)canvas->width - g_date_btn_w - logo_x();
+
         int mx = pointer_local_x(reg);
         int my = pointer_local_y(reg);
-        logo_hot =
-            g_menu_open || (mx >= logo_x0 && mx < logo_x0 + logo_w0 && my >= logo_y() && my < logo_y() + logo_h());
-        date_hot = reg->cp_open || (mx > (int)canvas->width - 120 && mx < (int)canvas->width && my >= 0 && my < bar_h);
+        logo_hot = g_menu_open || (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() && my < logo_y() + logo_h());
+        date_hot = reg->cp_open || (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() && my < logo_y() + logo_h());
     }
     if (logo_hot) {
         uint32_t logo_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
-        gui_fill_rounded_rect(canvas, logo_x0, logo_y(), logo_w0, logo_h(), gui_scaled_metric(6), logo_fill);
+        gui_fill_rounded_rect(canvas, g_logo_btn_x, logo_y(), g_logo_btn_w, logo_h(), gui_radius_sm(), logo_fill);
     }
     if (date_hot) {
         uint32_t date_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
-        int date_btn_w = 120 - gui_scaled_metric(8);
-        int date_btn_x = (int)canvas->width - 120;
-        gui_fill_rounded_rect(canvas, date_btn_x, logo_y(), date_btn_w, logo_h(), gui_scaled_metric(6), date_fill);
+        gui_fill_rounded_rect(canvas, g_date_btn_x, logo_y(), g_date_btn_w, logo_h(), gui_radius_sm(), date_fill);
     }
     int text_w = gui_measure_text(app_font, "uniOS");
-    int center_x = logo_x0 + (logo_w0 - text_w) / 2;
-    draw_menubar_text_clipped(canvas, app_font, center_x, app_text_y, logo_w0, "uniOS", text_color, is_light);
+    int center_x = g_logo_btn_x + (g_logo_btn_w - text_w) / 2;
+    draw_menubar_text_clipped(canvas, app_font, center_x, app_text_y, g_logo_btn_w, "uniOS", text_color, is_light);
 
     int x = menubar_content_x();
     FocusedWindowInfo focus = {};
@@ -614,8 +633,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
     struct SysTime t;
     if (get_time(&t) == 0) {
         char time_str[64];
-        const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-        const char *month_name = (t.month >= 1 && t.month <= 12) ? months[t.month - 1] : "???";
+        const char *month_name = get_month_name(t.month);
 
         if ((reg->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0) {
             snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d:%02d", month_name, t.day, t.hour, t.minute,
@@ -624,7 +642,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
             snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d", month_name, t.day, t.hour, t.minute);
         }
         uint32_t text_w = (uint32_t)gui_measure_text(menu_font, time_str);
-        int time_x = canvas->width - (int)text_w - gui_scaled_metric(18);
+        int time_x = g_date_btn_x + (g_date_btn_w - (int)text_w) / 2;
         draw_menubar_text(canvas, menu_font, time_x, menu_text_y, time_str, g_gui_style.text, is_light);
     }
 
@@ -641,10 +659,10 @@ int get_hovered_item(Registry *reg)
         SystemMenuModel model = build_system_menu_model(reg);
         return gui_popup_menu_hit_test(model.items, model.count, menu_x(), menu_y(), model.width, mx, my);
     } else {
-        if (mx >= logo_x() && mx < logo_x() + logo_w() && my >= logo_y() && my < logo_y() + logo_h()) {
+        if (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() && my < logo_y() + logo_h()) {
             return 99; // uniOS Logo
         }
-        if (mx > (int)reg->windows[0].w - 120 && mx < (int)reg->windows[0].w && my >= 0 && my < menubar_h()) {
+        if (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() && my < logo_y() + logo_h()) {
             return 100; // Date/Control Panel button
         }
     }

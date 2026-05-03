@@ -1028,7 +1028,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     int detail_inset = gui_scaled_metric(1);
     if (detail_inset < 1)
         detail_inset = 1;
-    int radius = gui_scaled_metric(13);
+    int radius = gui_radius_xl();
     int body_inset = border + detail_inset;
     int frame_radius = radius - border;
     if (frame_radius < 0)
@@ -1290,9 +1290,15 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         return;
     }
 
-    int inner_left = w.x + wm_frame_border(), inner_top = w.y;
-    int inner_w = w.w - wm_frame_border() * 2, inner_h = w.h - wm_frame_border();
-    int inner_r = gui_scaled_metric(12);
+    int radius = gui_radius_xl();
+    int border = wm_frame_border();
+    int detail_inset = gui_scaled_metric(1);
+    if (detail_inset < 1)
+        detail_inset = 1;
+    int body_inset = border + detail_inset;
+    int inner_r = radius - body_inset;
+    int inner_left = w.x + border, inner_top = w.y;
+    int inner_w = w.w - border * 2, inner_h = w.h - border;
     if (inner_r > inner_w / 2)
         inner_r = inner_w / 2;
     if (inner_r > inner_h / 2)
@@ -1547,15 +1553,23 @@ static void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, layout.box, nullptr))
         return;
 
-    int box_r = gui_radius_lg();
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + gui_scaled_metric(10), layout.box.w, layout.box.h,
-                          box_r, 0x18000000u);
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + gui_scaled_metric(3), layout.box.w, layout.box.h,
-                          box_r, g_gui_chrome.frame_shadow);
-    gui_draw_panel_inset(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, g_gui_style.app_surface,
-                         g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, "Storage Mode",
-                         "Choose how uniOS should expose AHCI and ATA storage");
+    int box_r = gui_scaled_metric(20);
+
+    // Multi-layer soft shadow (unified with Control Panel and Index)
+    int shadow_1 = gui_scaled_metric(10);
+    int shadow_2 = gui_scaled_metric(5);
+    int shadow_3 = gui_scaled_metric(2);
+    gui_fill_rounded_rect(&g_backbuffer, layout.box.x + 1, layout.box.y + shadow_1, layout.box.w - 2, layout.box.h,
+                          box_r, 0x08000000u);
+    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_2, layout.box.w, layout.box.h,
+                          box_r, 0x0C000000u);
+    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_3, layout.box.w, layout.box.h,
+                          box_r, 0x14000000u);
+
+    gui_draw_panel_inset_ext(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
+                             g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
+    gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r,
+                             "Storage Mode", "Choose how uniOS should expose AHCI and ATA storage");
 
     int text_x = layout.box.x + gui_space_2();
     int content_y = layout.box.y + gui_card_header_h() + gui_space_2();
@@ -1629,11 +1643,18 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_radius_lg();
-    int shadow = gui_scaled_metric(6);
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow, box.w, box.h, radius, g_gui_chrome.frame_shadow);
-    gui_draw_panel_inset(&g_backbuffer, box.x, box.y, box.w, box.h, g_gui_style.app_surface, g_gui_style.border_focus,
-                         g_gui_style.chrome_bg_alt);
+    int radius = gui_scaled_metric(20);
+
+    // Multi-layer soft shadow (unified with Control Panel)
+    int shadow_1 = gui_scaled_metric(8);
+    int shadow_2 = gui_scaled_metric(4);
+    int shadow_3 = gui_scaled_metric(2);
+    gui_fill_rounded_rect(&g_backbuffer, box.x + 1, box.y + shadow_1, box.w - 2, box.h, radius, 0x08000000u);
+    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_2, box.w, box.h, radius, 0x0C000000u);
+    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
+
+    gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
+                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
 
     DirtyRect search = wm_index_search_bounds();
     const char *query = g_index.query_len > 0 ? g_index.query : "";
@@ -1686,14 +1707,14 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
 
 static int wm_control_panel_card_h()
 {
-    int h = gui_scaled_metric(58);
-    return h < gui_scaled_metric(46) ? gui_scaled_metric(46) : h;
+    int h = gui_scaled_metric(54);
+    return h < gui_scaled_metric(44) ? gui_scaled_metric(44) : h;
 }
 
 static DirtyRect wm_control_item_rect(ControlPanelItem item)
 {
     DirtyRect box = control_center_bounds();
-    int pad = gui_space_2();
+    int pad = gui_space_1_5();
     int gap = gui_space_1();
     int header_h = gui_card_header_h();
     int card_h = wm_control_panel_card_h();
@@ -1719,7 +1740,7 @@ static DirtyRect wm_control_item_rect(ControlPanelItem item)
 
     y += card_h + gap;
     if (item == CONTROL_ITEM_VOLUME)
-        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(72)};
+        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(62)};
 
     int action_h = gui_app_control_h();
     int action_y = box.y + box.h - pad - action_h;
@@ -1744,13 +1765,14 @@ static void draw_control_volume_card()
     DirtyRect r = wm_control_item_rect(CONTROL_ITEM_VOLUME);
     bool hovered = g_control_center.hovered_item == CONTROL_ITEM_VOLUME || g_control_center.volume_dragging;
     uint32_t bg = hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface;
-    gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, gui_radius_md(), bg);
-    gui_draw_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, gui_radius_md(),
+    int card_r = gui_radius_md();
+    gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, card_r, bg);
+    gui_draw_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, card_r,
                           hovered ? g_gui_style.border_hover : g_gui_style.border);
 
     char value[16];
     snprintf(value, sizeof(value), "%u%%", (unsigned)g_control_center.volume);
-    int pad = gui_space_2();
+    int pad = gui_space_1_5();
     int label_y = r.y + gui_space_1();
     gui_draw_text_clipped(&g_backbuffer, gui_font_default(), r.x + pad, label_y, r.w / 2, "Volume", g_gui_style.text,
                           bg);
@@ -1758,7 +1780,7 @@ static void draw_control_volume_card()
     gui_draw_text_clipped(&g_backbuffer, gui_font_default(), r.x + r.w - pad - value_w, label_y, value_w, value,
                           g_gui_style.text_dim, bg);
 
-    int track_h = gui_scaled_metric(18);
+    int track_h = gui_scaled_metric(16);
     int track_x = r.x + pad;
     int track_y = r.y + r.h - pad - track_h;
     int track_w = r.w - pad * 2;
@@ -1790,12 +1812,22 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_radius_lg();
-    int shadow = gui_scaled_metric(6);
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow, box.w, box.h, radius, g_gui_chrome.frame_shadow);
-    gui_draw_panel_inset(&g_backbuffer, box.x, box.y, box.w, box.h, g_gui_style.app_surface, g_gui_style.border,
-                         g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, "Control Panel", "uniOS");
+    int radius = gui_scaled_metric(20);
+
+    // Multi-layer soft shadow for premium depth
+    int shadow_1 = gui_scaled_metric(8);
+    int shadow_2 = gui_scaled_metric(4);
+    int shadow_3 = gui_scaled_metric(2);
+    gui_fill_rounded_rect(&g_backbuffer, box.x + 1, box.y + shadow_1, box.w - 2, box.h, radius, 0x08000000u);
+    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_2, box.w, box.h, radius, 0x0C000000u);
+    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
+
+    // Main panel surface with inset highlight
+    gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
+                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
+
+    // Card header (drawn inside the panel inset border)
+    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Control Panel", "uniOS");
 
     draw_control_toggle(CONTROL_ITEM_NETWORK, "Network", g_control_center.network_enabled ? "Ethernet" : "Disconnected",
                         g_control_center.network_enabled);

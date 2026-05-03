@@ -694,7 +694,8 @@ extern uint64_t *vmm_create_address_space();
 static void user_task_wrapper()
 {
     Process *p = process_get_current();
-    DEBUG_INFO("Launching process: pid=%lu entry=0x%lx cr3=%p", p->pid, p->exec_entry, (void *)p->page_table);
+    DEBUG_INFO("Launching process: pid=%lu entry=0x%lx cr3=%p", p->pid, p->exec_entry,
+               reinterpret_cast<void *>(p->page_table));
 
     if (p->exec_entry != 0) {
         DEBUG_INFO("Entering user mode: rip=0x%lx rsp=0x%lx", p->exec_entry, USER_STACK_TOP);
@@ -1493,13 +1494,11 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint32_t pitch = static_cast<uint32_t>(g_framebuffer->pitch);
             const uint32_t *src32 = reinterpret_cast<const uint32_t *>(src);
             volatile uint32_t *dst32 = reinterpret_cast<volatile uint32_t *>(dest);
-            uint32_t src_stride = pitch / 4;
-            uint32_t dst_stride = pitch / 4;
-
+            const uint32_t stride = pitch / 4;
             uint64_t irq_flags = interrupts_save_disable();
             for (uint32_t y = 0; y < height; y++) {
-                const uint32_t *s = &src32[y * src_stride];
-                volatile uint32_t *d = &dst32[y * dst_stride];
+                const uint32_t *s = &src32[y * stride];
+                volatile uint32_t *d = &dst32[y * stride];
                 for (uint32_t x = 0; x < width; x++) {
                     d[x] = s[x];
                 }
@@ -1562,7 +1561,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             STAC();
             // Pre-fault the source buffer to avoid take faults during the blit loop
             for (size_t i = 0; i < access_size; i += 4096) {
-                volatile uint32_t dummy = ((volatile uint32_t *)src_buf)[i / 4];
+                volatile uint32_t dummy = reinterpret_cast<volatile uint32_t *>(src_buf)[i / 4];
                 (void)dummy;
             }
 

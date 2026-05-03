@@ -8,8 +8,8 @@ static constexpr int SHELL_DOCK_ICON_SPACING = 14;
 static constexpr int SHELL_DOCK_INDICATOR_SIZE = 3;
 static constexpr int SHELL_DOCK_INDICATOR_BOTTOM_PAD = 6;
 
-static constexpr int SHELL_DOCK_PANEL_PADDING_X = 16;
-static constexpr int SHELL_DOCK_PANEL_PADDING_Y = 10;
+static constexpr int SHELL_DOCK_PANEL_PADDING_X = 12;
+static constexpr int SHELL_DOCK_PANEL_PADDING_Y = 12;
 
 static constexpr int SHELL_DOCK_SHADOW_MARGIN_X = 38;
 static constexpr int SHELL_DOCK_SHADOW_MARGIN_Y = 6;

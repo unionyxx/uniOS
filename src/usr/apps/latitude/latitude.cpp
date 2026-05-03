@@ -2216,7 +2216,6 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     const char *search_value = (state->search[0] || state->search_focused) ? state->search : "Search";
     gui_app_draw_text_field(win, rects->search_field.x, rects->search_field.y, rects->search_field.w,
                             rects->search_field.h, search_value, state->search_focused, state->hovered == HOVER_SEARCH);
-    gui_draw_separator_h(win, panel_x + 1, toolbar_y + toolbar_h, panel_w - 2, g_gui_style.chrome_edge);
 
     int status_y = panel_y + panel_h - status_h;
     int edit_y = panel_y + tab_h + toolbar_h + 1;
@@ -2233,9 +2232,9 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     gui_fill_rect(win, edit_area.x, edit_area.y, edit_area.w, edit_area.h, editor_bg());
     gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h,
                   g_gui_style.app_surface_alt);
-    gui_draw_separator_h(win, edit_area.x, edit_area.y, edit_area.w, g_gui_style.chrome_edge);
+    gui_draw_separator_h(win, panel_x + 1, edit_area.y - 1, panel_w - 2, g_gui_style.chrome_edge);
     if (edit_area.w > gutter_w)
-        gui_fill_rect(win, edit_area.x + gutter_w - 1, edit_area.y, 1, edit_area.h, g_gui_style.chrome_edge);
+        gui_fill_rect(win, edit_area.x + gutter_w - 1, edit_area.y - 1, 1, edit_area.h + 1, g_gui_style.chrome_edge);
 
     if (state->focus == FOCUS_EDITOR)
         gui_draw_focus_frame(win, panel_x + 1, edit_y, panel_w - 2, edit_h, true, false);

@@ -7,7 +7,7 @@ static bool g_vector_used[IDT_ENTRIES] = {false};
 extern "C" void *isr_stub_table[];
 extern "C" void *irq_stub_table[];
 
-void idt_set_descriptor(uint8_t vector, void *isr, uint8_t flags)
+void idt_set_descriptor(uint8_t vector, const void *isr, uint8_t flags)
 {
     struct idt_entry *descriptor = &idt[vector];
 
@@ -22,7 +22,7 @@ void idt_set_descriptor(uint8_t vector, void *isr, uint8_t flags)
 
 // Set IDT descriptor with IST (Interrupt Stack Table) entry
 // IST 1-7 selects a stack from TSS; 0 means use current stack
-void idt_set_descriptor_with_ist(uint8_t vector, void *isr, uint8_t flags, uint8_t ist)
+void idt_set_descriptor_with_ist(uint8_t vector, const void *isr, uint8_t flags, uint8_t ist)
 {
     struct idt_entry *descriptor = &idt[vector];
 
@@ -61,7 +61,7 @@ void idt_init()
     }
 
     // Syscall (int 0x80) - Ring 3 callable
-    idt_set_descriptor(0x80, (void *)isr128, 0xEE); // 0xEE = Present, Ring3, Interrupt
+    idt_set_descriptor(0x80, reinterpret_cast<void *>(isr128), 0xEE); // 0xEE = Present, Ring3, Interrupt
     g_vector_used[0x80] = true;
 
     load_idt(&idtr);

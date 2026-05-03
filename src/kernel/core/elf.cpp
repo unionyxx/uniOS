@@ -250,14 +250,14 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
         void *frame = pmm_alloc_frame();
         if (!frame) {
             for (int j = 0; j < i; j++) {
-                const uint64_t vaddr = stack_base + (uint64_t)j * k_page_size;
+                const uint64_t vaddr = stack_base + static_cast<uint64_t>(j) * k_page_size;
                 const uint64_t phys = target_pml4 ? vmm_virt_to_phys_in(target_pml4, vaddr) : 0;
                 rollback_loaded_page(target_pml4, vaddr, phys);
             }
             return 0;
         }
 
-        const uint64_t vaddr = stack_base + (uint64_t)i * k_page_size;
+        const uint64_t vaddr = stack_base + static_cast<uint64_t>(i) * k_page_size;
         const uint64_t frame_phys = reinterpret_cast<uint64_t>(frame);
         const bool mapped = target_pml4 ? vmm_map_page_in(target_pml4, vaddr, frame_phys,
                                                           PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NX)
@@ -267,7 +267,7 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
         if (!mapped) {
             pmm_free_frame(frame);
             for (int j = 0; j < i; j++) {
-                const uint64_t old_vaddr = stack_base + (uint64_t)j * k_page_size;
+                const uint64_t old_vaddr = stack_base + static_cast<uint64_t>(j) * k_page_size;
                 const uint64_t phys = target_pml4 ? vmm_virt_to_phys_in(target_pml4, old_vaddr) : 0;
                 rollback_loaded_page(target_pml4, old_vaddr, phys);
             }

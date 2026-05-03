@@ -216,7 +216,7 @@ void apic_init()
     g_lapic_base = 0;
     g_apic_enabled = false;
 
-    AcpiMadtHeader *madt = (AcpiMadtHeader *)acpi_find_table("APIC");
+    AcpiMadtHeader *madt = reinterpret_cast<AcpiMadtHeader *>(acpi_find_table("APIC"));
     if (madt) {
         if (madt->local_apic_address != 0) {
             lapic_phys = madt->local_apic_address;

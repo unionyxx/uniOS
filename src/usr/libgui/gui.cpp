@@ -271,7 +271,8 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     uint32_t copy_h = (s->height < alloc_h) ? s->height : alloc_h;
     uint32_t old_stride = s->pitch / 4;
     for (uint32_t row = 0; row < copy_h; row++) {
-        memcpy(&new_buffer[static_cast<size_t>(row) * alloc_w], &s->buffer[static_cast<size_t>(row) * old_stride], static_cast<size_t>(copy_w) * 4u);
+        memcpy(&new_buffer[static_cast<size_t>(row) * alloc_w], &s->buffer[static_cast<size_t>(row) * old_stride],
+               static_cast<size_t>(copy_w) * 4u);
     }
 
     int old_shm_id = g_window_shm_id;
@@ -471,7 +472,8 @@ Surface gui_create_surface(uint32_t width, uint32_t height)
 
 void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color)
 {
-    if (!s || !s->buffer || x < 0 || y < 0 || x >= static_cast<int32_t>(s->width) || y >= static_cast<int32_t>(s->height))
+    if (!s || !s->buffer || x < 0 || y < 0 || x >= static_cast<int32_t>(s->width) ||
+        y >= static_cast<int32_t>(s->height))
         return;
     s->buffer[y * (s->pitch / 4) + x] = color;
 }
@@ -662,9 +664,10 @@ static uint32_t g_round_mask_cache_age = 1;
 
 static inline uint8_t rounded_hits_to_alpha(int hits)
 {
-    return hits <= 0
-               ? 0
-               : (hits >= k_round_aa_total ? 255 : static_cast<uint8_t>((hits * 255 + k_round_aa_total / 2) / k_round_aa_total));
+    return hits <= 0 ? 0
+                     : (hits >= k_round_aa_total
+                            ? 255
+                            : static_cast<uint8_t>((hits * 255 + k_round_aa_total / 2) / k_round_aa_total));
 }
 
 static uint8_t *build_rounded_corner_fill_mask(int radius)
@@ -690,7 +693,8 @@ static uint8_t *build_rounded_corner_fill_mask(int radius)
                         hits++;
                 }
             }
-            mask[static_cast<size_t>(row) * static_cast<size_t>(radius) + static_cast<size_t>(col)] = rounded_hits_to_alpha(hits);
+            mask[static_cast<size_t>(row) * static_cast<size_t>(radius) + static_cast<size_t>(col)] =
+                rounded_hits_to_alpha(hits);
         }
     }
     return mask;
@@ -733,7 +737,8 @@ static inline uint8_t rounded_corner_mask_alpha(const RoundedCornerMaskCacheEntr
 {
     if (!entry || !entry->fill || local_x < 0 || local_y < 0 || local_x >= entry->radius || local_y >= entry->radius)
         return 0;
-    return entry->fill[static_cast<size_t>(local_y) * static_cast<size_t>(entry->radius) + static_cast<size_t>(local_x)];
+    return entry
+        ->fill[static_cast<size_t>(local_y) * static_cast<size_t>(entry->radius) + static_cast<size_t>(local_x)];
 }
 
 uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int32_t h, int32_t r,
@@ -1027,7 +1032,8 @@ void gui_draw_char(Surface *s, int32_t x, int32_t y, char c, uint32_t fg, uint32
         gui_draw_text(s, gui_font_default(), x, y, text, fg, bg);
         return;
     }
-    if (!s || !s->buffer || x < 0 || y < 0 || x + 8 > static_cast<int32_t>(s->width) || y + 16 > static_cast<int32_t>(s->height))
+    if (!s || !s->buffer || x < 0 || y < 0 || x + 8 > static_cast<int32_t>(s->width) ||
+        y + 16 > static_cast<int32_t>(s->height))
         return;
     init_font_masks();
 
@@ -1350,18 +1356,22 @@ void gui_blit_rect(Surface *dest, Surface *src, int32_t dx, int32_t dy, int32_t 
     bool same_buffer = dest->buffer == src->buffer;
     bool overlap = false;
     if (same_buffer) {
-        overlap = !(static_cast<int64_t>(dx) + w <= sx || static_cast<int64_t>(sx) + w <= dx || static_cast<int64_t>(dy) + h <= sy || static_cast<int64_t>(sy) + h <= dy);
+        overlap = !(static_cast<int64_t>(dx) + w <= sx || static_cast<int64_t>(sx) + w <= dx ||
+                    static_cast<int64_t>(dy) + h <= sy || static_cast<int64_t>(sy) + h <= dy);
     }
 
     size_t row_bytes = static_cast<size_t>(w) * sizeof(uint32_t);
 
     if (!overlap && dx == 0 && sx == 0 && static_cast<uint32_t>(w) == sp_u32 && static_cast<uint32_t>(w) == dp_u32) {
-        memcpy(&dest->buffer[static_cast<size_t>(dy) * dp_u32], &src->buffer[static_cast<size_t>(sy) * sp_u32], row_bytes * static_cast<size_t>(h));
+        memcpy(&dest->buffer[static_cast<size_t>(dy) * dp_u32], &src->buffer[static_cast<size_t>(sy) * sp_u32],
+               row_bytes * static_cast<size_t>(h));
         return;
     }
 
-    if (!overlap && dx == 0 && sx == 0 && static_cast<uint32_t>(w) == src->width && static_cast<uint32_t>(w) == dest->width) {
-        memcpy(&dest->buffer[static_cast<size_t>(dy) * dp_u32], &src->buffer[static_cast<size_t>(sy) * sp_u32], row_bytes * static_cast<size_t>(h));
+    if (!overlap && dx == 0 && sx == 0 && static_cast<uint32_t>(w) == src->width &&
+        static_cast<uint32_t>(w) == dest->width) {
+        memcpy(&dest->buffer[static_cast<size_t>(dy) * dp_u32], &src->buffer[static_cast<size_t>(sy) * sp_u32],
+               row_bytes * static_cast<size_t>(h));
         return;
     }
 
@@ -1886,7 +1896,8 @@ void gui_app_draw_header(Surface *s, const GuiAppLayout *layout, const char *tit
         gui_draw_text_clipped(s, gui_font_title(), text_x, title_y, title_max_w, title, g_gui_style.text, 0);
     }
     if (subtitle && *subtitle) {
-        gui_draw_text_clipped(s, gui_font_default(), text_x, subtitle_y, title_max_w, subtitle, g_gui_style.text_dim, 0);
+        gui_draw_text_clipped(s, gui_font_default(), text_x, subtitle_y, title_max_w, subtitle, g_gui_style.text_dim,
+                              0);
     }
     if (detail && *detail) {
         int detail_w = gui_measure_text(gui_font_default(), detail);
@@ -2063,7 +2074,11 @@ void gui_app_draw_text_field(Surface *s, int x, int y, int w, int h, const char 
     const int space_2 = gui_space_2();
     uint32_t bg = focused ? g_gui_style.app_surface : g_gui_style.app_surface_alt;
     uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
-    int r = gui_corner_radius(w, h, gui_radius_sm());
+    int r = gui_corner_radius(w, h, gui_radius_md());
+
+    // Shadow to match button height/weight
+    gui_fill_rounded_rect(s, x, y + 1, w, h, r, 0x08000000u);
+
     gui_fill_rounded_rect(s, x, y, w, h, r, bg);
     gui_draw_rounded_rect(s, x, y, w, h, r, border);
     if (focused && w > 4 && h > 4)
@@ -2102,7 +2117,7 @@ void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *lab
     if (primary && hovered)
         bg = g_gui_style.border_hover;
     uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
-    int r = gui_corner_radius(w, h, gui_radius_sm());
+    int r = gui_corner_radius(w, h, gui_radius_md());
 
     // Shadow (only if not maximized/fullscreen logic, but here simple)
     gui_fill_rounded_rect(s, x, y + 1, w, h, r, primary ? 0x18000000u : 0x10000000u);
@@ -2189,14 +2204,14 @@ void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *ite
     int separator_inset = popup_menu_separator_inset();
     int y_cursor = y + popup_menu_outer_pad_y();
 
-    int radius = gui_corner_radius(w, menu_h, gui_scaled_metric(12));
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(5), w, menu_h, radius, 0x10000000u);
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(2), w, menu_h, radius, 0x12000000u);
-    gui_fill_rounded_rect(s, x, y, w, menu_h, radius, g_gui_style.app_surface);
-    gui_draw_rounded_rect(s, x, y, w, menu_h, radius, g_gui_style.border);
-    if (w > 4 && menu_h > 4)
-        gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, menu_h - 2, gui_corner_radius(w - 2, menu_h - 2, radius - 1),
-                              g_gui_style.chrome_bg_alt);
+    int radius = gui_corner_radius(w, menu_h, gui_radius_xl());
+
+    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(6), w, menu_h, radius, 0x08000000u);
+    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(3), w, menu_h, radius, 0x0C000000u);
+    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(1), w, menu_h, radius, 0x10000000u);
+
+    gui_draw_panel_inset_ext(s, x, y, w, menu_h, radius, g_gui_style.app_surface, g_gui_style.border,
+                             g_gui_style.chrome_bg_alt);
 
     for (int i = 0; i < count; i++) {
         bool hovered = i == hovered_index && !items[i].separator && items[i].enabled;
@@ -2209,7 +2224,10 @@ void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *ite
             if (hovered) {
                 int row_x = x + outer_pad_x;
                 int row_w = w - outer_pad_x * 2;
-                gui_fill_rounded_rect(s, row_x, y_cursor, row_w, item_h, gui_radius_sm(), row_bg);
+                int row_r = radius - outer_pad_x;
+                if (row_r < gui_radius_sm())
+                    row_r = gui_radius_sm();
+                gui_fill_rounded_rect(s, row_x, y_cursor, row_w, item_h, row_r, row_bg);
             }
             int text_y = gui_align_text_y(gui_font_default(), y_cursor, item_h);
             int text_x = x + outer_pad_x + row_pad_x;

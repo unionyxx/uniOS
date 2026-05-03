@@ -1,4 +1,5 @@
 #include <kernel/arch/x86_64/gdt.h>
+#include <stddef.h>
 
 __attribute__((aligned(0x1000))) static struct gdt_entry
     gdt[7]; // Null, Kernel Code, Kernel Data, User Code, User Data, TSS (Low), TSS (High)
@@ -25,8 +26,9 @@ extern "C" void load_tss(void);
 [[gnu::target("no-sse")]] void gdt_init()
 {
     // Zero the TSS first
-    for (unsigned i = 0; i < sizeof(tss); i++) {
-        ((uint8_t *)&tss)[i] = 0;
+    auto *tss_ptr = reinterpret_cast<uint8_t *>(&tss);
+    for (size_t i = 0; i < sizeof(tss); i++) {
+        tss_ptr[i] = 0;
     }
 
     // Setup TSS
@@ -84,7 +86,7 @@ extern "C" void load_tss(void);
               .granularity = (uint8_t)(((tss_limit >> 16) & 0x0F)),
               .base_high = (uint8_t)((tss_base >> 24) & 0xFF)};
 
-    uint64_t *tss_high = (uint64_t *)&gdt[6];
+    auto *tss_high = reinterpret_cast<uint64_t *>(&gdt[6]);
     *tss_high = (tss_base >> 32) & 0xFFFFFFFF;
 
     gdtr.size = sizeof(gdt) - 1;

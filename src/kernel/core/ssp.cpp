@@ -19,11 +19,11 @@ extern "C" void __stack_chk_guard_init()
         uint8_t ok;
         asm volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
         if (ok)
-            canary ^= (uintptr_t)val;
+            canary ^= static_cast<uintptr_t>(val);
     } else {
         uint32_t lo, hi;
         asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        canary ^= (uintptr_t)lo | ((uintptr_t)hi << 32);
+        canary ^= static_cast<uintptr_t>(lo) | (static_cast<uintptr_t>(hi) << 32);
     }
 
     __stack_chk_guard = canary;

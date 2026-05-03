@@ -411,16 +411,20 @@ static inline void gui_draw_panel(Surface *s, int x, int y, int w, int h, uint32
     gui_draw_rounded_rect(s, x, y, w, h, r, border);
 }
 
-static inline void gui_draw_panel_inset(Surface *s, int x, int y, int w, int h, uint32_t bg, uint32_t border,
-                                        uint32_t inset)
+static inline void gui_draw_panel_inset_ext(Surface *s, int x, int y, int w, int h, int r, uint32_t bg, uint32_t border,
+                                            uint32_t inset)
 {
-    int r = gui_panel_radius(w, h);
     gui_fill_rounded_rect(s, x, y, w, h, r, bg);
     gui_draw_rounded_rect(s, x, y, w, h, r, border);
     if (w > 4 && h > 4) {
-        // The inset border must also be rounded to match
         gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, gui_corner_radius(w - 2, h - 2, r - 1), inset);
     }
+}
+
+static inline void gui_draw_panel_inset(Surface *s, int x, int y, int w, int h, uint32_t bg, uint32_t border,
+                                        uint32_t inset)
+{
+    gui_draw_panel_inset_ext(s, x, y, w, h, gui_panel_radius(w, h), bg, border, inset);
 }
 
 static inline void gui_fill_top_rounded_panel(Surface *s, int x, int y, int w, int h, int r, uint32_t color)
@@ -437,7 +441,7 @@ static inline void gui_draw_card(Surface *s, int x, int y, int w, int h, const c
     int header_h = gui_card_header_h();
     int r = gui_panel_radius(w, h);
     gui_fill_rounded_rect(s, x, y + 1, w, h, r, g_gui_style.chrome_bg);
-    gui_draw_panel_inset(s, x, y, w, h, g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
+    gui_draw_panel_inset_ext(s, x, y, w, h, r, g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
     if (header_h > 0 && w > 2) {
         gui_fill_top_rounded_panel(s, x + 1, y + 1, w - 2, header_h, gui_corner_radius(w - 2, header_h, r - 1),
                                    g_gui_style.chrome_bg);
@@ -450,10 +454,10 @@ static inline void gui_draw_card(Surface *s, int x, int y, int w, int h, const c
     }
 }
 
-static inline void gui_draw_card_header(Surface *s, int x, int y, int w, const char *title, const char *detail)
+static inline void gui_draw_card_header_ext(Surface *s, int x, int y, int w, int r, const char *title,
+                                           const char *detail)
 {
     int header_h = gui_card_header_h();
-    int r = gui_panel_radius(w, header_h);
     gui_fill_top_rounded_panel(s, x, y, w, header_h, gui_corner_radius(w, header_h, r), g_gui_style.chrome_bg);
     gui_draw_separator_h(s, x, y + header_h, w, g_gui_style.chrome_edge);
     int title_y = gui_align_text_y(gui_font_title(), y, header_h);
@@ -469,6 +473,11 @@ static inline void gui_draw_card_header(Surface *s, int x, int y, int w, const c
         gui_draw_text_clipped(s, gui_font_default(), detail_x, detail_y, w - (detail_x - x) - gui_space_2(), detail,
                               g_gui_style.text_dim, g_gui_style.chrome_bg);
     }
+}
+
+static inline void gui_draw_card_header(Surface *s, int x, int y, int w, const char *title, const char *detail)
+{
+    gui_draw_card_header_ext(s, x, y, w, gui_panel_radius(w, gui_card_header_h()), title, detail);
 }
 
 static inline void gui_draw_badge(Surface *s, int x, int y, const char *label, uint32_t bg, uint32_t fg)
