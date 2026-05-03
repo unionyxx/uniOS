@@ -74,12 +74,12 @@ void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end)
     }
 }
 
-[[nodiscard]] VMA *vma_clone(VMA *src_list)
+[[nodiscard]] VMA *vma_clone(const VMA *src_list)
 {
     VMA *new_list = nullptr;
     VMA **last_ptr = &new_list;
 
-    for (VMA *current = src_list; current; current = current->next) {
+    for (const VMA *current = src_list; current; current = current->next) {
         VMA *new_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
         if (!new_vma) {
             vma_free_all(new_list);

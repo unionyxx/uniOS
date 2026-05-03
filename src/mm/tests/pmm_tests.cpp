@@ -27,7 +27,7 @@ KTEST(pmm_alloc_is_zeroed)
     KTEST_EXPECT(frame != nullptr);
 
     // Check if it's actually zeroed (pmm_alloc_frame does this by default)
-    uint8_t *ptr = (uint8_t *)vmm_phys_to_virt((uint64_t)frame);
+    uint8_t *ptr = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame)));
     for (int i = 0; i < 4096; i++) {
         KTEST_EXPECT_EQ(ptr[i], 0);
     }

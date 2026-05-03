@@ -53,7 +53,7 @@ static PageSlot g_page_slots[MAX_TRACKED_PAGES];
     return __builtin_mul_overflow(a, b, out);
 }
 
-[[nodiscard]] static size_t heap_observed_alignment(void *ptr)
+[[nodiscard]] static size_t heap_observed_alignment(const void *ptr)
 {
     uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
     if (addr == 0)
@@ -279,7 +279,7 @@ void heap_init(void *start, size_t size)
         return nullptr;
     if (add_overflow(total, sizeof(AllocHeader), &total))
         return nullptr;
-    void *raw = malloc(total);
+    const void *raw = malloc(total);
     if (!raw) [[unlikely]]
         return nullptr;
 
@@ -366,7 +366,7 @@ void free(void *ptr)
 
     void *base_user_ptr = ptr;
     bool was_aligned = false;
-    AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr, &was_aligned);
+    const AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr, &was_aligned);
     if (!header || header->magic != HEAP_MAGIC)
         return nullptr;
     if (header->size < sizeof(AllocHeader))
@@ -429,7 +429,7 @@ extern "C" void heap_dump_stats()
     spinlock_acquire(&g_heap_lock);
     for (int i = 0; i < NUM_BUCKETS; i++) {
         int count = 0;
-        for (FreeBlock *cur = g_buckets[i]; cur; cur = cur->next)
+        for (const FreeBlock *cur = g_buckets[i]; cur; cur = cur->next)
             count++;
 
         char buf[16];
@@ -480,19 +480,16 @@ extern "C" void heap_dump_stats()
 
     char cap_buf[16];
     bi = 0;
-    int cap = MAX_TRACKED_PAGES;
-    if (cap == 0) {
-        cap_buf[bi++] = '0';
-    } else {
-        char tmp[16];
-        int ti = 0;
-        while (cap > 0) {
-            tmp[ti++] = '0' + (cap % 10);
-            cap /= 10;
-        }
-        while (ti > 0)
-            cap_buf[bi++] = tmp[--ti];
+    int cap_val = MAX_TRACKED_PAGES;
+    char tmp[16];
+    int ti = 0;
+    while (cap_val > 0) {
+        tmp[ti++] = '0' + (cap_val % 10);
+        cap_val /= 10;
     }
+    while (ti > 0)
+        cap_buf[bi++] = tmp[--ti];
+
     cap_buf[bi] = '\0';
     g_terminal.write(cap_buf);
     g_terminal.write("\n");

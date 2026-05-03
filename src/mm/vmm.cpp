@@ -174,7 +174,7 @@ static inline void vmm_flush_tlb_all()
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
 }
 
-uint64_t vmm_virt_to_phys_in(uint64_t *pml4, uint64_t virt)
+uint64_t vmm_virt_to_phys_in(const uint64_t *pml4, uint64_t virt)
 {
     if (!pml4)
         return 0;
@@ -186,21 +186,21 @@ uint64_t vmm_virt_to_phys_in(uint64_t *pml4, uint64_t virt)
     if (!(pml4[pml4_index] & PTE_PRESENT))
         return 0;
 
-    uint64_t *pdpt = reinterpret_cast<uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pdpt = reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
     if (!(pdpt[pdpt_index] & PTE_PRESENT))
         return 0;
     if (pdpt[pdpt_index] & (1ULL << 7)) { // PS bit
         return (pdpt[pdpt_index] & 0x000FFFFFC0000000ULL) + (virt & 0x3FFFFFFFULL);
     }
 
-    uint64_t *pd = reinterpret_cast<uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pd = reinterpret_cast<const uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
     if (!(pd[pd_index] & PTE_PRESENT))
         return 0;
     if (pd[pd_index] & (1ULL << 7)) { // PS bit
         return (pd[pd_index] & 0x000FFFFFFFE00000ULL) + (virt & 0x1FFFFFULL);
     }
 
-    uint64_t *pt = reinterpret_cast<uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pt = reinterpret_cast<const uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
     if (!(pt[pt_index] & PTE_PRESENT))
         return 0;
 
@@ -209,14 +209,14 @@ uint64_t vmm_virt_to_phys_in(uint64_t *pml4, uint64_t virt)
 
 uint64_t vmm_virt_to_phys(uint64_t virt)
 {
-    uint64_t *pml4 = g_pml4;
-    Process *curr = process_get_current();
+    const uint64_t *pml4 = g_pml4;
+    const Process *curr = process_get_current();
     if (curr && curr->page_table)
         pml4 = curr->page_table;
     return vmm_virt_to_phys_in(pml4, virt);
 }
 
-uint64_t vmm_get_page_flags_in(uint64_t *pml4, uint64_t virt)
+uint64_t vmm_get_page_flags_in(const uint64_t *pml4, uint64_t virt)
 {
     if (!pml4)
         return 0;
@@ -229,15 +229,15 @@ uint64_t vmm_get_page_flags_in(uint64_t *pml4, uint64_t virt)
     if (!(pml4[pml4_index] & PTE_PRESENT))
         return 0;
 
-    uint64_t *pdpt = reinterpret_cast<uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pdpt = reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
     if (!(pdpt[pdpt_index] & PTE_PRESENT) || (pdpt[pdpt_index] & (1ULL << 7)))
         return 0;
 
-    uint64_t *pd = reinterpret_cast<uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pd = reinterpret_cast<const uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
     if (!(pd[pd_index] & PTE_PRESENT) || (pd[pd_index] & (1ULL << 7)))
         return 0;
 
-    uint64_t *pt = reinterpret_cast<uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pt = reinterpret_cast<const uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
     if (!(pt[pt_index] & PTE_PRESENT))
         return 0;
 
@@ -398,7 +398,7 @@ static void free_page_table_level(uint64_t *table, int level);
     return true;
 }
 
-uint64_t *vmm_clone_address_space(uint64_t *src_pml4)
+uint64_t *vmm_clone_address_space(const uint64_t *src_pml4)
 {
     if (!src_pml4)
         return nullptr;
@@ -474,7 +474,7 @@ static void free_page_table_level(uint64_t *table, int level)
     }
 }
 
-void vmm_free_address_space(uint64_t *target_pml4)
+void vmm_free_address_space(const uint64_t *target_pml4)
 {
     if (!target_pml4 || target_pml4 == g_pml4)
         return;
@@ -492,7 +492,7 @@ void vmm_free_address_space(uint64_t *target_pml4)
     pmm_free_frame(reinterpret_cast<void *>(reinterpret_cast<uint64_t>(target_pml4) - g_hhdm_offset));
 }
 
-void vmm_switch_address_space(uint64_t *new_pml4_phys)
+void vmm_switch_address_space(const uint64_t *new_pml4_phys)
 {
     asm volatile("mov %0, %%cr3" ::"r"(new_pml4_phys) : "memory");
 }

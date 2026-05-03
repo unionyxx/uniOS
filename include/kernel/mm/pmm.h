@@ -23,13 +23,13 @@ void pmm_init();
 void pmm_free_frame(void *frame);
 
 /** @brief Increments the reference count of a physical frame. */
-void pmm_refcount_inc(void *frame);
+void pmm_refcount_inc(const void *frame);
 
 /** @brief Decrements the reference count of a physical frame. */
 void pmm_refcount_dec(void *frame);
 
 /** @brief Gets the current reference count of a physical frame. */
-[[nodiscard]] uint16_t pmm_get_refcount(void *frame);
+[[nodiscard]] uint16_t pmm_get_refcount(const void *frame);
 
 /** @brief Returns total free physical memory in bytes. */
 [[nodiscard]] uint64_t pmm_get_free_memory();
@@ -38,4 +38,4 @@ void pmm_refcount_dec(void *frame);
 [[nodiscard]] uint64_t pmm_get_total_memory();
 
 /** @brief Checks if a physical address is within the managed RAM range. */
-[[nodiscard]] bool pmm_is_managed(void *frame);
+[[nodiscard]] bool pmm_is_managed(const void *frame);

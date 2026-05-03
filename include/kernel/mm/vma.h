@@ -28,6 +28,6 @@ struct VMA
 [[nodiscard]] VMA *vma_add(VMA **list_ptr, uint64_t start, uint64_t end, uint64_t flags, VMAType type);
 
 void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end);
-[[nodiscard]] VMA *vma_clone(VMA *src_list);
+[[nodiscard]] VMA *vma_clone(const VMA *src_list);
 void vma_free_all(VMA *list);
 void vma_dump_list(VMA *list);

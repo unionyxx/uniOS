@@ -78,7 +78,7 @@ void pmm_init()
     uint64_t highest_phys_addr = 0;
 
     for (uint64_t i = 0; i < boot_info->memory_map_count; i++) {
-        BootMemoryMapEntry *entry = &boot_info->memory_map[i];
+        const BootMemoryMapEntry *entry = &boot_info->memory_map[i];
         // Only consider usable/reclaimable memory for bitmap sizing.
         // UEFI may have MMIO regions at extremely high physical addresses (e.g., >4TiB)
         // that we don't need to track in the PMM bitmap.
@@ -117,7 +117,7 @@ void pmm_init()
     bool refcounts_phys_found = false;
 
     for (uint64_t i = 0; i < boot_info->memory_map_count; i++) {
-        BootMemoryMapEntry *entry = &boot_info->memory_map[i];
+        const BootMemoryMapEntry *entry = &boot_info->memory_map[i];
         if (entry->type == BOOT_MEM_USABLE) {
             uint64_t base = 0;
             uint64_t length = 0;
@@ -161,7 +161,7 @@ void pmm_init()
     uint64_t reserved_memory = 0;
 
     for (uint64_t i = 0; i < boot_info->memory_map_count; i++) {
-        BootMemoryMapEntry *entry = &boot_info->memory_map[i];
+        const BootMemoryMapEntry *entry = &boot_info->memory_map[i];
 
         if (entry->type == BOOT_MEM_USABLE) {
             usable_memory += entry->length;
@@ -276,7 +276,7 @@ void *pmm_alloc_frames(size_t count)
     return nullptr;
 }
 
-void pmm_refcount_inc(void *frame)
+void pmm_refcount_inc(const void *frame)
 {
     if (!frame)
         return;
@@ -320,7 +320,7 @@ void pmm_refcount_dec(void *frame)
     spinlock_release(&g_pmm_lock);
 }
 
-uint16_t pmm_get_refcount(void *frame)
+uint16_t pmm_get_refcount(const void *frame)
 {
     if (!frame)
         return 0;
@@ -347,7 +347,7 @@ uint64_t pmm_get_total_memory()
     return g_total_memory;
 }
 
-bool pmm_is_managed(void *frame)
+bool pmm_is_managed(const void *frame)
 {
     if (!frame)
         return false;

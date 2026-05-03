@@ -38,22 +38,22 @@ void vmm_unmap_page_in(uint64_t *pml4, uint64_t virt);
 [[nodiscard]] uint64_t vmm_virt_to_phys(uint64_t virt);
 
 /** @brief Translates a virtual address to its physical address in a specific PML4. */
-[[nodiscard]] uint64_t vmm_virt_to_phys_in(uint64_t *pml4, uint64_t virt);
-[[nodiscard]] uint64_t vmm_get_page_flags_in(uint64_t *pml4, uint64_t virt);
+[[nodiscard]] uint64_t vmm_virt_to_phys_in(const uint64_t *pml4, uint64_t virt);
+[[nodiscard]] uint64_t vmm_get_page_flags_in(const uint64_t *pml4, uint64_t virt);
 
 /** @brief Maps a physical address to its HHDM (Higher Half Direct Map) virtual address. */
 [[nodiscard]] uint64_t vmm_phys_to_virt(uint64_t phys);
 
 [[nodiscard]] uint64_t *vmm_create_address_space();
-void vmm_switch_address_space(uint64_t *pml4_phys);
+void vmm_switch_address_space(const uint64_t *pml4_phys);
 
 [[nodiscard]] uint64_t *vmm_get_kernel_pml4();
 
 constexpr uint64_t KERNEL_STACK_TOP = 0xFFFFFF8000000000ULL;
 constexpr size_t KERNEL_STACK_SIZE = 65536;
 
-[[nodiscard]] uint64_t *vmm_clone_address_space(uint64_t *src_pml4);
-void vmm_free_address_space(uint64_t *pml4);
+[[nodiscard]] uint64_t *vmm_clone_address_space(const uint64_t *src_pml4);
+void vmm_free_address_space(const uint64_t *pml4);
 
 [[nodiscard]] uint64_t vmm_get_hhdm_offset();
 

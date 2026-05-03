@@ -25,7 +25,7 @@ KTEST(heap_realloc)
     KTEST_EXPECT(p1_new != nullptr);
 
     // Check if data was preserved
-    uint8_t *ptr = (uint8_t *)p1_new;
+    const uint8_t *ptr = reinterpret_cast<const uint8_t *>(p1_new);
     for (int i = 0; i < 32; i++) {
         KTEST_EXPECT_EQ(ptr[i], 0xAA);
     }
@@ -37,8 +37,10 @@ KTEST(heap_calloc)
 {
     void *p = calloc(10, 64);
     KTEST_EXPECT(p != nullptr);
+    if (!p)
+        return;
 
-    uint8_t *ptr = (uint8_t *)p;
+    const uint8_t *ptr = reinterpret_cast<const uint8_t *>(p);
     for (int i = 0; i < 640; i++) {
         KTEST_EXPECT_EQ(ptr[i], 0);
     }
