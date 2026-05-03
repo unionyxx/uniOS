@@ -697,7 +697,7 @@ cppcheck = find_program('cppcheck', required : false)
 if cppcheck.found()
   run_target(
     'lint',
-    command : [cppcheck, '--enable=all', '--suppress=missingIncludeSystem', '--error-exitcode=1', meson.project_source_root() / 'src', meson.project_source_root() / 'include'],
+    command : [cppcheck, '--enable=all', '--suppress=missingIncludeSystem', '--error-exitcode=1', '-D__asm__(x)=', meson.project_source_root() / 'src', meson.project_source_root() / 'include'],
   )
 endif
 

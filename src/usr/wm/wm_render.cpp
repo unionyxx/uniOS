@@ -552,7 +552,7 @@ static void blur_surface_box(Surface *s, int radius)
     if (!s || !s->buffer || radius <= 0)
         return;
     uint32_t w = s->width, h = s->height, stride = s->pitch / 4;
-    uint32_t *tmp = (uint32_t *)malloc(w * h * 4);
+    uint32_t *tmp = static_cast<uint32_t *>(malloc(w * h * 4));
     if (!tmp)
         return;
 
@@ -923,13 +923,13 @@ bool init_shell_blur_buffers(Registry *registry, uint32_t dock_w, uint32_t dock_
         return false;
     }
 
-    g_menubar_blur.buffer = (uint32_t *)mb_map;
+    g_menubar_blur.buffer = reinterpret_cast<uint32_t *>(mb_map);
     g_menubar_blur.width = g_screen.width;
     g_menubar_blur.height = (uint32_t)menubar_h;
     g_menubar_blur.pitch = g_screen.width * 4u;
     g_menubar_blur.owns_buffer = false;
 
-    g_dock_blur.buffer = (uint32_t *)dk_map;
+    g_dock_blur.buffer = reinterpret_cast<uint32_t *>(dk_map);
     g_dock_blur.width = dock_w;
     g_dock_blur.height = dock_h;
     g_dock_blur.pitch = dock_w * 4u;
@@ -1021,7 +1021,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
         return;
 
     int title_bar_h = wm_title_bar_h();
-    int button_size = wm_button_size();
+    wm_button_size();
     int space_1 = gui_space_1();
     int space_2 = gui_space_2();
     int border = wm_frame_border();

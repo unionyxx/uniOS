@@ -121,7 +121,7 @@ static void enqueue_damage_rect_expanded(const DirtyRect &rect, int pad)
     enqueue_damage_rect(expanded.x, expanded.y, expanded.w, expanded.h);
 }
 
-static void publish_window_scroll(Window &w)
+static void publish_window_scroll(const Window &w)
 {
     if (!w.entry)
         return;
@@ -134,9 +134,7 @@ static void publish_window_scroll(Window &w)
 
 static uint32_t next_configure_serial(Window &w)
 {
-    uint32_t serial = w.configure_serial + 1u;
-    if (serial == 0)
-        serial = 1u;
+    uint32_t serial = (w.configure_serial == 0xFFFFFFFFu) ? 1u : w.configure_serial + 1u;
     w.configure_serial = serial;
     return serial;
 }
@@ -170,7 +168,7 @@ static int wm_snap_escape()
     return escape < wm_snap_threshold() ? wm_snap_threshold() : escape;
 }
 
-static void apply_window_move_snap(Window &w, int *x, int *y, int width, int height)
+static void apply_window_move_snap(const Window &w, int *x, int *y, int width, int height)
 {
     if (!x || !y || !w.entry || w.entry->state == WIN_MAXIMIZED || width <= 0 || height <= 0)
         return;
@@ -1032,7 +1030,7 @@ void minimize_window(int index)
 {
     if (index < 2 || index >= g_window_count || !g_windows[index].entry)
         return;
-    Window &w = g_windows[index];
+    const Window &w = g_windows[index];
     if (w.entry->state == WIN_NORMAL) {
         w.entry->restore_x = w.x;
         w.entry->restore_y = w.y;
@@ -1114,13 +1112,13 @@ int hit_test_resize(const Window &w, int px, int py)
     int64_t l = w.x - border, r = w.x + w.w + border, t = w.y - wm_title_bar_h() - border, b = w.y + w.h + border;
     if (px < l - grip || px >= r + grip || py < t - grip || py >= b + grip)
         return RESIZE_NONE;
-    if (px >= l - grip && px < l + grip)
+    if (px < l + grip)
         edges |= RESIZE_LEFT;
     if (px >= r - grip && px < r + grip)
         edges |= RESIZE_RIGHT;
     if (py >= t - grip && py < t + grip)
         edges |= RESIZE_TOP;
-    if (py >= b - grip && py < b + grip)
+    if (py < b + grip)
         edges |= RESIZE_BOTTOM;
     return edges;
 }
@@ -1232,7 +1230,6 @@ void post_mouse_event_to_window(const Window &w, EventType type, int px, int py,
     ev.mouse.x = px - w.x + w.scroll_x;
     ev.mouse.y = py - w.y + w.scroll_y;
     ev.mouse.button = button;
-    ev.mouse.scroll_y = scroll_y;
     ev.mouse.scroll_y = scroll_y;
     syscall2(SYS_POST_EVENT, owner, (uint64_t)&ev);
 }
@@ -1511,9 +1508,7 @@ static void publish_settings_changed(Registry *registry)
 {
     if (!registry)
         return;
-    uint32_t next = registry->settings_generation + 1u;
-    if (next == 0)
-        next = 1u;
+    uint32_t next = (registry->settings_generation == 0xFFFFFFFFu) ? 1u : registry->settings_generation + 1u;
     registry->settings_generation = next;
     asm volatile("sfence" ::: "memory");
 }
@@ -1782,6 +1777,11 @@ void toggle_control_center()
     close_context_menu();
     sync_control_center_state_from_registry(gui_registry());
     g_control_center.open = true;
+    Registry *reg = gui_registry();
+    if (reg) {
+        reg->cp_open = true;
+        asm volatile("sfence" ::: "memory");
+    }
     g_control_center.hovered_item = CONTROL_ITEM_NONE;
     g_control_center.volume_dragging = false;
     DirtyRect damage = control_center_damage_bounds();
@@ -1794,6 +1794,11 @@ void close_control_center()
         return;
     DirtyRect damage = control_center_damage_bounds();
     g_control_center.open = false;
+    Registry *reg = gui_registry();
+    if (reg) {
+        reg->cp_open = false;
+        asm volatile("sfence" ::: "memory");
+    }
     g_control_center.hovered_item = CONTROL_ITEM_NONE;
     g_control_center.volume_dragging = false;
     enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
@@ -2103,7 +2108,7 @@ static int resolve_context_menu_target_index()
         }
     }
     if (g_context_menu.target_index >= 2 && g_context_menu.target_index < g_window_count) {
-        Window &w = g_windows[g_context_menu.target_index];
+        const Window &w = g_windows[g_context_menu.target_index];
         if (w.entry && is_window_visible(w)) {
             g_context_menu.target_entry = w.entry;
             return g_context_menu.target_index;
@@ -2269,7 +2274,7 @@ bool activate_context_menu_item(Registry *registry, int index)
             close_context_menu();
             return false;
         }
-        Window &t = g_windows[target_index];
+        const Window &t = g_windows[target_index];
         if (!t.entry) {
             close_context_menu();
             return false;
@@ -2442,7 +2447,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     Window &win = g_windows[g_window_count++];
     memset(&win, 0, sizeof(win));
     win.shm_id = shm_id;
-    win.buffer = (uint32_t *)ptr;
+    win.buffer = reinterpret_cast<uint32_t *>(ptr);
     win.owner_pid = entry ? entry->owner_pid : 0;
     win.x = x;
     win.y = y;
@@ -2593,7 +2598,7 @@ void update_hover_feedback()
     int nhf = -1, nre = RESIZE_NONE, nhb = -1;
     if (!g_input.pointer_down && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y)) {
         for (int i = g_window_count - 1; i >= 2; i--) {
-            Window &w = g_windows[i];
+            const Window &w = g_windows[i];
             if (!is_window_visible(w))
                 continue;
             if (w.transparent) {

@@ -38,7 +38,7 @@ static inline void gui_copy_to_canvas(volatile uint32_t *dst, const uint32_t *sr
     if (!dst || !src || w == 0 || h == 0)
         return;
     for (uint32_t y = 0; y < h; y++) {
-        uint32_t *d_row = (uint32_t *)(dst + ((size_t)y * w));
+        uint32_t *d_row = reinterpret_cast<uint32_t *>(const_cast<uint32_t *>(dst) + ((size_t)y * w));
         const uint32_t *s_row = src + ((size_t)y * w);
         memcpy(d_row, s_row, (size_t)w * sizeof(uint32_t));
     }
@@ -50,7 +50,7 @@ static inline void gui_copy_rect_to_canvas(volatile uint32_t *dst, uint32_t dst_
     if (!dst || !src || dst_stride == 0 || src_stride == 0 || rect.w <= 0 || rect.h <= 0 || rect.x < 0 || rect.y < 0)
         return;
     for (int py = 0; py < rect.h; py++) {
-        uint32_t *d_row = (uint32_t *)(dst + (size_t)(rect.y + py) * dst_stride + rect.x);
+        uint32_t *d_row = reinterpret_cast<uint32_t *>(const_cast<uint32_t *>(dst) + (size_t)(rect.y + py) * dst_stride + rect.x);
         const uint32_t *s_row = src + (size_t)(rect.y + py) * src_stride + rect.x;
         memcpy(d_row, s_row, (size_t)rect.w * sizeof(uint32_t));
     }

@@ -188,7 +188,7 @@ static bool load_file(const char *path, uint8_t **out_data, uint32_t *out_size)
     if (fd < 0)
         return false;
 
-    uint8_t *data = (uint8_t *)malloc((size_t)st.size);
+    uint8_t *data = static_cast<uint8_t *>(malloc((size_t)st.size));
     if (!data) {
         close(fd);
         return false;
@@ -226,7 +226,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
         return false;
     }
 
-    const UofHeader *header = (const UofHeader *)data;
+    const UofHeader *header = reinterpret_cast<const UofHeader *>(data);
     if (header->magic != UOF_MAGIC || header->version != UOF_VERSION) {
         free(data);
         return false;
@@ -242,10 +242,6 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
 
     uint64_t glyph_bytes64 = (uint64_t)header->glyph_count * (uint64_t)sizeof(GuiGlyph);
     if (glyph_bytes64 > 0xFFFFFFFFu || (uint64_t)header->glyph_offset + glyph_bytes64 > size) {
-        free(data);
-        return false;
-    }
-    if (header->atlas_offset > size) {
         free(data);
         return false;
     }
@@ -267,8 +263,8 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
     font->ascent = header->ascent;
     font->descent = header->descent;
     font->line_gap = header->line_gap;
-    font->glyphs = (GuiGlyph *)malloc(glyph_bytes);
-    font->atlas = (uint8_t *)malloc(atlas_bytes);
+    font->glyphs = static_cast<GuiGlyph *>(malloc(glyph_bytes));
+    font->atlas = static_cast<uint8_t *>(malloc(atlas_bytes));
     if (!font->glyphs || !font->atlas) {
         free(font->glyphs);
         free(font->atlas);
@@ -375,38 +371,7 @@ static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
     return (uint8_t)(((uint32_t)alpha * (uint32_t)coverage + 127u) / 255u);
 }
 
-static uint32_t blend_src_over_argb(uint32_t dst, uint32_t src_rgb, uint8_t src_alpha)
-{
-    if (src_alpha == 0)
-        return dst;
-    if (src_alpha == 255)
-        return 0xFF000000u | (src_rgb & 0x00FFFFFFu);
 
-    uint8_t dst_alpha = (uint8_t)(dst >> 24);
-    if (dst_alpha == 0)
-        return ((uint32_t)src_alpha << 24) | (src_rgb & 0x00FFFFFFu);
-
-    uint32_t inv = 255u - src_alpha;
-    uint32_t out_alpha = (uint32_t)src_alpha + ((uint32_t)dst_alpha * inv + 127u) / 255u;
-    if (out_alpha == 0)
-        return 0;
-
-    uint32_t dr_p = ((dst >> 16) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t dg_p = ((dst >> 8) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t db_p = (dst & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t sr_p = ((src_rgb >> 16) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sg_p = ((src_rgb >> 8) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sb_p = (src_rgb & 0xFFu) * (uint32_t)src_alpha;
-
-    uint32_t out_r_p = sr_p + (dr_p * inv + 127u) / 255u;
-    uint32_t out_g_p = sg_p + (dg_p * inv + 127u) / 255u;
-    uint32_t out_b_p = sb_p + (db_p * inv + 127u) / 255u;
-
-    uint32_t r = (out_r_p + out_alpha / 2u) / out_alpha;
-    uint32_t g = (out_g_p + out_alpha / 2u) / out_alpha;
-    uint32_t b = (out_b_p + out_alpha / 2u) / out_alpha;
-    return (out_alpha << 24) | (r << 16) | (g << 8) | b;
-}
 
 static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x, int32_t top_y, const GuiGlyph *glyph,
                               uint32_t fg, uint32_t bg, const uint8_t *alpha_lut, int32_t clip_x = 0,

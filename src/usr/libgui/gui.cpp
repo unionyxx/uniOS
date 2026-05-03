@@ -111,8 +111,8 @@ static uint32_t next_window_buffer_generation()
 {
     if (!g_my_window)
         return 1;
-    uint32_t next = g_my_window->buffer_generation + 1u;
-    return next == 0 ? 1u : next;
+    uint32_t next = (g_my_window->buffer_generation == 0xFFFFFFFFu) ? 1u : g_my_window->buffer_generation + 1u;
+    return next;
 }
 
 static bool gui_surface_layout(uint32_t width, uint32_t height, uint32_t *pitch_out, size_t *bytes_out)
@@ -156,7 +156,7 @@ static void gui_publish_window_count_for_slot(int slot)
     if (!g_registry || slot < 0)
         return;
 
-    uint32_t needed = (uint32_t)slot + 1u;
+    uint32_t needed = static_cast<uint32_t>(slot) + 1u;
     while (true) {
         uint32_t cur = g_registry->window_count;
         if (cur >= needed)
@@ -182,7 +182,7 @@ static uint32_t gui_resize_capacity(uint32_t current, uint32_t target)
     grown = (grown + 63u) & ~63u;
     if (grown > 0xFFFFFFFFu)
         return target;
-    return (uint32_t)grown;
+    return static_cast<uint32_t>(grown);
 }
 
 static void gui_init_retired_window_buffers()
@@ -197,7 +197,7 @@ static bool gui_generation_reached(uint32_t acked, uint32_t generation)
 {
     if (generation == 0 || acked == 0)
         return false;
-    return (int32_t)(acked - generation) >= 0;
+    return static_cast<int32_t>(acked - generation) >= 0;
 }
 
 static void gui_release_retired_window_buffer()
@@ -213,7 +213,7 @@ static void gui_release_retired_window_buffer()
         if (!gui_generation_reached(acked, retired.generation))
             continue;
 
-        syscall1(SYS_SHM_FREE, (uint64_t)retired.shm_id);
+        syscall1(SYS_SHM_FREE, static_cast<uint64_t>(retired.shm_id));
         retired.shm_id = WIN_SHM_INVALID;
         retired.generation = 0;
     }
@@ -254,24 +254,24 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
             return false;
     }
 
-    int new_shm_id = (int)syscall1(SYS_SHM_GET, shm_bytes);
+    int new_shm_id = static_cast<int>(syscall1(SYS_SHM_GET, shm_bytes));
     if (new_shm_id < 0)
         return false;
 
-    uint64_t mapped = syscall1(SYS_SHM_MAP, (uint64_t)new_shm_id);
-    if (mapped == 0 || mapped == (uint64_t)-1) {
-        syscall1(SYS_SHM_FREE, (uint64_t)new_shm_id);
+    uint64_t mapped = syscall1(SYS_SHM_MAP, static_cast<uint64_t>(new_shm_id));
+    if (mapped == 0 || mapped == static_cast<uint64_t>(-1)) {
+        syscall1(SYS_SHM_FREE, static_cast<uint64_t>(new_shm_id));
         return false;
     }
 
-    uint32_t *new_buffer = (uint32_t *)mapped;
-    memset(new_buffer, 0, (size_t)shm_bytes);
+    uint32_t *new_buffer = reinterpret_cast<uint32_t *>(mapped);
+    memset(new_buffer, 0, static_cast<size_t>(shm_bytes));
 
     uint32_t copy_w = (s->width < alloc_w) ? s->width : alloc_w;
     uint32_t copy_h = (s->height < alloc_h) ? s->height : alloc_h;
     uint32_t old_stride = s->pitch / 4;
     for (uint32_t row = 0; row < copy_h; row++) {
-        memcpy(&new_buffer[(size_t)row * alloc_w], &s->buffer[(size_t)row * old_stride], (size_t)copy_w * 4u);
+        memcpy(&new_buffer[static_cast<size_t>(row) * alloc_w], &s->buffer[static_cast<size_t>(row) * old_stride], static_cast<size_t>(copy_w) * 4u);
     }
 
     int old_shm_id = g_window_shm_id;
@@ -286,13 +286,13 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     g_window_buffer_w = alloc_w;
     g_window_buffer_h = alloc_h;
 
-    g_my_window->buffer_w = (int)alloc_w;
-    g_my_window->buffer_h = (int)alloc_h;
+    g_my_window->buffer_w = static_cast<int>(alloc_w);
+    g_my_window->buffer_h = static_cast<int>(alloc_h);
     g_my_window->shm_id = new_shm_id;
     g_my_window->buffer_generation = generation;
     asm volatile("sfence" ::: "memory");
 
-    syscall1(SYS_SHM_UNMAP, (uint64_t)old_shm_id);
+    syscall1(SYS_SHM_UNMAP, static_cast<uint64_t>(old_shm_id));
     g_retired_window_buffers[retired_slot].shm_id = old_shm_id;
     g_retired_window_buffers[retired_slot].generation = generation;
     return true;
@@ -352,7 +352,7 @@ static int resolve_ui_scale_pct()
 
     gui_fonts_init();
     const GuiFont *font = gui_font_default();
-    int pixel_size = (font && font->pixel_size > 0) ? (int)font->pixel_size : 12;
+    int pixel_size = (font && font->pixel_size > 0) ? static_cast<int>(font->pixel_size) : 12;
     int font_scale_pct = 100 + (pixel_size - 12) * 4;
     int framebuffer_scale_pct = detect_framebuffer_scale_pct();
     int resolved = font_scale_pct > framebuffer_scale_pct ? font_scale_pct : framebuffer_scale_pct;
@@ -447,7 +447,7 @@ Surface gui_init_framebuffer(void)
         s.width = info[0];
         s.height = info[1];
         s.pitch = info[2];
-        s.buffer = (uint32_t *)fb_mmap();
+        s.buffer = reinterpret_cast<uint32_t *>(fb_mmap());
         s.owns_buffer = false;
     }
     return s;
@@ -462,7 +462,7 @@ Surface gui_create_surface(uint32_t width, uint32_t height)
 
     s.width = width;
     s.height = height;
-    s.buffer = (uint32_t *)malloc(size);
+    s.buffer = static_cast<uint32_t *>(malloc(size));
     s.owns_buffer = (s.buffer != nullptr);
     if (s.buffer)
         memset(s.buffer, 0, size);
@@ -471,7 +471,7 @@ Surface gui_create_surface(uint32_t width, uint32_t height)
 
 void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color)
 {
-    if (!s || !s->buffer || x < 0 || y < 0 || x >= (int32_t)s->width || y >= (int32_t)s->height)
+    if (!s || !s->buffer || x < 0 || y < 0 || x >= static_cast<int32_t>(s->width) || y >= static_cast<int32_t>(s->height))
         return;
     s->buffer[y * (s->pitch / 4) + x] = color;
 }
@@ -480,11 +480,11 @@ void gui_fill_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint3
 {
     if (!s || !s->buffer || s->pitch == 0 || w <= 0 || h <= 0)
         return;
-    if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, (int32_t)s->width, (int32_t)s->height))
+    if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, static_cast<int32_t>(s->width), static_cast<int32_t>(s->height)))
         return;
 
     uint32_t pitch_u32 = s->pitch / 4;
-    uint32_t *first_row = &s->buffer[(size_t)y * pitch_u32 + (size_t)x];
+    uint32_t *first_row = &s->buffer[static_cast<size_t>(y) * pitch_u32 + static_cast<size_t>(x)];
 
     int32_t i = 0;
     for (; i + 7 < w; i += 8) {
@@ -501,9 +501,9 @@ void gui_fill_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint3
         first_row[i] = color;
 
     if (h > 1) {
-        size_t row_bytes = (size_t)w * sizeof(uint32_t);
+        size_t row_bytes = static_cast<size_t>(w) * sizeof(uint32_t);
         for (int32_t py = 1; py < h; py++) {
-            memcpy(&s->buffer[(size_t)(y + py) * pitch_u32 + (size_t)x], first_row, row_bytes);
+            memcpy(&s->buffer[static_cast<size_t>(y + py) * pitch_u32 + static_cast<size_t>(x)], first_row, row_bytes);
         }
     }
 }
@@ -518,7 +518,7 @@ void gui_draw_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint3
 
 static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
 {
-    return (uint8_t)(((uint32_t)alpha * (uint32_t)coverage + 127u) / 255u);
+    return static_cast<uint8_t>((static_cast<uint32_t>(alpha) * static_cast<uint32_t>(coverage) + 127u) / 255u);
 }
 
 static inline uint32_t blend_pixel(uint32_t dst, uint32_t src, uint8_t coverage)
@@ -582,7 +582,7 @@ static void paint_solid_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_
     if (!s || !s->buffer || w <= 0 || h <= 0)
         return;
 
-    uint8_t base_alpha = (uint8_t)(color >> 24);
+    uint8_t base_alpha = static_cast<uint8_t>(color >> 24);
     if (base_alpha == 0)
         return;
     if (base_alpha == 255) {
@@ -598,18 +598,18 @@ static void paint_solid_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_
         h += y;
         y = 0;
     }
-    if (x >= (int32_t)s->width || y >= (int32_t)s->height)
+    if (x >= static_cast<int32_t>(s->width) || y >= static_cast<int32_t>(s->height))
         return;
-    if (x + w > (int32_t)s->width)
-        w = (int32_t)s->width - x;
-    if (y + h > (int32_t)s->height)
-        h = (int32_t)s->height - y;
+    if (x + w > static_cast<int32_t>(s->width))
+        w = static_cast<int32_t>(s->width) - x;
+    if (y + h > static_cast<int32_t>(s->height))
+        h = static_cast<int32_t>(s->height) - y;
     if (w <= 0 || h <= 0)
         return;
 
     uint32_t pitch = s->pitch / 4;
     for (int32_t py = 0; py < h; py++) {
-        uint32_t *dst = &s->buffer[(size_t)(y + py) * pitch + x];
+        uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
         for (int32_t px = 0; px < w; px++)
             dst[px] = blend_pixel(dst[px], color, 255);
     }
@@ -664,33 +664,33 @@ static inline uint8_t rounded_hits_to_alpha(int hits)
 {
     return hits <= 0
                ? 0
-               : (hits >= k_round_aa_total ? 255 : (uint8_t)((hits * 255 + k_round_aa_total / 2) / k_round_aa_total));
+               : (hits >= k_round_aa_total ? 255 : static_cast<uint8_t>((hits * 255 + k_round_aa_total / 2) / k_round_aa_total));
 }
 
 static uint8_t *build_rounded_corner_fill_mask(int radius)
 {
     if (radius <= 0)
         return nullptr;
-    size_t count = (size_t)radius * (size_t)radius;
-    uint8_t *mask = (uint8_t *)malloc(count);
+    size_t count = static_cast<size_t>(radius) * static_cast<size_t>(radius);
+    uint8_t *mask = static_cast<uint8_t *>(malloc(count));
     if (!mask)
         return nullptr;
 
-    float rr = (float)radius * (float)radius;
+    float rr = static_cast<float>(radius) * static_cast<float>(radius);
     for (int row = 0; row < radius; row++) {
         for (int col = 0; col < radius; col++) {
             int hits = 0;
             for (int sy = 0; sy < k_round_aa_samples; sy++) {
-                float sample_y = (float)row + k_round_aa_offsets[sy];
+                float sample_y = static_cast<float>(row) + k_round_aa_offsets[sy];
                 for (int sx = 0; sx < k_round_aa_samples; sx++) {
-                    float sample_x = (float)col + k_round_aa_offsets[sx];
-                    float dx = sample_x - (float)radius;
-                    float dy = sample_y - (float)radius;
+                    float sample_x = static_cast<float>(col) + k_round_aa_offsets[sx];
+                    float dx = sample_x - static_cast<float>(radius);
+                    float dy = sample_y - static_cast<float>(radius);
                     if (dx * dx + dy * dy <= rr)
                         hits++;
                 }
             }
-            mask[(size_t)row * (size_t)radius + (size_t)col] = rounded_hits_to_alpha(hits);
+            mask[static_cast<size_t>(row) * static_cast<size_t>(radius) + static_cast<size_t>(col)] = rounded_hits_to_alpha(hits);
         }
     }
     return mask;
@@ -733,7 +733,7 @@ static inline uint8_t rounded_corner_mask_alpha(const RoundedCornerMaskCacheEntr
 {
     if (!entry || !entry->fill || local_x < 0 || local_y < 0 || local_x >= entry->radius || local_y >= entry->radius)
         return 0;
-    return entry->fill[(size_t)local_y * (size_t)entry->radius + (size_t)local_x];
+    return entry->fill[static_cast<size_t>(local_y) * static_cast<size_t>(entry->radius) + static_cast<size_t>(local_x)];
 }
 
 uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int32_t h, int32_t r,
@@ -761,14 +761,14 @@ uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int
 
     const RoundedCornerMaskCacheEntry *entry = get_rounded_corner_mask_entry(r);
     if (!entry) {
-        float center_x = (col < r) ? (float)r : (float)(w - r);
-        float center_y = top_band ? (float)r : (float)(h - r);
-        float rr = (float)r * (float)r;
+        float center_x = (col < r) ? static_cast<float>(r) : static_cast<float>(w - r);
+        float center_y = top_band ? static_cast<float>(r) : static_cast<float>(h - r);
+        float rr = static_cast<float>(r) * static_cast<float>(r);
         int hits = 0;
         for (int sy = 0; sy < k_round_aa_samples; sy++) {
-            float sample_y = (float)row + k_round_aa_offsets[sy];
+            float sample_y = static_cast<float>(row) + k_round_aa_offsets[sy];
             for (int sx = 0; sx < k_round_aa_samples; sx++) {
-                float sample_x = (float)col + k_round_aa_offsets[sx];
+                float sample_x = static_cast<float>(col) + k_round_aa_offsets[sx];
                 float dx = sample_x - center_x;
                 float dy = sample_y - center_y;
                 if (dx * dx + dy * dy <= rr)
@@ -795,28 +795,28 @@ static inline uint8_t rounded_rect_stroke_coverage_local(int32_t col, int32_t ro
     int32_t inner_h = h - 2;
     int32_t inner_r = r > 0 ? r - 1 : 0;
     uint8_t inner = gui_rounded_rect_coverage_local(col - 1, row - 1, inner_w, inner_h, inner_r, GUI_ROUNDED_EDGE_ALL);
-    return inner >= outer ? 0 : (uint8_t)(outer - inner);
+    return inner >= outer ? 0 : static_cast<uint8_t>(outer - inner);
 }
 
 static inline uint8_t circle_fill_coverage(int32_t px, int32_t py, int32_t cx, int32_t cy, int32_t r)
 {
     if (r <= 0)
         return 0;
-    float rr = (float)r * (float)r;
-    float center_x = (float)cx;
-    float center_y = (float)cy;
+    float rr = static_cast<float>(r) * static_cast<float>(r);
+    float center_x = static_cast<float>(cx);
+    float center_y = static_cast<float>(cy);
     float edge_dist =
         libgui_sqrt((px + 0.5f - center_x) * (px + 0.5f - center_x) + (py + 0.5f - center_y) * (py + 0.5f - center_y));
-    if (edge_dist <= (float)r - 0.75f)
+    if (edge_dist <= static_cast<float>(r) - 0.75f)
         return 255;
-    if (edge_dist >= (float)r + 0.75f)
+    if (edge_dist >= static_cast<float>(r) + 0.75f)
         return 0;
 
     int hits = 0;
     for (int sy = 0; sy < k_round_aa_samples; sy++) {
-        float sample_y = (float)py + k_round_aa_offsets[sy] - center_y;
+        float sample_y = static_cast<float>(py) + k_round_aa_offsets[sy] - center_y;
         for (int sx = 0; sx < k_round_aa_samples; sx++) {
-            float sample_x = (float)px + k_round_aa_offsets[sx] - center_x;
+            float sample_x = static_cast<float>(px) + k_round_aa_offsets[sx] - center_x;
             if (sample_x * sample_x + sample_y * sample_y <= rr)
                 hits++;
         }
@@ -839,7 +839,7 @@ void gui_fill_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t 
         return;
     }
 
-    uint8_t base_alpha = (uint8_t)(color >> 24);
+    uint8_t base_alpha = static_cast<uint8_t>(color >> 24);
     if (base_alpha == 0)
         return;
     uint32_t pitch = s->pitch / 4;
@@ -856,15 +856,15 @@ void gui_fill_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t 
         int32_t cy0 = bottom ? y + h - r : y;
         int32_t start_y = cy0 < 0 ? 0 : cy0;
         int32_t end_y = cy0 + r;
-        if (end_y > (int32_t)s->height)
-            end_y = (int32_t)s->height;
+        if (end_y > static_cast<int32_t>(s->height))
+            end_y = static_cast<int32_t>(s->height);
         int32_t start_x = cx0 < 0 ? 0 : cx0;
         int32_t end_x = cx0 + r;
-        if (end_x > (int32_t)s->width)
-            end_x = (int32_t)s->width;
+        if (end_x > static_cast<int32_t>(s->width))
+            end_x = static_cast<int32_t>(s->width);
 
         for (int32_t py = start_y; py < end_y; py++) {
-            uint32_t *dst_row = &s->buffer[(size_t)py * pitch];
+            uint32_t *dst_row = &s->buffer[static_cast<size_t>(py) * pitch];
             for (int32_t px = start_x; px < end_x; px++) {
                 uint8_t coverage = 0;
                 if (entry) {
@@ -895,7 +895,7 @@ void gui_draw_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t 
         return;
     }
 
-    uint8_t base_alpha = (uint8_t)(color >> 24);
+    uint8_t base_alpha = static_cast<uint8_t>(color >> 24);
     if (base_alpha == 0)
         return;
     uint32_t pitch = s->pitch / 4;
@@ -912,16 +912,16 @@ void gui_draw_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t 
         int32_t cy0 = bottom ? y + h - r : y;
         int32_t start_y = cy0 < 0 ? 0 : cy0;
         int32_t end_y = cy0 + r;
-        if (end_y > (int32_t)s->height)
-            end_y = (int32_t)s->height;
+        if (end_y > static_cast<int32_t>(s->height))
+            end_y = static_cast<int32_t>(s->height);
         int32_t start_x = cx0 < 0 ? 0 : cx0;
         int32_t end_x = cx0 + r;
-        if (end_x > (int32_t)s->width)
-            end_x = (int32_t)s->width;
+        if (end_x > static_cast<int32_t>(s->width))
+            end_x = static_cast<int32_t>(s->width);
 
         for (int32_t py = start_y; py < end_y; py++) {
             int32_t row = py - y;
-            uint32_t *dst_row = &s->buffer[(size_t)py * pitch];
+            uint32_t *dst_row = &s->buffer[static_cast<size_t>(py) * pitch];
             for (int32_t px = start_x; px < end_x; px++) {
                 uint8_t coverage = rounded_rect_stroke_coverage_local(px - x, row, w, h, r);
                 paint_pixel_coverage(&dst_row[px], color, coverage, base_alpha);
@@ -934,7 +934,7 @@ void gui_fill_circle(Surface *s, int32_t x, int32_t y, int32_t r, uint32_t color
 {
     if (!s || !s->buffer || r <= 0)
         return;
-    uint8_t base_alpha = (uint8_t)(color >> 24);
+    uint8_t base_alpha = static_cast<uint8_t>(color >> 24);
     if (base_alpha == 0)
         return;
     uint32_t pitch = s->pitch / 4;
@@ -943,17 +943,17 @@ void gui_fill_circle(Surface *s, int32_t x, int32_t y, int32_t r, uint32_t color
     if (start_y < 0)
         start_y = 0;
     int32_t end_y = y + r + 1;
-    if (end_y > (int32_t)s->height)
-        end_y = (int32_t)s->height;
+    if (end_y > static_cast<int32_t>(s->height))
+        end_y = static_cast<int32_t>(s->height);
     int32_t start_x = x - r;
     if (start_x < 0)
         start_x = 0;
     int32_t end_x = x + r + 1;
-    if (end_x > (int32_t)s->width)
-        end_x = (int32_t)s->width;
+    if (end_x > static_cast<int32_t>(s->width))
+        end_x = static_cast<int32_t>(s->width);
 
     for (int32_t py = start_y; py < end_y; py++) {
-        uint32_t *dst_row = &s->buffer[(size_t)py * pitch];
+        uint32_t *dst_row = &s->buffer[static_cast<size_t>(py) * pitch];
         for (int32_t px = start_x; px < end_x; px++) {
             uint8_t coverage = circle_fill_coverage(px, py, x, y, r);
             if (coverage == 0)
@@ -972,7 +972,7 @@ void gui_draw_circle_stroke(Surface *s, int32_t x, int32_t y, int32_t r, int32_t
     if (!s || !s->buffer || r <= 0)
         return;
 
-    uint8_t base_alpha = (uint8_t)(color >> 24);
+    uint8_t base_alpha = static_cast<uint8_t>(color >> 24);
     if (base_alpha == 0)
         return;
 
@@ -990,24 +990,24 @@ void gui_draw_circle_stroke(Surface *s, int32_t x, int32_t y, int32_t r, int32_t
     if (start_y < 0)
         start_y = 0;
     int32_t end_y = y + r + 1;
-    if (end_y > (int32_t)s->height)
-        end_y = (int32_t)s->height;
+    if (end_y > static_cast<int32_t>(s->height))
+        end_y = static_cast<int32_t>(s->height);
     int32_t start_x = x - r;
     if (start_x < 0)
         start_x = 0;
     int32_t end_x = x + r + 1;
-    if (end_x > (int32_t)s->width)
-        end_x = (int32_t)s->width;
+    if (end_x > static_cast<int32_t>(s->width))
+        end_x = static_cast<int32_t>(s->width);
 
     for (int32_t py = start_y; py < end_y; py++) {
-        uint32_t *dst_row = &s->buffer[(size_t)py * pitch];
+        uint32_t *dst_row = &s->buffer[static_cast<size_t>(py) * pitch];
         for (int32_t px = start_x; px < end_x; px++) {
             uint8_t outer = circle_fill_coverage(px, py, x, y, r);
             if (outer == 0)
                 continue;
 
             uint8_t inner = (inner_r > 0) ? circle_fill_coverage(px, py, x, y, inner_r) : 0;
-            uint8_t coverage = inner >= outer ? 0 : (uint8_t)(outer - inner);
+            uint8_t coverage = inner >= outer ? 0 : static_cast<uint8_t>(outer - inner);
             if (coverage == 0)
                 continue;
 
@@ -1027,13 +1027,13 @@ void gui_draw_char(Surface *s, int32_t x, int32_t y, char c, uint32_t fg, uint32
         gui_draw_text(s, gui_font_default(), x, y, text, fg, bg);
         return;
     }
-    if (!s || !s->buffer || x < 0 || y < 0 || x + 8 > (int32_t)s->width || y + 16 > (int32_t)s->height)
+    if (!s || !s->buffer || x < 0 || y < 0 || x + 8 > static_cast<int32_t>(s->width) || y + 16 > static_cast<int32_t>(s->height))
         return;
     init_font_masks();
 
-    const uint8_t *glyph = font8x16[(uint8_t)c];
+    const uint8_t *glyph = font8x16[static_cast<uint8_t>(c)];
     uint32_t pitch_u32 = s->pitch / 4;
-    uint32_t *row_ptr = s->buffer + (y * pitch_u32) + x;
+    uint32_t *row_ptr = s->buffer + (static_cast<size_t>(y) * pitch_u32) + static_cast<size_t>(x);
 
     for (int row = 0; row < 16; row++) {
         uint8_t bits = glyph[row];
@@ -1079,7 +1079,7 @@ int gui_measure_text_n(const GuiFont *font, const char *str, size_t len)
     int width = 0;
     size_t i = 0;
     for (; i < len && str[i] && str[i] != '\n'; i++) {
-        uint8_t ch = (uint8_t)str[i];
+        uint8_t ch = static_cast<uint8_t>(str[i]);
         if (!font) {
             width += 8;
             continue;
@@ -1124,7 +1124,7 @@ size_t gui_truncate_text(const GuiFont *font, const char *str, int max_width, ch
     size_t len = gui_bounded_clip_text_len(str, k_gui_clip_text_limit);
     int full_width = 0;
     for (size_t i = 0; i < len; i++) {
-        uint8_t ch = (uint8_t)str[i];
+        uint8_t ch = static_cast<uint8_t>(str[i]);
         if (!font) {
             full_width += 8;
         } else if (ch < 128u) {
@@ -1159,7 +1159,7 @@ size_t gui_truncate_text(const GuiFont *font, const char *str, int max_width, ch
     size_t clipped = 0;
     int clipped_width = 0;
     while (clipped < len && str[clipped]) {
-        uint8_t ch = (uint8_t)str[clipped];
+        uint8_t ch = static_cast<uint8_t>(str[clipped]);
         int advance = 8;
         if (font) {
             if (ch < 128u) {
@@ -1226,7 +1226,7 @@ void gui_blit(Surface *dest, Surface *src, int32_t dest_x, int32_t dest_y)
 {
     if (!dest || !dest->buffer || !src || !src->buffer)
         return;
-    gui_blit_rect(dest, src, dest_x, dest_y, 0, 0, (int32_t)src->width, (int32_t)src->height);
+    gui_blit_rect(dest, src, dest_x, dest_y, 0, 0, static_cast<int32_t>(src->width), static_cast<int32_t>(src->height));
 }
 
 void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
@@ -1236,14 +1236,14 @@ void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
 
     int32_t sx = 0;
     int32_t sy = 0;
-    int32_t w = (int32_t)src->width;
-    int32_t h = (int32_t)src->height;
+    int32_t w = static_cast<int32_t>(src->width);
+    int32_t h = static_cast<int32_t>(src->height);
 
     if (dx < 0) {
         int64_t skip = -(int64_t)dx;
         if (skip > 0x7FFFFFFF)
             return;
-        sx = (int32_t)skip;
+        sx = static_cast<int32_t>(skip);
         w -= sx;
         dx = 0;
     }
@@ -1251,24 +1251,24 @@ void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
         int64_t skip = -(int64_t)dy;
         if (skip > 0x7FFFFFFF)
             return;
-        sy = (int32_t)skip;
+        sy = static_cast<int32_t>(skip);
         h -= sy;
         dy = 0;
     }
     if (w <= 0 || h <= 0)
         return;
-    if (dx >= (int32_t)dest->width || dy >= (int32_t)dest->height)
+    if (dx >= static_cast<int32_t>(dest->width) || dy >= static_cast<int32_t>(dest->height))
         return;
-    if (sx >= (int32_t)src->width || sy >= (int32_t)src->height)
+    if (sx >= static_cast<int32_t>(src->width) || sy >= static_cast<int32_t>(src->height))
         return;
-    if ((int64_t)sx + w > (int32_t)src->width)
-        w = (int32_t)src->width - sx;
-    if ((int64_t)sy + h > (int32_t)src->height)
-        h = (int32_t)src->height - sy;
-    if ((int64_t)dx + w > (int32_t)dest->width)
-        w = (int32_t)dest->width - dx;
-    if ((int64_t)dy + h > (int32_t)dest->height)
-        h = (int32_t)dest->height - dy;
+    if (static_cast<int64_t>(sx) + w > static_cast<int32_t>(src->width))
+        w = static_cast<int32_t>(src->width) - sx;
+    if (static_cast<int64_t>(sy) + h > static_cast<int32_t>(src->height))
+        h = static_cast<int32_t>(src->height) - sy;
+    if (static_cast<int64_t>(dx) + w > static_cast<int32_t>(dest->width))
+        w = static_cast<int32_t>(dest->width) - dx;
+    if (static_cast<int64_t>(dy) + h > static_cast<int32_t>(dest->height))
+        h = static_cast<int32_t>(dest->height) - dy;
     if (w <= 0 || h <= 0)
         return;
 
@@ -1276,11 +1276,11 @@ void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
     uint32_t sp = src->pitch / 4;
 
     for (int32_t y = 0; y < h; y++) {
-        uint32_t *drow = &dest->buffer[(size_t)(dy + y) * dp + (size_t)dx];
-        uint32_t *srow = &src->buffer[(size_t)(sy + y) * sp + (size_t)sx];
+        uint32_t *drow = &dest->buffer[static_cast<size_t>(dy + y) * dp + static_cast<size_t>(dx)];
+        uint32_t *srow = &src->buffer[static_cast<size_t>(sy + y) * sp + static_cast<size_t>(sx)];
         for (int32_t x = 0; x < w; x++) {
             uint32_t pixel = srow[x];
-            uint8_t alpha = (uint8_t)(pixel >> 24);
+            uint8_t alpha = static_cast<uint8_t>(pixel >> 24);
             if (alpha == 0)
                 continue;
             if (alpha == 255)
@@ -1328,40 +1328,40 @@ void gui_blit_rect(Surface *dest, Surface *src, int32_t dx, int32_t dy, int32_t 
     if (src_x >= src->width || src_y >= src->height || dst_x >= dest->width || dst_y >= dest->height)
         return;
     if (src_x + copy_w > src->width)
-        copy_w = (int64_t)src->width - src_x;
+        copy_w = static_cast<int64_t>(src->width) - src_x;
     if (src_y + copy_h > src->height)
-        copy_h = (int64_t)src->height - src_y;
+        copy_h = static_cast<int64_t>(src->height) - src_y;
     if (dst_x + copy_w > dest->width)
-        copy_w = (int64_t)dest->width - dst_x;
+        copy_w = static_cast<int64_t>(dest->width) - dst_x;
     if (dst_y + copy_h > dest->height)
-        copy_h = (int64_t)dest->height - dst_y;
+        copy_h = static_cast<int64_t>(dest->height) - dst_y;
     if (copy_w <= 0 || copy_h <= 0)
         return;
 
-    dx = (int32_t)dst_x;
-    dy = (int32_t)dst_y;
-    sx = (int32_t)src_x;
-    sy = (int32_t)src_y;
-    w = (int32_t)copy_w;
-    h = (int32_t)copy_h;
+    dx = static_cast<int32_t>(dst_x);
+    dy = static_cast<int32_t>(dst_y);
+    sx = static_cast<int32_t>(src_x);
+    sy = static_cast<int32_t>(src_y);
+    w = static_cast<int32_t>(copy_w);
+    h = static_cast<int32_t>(copy_h);
 
     uint32_t dp_u32 = dest->pitch / 4;
     uint32_t sp_u32 = src->pitch / 4;
     bool same_buffer = dest->buffer == src->buffer;
     bool overlap = false;
     if (same_buffer) {
-        overlap = !((int64_t)dx + w <= sx || (int64_t)sx + w <= dx || (int64_t)dy + h <= sy || (int64_t)sy + h <= dy);
+        overlap = !(static_cast<int64_t>(dx) + w <= sx || static_cast<int64_t>(sx) + w <= dx || static_cast<int64_t>(dy) + h <= sy || static_cast<int64_t>(sy) + h <= dy);
     }
 
-    size_t row_bytes = (size_t)w * sizeof(uint32_t);
+    size_t row_bytes = static_cast<size_t>(w) * sizeof(uint32_t);
 
-    if (!overlap && dx == 0 && sx == 0 && (uint32_t)w == sp_u32 && (uint32_t)w == dp_u32) {
-        memcpy(&dest->buffer[(size_t)dy * dp_u32], &src->buffer[(size_t)sy * sp_u32], row_bytes * (size_t)h);
+    if (!overlap && dx == 0 && sx == 0 && static_cast<uint32_t>(w) == sp_u32 && static_cast<uint32_t>(w) == dp_u32) {
+        memcpy(&dest->buffer[static_cast<size_t>(dy) * dp_u32], &src->buffer[static_cast<size_t>(sy) * sp_u32], row_bytes * static_cast<size_t>(h));
         return;
     }
 
-    if (!overlap && dx == 0 && sx == 0 && (uint32_t)w == src->width && (uint32_t)w == dest->width) {
-        memcpy(&dest->buffer[(size_t)dy * dp_u32], &src->buffer[(size_t)sy * sp_u32], row_bytes * (size_t)h);
+    if (!overlap && dx == 0 && sx == 0 && static_cast<uint32_t>(w) == src->width && static_cast<uint32_t>(w) == dest->width) {
+        memcpy(&dest->buffer[static_cast<size_t>(dy) * dp_u32], &src->buffer[static_cast<size_t>(sy) * sp_u32], row_bytes * static_cast<size_t>(h));
         return;
     }
 
@@ -1375,8 +1375,8 @@ void gui_blit_rect(Surface *dest, Surface *src, int32_t dx, int32_t dy, int32_t 
     }
 
     for (int32_t y = start_y; y != end_y; y += step_y) {
-        uint32_t *d_row = &dest->buffer[(size_t)(dy + y) * dp_u32 + (size_t)dx];
-        uint32_t *s_row = &src->buffer[(size_t)(sy + y) * sp_u32 + (size_t)sx];
+        uint32_t *d_row = &dest->buffer[static_cast<size_t>(dy + y) * dp_u32 + static_cast<size_t>(dx)];
+        uint32_t *s_row = &src->buffer[static_cast<size_t>(sy + y) * sp_u32 + static_cast<size_t>(sx)];
         if (same_buffer && overlap)
             memmove(d_row, s_row, row_bytes);
         else
@@ -1398,8 +1398,8 @@ int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_
     if (!s || !s->buffer || !g_my_window || s->pitch == 0)
         return -1;
 
-    int32_t damage_max_w = s->width > 0 ? (int32_t)s->width : g_my_window->w;
-    int32_t damage_max_h = s->height > 0 ? (int32_t)s->height : g_my_window->h;
+    int32_t damage_max_w = s->width > 0 ? static_cast<int32_t>(s->width) : g_my_window->w;
+    int32_t damage_max_h = s->height > 0 ? static_cast<int32_t>(s->height) : g_my_window->h;
     if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, damage_max_w, damage_max_h))
         return -1;
 
@@ -1453,12 +1453,12 @@ void gui_blit_to_screen_rect(Surface *src, int32_t x, int32_t y, int32_t w, int3
         return;
     }
 
-    if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, (int32_t)src->width, (int32_t)src->height))
+    if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, static_cast<int32_t>(src->width), static_cast<int32_t>(src->height)))
         return;
 
     Rect rect = gui_rect_make(x, y, w, h);
     DisplayPresentRequest req = {};
-    req.buffer = src->buffer + ((size_t)y * (src->pitch / 4) + (size_t)x);
+    req.buffer = src->buffer + (static_cast<size_t>(y) * (src->pitch / 4) + static_cast<size_t>(x));
     req.stride = src->pitch / 4;
     req.rects = &rect;
     req.rect_count = 1;
@@ -1475,11 +1475,11 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
 
     if (!g_registry) {
         uint64_t reg_ptr = syscall1(SYS_SHM_MAP, 0);
-        if (reg_ptr == 0 || reg_ptr == (uint64_t)-1) {
+        if (reg_ptr == 0 || reg_ptr == static_cast<uint64_t>(-1)) {
             LOG_ERROR("gui", "register_window failed: no registry for %s", window_title);
             return {NULL, 0, 0, 0, false};
         }
-        g_registry = (Registry *)reg_ptr;
+        g_registry = reinterpret_cast<Registry *>(reg_ptr);
 
         int timeout = 0;
         while (g_registry->magic != REGISTRY_MAGIC && timeout < 1000) {
@@ -1503,19 +1503,19 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
     uint32_t buffer_w = w;
     uint32_t buffer_h = h;
 
-    int shm_id = (int)syscall1(SYS_SHM_GET, (uint64_t)buffer_bytes);
+    int shm_id = static_cast<int>(syscall1(SYS_SHM_GET, static_cast<uint64_t>(buffer_bytes)));
     if (shm_id < 0) {
         LOG_ERROR("gui", "register_window SHM_GET failed: %s (%ux%u)", window_title, w, h);
         return {NULL, 0, 0, 0, false};
     }
 
-    uint64_t win_ptr = syscall1(SYS_SHM_MAP, (uint64_t)shm_id);
-    if (win_ptr == 0 || win_ptr == (uint64_t)-1) {
+    uint64_t win_ptr = syscall1(SYS_SHM_MAP, static_cast<uint64_t>(shm_id));
+    if (win_ptr == 0 || win_ptr == static_cast<uint64_t>(-1)) {
         LOG_ERROR("gui", "register_window SHM_MAP failed: %s shm=%d", window_title, shm_id);
         gui_window_register_cleanup(shm_id, false);
         return {NULL, 0, 0, 0, false};
     }
-    memset((void *)win_ptr, 0, buffer_bytes);
+    memset(reinterpret_cast<void *>(win_ptr), 0, buffer_bytes);
 
     int win_idx = -1;
     if (strcmp(window_title, "Menubar") == 0) {
@@ -1546,21 +1546,21 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
     win_entry->shm_id = WIN_SHM_RESERVED;
     win_entry->x = 100 + (win_idx * 40);
     win_entry->y = 100 + (win_idx * 40);
-    win_entry->w = (int)w;
-    win_entry->h = (int)h;
+    win_entry->w = static_cast<int>(w);
+    win_entry->h = static_cast<int>(h);
     win_entry->restore_x = win_entry->x;
     win_entry->restore_y = win_entry->y;
     win_entry->restore_w = win_entry->w;
     win_entry->restore_h = win_entry->h;
-    win_entry->buffer_w = (int)buffer_w;
-    win_entry->buffer_h = (int)buffer_h;
+    win_entry->buffer_w = static_cast<int>(buffer_w);
+    win_entry->buffer_h = static_cast<int>(buffer_h);
     win_entry->min_w = 0;
     win_entry->min_h = 0;
     win_entry->title[0] = '\0';
     strncpy(win_entry->title, window_title, 63);
     win_entry->title[63] = '\0';
     win_entry->flags = flags;
-    win_entry->owner_pid = (uint32_t)syscall1(SYS_GETPID, 0);
+    win_entry->owner_pid = static_cast<uint32_t>(syscall1(SYS_GETPID, 0));
     win_entry->state = WIN_NORMAL;
     win_entry->buffer_generation = 1u;
     win_entry->buffer_ack_generation = 1u;
@@ -1583,7 +1583,7 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
     g_window_buffer_h = buffer_h;
     gui_init_retired_window_buffers();
 
-    return {(uint32_t *)win_ptr, w, h, buffer_pitch, false};
+    return {reinterpret_cast<uint32_t *>(win_ptr), w, h, buffer_pitch, false};
 }
 
 Surface gui_register_window(const char *title, uint32_t w, uint32_t h)
@@ -1596,7 +1596,7 @@ int gui_set_window_owner_pid(uint32_t pid)
     if (!g_my_window)
         return -1;
     if (pid == 0) {
-        pid = (uint32_t)syscall1(SYS_GETPID, 0);
+        pid = static_cast<uint32_t>(syscall1(SYS_GETPID, 0));
     }
     g_my_window->owner_pid = pid;
     asm volatile("sfence" ::: "memory");
@@ -1640,8 +1640,8 @@ int gui_sync_window_size(Surface *s)
 
     gui_release_retired_window_buffer();
 
-    uint32_t new_w = (g_my_window->w > 0) ? (uint32_t)g_my_window->w : s->width;
-    uint32_t new_h = (g_my_window->h > 0) ? (uint32_t)g_my_window->h : s->height;
+    uint32_t new_w = (g_my_window->w > 0) ? static_cast<uint32_t>(g_my_window->w) : s->width;
+    uint32_t new_h = (g_my_window->h > 0) ? static_cast<uint32_t>(g_my_window->h) : s->height;
     bool requested_resize =
         (g_my_window->flags & WIN_FLAG_RESIZABLE) != 0 && (new_w != g_window_buffer_w || new_h != g_window_buffer_h);
     if (requested_resize && !gui_resize_window_backing(s, new_w, new_h)) {
@@ -1667,20 +1667,20 @@ int gui_set_content_size(Surface *s, int content_w, int content_h)
     if (!s || !g_my_window)
         return -1;
 
-    int view_w = g_my_window->w > 0 ? g_my_window->w : (int)s->width;
-    int view_h = g_my_window->h > 0 ? g_my_window->h : (int)s->height;
+    int view_w = g_my_window->w > 0 ? g_my_window->w : static_cast<int>(s->width);
+    int view_h = g_my_window->h > 0 ? g_my_window->h : static_cast<int>(s->height);
     if (content_w < view_w)
         content_w = view_w;
     if (content_h < view_h)
         content_h = view_h;
 
-    if ((uint32_t)content_w > g_window_buffer_w || (uint32_t)content_h > g_window_buffer_h) {
-        if (!gui_resize_window_backing(s, (uint32_t)content_w, (uint32_t)content_h))
+    if (static_cast<uint32_t>(content_w) > g_window_buffer_w || static_cast<uint32_t>(content_h) > g_window_buffer_h) {
+        if (!gui_resize_window_backing(s, static_cast<uint32_t>(content_w), static_cast<uint32_t>(content_h)))
             return -1;
     }
 
-    s->width = (uint32_t)content_w;
-    s->height = (uint32_t)content_h;
+    s->width = static_cast<uint32_t>(content_w);
+    s->height = static_cast<uint32_t>(content_h);
     g_my_window->content_w = content_w;
     g_my_window->content_h = content_h;
     asm volatile("sfence" ::: "memory");
@@ -1691,8 +1691,8 @@ Registry *gui_registry(void)
 {
     if (!g_registry) {
         uint64_t reg_ptr = syscall1(SYS_SHM_MAP, 0);
-        if (reg_ptr != 0 && reg_ptr != (uint64_t)-1) {
-            g_registry = (Registry *)reg_ptr;
+        if (reg_ptr != 0 && reg_ptr != static_cast<uint64_t>(-1)) {
+            g_registry = reinterpret_cast<Registry *>(reg_ptr);
         }
     }
     return g_registry;

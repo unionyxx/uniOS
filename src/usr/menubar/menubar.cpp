@@ -572,15 +572,23 @@ void draw_menubar(Surface *canvas, Registry *reg)
     uint32_t text_color = g_gui_style.text;
 
     bool logo_hot = false;
+    bool date_hot = false;
     if (reg) {
         int mx = pointer_local_x(reg);
         int my = pointer_local_y(reg);
         logo_hot =
             g_menu_open || (mx >= logo_x0 && mx < logo_x0 + logo_w0 && my >= logo_y() && my < logo_y() + logo_h());
+        date_hot = reg->cp_open || (mx > (int)canvas->width - 120 && mx < (int)canvas->width && my >= 0 && my < bar_h);
     }
     if (logo_hot) {
         uint32_t logo_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
         gui_fill_rounded_rect(canvas, logo_x0, logo_y(), logo_w0, logo_h(), gui_scaled_metric(6), logo_fill);
+    }
+    if (date_hot) {
+        uint32_t date_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
+        int date_btn_w = 120 - gui_scaled_metric(8);
+        int date_btn_x = (int)canvas->width - 120;
+        gui_fill_rounded_rect(canvas, date_btn_x, logo_y(), date_btn_w, logo_h(), gui_scaled_metric(6), date_fill);
     }
     int text_w = gui_measure_text(app_font, "uniOS");
     int center_x = logo_x0 + (logo_w0 - text_w) / 2;
@@ -635,6 +643,9 @@ int get_hovered_item(Registry *reg)
     } else {
         if (mx >= logo_x() && mx < logo_x() + logo_w() && my >= logo_y() && my < logo_y() + logo_h()) {
             return 99; // uniOS Logo
+        }
+        if (mx > (int)reg->windows[0].w - 120 && mx < (int)reg->windows[0].w && my >= 0 && my < menubar_h()) {
+            return 100; // Date/Control Panel button
         }
     }
     return -1;
@@ -693,6 +704,7 @@ extern "C" int main(int argc, char **argv)
     uint32_t last_focused_state = 0xFFFFFFFFu;
     uint32_t last_settings_generation = registry->settings_generation;
     uint32_t last_wallpaper_generation = registry->mb_blur_generation;
+    bool last_cp_open = registry->cp_open;
     char last_focused_title[64];
     memset(last_focused_title, 0, sizeof(last_focused_title));
 
@@ -773,8 +785,13 @@ extern "C" int main(int argc, char **argv)
             blur_changed = true;
         }
 
+        bool cp_state_changed = (registry->cp_open != last_cp_open);
+        if (cp_state_changed) {
+            last_cp_open = registry->cp_open;
+        }
+
         if (clicked || theme_changed || blur_changed || time_changed || hover_changed ||
-            g_menu_open != last_menu_open || focus_changed) {
+            g_menu_open != last_menu_open || focus_changed || cp_state_changed) {
             int target_h = g_menu_open ? menu_total_h() : menubar_h();
             if (registry->windows[0].h != target_h) {
                 registry->windows[0].h = target_h;

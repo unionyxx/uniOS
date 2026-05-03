@@ -545,7 +545,7 @@ static inline int gui_draw_wrapped_value(Surface *s, int x, int y, int w, const 
         if (*scan && best && best > start)
             end = best;
         if (end == start)
-            end = scan > start ? scan : start + 1;
+            end = start + 1;
 
         int copy_len = (int)(end - start);
         if (copy_len > (int)sizeof(line) - 1)

@@ -138,7 +138,7 @@ static bool read_file(const char *path, uint8_t **out_data, uint32_t *out_size)
     if (fd < 0)
         return false;
 
-    uint8_t *data = (uint8_t *)malloc((size_t)st.size);
+    uint8_t *data = static_cast<uint8_t *>(malloc((size_t)st.size));
     if (!data) {
         close(fd);
         return false;
@@ -595,7 +595,7 @@ bool gui_load_uoic(const char *path, uint32_t logical_px, uint32_t display_scale
         return false;
     }
 
-    const UoicHeader *header = (const UoicHeader *)data;
+    const UoicHeader *header = reinterpret_cast<const UoicHeader *>(data);
     if (header->magic != UOIC_MAGIC || header->version != UOIC_VERSION || header->flags != 0 ||
         header->entry_count == 0 || !metadata_range_valid(header->metadata_offset, header->metadata_size, size)) {
         free(data);
@@ -610,7 +610,7 @@ bool gui_load_uoic(const char *path, uint32_t logical_px, uint32_t display_scale
         return false;
     }
 
-    const UoicEntry *entries = (const UoicEntry *)(data + header->directory_offset);
+    const UoicEntry *entries = reinterpret_cast<const UoicEntry *>(data + header->directory_offset);
     const UoicEntry *entry = uoic_select_entry(entries, header->entry_count, size, physical_px);
     if (!entry) {
         free(data);
@@ -649,7 +649,7 @@ bool gui_load_uowp(const char *path, uint16_t preferred_variant, uint32_t target
         return false;
     }
 
-    const UowpHeader *header = (const UowpHeader *)data;
+    const UowpHeader *header = reinterpret_cast<const UowpHeader *>(data);
     if (header->magic != UOWP_MAGIC || header->version != UOWP_VERSION || header->flags != 0 ||
         header->entry_count == 0 || !metadata_range_valid(header->metadata_offset, header->metadata_size, size)) {
         free(data);
@@ -664,7 +664,7 @@ bool gui_load_uowp(const char *path, uint16_t preferred_variant, uint32_t target
         return false;
     }
 
-    const UowpEntry *entries = (const UowpEntry *)(data + header->directory_offset);
+    const UowpEntry *entries = reinterpret_cast<const UowpEntry *>(data + header->directory_offset);
     const UowpEntry *entry =
         uowp_select_entry(entries, header->entry_count, size, preferred_variant, target_width, target_height);
     if (!entry) {
@@ -716,7 +716,7 @@ bool gui_load_uocu(const char *path, uint16_t cursor_role, uint32_t logical_px, 
         return false;
     }
 
-    const UocuHeader *header = (const UocuHeader *)data;
+    const UocuHeader *header = reinterpret_cast<const UocuHeader *>(data);
     if (header->magic != UOCU_MAGIC || header->version != UOCU_VERSION || header->flags != 0 ||
         header->entry_count == 0 || !metadata_range_valid(header->metadata_offset, header->metadata_size, size)) {
         free(data);
@@ -731,7 +731,7 @@ bool gui_load_uocu(const char *path, uint16_t cursor_role, uint32_t logical_px, 
         return false;
     }
 
-    const UocuEntry *entries = (const UocuEntry *)(data + header->directory_offset);
+    const UocuEntry *entries = reinterpret_cast<const UocuEntry *>(data + header->directory_offset);
     const UocuEntry *entry =
         uocu_select_entry(entries, header->entry_count, size, cursor_role, preferred_variant, physical_px);
     if (!entry && preferred_variant != GUI_UOCU_VARIANT_DEFAULT) {

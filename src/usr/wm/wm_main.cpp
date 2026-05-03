@@ -228,7 +228,7 @@ static CursorPresentBuffer *ensure_cursor_present_buffer(GuiCursorKind kind)
     slot.surface.width = (uint32_t)bw;
     slot.surface.height = (uint32_t)bh;
     slot.surface.pitch = map.stride * 4u;
-    slot.surface.buffer = (uint32_t *)map.address;
+    slot.surface.buffer = reinterpret_cast<uint32_t *>(map.address);
     slot.kind = kind;
     gui_get_cursor_hotspot(kind, &slot.hot_x, &slot.hot_y);
     gui_fill_rect(&slot.surface, 0, 0, bw, bh, 0x00000000u);
@@ -617,7 +617,7 @@ extern "C" int main(int argc, char **argv)
     if (reg_ptr == 0 || reg_ptr == (uint64_t)-1)
         return 1;
 
-    Registry *registry = (Registry *)reg_ptr;
+    Registry *registry = reinterpret_cast<Registry *>(reg_ptr);
     memset(registry, 0, (sizeof(Registry) + 0xFFFu) & ~0xFFFu);
     registry->mb_shm_id = WIN_SHM_INVALID;
     registry->dk_shm_id = WIN_SHM_INVALID;
@@ -669,7 +669,7 @@ extern "C" int main(int argc, char **argv)
             slot.surface.width = g_screen.width;
             slot.surface.height = g_screen.height;
             slot.surface.pitch = map.stride * 4u;
-            slot.surface.buffer = (uint32_t *)map.address;
+            slot.surface.buffer = reinterpret_cast<uint32_t *>(map.address);
             slot.handle = create.handle;
             slot.in_flight_sequence = 0;
         }
@@ -680,7 +680,7 @@ extern "C" int main(int argc, char **argv)
         slot.surface.width = g_screen.width;
         slot.surface.height = g_screen.height;
         slot.surface.pitch = g_screen.pitch;
-        slot.surface.buffer = (uint32_t *)malloc((size_t)g_screen.pitch * (size_t)g_screen.height);
+        slot.surface.buffer = static_cast<uint32_t *>(malloc((size_t)g_screen.pitch * (size_t)g_screen.height));
         slot.handle = 0;
         slot.in_flight_sequence = 0;
         if (slot.surface.buffer)
@@ -1298,7 +1298,7 @@ extern "C" int main(int argc, char **argv)
 
                     int old_shm_id = w.shm_id;
                     w.shm_id = entry_snapshot.shm_id;
-                    w.buffer = (uint32_t *)mapped;
+                    w.buffer = reinterpret_cast<uint32_t *>(mapped);
                     if (gui_shm_id_is_valid(old_shm_id))
                         syscall1(SYS_SHM_UNMAP, old_shm_id);
 
