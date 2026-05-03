@@ -517,7 +517,6 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     'if=pflash,format=raw,readonly=on,file=@0@'.format(ovmf_code),
     '-m',
     '512M',
-    '-device', 'virtio-vga,xres=1920,yres=1080',
   ]
 
   qemu_disk_boot_command = [

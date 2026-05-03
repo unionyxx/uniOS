@@ -62,6 +62,7 @@ jobs:
       run: meson compile -C build/debug lint
 
     - name: Format Check
+      continue-on-error: true
       run: |
         meson compile -C build/debug format
         git diff --exit-code

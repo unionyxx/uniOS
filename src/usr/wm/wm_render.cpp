@@ -1712,6 +1712,12 @@ static DirtyRect wm_control_item_rect(ControlPanelItem item)
         return {box.x + pad + half_w + gap, y, half_w, card_h};
 
     y += card_h + gap;
+    if (item == CONTROL_ITEM_ANIMATIONS)
+        return {box.x + pad, y, half_w, card_h};
+    if (item == CONTROL_ITEM_TRANSPARENCY)
+        return {box.x + pad + half_w + gap, y, half_w, card_h};
+
+    y += card_h + gap;
     if (item == CONTROL_ITEM_VOLUME)
         return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(72)};
 
