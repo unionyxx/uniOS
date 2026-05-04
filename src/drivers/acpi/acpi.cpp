@@ -29,7 +29,7 @@ static bool g_rsdp_logged = false;
 // Validate RSDP checksum
 static bool rsdp_checksum_valid(const AcpiRsdp *rsdp)
 {
-    const uint8_t *bytes = (const uint8_t *)rsdp;
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(rsdp);
     uint8_t sum = 0;
     for (int i = 0; i < 20; i++) {
         sum += bytes[i];
@@ -40,7 +40,7 @@ static bool rsdp_checksum_valid(const AcpiRsdp *rsdp)
 // Validate SDT checksum
 static bool sdt_checksum_valid(const AcpiSdtHeader *header)
 {
-    const uint8_t *bytes = (const uint8_t *)header;
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(header);
     uint8_t sum = 0;
     for (uint32_t i = 0; i < header->length; i++) {
         sum += bytes[i];
@@ -51,11 +51,11 @@ static bool sdt_checksum_valid(const AcpiSdtHeader *header)
 static AcpiRsdp *find_rsdp_in_range(uint64_t start, uint64_t end)
 {
     for (uint64_t addr = start; addr < end; addr += 16) {
-        uint8_t *ptr = (uint8_t *)vmm_phys_to_virt(addr);
+        uint8_t *ptr = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(addr));
 
         if (ptr[0] == 'R' && ptr[1] == 'S' && ptr[2] == 'D' && ptr[3] == ' ' && ptr[4] == 'P' && ptr[5] == 'T' &&
             ptr[6] == 'R' && ptr[7] == ' ') {
-            AcpiRsdp *rsdp = (AcpiRsdp *)ptr;
+            AcpiRsdp *rsdp = reinterpret_cast<AcpiRsdp *>(ptr);
             if (rsdp_checksum_valid(rsdp)) {
                 return rsdp;
             }
@@ -69,12 +69,12 @@ static AcpiRsdp *find_rsdp()
     const BootInfo *boot_info = boot_get_info();
     if (boot_info && boot_info->rsdp_address) {
         if (boot_info->rsdp_address < 0x0000800000000000ULL)
-            return (AcpiRsdp *)vmm_phys_to_virt(boot_info->rsdp_address);
-        return (AcpiRsdp *)boot_info->rsdp_address;
+            return reinterpret_cast<AcpiRsdp *>(vmm_phys_to_virt(boot_info->rsdp_address));
+        return reinterpret_cast<AcpiRsdp *>(boot_info->rsdp_address);
     }
 
-    uint16_t ebda_segment = *(uint16_t *)vmm_phys_to_virt(0x40E);
-    uint64_t ebda_addr = (uint64_t)ebda_segment << 4;
+    uint16_t ebda_segment = *reinterpret_cast<uint16_t *>(vmm_phys_to_virt(0x40E));
+    uint64_t ebda_addr = static_cast<uint64_t>(ebda_segment) << 4;
 
     AcpiRsdp *rsdp = find_rsdp_in_range(ebda_addr, ebda_addr + 0x400);
     if (rsdp)
@@ -87,14 +87,14 @@ static AcpiRsdp *find_rsdp()
 // This is a simplified parser - real ACPI requires full AML parsing
 static bool find_s5_in_dsdt(uint64_t dsdt_phys)
 {
-    AcpiSdtHeader *dsdt = (AcpiSdtHeader *)vmm_phys_to_virt(dsdt_phys);
+    AcpiSdtHeader *dsdt = reinterpret_cast<AcpiSdtHeader *>(vmm_phys_to_virt(dsdt_phys));
 
     if (!dsdt || dsdt->length < sizeof(AcpiSdtHeader) || !sdt_checksum_valid(dsdt)) {
         return false;
     }
 
     // Search for "_S5_" in the DSDT
-    uint8_t *data = (uint8_t *)dsdt;
+    uint8_t *data = reinterpret_cast<uint8_t *>(dsdt);
     uint32_t length = dsdt->length;
 
     for (uint32_t i = sizeof(AcpiSdtHeader); i + 4 < length; i++) {
@@ -176,7 +176,7 @@ void *acpi_find_table(const char *signature)
     bool use_xsdt = false;
 
     if (rsdp->revision >= 2) {
-        AcpiRsdp20 *rsdp20 = (AcpiRsdp20 *)rsdp;
+        AcpiRsdp20 *rsdp20 = reinterpret_cast<AcpiRsdp20 *>(rsdp);
         if (rsdp20->xsdt_address != 0) {
             rsdt_phys = rsdp20->xsdt_address;
             use_xsdt = true;
@@ -187,24 +187,24 @@ void *acpi_find_table(const char *signature)
         rsdt_phys = rsdp->rsdt_address;
     }
 
-    AcpiSdtHeader *rsdt = (AcpiSdtHeader *)vmm_phys_to_virt(rsdt_phys);
+    AcpiSdtHeader *rsdt = reinterpret_cast<AcpiSdtHeader *>(vmm_phys_to_virt(rsdt_phys));
     if (!sdt_checksum_valid(rsdt))
         return nullptr;
 
     uint32_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / (use_xsdt ? 8 : 4);
-    uint8_t *entry_base = (uint8_t *)rsdt + sizeof(AcpiSdtHeader);
+    uint8_t *entry_base = reinterpret_cast<uint8_t *>(rsdt) + sizeof(AcpiSdtHeader);
 
     for (uint32_t i = 0; i < entries; i++) {
         uint64_t table_phys;
         if (use_xsdt) {
-            table_phys = *(uint64_t *)(entry_base + i * 8);
+            table_phys = *reinterpret_cast<uint64_t *>(entry_base + i * 8);
         } else {
-            table_phys = *(uint32_t *)(entry_base + i * 4);
+            table_phys = *reinterpret_cast<uint32_t *>(entry_base + i * 4);
         }
 
-        AcpiSdtHeader *table = (AcpiSdtHeader *)vmm_phys_to_virt(table_phys);
+        AcpiSdtHeader *table = reinterpret_cast<AcpiSdtHeader *>(vmm_phys_to_virt(table_phys));
         if (kstring::strncmp(table->signature, signature, 4) == 0) {
-            return (void *)table;
+            return static_cast<void *>(table);
         }
     }
 
@@ -241,7 +241,7 @@ void acpi_init()
         rsdt_phys = rsdp->rsdt_address;
     }
 
-    AcpiSdtHeader *rsdt = (AcpiSdtHeader *)vmm_phys_to_virt(rsdt_phys);
+    AcpiSdtHeader *rsdt = reinterpret_cast<AcpiSdtHeader *>(vmm_phys_to_virt(rsdt_phys));
     if (!sdt_checksum_valid(rsdt)) {
         DEBUG_ERROR("acpi: rsdt checksum failed");
         return;
@@ -249,7 +249,7 @@ void acpi_init()
 
     // Find FADT in RSDT/XSDT entries
     uint32_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / (use_xsdt ? 8 : 4);
-    uint8_t *entry_base = (uint8_t *)rsdt + sizeof(AcpiSdtHeader);
+    uint8_t *entry_base = reinterpret_cast<uint8_t *>(rsdt) + sizeof(AcpiSdtHeader);
 
     for (uint32_t i = 0; i < entries; i++) {
         uint64_t table_phys;
@@ -264,7 +264,7 @@ void acpi_init()
         // Check for FACP (FADT signature in ACPI)
         if (table->signature[0] == 'F' && table->signature[1] == 'A' && table->signature[2] == 'C' &&
             table->signature[3] == 'P') {
-            AcpiFadt *fadt = (AcpiFadt *)table;
+            AcpiFadt *fadt = reinterpret_cast<AcpiFadt *>(table);
             pm1a_cnt = fadt->pm1a_cnt_blk;
             pm1b_cnt = fadt->pm1b_cnt_blk;
             smi_cmd_port = fadt->smi_cmd;

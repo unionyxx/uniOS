@@ -36,8 +36,8 @@ static bool g_fonts_ready = false;
 
 static constexpr int k_font_sizes[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
 static constexpr int k_font_size_count = (int)(sizeof(k_font_sizes) / sizeof(k_font_sizes[0]));
-static constexpr size_t k_glyph_cache_cap = 256;
 static constexpr size_t k_gui_text_scan_limit = 1024;
+
 static bool gui_font_load_from_file(GuiFont *font, const char *path);
 static inline const GuiGlyph *gui_font_fallback_glyph(const GuiFont *font);
 static size_t gui_bounded_line_length(const char *str, size_t limit);
@@ -68,7 +68,6 @@ static int choose_font_pixel_size()
     uint32_t min_dim = width < height ? width : height;
     uint32_t max_dim = width > height ? width : height;
 
-    // Scale font size based on display resolution (min_dim).
     int target = 12;
     if (min_dim < 800)
         target = 11;
@@ -144,7 +143,6 @@ static size_t gui_bounded_line_length(const char *str, size_t limit)
 {
     if (!str)
         return 0;
-
     size_t len = 0;
     while (len < limit && str[len] && str[len] != '\n')
         len++;
@@ -155,19 +153,27 @@ static void build_font_alpha_lut(GuiFont *font, FontRenderProfile profile)
 {
     if (!font)
         return;
- 
-    int boost_factor = 120;
+
+    // Finely tuned text-weight gamma correction mapping for sharp anti-aliasing
+    uint32_t boost_factor = 120;
     switch (profile) {
-        case FontRenderProfile::Ui:    boost_factor = 144; break;
-        case FontRenderProfile::Title: boost_factor = 96; break;
-        case FontRenderProfile::Mono:  boost_factor = 160; break;
+        case FontRenderProfile::Ui:
+            boost_factor = 145;
+            break; // Sharp, readable standard text
+        case FontRenderProfile::Title:
+            boost_factor = 100;
+            break; // Heavy fonts need less artificial thickness
+        case FontRenderProfile::Mono:
+            boost_factor = 175;
+            break; // Monospace structural gaps need aggressive boost
     }
- 
-    for (int i = 0; i < 256; i++) {
-        uint32_t x = (uint32_t)i;
-        uint32_t boost = (x * (255u - x) * (uint32_t)boost_factor) / 65025u;
+
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t x = i;
+        // Fast integer approximation of gamma correction curve
+        uint32_t boost = (x * (255u - x) * boost_factor) / 65025u;
         uint32_t out = x + boost;
-        font->alpha_lut[i] = (uint8_t)(out > 255 ? 255 : out);
+        font->alpha_lut[i] = (uint8_t)(out > 255u ? 255u : out);
     }
 }
 
@@ -221,6 +227,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
     uint32_t size = 0;
     if (!load_file(path, &data, &size))
         return false;
+
     if (size < sizeof(UofHeader)) {
         free(data);
         return false;
@@ -263,6 +270,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
     font->ascent = header->ascent;
     font->descent = header->descent;
     font->line_gap = header->line_gap;
+
     font->glyphs = static_cast<GuiGlyph *>(malloc(glyph_bytes));
     font->atlas = static_cast<uint8_t *>(malloc(atlas_bytes));
     if (!font->glyphs || !font->atlas) {
@@ -281,6 +289,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
     font->max_ink_width = 8;
     for (int i = 0; i < 128; i++)
         font->ascii_index[i] = -1;
+
     for (uint32_t i = 0; i < font->glyph_count; i++) {
         const GuiGlyph &glyph = font->glyphs[i];
         if (glyph.advance_x > font->max_advance)
@@ -294,6 +303,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
         font->max_advance = 8;
     if (font->max_ink_width <= 0)
         font->max_ink_width = font->max_advance;
+
     font->line_height = font->ascent + font->descent + font->line_gap;
     if (font->line_height <= 0)
         font->line_height = font->pixel_size > 0 ? (int16_t)font->pixel_size : 16;
@@ -303,6 +313,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
         if (fallback->advance_x > 0)
             fallback_advance = fallback->advance_x;
     }
+
     for (int i = 0; i < 128; i++)
         font->ascii_advance[i] = (int16_t)fallback_advance;
     for (uint32_t i = 0; i < font->glyph_count; i++) {
@@ -366,13 +377,6 @@ static inline uint8_t effective_color_alpha(uint32_t color)
     return color == 0 ? 0u : 255u;
 }
 
-static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
-{
-    return (uint8_t)(((uint32_t)alpha * (uint32_t)coverage + 127u) / 255u);
-}
-
-
-
 static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x, int32_t top_y, const GuiGlyph *glyph,
                               uint32_t fg, uint32_t bg, const uint8_t *alpha_lut, int32_t clip_x = 0,
                               int32_t clip_y = 0, int32_t clip_w = -1, int32_t clip_h = -1)
@@ -381,7 +385,7 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
         return;
     (void)bg;
 
-    uint8_t fg_alpha = effective_color_alpha(fg);
+    uint32_t fg_alpha = effective_color_alpha(fg);
     if (fg_alpha == 0)
         return;
 
@@ -391,6 +395,8 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
     int32_t start_row = 0;
     int32_t end_col = glyph->width;
     int32_t end_row = glyph->height;
+
+    // Evaluate standard rect clips relative to glyph origin
     if (clip_w >= 0 && clip_h >= 0) {
         if (dest_x < clip_x)
             start_col = clip_x - dest_x;
@@ -401,25 +407,33 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
         if (dest_y + end_row > clip_y + clip_h)
             end_row = clip_y + clip_h - dest_y;
     }
+
+    // Bounds limit relative to surface
     if (dest_x < 0)
-        start_col = -dest_x;
+        start_col = dest_x < -start_col ? -dest_x : start_col;
     if (dest_y < 0)
-        start_row = -dest_y;
+        start_row = dest_y < -start_row ? -dest_y : start_row;
     if (dest_x + end_col > (int32_t)s->width)
         end_col = (int32_t)s->width - dest_x;
     if (dest_y + end_row > (int32_t)s->height)
         end_row = (int32_t)s->height - dest_y;
+
     if (start_col >= end_col || start_row >= end_row)
         return;
 
     uint32_t stride = s->pitch / 4;
+    uint32_t atlas_stride = font->atlas_width;
+
+    // SWAR precalculations
     uint32_t fg_rgb = 0xFF000000u | (fg & 0x00FFFFFFu);
-    uint32_t fr = (fg_rgb >> 16) & 0xFFu, fg_g = (fg_rgb >> 8) & 0xFFu, fb = fg_rgb & 0xFFu;
- 
+    uint32_t rb_f = fg_rgb & 0x00FF00FFu;
+    uint32_t g_f = fg_rgb & 0x0000FF00u;
+
     for (int32_t row = start_row; row < end_row; row++) {
         uint32_t *dst = &s->buffer[(uint32_t)(dest_y + row) * stride + (uint32_t)(dest_x + start_col)];
         const uint8_t *atlas =
-            &font->atlas[(uint32_t)(glyph->atlas_y + row) * font->atlas_width + (uint32_t)(glyph->atlas_x + start_col)];
+            &font->atlas[(uint32_t)(glyph->atlas_y + row) * atlas_stride + (uint32_t)(glyph->atlas_x + start_col)];
+
         for (int32_t col = start_col; col < end_col; col++) {
             uint8_t raw_coverage = *atlas++;
             uint8_t coverage = alpha_lut ? alpha_lut[raw_coverage] : raw_coverage;
@@ -427,17 +441,30 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
                 dst++;
                 continue;
             }
-            uint8_t alpha = scale_alpha_u8(fg_alpha, coverage);
-            if (alpha == 255) {
+
+            // Fast coverage scale (avoid division)
+            uint32_t alpha = (fg_alpha * coverage + 255u) >> 8;
+
+            if (alpha >= 254u) {
                 *dst = fg_rgb;
             } else {
                 uint32_t d = *dst;
                 uint32_t inv = 255u - alpha;
-                uint32_t dr = (d >> 16) & 0xFFu, dg = (d >> 8) & 0xFFu, db = d & 0xFFu;
-                uint32_t r = (fr * alpha + dr * inv + 127u) / 255u;
-                uint32_t g = (fg_g * alpha + dg * inv + 127u) / 255u;
-                uint32_t b = (fb * alpha + db * inv + 127u) / 255u;
-                *dst = 0xFF000000u | (r << 16) | (g << 8) | b;
+
+                // SWAR exact div-255 Alpha Blending: (val + ((val >> 8) & mask) + offset) >> 8
+                // Processes Red & Blue concurrently in one 32-bit pipeline without overflow.
+                uint32_t rb_d = d & 0x00FF00FFu;
+                uint32_t g_d = d & 0x0000FF00u;
+
+                uint32_t rb = (rb_f * alpha) + (rb_d * inv) + 0x00800080u;
+                rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+                rb &= 0x00FF00FFu;
+
+                uint32_t g = (g_f * alpha) + (g_d * inv) + 0x00008000u;
+                g = (g + ((g >> 8) & 0x0000FF00u)) >> 8;
+                g &= 0x0000FF00u;
+
+                *dst = 0xFF000000u | rb | g;
             }
             dst++;
         }
@@ -457,10 +484,8 @@ static void draw_text_run_clipped(Surface *s, const GuiFont *font, int32_t x, in
         const GuiGlyph *glyph = resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
         if (glyph) {
             draw_single_glyph(s, font, pen_x, y, glyph, fg, bg, alpha_lut, clip_x, clip_y, clip_w, clip_h);
-            pen_x += advance;
-        } else {
-            pen_x += advance;
         }
+        pen_x += advance;
         if (clip_w >= 0 && pen_x >= clip_x + clip_w)
             break;
     }
@@ -568,9 +593,7 @@ int gui_measure_text(const GuiFont *font, const char *str)
 
 void gui_draw_text(Surface *s, const GuiFont *font, int32_t x, int32_t y, const char *str, uint32_t fg, uint32_t bg)
 {
-    if (!s || !s->buffer || !str)
-        return;
-    if (!font)
+    if (!s || !s->buffer || !str || !font)
         return;
 
     const char *line_start = str;
@@ -578,7 +601,8 @@ void gui_draw_text(Surface *s, const GuiFont *font, int32_t x, int32_t y, const 
     int line_height = gui_font_line_height(font);
     bool paint_bg = effective_color_alpha(bg) != 0;
     size_t remaining = k_gui_text_scan_limit;
-    while (remaining > 0) {
+
+    while (remaining > 0 && *line_start) {
         const char *line_end = line_start;
         size_t line_len = 0;
         while (line_len < remaining && *line_end && *line_end != '\n') {
@@ -586,44 +610,27 @@ void gui_draw_text(Surface *s, const GuiFont *font, int32_t x, int32_t y, const 
             line_len++;
         }
 
-        const GuiGlyph *glyph_cache[k_glyph_cache_cap];
-        int advance_cache[k_glyph_cache_cap];
-        size_t glyph_count = 0;
-        int line_width = 0;
-        for (const char *it = line_start; it < line_end; ++it) {
-            int advance = 0;
-            const GuiGlyph *glyph = resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
-            if (glyph_count < k_glyph_cache_cap) {
-                glyph_cache[glyph_count++] = glyph;
-                advance_cache[glyph_count - 1] = advance;
-            }
-            line_width += advance;
-        }
-        if (line_width > 0) {
-            if (paint_bg)
-                gui_fill_rect(s, x, pen_y, line_width, line_height, bg);
-            int32_t pen_x = x;
-            if (glyph_count == (size_t)(line_end - line_start)) {
-                for (size_t i = 0; i < glyph_count; i++) {
-                    const GuiGlyph *glyph = glyph_cache[i];
-                    if (glyph) {
-                        draw_single_glyph(s, font, pen_x, pen_y, glyph, fg, bg, font->alpha_lut);
-                        pen_x += advance_cache[i];
-                    } else {
-                        pen_x += advance_cache[i];
-                    }
-                }
-            } else {
+        if (line_len > 0) {
+            if (paint_bg) {
+                // Fill background
+                int line_width = 0;
                 for (const char *it = line_start; it < line_end; ++it) {
                     int advance = 0;
-                    const GuiGlyph *glyph = resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
-                    if (glyph) {
-                        draw_single_glyph(s, font, pen_x, pen_y, glyph, fg, bg, font->alpha_lut);
-                        pen_x += advance;
-                    } else {
-                        pen_x += advance;
-                    }
+                    resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
+                    line_width += advance;
                 }
+                if (line_width > 0)
+                    gui_fill_rect(s, x, pen_y, line_width, line_height, bg);
+            }
+
+            int32_t pen_x = x;
+            for (const char *it = line_start; it < line_end; ++it) {
+                int advance = 0;
+                const GuiGlyph *glyph = resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
+                if (glyph) {
+                    draw_single_glyph(s, font, pen_x, pen_y, glyph, fg, bg, font->alpha_lut);
+                }
+                pen_x += advance;
             }
         }
 
@@ -639,18 +646,16 @@ void gui_draw_text_rect_clipped(Surface *s, const GuiFont *font, int32_t x, int3
                                 int32_t clip_x, int32_t clip_y, int32_t clip_w, int32_t clip_h, const char *str,
                                 uint32_t fg, uint32_t bg)
 {
-    if (!s || !s->buffer || !str || max_width <= 0 || clip_w <= 0 || clip_h <= 0)
-        return;
-    if (!font)
+    if (!s || !s->buffer || !str || max_width <= 0 || clip_w <= 0 || clip_h <= 0 || !font)
         return;
 
-    char safe_text[256];
+    char safe_text[512];
     size_t safe_len = gui_bounded_line_length(str, sizeof(safe_text) - 1u);
     for (size_t i = 0; i < safe_len; i++)
         safe_text[i] = str[i];
     safe_text[safe_len] = '\0';
 
-    char clipped[256];
+    char clipped[512];
     const char *text = safe_text;
     if (gui_measure_text(font, safe_text) > max_width) {
         size_t len = gui_truncate_text(font, safe_text, max_width, clipped, sizeof(clipped));

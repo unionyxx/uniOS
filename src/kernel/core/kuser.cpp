@@ -14,7 +14,7 @@ static char *kstrdup(const char *s)
     if (!s)
         return nullptr;
     size_t len = kstring::strlen(s);
-    char *d = (char *)malloc(len + 1);
+    char *d = static_cast<char *>(malloc(len + 1));
     if (d)
         kstring::strncpy(d, s, len + 1);
     return d;
@@ -66,7 +66,7 @@ static char *read_file_to_buf(const char *path, uint64_t *out_size)
     if (vfs_stat(path, &st) < 0)
         return nullptr;
 
-    char *buf = (char *)malloc(st.size + 1);
+    char *buf = static_cast<char *>(malloc(st.size + 1));
     if (!buf)
         return nullptr;
 
@@ -111,7 +111,7 @@ passwd *kgetpwnam(const char *name)
         if (u_end) {
             *u_end = '\0';
             if (kstring::strcmp(p, name) == 0) {
-                result = (passwd *)malloc(sizeof(passwd));
+                result = static_cast<passwd *>(malloc(sizeof(passwd)));
                 if (result) {
                     kstring::memset(result, 0, sizeof(passwd));
                     result->pw_name = kstrdup(p);
@@ -191,7 +191,7 @@ passwd *kgetpwuid(uint32_t uid)
                 if (uid_end) {
                     *uid_end = '\0';
                     if ((uint32_t)str_to_int(p) == uid) {
-                        result = (passwd *)malloc(sizeof(passwd));
+                        result = static_cast<passwd *>(malloc(sizeof(passwd)));
                         if (result) {
                             kstring::memset(result, 0, sizeof(passwd));
                             result->pw_name = kstrdup(username);
@@ -251,7 +251,7 @@ spwd *kgetspnam(const char *name)
         if (u_end) {
             *u_end = '\0';
             if (kstring::strcmp(p, name) == 0) {
-                result = (spwd *)malloc(sizeof(spwd));
+                result = static_cast<spwd *>(malloc(sizeof(spwd)));
                 if (result) {
                     kstring::memset(result, 0, sizeof(spwd));
                     result->sp_namp = kstrdup(p);
@@ -409,8 +409,8 @@ void ksha256_string(const char *salt, const char *pass, char *out_hex)
     uint8_t hash[32];
     SHA256_CTX ctx;
     sha256_init(&ctx);
-    sha256_update(&ctx, (const uint8_t *)salt, kstring::strlen(salt));
-    sha256_update(&ctx, (const uint8_t *)pass, kstring::strlen(pass));
+    sha256_update(&ctx, reinterpret_cast<const uint8_t *>(salt), kstring::strlen(salt));
+    sha256_update(&ctx, reinterpret_cast<const uint8_t *>(pass), kstring::strlen(pass));
     sha256_final(&ctx, hash);
     const char *hex = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
@@ -487,7 +487,7 @@ bool kuser_create(const char *username, const char *password, uint32_t uid)
     kuser_generate_salt(salt, 16);
     char hash[65];
     ksha256_string(salt, password, hash);
-    kstring::memset((void *)password, 0, kstring::strlen(password));
+    kstring::memset(const_cast<char *>(password), 0, kstring::strlen(password));
 
     char shadow_entry[256];
     shadow_entry[0] = '\0';
@@ -543,7 +543,7 @@ static char *kread_file_to_buf(const char *path, uint64_t *out_size)
     VNodeStat st;
     if (vfs_stat(path, &st) < 0)
         return nullptr;
-    char *buf = (char *)malloc(st.size + 1);
+    char *buf = static_cast<char *>(malloc(st.size + 1));
     if (!buf)
         return nullptr;
     int fd = vfs_open(path, O_RDONLY);

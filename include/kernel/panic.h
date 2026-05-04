@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-void hcf();
+[[noreturn]] void hcf();
 void panic(const char *message);
 
 struct InterruptFrame

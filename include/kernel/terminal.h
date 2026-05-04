@@ -80,7 +80,7 @@ private:
         Esc,
         CSI
     } m_ansi_state = AnsiState::Normal;
-    char m_ansi_buffer[32];
+    char m_ansi_buffer[32] = {};
     int m_ansi_idx = 0;
 };
 

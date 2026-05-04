@@ -59,7 +59,6 @@ static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *udp_d
     return result;
 }
 
-// Receive UDP packet
 void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t dst_ip)
 {
     if (!data || length < UDP_HEADER_SIZE) {
@@ -108,7 +107,6 @@ void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
     (void)dst_ip; // Unused
 }
 
-// Send UDP packet
 bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void *data, uint16_t length)
 {
     if ((!data && length > 0) || dst_ip == 0 || src_port == 0 || dst_port == 0)
@@ -146,7 +144,6 @@ bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void 
     return result;
 }
 
-// Create UDP socket
 int udp_socket()
 {
     for (int i = 0; i < UDP_MAX_SOCKETS; i++) {
@@ -160,7 +157,6 @@ int udp_socket()
     return -1;
 }
 
-// Bind socket to port
 bool udp_bind(int sock, uint16_t port)
 {
     if (sock < 0 || sock >= UDP_MAX_SOCKETS || !sockets[sock].in_use) {
@@ -183,7 +179,6 @@ bool udp_bind(int sock, uint16_t port)
     return true;
 }
 
-// Send via socket
 bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void *data, uint16_t length)
 {
     if (sock < 0 || sock >= UDP_MAX_SOCKETS || !sockets[sock].in_use) {
@@ -194,7 +189,6 @@ bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void *data, 
     return udp_send(dst_ip, src_port, dst_port, data, length);
 }
 
-// Receive into socket
 int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uint16_t *src_port)
 {
     if (!buffer && max_len > 0)
@@ -225,7 +219,6 @@ int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uin
     return len;
 }
 
-// Close socket
 void udp_close(int sock)
 {
     if (sock >= 0 && sock < UDP_MAX_SOCKETS) {

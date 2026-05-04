@@ -766,7 +766,7 @@ void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
     vmm_flush_tlb_all();
 }
 
-void vmm_free_dma(DMAAllocation alloc)
+void vmm_free_dma(const DMAAllocation &alloc)
 {
     if (alloc.size == 0)
         return;

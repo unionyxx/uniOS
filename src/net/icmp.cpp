@@ -4,7 +4,6 @@
 #include <kernel/net/ipv4.h>
 #include <kernel/time/timer.h>
 
-// Ping tracking
 static ping_callback_t g_ping_callback = nullptr;
 static uint16_t g_ping_id = 0;
 static uint16_t g_ping_seq = 0;
@@ -23,7 +22,6 @@ void icmp_set_ping_callback(ping_callback_t callback)
     g_ping_callback = callback;
 }
 
-// Receive ICMP packet
 void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
 {
     if (!data || length < ICMP_HEADER_SIZE) {
@@ -50,21 +48,17 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
             reply_hdr->identifier = hdr->identifier;
             reply_hdr->sequence = hdr->sequence;
 
-            // Copy payload
             for (uint16_t i = 0; i < reply_payload_len; i++) {
                 reply[ICMP_HEADER_SIZE + i] = payload[i];
             }
 
-            // Calculate checksum
             reply_hdr->checksum = ipv4_checksum(reply, ICMP_HEADER_SIZE + reply_payload_len);
 
-            // Send reply
             ipv4_send(src_ip, IP_PROTO_ICMP, reply, ICMP_HEADER_SIZE + reply_payload_len);
             break;
         }
 
         case ICMP_TYPE_ECHO_REPLY: {
-            // Check if this is our ping reply
             if (ntohs(hdr->identifier) == g_ping_id) {
                 uint16_t seq = ntohs(hdr->sequence);
                 uint64_t now = timer_get_ticks();
@@ -83,7 +77,6 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
     }
 }
 
-// Send echo request (ping)
 bool icmp_send_echo_request(uint32_t dst_ip, uint16_t id, uint16_t seq)
 {
     if (dst_ip == 0)
@@ -97,16 +90,13 @@ bool icmp_send_echo_request(uint32_t dst_ip, uint16_t id, uint16_t seq)
     hdr->identifier = htons(id);
     hdr->sequence = htons(seq);
 
-    // Add some payload data
     uint8_t *payload = packet + ICMP_HEADER_SIZE;
     for (int i = 0; i < 56; i++) {
         payload[i] = (uint8_t)i;
     }
 
-    // Calculate checksum
     hdr->checksum = ipv4_checksum(packet, ICMP_HEADER_SIZE + 56);
 
-    // Track for RTT calculation
     g_ping_id = id;
     g_ping_seq = seq;
     g_ping_sent_time = timer_get_ticks();

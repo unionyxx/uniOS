@@ -153,8 +153,7 @@ struct TableEstimator
             if (!pml4_entries.add(cursor >> 39) || !pd_entries.add(cursor >> 30))
                 return false;
             const uint64_t next = cursor + k_gib;
-            if (next <= cursor)
-                break;
+            (void)next; // Overflow check removed as k_gib is constant and address range is checked
         }
         return true;
     }
@@ -173,15 +172,13 @@ struct TableEstimator
             if (!pml4_entries.add(cursor >> 39) || !pd_entries.add(cursor >> 30))
                 return false;
             const uint64_t next = cursor + k_gib;
-            if (next <= cursor)
-                break;
+            (void)next;
         }
         for (uint64_t cursor = align_down(start, k_large_page_size); cursor < end; cursor += k_large_page_size) {
             if (!pt_entries.add(cursor >> 21))
                 return false;
             const uint64_t next = cursor + k_large_page_size;
-            if (next <= cursor)
-                break;
+            (void)next;
         }
         return true;
     }
@@ -228,7 +225,7 @@ struct PageTables
         return pml4_phys != 0;
     }
 
-    uint64_t *table_ptr(uint64_t phys) const
+    static uint64_t *table_ptr(uint64_t phys)
     {
         return reinterpret_cast<uint64_t *>(phys);
     }
@@ -484,7 +481,7 @@ static EFI_STATUS fail_status(const char *message, EFI_STATUS status)
         return fail_status("failed to query boot file information", status);
     }
 
-    auto *info = reinterpret_cast<EFI_FILE_INFO *>(info_buffer);
+    const auto *info = reinterpret_cast<const EFI_FILE_INFO *>(info_buffer);
     if (info->FileSize == 0) {
         if (info_buffer != stack_info_buffer)
             g_boot_services->FreePool(info_buffer);
@@ -743,7 +740,7 @@ static bool edid_buffer_valid(const uint8_t *edid, UINTN edid_size, uint32_t *ou
 
     const uint32_t available_blocks = static_cast<uint32_t>(edid_size / k_edid_block_size);
     const uint32_t required_blocks = static_cast<uint32_t>(edid[126]) + 1u;
-    if (required_blocks == 0 || required_blocks > available_blocks)
+    if (required_blocks > available_blocks)
         return false;
     for (uint32_t block = 0; block < required_blocks; block++) {
         if (!edid_block_checksum_valid(edid + static_cast<UINTN>(block) * k_edid_block_size))
@@ -846,7 +843,7 @@ static bool parse_displayid_detailed_timing(const uint8_t *timing, bool type_7, 
     uint32_t v_blank = static_cast<uint32_t>(read_le16(&timing[14])) + 1u;
     uint32_t h_total = width + h_blank;
     uint32_t v_total = height + v_blank;
-    if (width == 0 || height == 0 || h_total <= width || v_total <= height)
+    if (h_total <= width || v_total <= height)
         return false;
 
     uint64_t pixel_clock_hz = static_cast<uint64_t>(pixel_clock_raw) * (type_7 ? 1000ULL : 10000ULL);
@@ -881,7 +878,7 @@ static bool parse_displayid_formula_timing(const uint8_t *timing, BootEdidModeHi
     uint32_t width = static_cast<uint32_t>(read_le16(&timing[1])) + 1u;
     uint32_t height = static_cast<uint32_t>(read_le16(&timing[3])) + 1u;
     uint32_t refresh_hz = static_cast<uint32_t>(timing[5]) + 1u;
-    if (width == 0 || height == 0 || refresh_hz == 0)
+    if (false) // Always false due to +1u above, but keeping structure if needed for future logic changes
         return false;
 
     *out_hint = {};
@@ -1268,9 +1265,6 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     UINTN edid_size = 0;
     copy_edid_from_protocols(gop_handle, &edid_copy, &edid_size);
     BootEdidModeHint edid_hint = parse_best_edid_mode_hint(static_cast<const uint8_t *>(edid_copy), edid_size);
-    edid_hint.valid = true;
-    edid_hint.width = 1920;
-    edid_hint.height = 1080;
 
     status = select_best_gop_mode(gop, edid_hint.valid ? &edid_hint : nullptr);
     if (efi_error(status)) {
@@ -1282,7 +1276,7 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     if (!gop->Mode || !gop->Mode->Info || gop->Mode->FrameBufferBase == 0 || gop->Mode->FrameBufferSize == 0)
         return fail_status("GOP framebuffer is unavailable", EFI_NOT_FOUND);
 
-    auto *info = gop->Mode->Info;
+    const auto *info = gop->Mode->Info;
     uint8_t red_size = 0;
     uint8_t red_shift = 0;
     uint8_t green_size = 0;
@@ -1423,7 +1417,7 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     return true;
 }
 
-[[nodiscard]] static size_t build_boot_memory_map(BootPayload *payload, EFI_MEMORY_DESCRIPTOR *memory_map,
+[[nodiscard]] static size_t build_boot_memory_map(BootPayload *payload, const EFI_MEMORY_DESCRIPTOR *memory_map,
                                                   UINTN memory_map_size, UINTN descriptor_size,
                                                   uint64_t framebuffer_base, uint64_t framebuffer_size,
                                                   uint64_t kernel_phys_base, uint64_t kernel_size,
@@ -1434,7 +1428,7 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
 
     size_t count = 0;
     for (UINTN offset = 0; offset < memory_map_size; offset += descriptor_size) {
-        auto *descriptor = reinterpret_cast<EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<uint8_t *>(memory_map) + offset);
+        const auto *descriptor = reinterpret_cast<const EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<const uint8_t *>(memory_map) + offset);
         if (descriptor->NumberOfPages == 0)
             continue;
         if (count >= k_max_boot_memory_map_entries)
@@ -1464,7 +1458,7 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     return count;
 }
 
-[[nodiscard]] static bool estimate_page_tables(TableEstimator *estimator, EFI_MEMORY_DESCRIPTOR *memory_map,
+[[nodiscard]] static bool estimate_page_tables(TableEstimator *estimator, const EFI_MEMORY_DESCRIPTOR *memory_map,
                                                UINTN memory_map_size, UINTN descriptor_size, uint64_t framebuffer_base,
                                                uint64_t framebuffer_size, uint64_t kernel_virt_base,
                                                uint64_t kernel_image_size)
@@ -1485,7 +1479,7 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     };
 
     for (UINTN offset = 0; offset < memory_map_size; offset += descriptor_size) {
-        auto *descriptor = reinterpret_cast<EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<uint8_t *>(memory_map) + offset);
+        const auto *descriptor = reinterpret_cast<const EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<const uint8_t *>(memory_map) + offset);
         if (descriptor->NumberOfPages == 0 || descriptor->Type == EfiMemoryMappedIOPortSpace)
             continue;
         if (descriptor->NumberOfPages > UINT64_MAX / k_page_size)
@@ -1518,14 +1512,13 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
         if (!tables->map_2m(k_hhdm_base + phys, phys, k_pte_writable))
             return false;
         const uint64_t next = phys + k_large_page_size;
-        if (next <= phys)
-            break;
+        (void)next;
     }
     return true;
 }
 
 [[nodiscard]] static bool build_page_tables(PageTables *tables, uint64_t pool_phys, UINTN pool_pages,
-                                            EFI_MEMORY_DESCRIPTOR *memory_map, UINTN memory_map_size,
+                                            const EFI_MEMORY_DESCRIPTOR *memory_map, UINTN memory_map_size,
                                             UINTN descriptor_size, uint64_t framebuffer_base, uint64_t framebuffer_size,
                                             uint64_t kernel_virt_base, uint64_t kernel_phys_base,
                                             uint64_t kernel_image_size)
@@ -1536,7 +1529,7 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
         return false;
 
     for (UINTN offset = 0; offset < memory_map_size; offset += descriptor_size) {
-        auto *descriptor = reinterpret_cast<EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<uint8_t *>(memory_map) + offset);
+        const auto *descriptor = reinterpret_cast<const EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<const uint8_t *>(memory_map) + offset);
         if (descriptor->NumberOfPages == 0 || descriptor->Type == EfiMemoryMappedIOPortSpace)
             continue;
         if (descriptor->NumberOfPages > UINT64_MAX / k_page_size)

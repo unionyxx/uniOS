@@ -45,7 +45,7 @@ static bool vfs_path_is_storage_guarded(const char *path)
         return false;
 
     spinlock_acquire(&g_mount_lock);
-    Mount *mount = vfs_find_best_mount_locked(string_view(path));
+    const Mount *mount = vfs_find_best_mount_locked(string_view(path));
     bool guarded = mount && (mount->flags & VFS_MOUNT_FLAG_STORAGE_GUARDED) != 0;
     spinlock_release(&g_mount_lock);
     return guarded;
@@ -80,7 +80,7 @@ static uint16_t vfs_sanitize_file_mode(uint16_t mode)
 
 static bool vfs_check_permission(VNode *node, int mask)
 {
-    Process *p = process_get_current();
+    const Process *p = process_get_current();
     if (!p)
         return true; // Kernel-level tasks often have no process struct initially
     if (p->uid == 0)
@@ -167,7 +167,7 @@ int vfs_mount(const char *path, VNode *root)
         return nullptr;
 
     spinlock_acquire(&g_mount_lock);
-    Mount *best_mount = vfs_find_best_mount_locked(path);
+    const Mount *best_mount = vfs_find_best_mount_locked(path);
     spinlock_release(&g_mount_lock);
 
     if (!best_mount)
@@ -299,7 +299,7 @@ void vfs_resolve_relative_path(const char *cwd, const char *path, char *out)
 void vfs_sync()
 {
     spinlock_acquire(&g_mount_lock);
-    for (Mount *m = g_mount_list; m; m = m->next) {
+    for (const Mount *m = g_mount_list; m; m = m->next) {
         if (m->root && m->root->ops->sync) {
             m->root->ops->sync(m->root);
         }
@@ -315,7 +315,7 @@ void vfs_close_vnode(VNode *node)
     if (__sync_sub_and_fetch(&node->ref_count, 1) == 0) {
         bool is_mount_root = false;
         spinlock_acquire(&g_mount_lock);
-        for (Mount *m = g_mount_list; m; m = m->next) {
+        for (const Mount *m = g_mount_list; m; m = m->next) {
             if (m->root == node) {
                 is_mount_root = true;
                 break;
@@ -625,7 +625,7 @@ int vfs_unlink(const char *path)
         return -1;
 
     const char *name = last_slash + 1;
-    if (!name || name[0] == '\0')
+    if (*name == '\0')
         return -1;
     const char *lookup_path = (last_slash == parent_path) ? "/" : parent_path;
     if (last_slash != parent_path)
@@ -671,7 +671,7 @@ int vfs_rmdir(const char *path)
         return -1;
 
     const char *name = last_slash + 1;
-    if (!name || name[0] == '\0')
+    if (*name == '\0')
         return -1;
     const char *lookup_path = (last_slash == parent_path) ? "/" : parent_path;
     if (last_slash != parent_path)
@@ -746,7 +746,7 @@ bool is_file_open(const char *path)
     // Iterate all processes
     Process *start = scheduler_get_process_list();
     if (start) {
-        Process *curr = start;
+        const Process *curr = start;
         do {
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
                 if (curr->fd_table[i].used && curr->fd_table[i].vnode == target) {

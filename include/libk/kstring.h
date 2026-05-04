@@ -80,7 +80,7 @@ inline int strcmp(const char *s1, const char *s2)
         s1++;
         s2++;
     }
-    return *(const unsigned char *)s1 - *(const unsigned char *)s2;
+    return *static_cast<const unsigned char *>(static_cast<const void *>(s1)) - *static_cast<const unsigned char *>(static_cast<const void *>(s2));
 }
 
 // String comparison with length limit
@@ -93,7 +93,7 @@ inline int strncmp(const char *s1, const char *s2, size_t n)
     }
     if (n == 0)
         return 0;
-    return *(const unsigned char *)s1 - *(const unsigned char *)s2;
+    return *static_cast<const unsigned char *>(static_cast<const void *>(s1)) - *static_cast<const unsigned char *>(static_cast<const void *>(s2));
 }
 
 // String length
@@ -109,8 +109,11 @@ inline size_t strlen(const char *s)
 inline char *strncpy(char *dst, const char *src, size_t n)
 {
     char *ret = dst;
-    while (n && (*dst++ = *src++))
+    while (n && (*dst = *src)) {
+        dst++;
+        src++;
         n--;
+    }
     while (n--)
         *dst++ = '\0';
     return ret;
@@ -122,8 +125,11 @@ inline char *strncat(char *dst, const char *src, size_t n)
     char *ret = dst;
     while (*dst)
         dst++;
-    while (n && (*dst++ = *src++))
+    while (n && (*dst = *src)) {
+        dst++;
+        src++;
         n--;
+    }
     if (n == 0)
         *dst = '\0';
     return ret;

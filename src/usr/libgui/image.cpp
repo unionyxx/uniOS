@@ -555,20 +555,7 @@ static bool uocu_raw_decode_to_surface(const uint8_t *encoded, uint32_t encoded_
 
 extern "C" {
 
-void gui_destroy_surface(Surface *s)
-{
-    if (!s)
-        return;
-    if (s->owns_buffer && s->buffer) {
-        free(s->buffer);
-    }
-    s->buffer = nullptr;
-    s->width = 0;
-    s->height = 0;
-    s->pitch = 0;
-    s->owns_buffer = false;
-    s->display_handle = 0;
-}
+
 
 bool gui_load_uoic(const char *path, uint32_t logical_px, uint32_t display_scale_pct, Surface *out)
 {

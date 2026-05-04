@@ -143,6 +143,7 @@ static void blit_alpha_blend_rect(uint32_t *dst, uint32_t dst_stride, const uint
 
             uint32_t d = drow[x];
             uint32_t da = d >> 24;
+            g_frame_stats.alpha_pixels_last_frame++;
             if (da == 255) {
                 uint32_t inv_sa = 255u - sa;
                 uint32_t s_rb = s & 0x00FF00FFu;
@@ -735,6 +736,15 @@ static void mark_shell_blur_dirty(Registry *registry, const DirtyRect &screen_re
 
     DirtyRect menubar_rect = {0, 0, (int)g_screen.width, wm_menubar_h()};
     DirtyRect overlap = {};
+
+    bool manip = g_input.pointer_down && g_input.drag_index >= 2;
+    bool interaction = manip || g_input.hover_resize_edges != RESIZE_NONE || g_input.hover_button >= 0;
+    if (interaction) {
+        g_menubar_blur_dirty = false;
+        g_dock_blur_dirty = false;
+        return;
+    }
+
     if (g_menubar_blur_source.buffer && rect_intersection(screen_rect, menubar_rect, &overlap)) {
         copy_surface_rect(&g_menubar_blur_source, overlap.x, overlap.y, &g_backbuffer, overlap.x, overlap.y, overlap.w,
                           overlap.h);
@@ -1561,15 +1571,15 @@ static void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
     int shadow_3 = gui_scaled_metric(2);
     gui_fill_rounded_rect(&g_backbuffer, layout.box.x + 1, layout.box.y + shadow_1, layout.box.w - 2, layout.box.h,
                           box_r, 0x08000000u);
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_2, layout.box.w, layout.box.h,
-                          box_r, 0x0C000000u);
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_3, layout.box.w, layout.box.h,
-                          box_r, 0x14000000u);
+    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_2, layout.box.w, layout.box.h, box_r,
+                          0x0C000000u);
+    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_3, layout.box.w, layout.box.h, box_r,
+                          0x14000000u);
 
     gui_draw_panel_inset_ext(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
                              g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
-    gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r,
-                             "Storage Mode", "Choose how uniOS should expose AHCI and ATA storage");
+    gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r, "Storage Mode",
+                             "Choose how uniOS should expose AHCI and ATA storage");
 
     int text_x = layout.box.x + gui_space_2();
     int content_y = layout.box.y + gui_card_header_h() + gui_space_2();
@@ -1654,7 +1664,7 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
 
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
+                             g_gui_style.border, g_gui_style.chrome_bg_alt);
 
     DirtyRect search = wm_index_search_bounds();
     const char *query = g_index.query_len > 0 ? g_index.query : "";
@@ -1814,7 +1824,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
 
     int radius = gui_scaled_metric(20);
 
-    // Multi-layer soft shadow for premium depth
+    // Multi-layer soft shadow
     int shadow_1 = gui_scaled_metric(8);
     int shadow_2 = gui_scaled_metric(4);
     int shadow_3 = gui_scaled_metric(2);
@@ -1824,7 +1834,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
 
     // Main panel surface with inset highlight
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
+                             g_gui_style.border, g_gui_style.chrome_bg_alt);
 
     // Card header (drawn inside the panel inset border)
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Control Panel", "uniOS");
@@ -1850,4 +1860,44 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
                         g_control_center.hovered_item == CONTROL_ITEM_STORAGE);
     gui_app_draw_button(&g_backbuffer, settings.x, settings.y, settings.w, settings.h, "Settings", true, false,
                         g_control_center.hovered_item == CONTROL_ITEM_SETTINGS);
+}
+void draw_debug_overlay(Surface *dst)
+{
+    if (!dst || !dst->buffer)
+        return;
+
+    int pad = gui_space_1();
+    int line_h = gui_line_height();
+    int x = pad;
+    int w = gui_scaled_metric(220);
+    int h = (line_h * 11) + pad;
+    int y = (int)dst->height - h - pad;
+
+    gui_fill_rect(dst, x - pad / 2, y - pad / 2, w, h, 0x80000000u);
+    gui_draw_rect(dst, x - pad / 2, y - pad / 2, w, h, 0xFFFFFFFFu);
+
+    auto draw_stat = [&](const char *label, uint64_t val, const char *unit = "") {
+        char buf[64];
+        if (unit[0])
+            snprintf(buf, sizeof(buf), "%s: %llu %s", label, (unsigned long long)val, unit);
+        else
+            snprintf(buf, sizeof(buf), "%s: %llu", label, (unsigned long long)val);
+        gui_draw_text_clipped(dst, gui_font_default(), x, y, w - pad, buf, 0xFFFFFFFFu, 0);
+        y += line_h;
+    };
+
+    uint64_t frame_time = g_frame_stats.last_submit_ticks - g_frame_stats.last_build_ticks;
+    uint64_t fps = frame_time > 0 ? 1000 / frame_time : 0;
+
+    draw_stat("FPS", fps);
+    draw_stat("Frame Time", frame_time, "ms");
+    draw_stat("Compose Time", g_frame_stats.last_compose_ticks, "ms");
+    draw_stat("Copy Time", g_frame_stats.last_copy_ticks, "ms");
+    draw_stat("Blur Time", g_frame_stats.last_blur_ticks, "ms");
+    draw_stat("Dirty Rects", g_frame_stats.last_dirty_rects);
+    uint32_t area_pct = (uint32_t)(g_frame_stats.last_dirty_area * 100 / (dst->width * dst->height));
+    draw_stat("Dirty Area", area_pct, "%");
+    draw_stat("Alpha Pixels", g_frame_stats.alpha_pixels_last_frame);
+    draw_stat("Missed Frames", g_frame_stats.missed_frames);
+    draw_stat("Submits", g_frame_stats.frames_submitted);
 }

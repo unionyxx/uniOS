@@ -1,5 +1,6 @@
 #include "../libc/config_utils.h"
 #include "../libc/log.h"
+#include "../libc/stdlib.h"
 #include "wm_core.h"
 
 IndexState g_index = {};
@@ -28,8 +29,22 @@ void enqueue_damage_rect(int x, int y, int w, int h)
     if (!clip_dirty_rect_to_screen(incoming))
         return;
 
+    int current_count = clamp_dirty_rect_count(g_dirty_count);
+    if (current_count >= MAX_DIRTY_RECTS - 1) {
+        // Approaching limit: collapse existing and new into one bounding rect
+        DirtyRect bounds = incoming;
+        for (int i = 0; i < current_count; i++) {
+            bounds = rect_union(bounds, g_dirty_rects[i]);
+        }
+        clip_dirty_rect_to_screen(bounds);
+        g_dirty_rects[0] = bounds;
+        g_dirty_count = 1;
+        invalidate_dirty_frame();
+        return;
+    }
+
     wm::DirtyRect policy_rects[MAX_DIRTY_RECTS] = {};
-    int policy_count = clamp_dirty_rect_count(g_dirty_count);
+    int policy_count = current_count;
     copy_dirty_rects_to_policy(policy_rects, policy_count);
 
     wm::DirtyRect incoming_policy = {incoming.x, incoming.y, incoming.w, incoming.h};
@@ -77,7 +92,11 @@ void normalize_dirty_rects(bool interactive)
     int policy_count = clamp_dirty_rect_count(g_dirty_count);
     copy_dirty_rects_to_policy(policy_rects, policy_count);
 
+    int prev_count = policy_count;
     wm::normalize_dirty_rects(policy_rects, &policy_count, (int)g_screen.width, (int)g_screen.height, interactive);
+
+    if (prev_count > 1 && policy_count == 1)
+        g_frame_stats.damage_collapse_count++;
 
     g_dirty_count = clamp_dirty_rect_count(policy_count);
     copy_dirty_rects_from_policy(policy_rects, g_dirty_count);
@@ -1321,6 +1340,7 @@ static const IndexCatalogEntry k_index_catalog[] = {
     {"Toggle Motion", "Turn window motion on or off", "animations", false, INDEX_ACTION_TOGGLE_ANIMATIONS},
     {"Toggle Transparency", "Use transparent or solid surfaces", "transparency", false,
      INDEX_ACTION_TOGGLE_TRANSPARENCY},
+    {"Torture", "Simulate High Compositor Load", nullptr, false, INDEX_ACTION_TORTURE_TEST},
 };
 
 static constexpr int INDEX_CATALOG_COUNT = (int)(sizeof(k_index_catalog) / sizeof(k_index_catalog[0]));
@@ -1587,6 +1607,28 @@ bool activate_index_selection(Registry *registry)
                 persist_wm_settings();
             }
             enqueue_damage_rect(0, 0, (int)g_screen.width, (int)g_screen.height);
+            return true;
+        case INDEX_ACTION_TORTURE_TEST:
+            for (int i = 0; i < 100; i++) {
+                enqueue_damage_rect(rand() % g_screen.width, rand() % g_screen.height, 10 + rand() % 100, 10 + rand() % 100);
+            }
+            if (g_window_count > 2) {
+                int top = find_top_visible_user_window();
+                for (int i = 0; i < 10; i++) {
+                    if (top >= 2) {
+                        Window &w = g_windows[top];
+                        set_window_bounds(w, w.x + (rand() % 21 - 10), w.y + (rand() % 21 - 10), w.w, w.h);
+                    }
+                }
+            }
+            // Simulate a massive memory load
+            for (int i = 0; i < 5; i++) {
+                volatile uint32_t *fb = g_backbuffer.buffer;
+                if (fb) {
+                    for (uint32_t j = 0; j < g_screen.width * g_screen.height; j += 1024)
+                        (void)fb[j];
+                }
+            }
             return true;
         default:
             return false;

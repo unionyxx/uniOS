@@ -41,6 +41,7 @@ struct AllocRegion
 };
 
 static AllocRegion *g_regions = NULL;
+static unsigned int g_rand_seed = 1;
 
 static size_t align_up(size_t value, size_t alignment)
 {
@@ -319,4 +320,15 @@ int atoi(const char *str)
         res = res * 10 + (str[i] - '0');
     }
     return sign * res;
+}
+
+void srand(unsigned int seed)
+{
+    g_rand_seed = seed;
+}
+
+int rand(void)
+{
+    g_rand_seed = g_rand_seed * 1103515245 + 12345;
+    return (int)((g_rand_seed / 65536) % 32768);
 }

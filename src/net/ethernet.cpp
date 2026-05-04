@@ -6,11 +6,9 @@
 #include <kernel/net/net.h>
 #include <kernel/sync/spinlock.h>
 
-// Broadcast MAC
 const uint8_t ETH_BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static constexpr uint16_t ETH_MIN_PAYLOAD_LEN = 46;
 
-// Byte order conversion
 uint16_t htons(uint16_t value)
 {
     return ((value & 0xFF) << 8) | ((value >> 8) & 0xFF);
@@ -31,7 +29,6 @@ uint32_t ntohl(uint32_t value)
     return htonl(value);
 }
 
-// MAC address helpers
 bool eth_mac_equals(const uint8_t *mac1, const uint8_t *mac2)
 {
     if (!mac1 || !mac2)
@@ -77,7 +74,6 @@ void ethernet_init()
 {
 }
 
-// Send Ethernet frame
 static Spinlock tx_lock = SPINLOCK_INIT;
 static uint8_t tx_buffer[1600];
 
@@ -125,7 +121,6 @@ bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype, const void *data,
     return result;
 }
 
-// Process received Ethernet frame
 void ethernet_receive(const void *frame, uint16_t length)
 {
     if (!frame || length < ETH_HLEN) {
@@ -136,7 +131,6 @@ void ethernet_receive(const void *frame, uint16_t length)
     const uint8_t *payload = (const uint8_t *)frame + ETH_HLEN;
     uint16_t payload_len = length - ETH_HLEN;
 
-    // Check if frame is for us
     uint8_t our_mac[6];
     net_get_mac(our_mac);
 
@@ -144,7 +138,6 @@ void ethernet_receive(const void *frame, uint16_t length)
         return; // Not for us
     }
 
-    // Demultiplex by EtherType
     uint16_t ethertype = ntohs(hdr->ethertype);
 
     switch (ethertype) {

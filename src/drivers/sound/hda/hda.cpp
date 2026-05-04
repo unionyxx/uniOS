@@ -73,12 +73,10 @@ void hda_init()
         }
     }
 
-    // Try to set operational state.
     mmio_write16((void *)(hda_info.base + HDA_GLOBAL_CONTROL), HDA_GLOBAL_CONTROL_IN_OPERATIONAL_STATE);
 
     DEBUG_INFO("waiting for operational state");
 
-    // Wait for completion with timeout.
     reset_timeout = 100000;
     while (!(mmio_read16((void *)(hda_info.base + HDA_GLOBAL_CONTROL)) & HDA_GLOBAL_CONTROL_IN_OPERATIONAL_STATE)) {
         io_wait();
@@ -88,16 +86,11 @@ void hda_init()
         }
     }
 
-    // Disable all interrupts by writing 0 to all bits.
-    // Bit 31 = Interrupt state.
-    // 0 - All interrupts are disabled.
-    // 1 - All interrupts are enabled.
+    // Disable interrupts and DMA
     mmio_write32((void *)(hda_info.base + HDA_INTERRUPT_CONTROL), 0);
 
-    // Turn off dma position transfer.
     mmio_write64((void *)(hda_info.base + HDA_DMA_POSITION_BASE_ADDRESS), 0);
 
-    // Disable stream synchronization.
     mmio_write32((void *)(hda_info.base + HDA_STREAM_SYNCHRONIZATION), 0);
 
     // Get output stream address.
@@ -126,7 +119,6 @@ void hda_init()
         DEBUG_INFO("no input streams available");
     }
 
-    // Allocate CORB DMA.
     uint64_t corb_size = sizeof(uint32_t) * HDA_CORB_ENTRY_COUNT;
     hda_info.corb_dma = vmm_alloc_dma((corb_size + 4095) / 4096);
     hda_info.corb = (uint32_t *)hda_info.corb_dma.virt;
@@ -136,7 +128,6 @@ void hda_init()
         return;
     }
 
-    // Allocate RIRB DMA.
     uint64_t rirb_size = sizeof(uint32_t) * HDA_RIRB_ENTRY_COUNT * 2;
     hda_info.rirb_dma = vmm_alloc_dma((rirb_size + 4095) / 4096);
     hda_info.rirb = (uint32_t *)hda_info.rirb_dma.virt;
@@ -146,11 +137,9 @@ void hda_init()
         return;
     }
 
-    // Reset CORB/RIRB positions.
     hda_info.corb_entry = 1;
     hda_info.rirb_entry = 1;
 
-    // Allocate Buffer Descriptor List entries.
     uint64_t bdl_size = sizeof(HdAudioBufferEntry) * HDA_BUFFER_ENTRY_COUNT;
     hda_info.buffer_entries_dma = vmm_alloc_dma((bdl_size + 4095) / 4096);
     hda_info.buffer_entries = (HdAudioBufferEntry *)hda_info.buffer_entries_dma.virt;
@@ -160,7 +149,6 @@ void hda_init()
         return;
     }
 
-    // Allocate sound buffers.
     uint64_t sound_buf_size = HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * HDA_BUFFER_ENTRY_COUNT;
     hda_info.sound_buffers_dma = vmm_alloc_dma((sound_buf_size + 4095) / 4096);
 
@@ -169,7 +157,6 @@ void hda_init()
         return;
     }
 
-    // Allocate input buffer entries and buffers (for recording support).
     if (hda_info.input_stream) {
         hda_info.input_buffer_entries_dma = vmm_alloc_dma((bdl_size + 4095) / 4096);
         hda_info.input_buffer_entries = (HdAudioBufferEntry *)hda_info.input_buffer_entries_dma.virt;
@@ -235,13 +222,10 @@ void hda_init()
         }
     }
 
-    // Set CORB write pointer.
     mmio_write16((void *)(hda_info.base + HDA_CORB_WRITE_POINTER), 0);
 
-    // Reset RIRB write pointer.
     mmio_write16((void *)(hda_info.base + HDA_RIRB_WRITE_POINTER), HDA_RIRB_WRITE_POINTER_IN_RESET);
 
-    // Disable RIRB interrupts.
     mmio_write16((void *)(hda_info.base + HDA_RIRB_RESPONSE_INTERRUPT_COUNT), 0);
 
     // Bit 1 = CORB/RIRB stopped/running.
@@ -257,7 +241,6 @@ void hda_init()
 
     DEBUG_INFO("searching for codec");
 
-    // Reset codec and AFG
     hda_info.codec = HDA_INVALID;
     hda_info.afg.node = HDA_INVALID;
 
@@ -302,8 +285,6 @@ void hda_init()
         DEBUG_ERROR("failed to find codec.");
         return;
     }
-
-    // Proceed with searching for Audio Function Group in codec.
 
     DEBUG_INFO("searching for afg node");
 
@@ -442,7 +423,6 @@ void hda_init()
     // Reset everything.
     hda_reset();
 
-    // Set default volume to 100%
     hda_set_volume(100);
 
     DEBUG_INFO("init completed");
@@ -473,7 +453,6 @@ uint16_t hda_get_node_connection_entry(HdAudioNode *node, uint32_t connection_en
             0xFFFF);
 }
 
-// Set power state for node.
 void hda_power_on_node(HdAudioNode *node)
 {
     // Set power state for this pin. 0 - full power.
@@ -484,7 +463,6 @@ void hda_power_on_node(HdAudioNode *node)
         io_wait();
 }
 
-// Initialize pin widget.
 void hda_init_pin(HdAudioNode *node)
 {
     // Check if node widget type is pin complex.
@@ -519,7 +497,6 @@ void hda_init_pin(HdAudioNode *node)
     hda_set_node_volume(node, 0);
 }
 
-// Initialize audio mixer widget.
 void hda_init_mixer(HdAudioNode *node)
 {
     // Check if node widget type is mixer.
@@ -547,7 +524,6 @@ void hda_init_mixer(HdAudioNode *node)
     hda_set_node_volume(node, 0);
 }
 
-// Initialize audio output widget.
 void hda_init_output(HdAudioNode *node)
 {
     // Check if node widget type is output.
@@ -581,7 +557,6 @@ void hda_init_output(HdAudioNode *node)
     hda_set_node_volume(node, 0);
 }
 
-// Clean buffers and reset flags.
 void hda_reset()
 {
     if (!hda_info.is_initialized) {
@@ -614,7 +589,6 @@ void hda_reset()
     hda_info.sound_data = nullptr;
     hda_info.sound_data_size = 0;
 }
-// Send verb via CORB/RIRB buffers.
 uint32_t hda_send_command(uint32_t codec, uint32_t node, uint32_t verb, uint32_t command)
 {
     // CORB entry structure.
@@ -690,7 +664,6 @@ void hda_set_node_volume(HdAudioNode *node, uint32_t volume)
                output_amplifier_capabilities);
 }
 
-// Set current node volume.
 void hda_set_volume(uint8_t volume)
 {
     if (!hda_info.is_initialized) {
@@ -714,25 +687,21 @@ void hda_set_volume(uint8_t volume)
     DEBUG_INFO("set volume to %d", hda_info.sound_volume);
 }
 
-// Get node volume set previously.
 uint8_t hda_get_volume()
 {
     return hda_info.sound_volume;
 }
 
-// Set channel count for output sound data.
 void hda_set_channels(uint8_t channels)
 {
     hda_info.channels = channels;
 }
 
-// Set bits per sample for output sound data.
 void hda_set_bits_per_sample(uint8_t bits_per_sample)
 {
     hda_info.bits_per_sample = bits_per_sample;
 }
 
-// Set sample rate for output sound data.
 void hda_set_sample_rate(uint32_t sample_rate)
 {
     hda_info.sample_rate = sample_rate;
@@ -781,7 +750,6 @@ uint16_t hda_return_sound_data_format(uint32_t sample_rate, uint32_t channels, u
     return data_format;
 }
 
-// Play PCM byte array.
 void hda_play(uint8_t *data, uint32_t size)
 {
     if (!hda_info.is_initialized) {
@@ -831,7 +799,6 @@ void hda_play(uint8_t *data, uint32_t size)
 
     DEBUG_INFO("playing sound data ptr: %p | data size: %d", data, size);
 
-    // Set sound data source.
     hda_info.sound_data = data;
     hda_info.sound_data_size = size;
 
@@ -843,35 +810,28 @@ void hda_play(uint8_t *data, uint32_t size)
         memset((void *)(hda_info.sound_buffers_dma.virt + copy_size), 0, hda_info.sound_buffers_dma.size - copy_size);
     }
 
-    DEBUG_INFO("filling buffer entries");
-
-    // Fill entries.
+    // Copy new buffer data (bounded to avoid reading past source)
     uint64_t mem_offset = 0;
     for (uint32_t i = 0; i < HDA_BUFFER_ENTRY_COUNT; i++) {
-        // Fill current entry.
         hda_info.buffer_entries[i].buffer = hda_info.sound_buffers_dma.phys + mem_offset;
 
-        // Set buffer size.
         hda_info.buffer_entries[i].buffer_size = HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE;
 
         // Add offset to read next sound data for next buffer entry. We don't want to listen to same buffer 24/7.
         mem_offset += HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE;
     }
 
-    // Write buffer descriptor list address and total buffer length.
     mmio_write64((void *)(hda_info.output_stream + HDA_STREAM_DESCRIPTOR_BDL_BASE_ADDRESS),
                  hda_info.buffer_entries_dma.phys);
     mmio_write32((void *)(hda_info.output_stream + HDA_STREAM_DESCRIPTOR_RING_BUFFER_LENGTH),
                  HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * HDA_BUFFER_ENTRY_COUNT);
 
-    // Write last valid entry of buffer ( entries count - 1!!!! ).
     mmio_write16((void *)(hda_info.output_stream + HDA_STREAM_DESCRIPTOR_LAST_VALID_INDEX), HDA_BUFFER_ENTRY_COUNT - 1);
 
     // Get sound format from sample rate, channels and bps.
     uint16_t sound_format =
         hda_return_sound_data_format(hda_info.sample_rate, hda_info.channels, hda_info.bits_per_sample);
 
-    // Set stream format.
     mmio_write16((void *)(hda_info.output_stream + HDA_STREAM_DESCRIPTOR_STREAM_FORMAT), sound_format);
 
     // Set audio output nodes format.
@@ -891,12 +851,10 @@ void hda_play(uint8_t *data, uint32_t size)
 
     DEBUG_INFO("started playback");
 
-    // Let everyone know audio is playing.
     hda_info.is_paused = false;
     hda_info.is_playing = true;
 }
 
-// Resume playback if we played something before.
 void hda_resume()
 {
     if (!hda_info.is_initialized) {
@@ -916,7 +874,6 @@ void hda_resume()
     hda_info.is_paused = false;
 }
 
-// Pause playback.
 void hda_pause()
 {
     if (!hda_info.is_initialized) {
@@ -936,7 +893,6 @@ void hda_pause()
     hda_info.is_paused = true;
 }
 
-// Full stop.
 void hda_stop()
 {
     if (!hda_info.is_initialized) {
@@ -986,7 +942,6 @@ void hda_stop()
         }
     }
 
-    // Reset playback info.
     hda_reset();
 
     DEBUG_INFO("stopped playback");

@@ -29,7 +29,9 @@ void ktest_run_all()
 
     DEBUG_INFO("ktest suite started");
 
-    for (KTestCase *test = __ktests_start; test < __ktests_end; test++) {
+    const uintptr_t start_addr = reinterpret_cast<uintptr_t>(__ktests_start);
+    const uintptr_t end_addr = reinterpret_cast<uintptr_t>(__ktests_end);
+    for (KTestCase *test = reinterpret_cast<KTestCase *>(start_addr); reinterpret_cast<uintptr_t>(test) < end_addr; test++) {
         if (!test->name || !test->func)
             continue;
         total++;

@@ -13,6 +13,9 @@ void *realloc(void *ptr, size_t size);
 int atoi(const char *str);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
 
+void srand(unsigned int seed);
+int rand(void);
+
 #ifdef __cplusplus
 }
 #endif

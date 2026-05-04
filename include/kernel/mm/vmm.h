@@ -70,6 +70,6 @@ struct DMAAllocation
 
 [[nodiscard]] DMAAllocation vmm_alloc_dma(size_t pages);
 [[nodiscard]] DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags);
-void vmm_free_dma(DMAAllocation alloc);
+void vmm_free_dma(const DMAAllocation &alloc);
 
 bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code);

@@ -608,6 +608,8 @@ static VNode *unifs_vfs_lookup(VNode *dir, const char *name)
 
         if (!real_name.empty() && real_name.data()[real_name.size() - 1] != '/') {
             char *name_copy = static_cast<char *>(malloc(real_name.size() + 1));
+            if (!name_copy)
+                return nullptr;
             kstring::strncpy(name_copy, real_name.data(), real_name.size());
             name_copy[real_name.size()] = '\0';
             return vfs_create_vnode(0, unifs_get_file_size(p_view), false, &unifs_file_ops, name_copy);
@@ -626,6 +628,8 @@ static VNode *unifs_vfs_lookup(VNode *dir, const char *name)
             real_name = find_boot_entry(dp_view)->name;
 
         char *name_copy = static_cast<char *>(malloc(real_name.size() + 1));
+        if (!name_copy)
+            return nullptr;
         kstring::strncpy(name_copy, real_name.data(), real_name.size());
         name_copy[real_name.size()] = '\0';
         return vfs_create_vnode(0, 0, true, &unifs_dir_ops, name_copy);
@@ -789,6 +793,8 @@ static int unifs_vfs_unlink(VNode *dir, const char *name)
 VNode *unifs_get_root()
 {
     char *root_prefix = static_cast<char *>(malloc(1));
+    if (!root_prefix)
+        return nullptr;
     root_prefix[0] = '\0';
     return vfs_create_vnode(0, 0, true, &unifs_dir_ops, root_prefix);
 }

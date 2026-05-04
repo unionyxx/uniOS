@@ -210,7 +210,7 @@ static bool display_buffer_lookup_snapshot(DisplayBufferHandle handle, uint64_t 
         return false;
 
     spinlock_acquire(&s_display_buffer_lock);
-    DisplayBufferObject *buffer = display_find_buffer_locked(handle);
+    const DisplayBufferObject *buffer = display_find_buffer_locked(handle);
     if (!buffer || !display_buffer_owner_permits_access(*buffer, owner_pid)) {
         spinlock_release(&s_display_buffer_lock);
         return false;
@@ -1535,9 +1535,8 @@ static void setup_boot_caps(DisplayCaps *caps, const BootFramebuffer *fb)
     if (!decision.exact_match) {
         applied_handoff = resolve_exact_boot_handoff_refresh(fb, &caps->refresh_hz, &caps->refresh_millihz);
     }
-    if (!applied_handoff)
-        log_edid_refresh_decision(fb, decision);
     if (!applied_handoff) {
+        log_edid_refresh_decision(fb, decision);
         caps->refresh_hz = decision.refresh_hz;
         caps->refresh_millihz = decision.refresh_millihz;
     }
@@ -1778,7 +1777,7 @@ static bool display_resolve_atomic_request(DisplayDevice *device, const DisplayA
 
     DisplayMode requested = {};
     requested.mode_id = request.mode_id;
-    DisplayMode *resolved = display_find_mode(connector, requested);
+    const DisplayMode *resolved = display_find_mode(connector, requested);
     if (!resolved)
         return false;
 
@@ -2083,7 +2082,7 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
         return false;
 
     spinlock_acquire(&process->vma_lock);
-    VMA *existing = vma_find(process->vma_list, virt_start);
+    const VMA *existing = vma_find(process->vma_list, virt_start);
     if (existing) {
         bool same_mapping =
             existing->start == virt_start && existing->end >= virt_start + size && (existing->flags & PTE_SHARED);
@@ -2519,15 +2518,17 @@ static uint32_t gop_present(DisplayDevice *device, const DisplayPresentRequest &
     }
 
     display_note_present_submitted(head, sequence, DISPLAY_PRESENT_PATH_COPY, 1u, rects, rect_count);
+
+    if (wait_for_vblank)
+        display_fallback_finish_wait(head, target_tick);
+    else
+        head->last_vblank_wait_ticks = 0;
+
     uint64_t copy_start = timer_get_ticks();
     display_copy_present(device, request);
     uint64_t copy_end = timer_get_ticks();
     head->last_dma_wait_ticks = copy_end - copy_start;
     head->total_dma_wait_ticks += head->last_dma_wait_ticks;
-    if (wait_for_vblank)
-        display_fallback_finish_wait(head, target_tick);
-    else
-        head->last_vblank_wait_ticks = 0;
     display_complete_present(head, sequence, DISPLAY_PRESENT_RESULT_OK, present_pixels);
     return sequence;
 }
@@ -2649,7 +2650,7 @@ int display_query_connectors(DisplayConnectorInfo *out, uint32_t max_count)
 int display_get_modes(uint32_t connector_id, DisplayMode *out, uint32_t max_count)
 {
     for (uint32_t i = 0; i < s_device.connector_count; i++) {
-        DisplayConnector &connector = s_device.connectors[i];
+        const DisplayConnector &connector = s_device.connectors[i];
         if (connector.info.connector_id != connector_id)
             continue;
 
@@ -2811,7 +2812,7 @@ bool display_buffer_destroy(DisplayBufferHandle handle)
     }
 
     DisplayBuffer view = display_buffer_view_from_object(*buffer);
-    DisplayHead *head = &s_device.primary_head;
+    const DisplayHead *head = &s_device.primary_head;
     for (uint32_t i = 0; i < head->buffer_count; ++i) {
         if (!display_buffers_match(head->buffers[i], view))
             continue;
@@ -2844,10 +2845,25 @@ uint32_t display_compose_submit(const DisplayComposeRequest &request)
     if (!s_device.ops || !request.layers || request.layer_count == 0)
         return primary_head()->status.completed_sequence;
 
-    Rect local_damage[32] = {};
+    Rect local_damage[64] = {};
     uint32_t damage_count = request.damage_rect_count;
-    if (damage_count > 32u)
-        damage_count = 32u;
+    if (damage_count > 64u) {
+        // Collapse to bounding box if too many rects
+        int32_t x0 = primary_head()->caps.width, y0 = primary_head()->caps.height, x1 = 0, y1 = 0;
+        for (uint32_t i = 0; i < damage_count; i++) {
+            if (request.damage_rects[i].x < x0) x0 = request.damage_rects[i].x;
+            if (request.damage_rects[i].y < y0) y0 = request.damage_rects[i].y;
+            int32_t r = request.damage_rects[i].x + request.damage_rects[i].w;
+            if (r > x1) x1 = r;
+            int32_t b = request.damage_rects[i].y + request.damage_rects[i].h;
+            if (b > y1) y1 = b;
+        }
+        int32_t cw = (x1 > x0) ? (x1 - x0) : 0;
+        int32_t ch = (y1 > y0) ? (y1 - y0) : 0;
+        local_damage[0] = gui_rect_make(x0, y0, cw, ch);
+        damage_count = 1u;
+    }
+
     for (uint32_t i = 0; i < damage_count; i++) {
         local_damage[i] = request.damage_rects[i];
         if (!display_clip_rect(local_damage[i], primary_head()->caps)) {
@@ -2884,7 +2900,8 @@ bool display_event_wait(DisplayEvent *out_event, bool block)
         }
 
         scheduler_wait(&s_display_event_wait_queue, &s_display_event_lock);
-        spinlock_release(&s_display_event_lock);
+        // scheduler_wait re-acquires the lock on wake, but display_event_wait 
+        // doesn't need to release it again here since the loop will handle it.
     }
 }
 

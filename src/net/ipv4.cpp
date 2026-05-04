@@ -17,7 +17,6 @@ void ipv4_init()
     DEBUG_INFO("ipv4: layer initialized");
 }
 
-// Calculate one's complement checksum
 uint16_t ipv4_checksum(const void *data, uint16_t length)
 {
     const uint16_t *ptr = (const uint16_t *)data;
@@ -41,13 +40,11 @@ uint16_t ipv4_checksum(const void *data, uint16_t length)
     return (uint16_t)~sum;
 }
 
-// Create IP address from bytes
 uint32_t ip_make(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
     return (uint32_t)a | ((uint32_t)b << 8) | ((uint32_t)c << 16) | ((uint32_t)d << 24);
 }
 
-// Format IP address to string
 void ip_format(uint32_t ip, char *buf)
 {
     if (!buf)
@@ -72,7 +69,6 @@ void ip_format(uint32_t ip, char *buf)
     buf[i] = '\0';
 }
 
-// Receive IPv4 packet
 void ipv4_receive(const void *data, uint16_t length)
 {
     if (!data || length < IPV4_HEADER_SIZE) {
@@ -81,19 +77,16 @@ void ipv4_receive(const void *data, uint16_t length)
 
     const IPv4Header *hdr = (const IPv4Header *)data;
 
-    // Check version
     uint8_t version = (hdr->ihl_version >> 4) & 0x0F;
     if (version != 4) {
         return;
     }
 
-    // Get header length
     uint8_t ihl = (hdr->ihl_version & 0x0F) * 4;
     if (ihl < 20 || ihl > length) {
         return;
     }
 
-    // Verify checksum
     uint16_t orig_checksum = hdr->checksum;
     if (orig_checksum != 0) {
         // Calculate checksum over header
@@ -109,7 +102,6 @@ void ipv4_receive(const void *data, uint16_t length)
         }
     }
 
-    // Check if packet is for us
     uint32_t our_ip = net_get_ip();
     if (hdr->dst_ip != our_ip && hdr->dst_ip != 0xFFFFFFFF && // Broadcast
         (hdr->dst_ip & 0xFF000000) != 0xFF000000) {           // Not class E / multicast
@@ -120,11 +112,9 @@ void ipv4_receive(const void *data, uint16_t length)
     if (total_length < ihl || total_length > length)
         return;
 
-    // Get payload
     const uint8_t *payload = (const uint8_t *)data + ihl;
     uint16_t payload_len = total_length - ihl;
 
-    // Demultiplex by protocol
     switch (hdr->protocol) {
         case IP_PROTO_ICMP:
             icmp_receive(payload, payload_len, hdr->src_ip);
@@ -141,7 +131,6 @@ void ipv4_receive(const void *data, uint16_t length)
     }
 }
 
-// Send IPv4 packet
 static Spinlock tx_lock = SPINLOCK_INIT;
 static uint8_t tx_buffer[1600];
 
@@ -196,17 +185,14 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len
     hdr->src_ip = net_get_ip();
     hdr->dst_ip = dst_ip;
 
-    // Calculate header checksum
     hdr->checksum = ipv4_checksum(hdr, IPV4_HEADER_SIZE);
 
-    // Copy payload
     uint8_t *payload = packet + IPV4_HEADER_SIZE;
     const uint8_t *src = (const uint8_t *)data;
     for (uint16_t i = 0; i < length; i++) {
         payload[i] = src[i];
     }
 
-    // Send via Ethernet
     bool result = ethernet_send(dst_mac, ETH_TYPE_IPV4, packet, IPV4_HEADER_SIZE + length);
     spinlock_release(&tx_lock);
     return result;

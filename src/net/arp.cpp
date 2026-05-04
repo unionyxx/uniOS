@@ -4,10 +4,8 @@
 #include <kernel/net/net.h>
 #include <kernel/time/timer.h>
 
-// ARP table
 static ArpEntry arp_table[ARP_TABLE_SIZE];
 
-// Pending ARP request
 static bool arp_waiting = false;
 static uint32_t arp_waiting_ip = 0;
 static uint8_t arp_waiting_mac[6];
@@ -33,7 +31,6 @@ void arp_init()
     }
 }
 
-// Add entry to ARP table
 void arp_add_entry(uint32_t ip, const uint8_t *mac)
 {
     if (ip == 0 || ip == 0xFFFFFFFF || arp_mac_is_unusable(mac))
@@ -64,7 +61,6 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
     arp_table[0].valid = true;
 }
 
-// Lookup IP in ARP table
 bool arp_lookup(uint32_t ip, uint8_t *out_mac)
 {
     if (!out_mac || ip == 0)
@@ -78,7 +74,6 @@ bool arp_lookup(uint32_t ip, uint8_t *out_mac)
     return false;
 }
 
-// Send ARP request
 void arp_send_request(uint32_t target_ip)
 {
     if (target_ip == 0 || target_ip == 0xFFFFFFFF)
@@ -104,7 +99,6 @@ void arp_send_request(uint32_t target_ip)
     ethernet_send(ETH_BROADCAST_MAC, ETH_TYPE_ARP, &arp, sizeof(arp));
 }
 
-// Send ARP reply
 static void arp_send_reply(uint32_t target_ip, const uint8_t *target_mac)
 {
     if (target_ip == 0 || arp_mac_is_unusable(target_mac))
@@ -129,7 +123,6 @@ static void arp_send_reply(uint32_t target_ip, const uint8_t *target_mac)
     ethernet_send(target_mac, ETH_TYPE_ARP, &arp, sizeof(arp));
 }
 
-// Receive ARP packet
 void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac)
 {
     (void)src_mac;
@@ -165,7 +158,6 @@ void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac)
     }
 }
 
-// Resolve IP to MAC (blocking with timeout)
 bool arp_resolve(uint32_t ip, uint8_t *out_mac)
 {
     if (!out_mac || ip == 0)

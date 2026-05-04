@@ -607,7 +607,7 @@ extern "C" void signal_check(SyscallFrame *frame)
 {
     if (count > 0 && !validate_user_ptr(buf, count, false))
         return static_cast<uint64_t>(-1);
-    Process *p = process_get_current();
+    const Process *p = process_get_current();
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return static_cast<uint64_t>(-1);
 
@@ -957,9 +957,7 @@ static uint64_t sys_getsysinfo(SystemProfile *out)
 
 [[nodiscard]] static uint64_t sys_set_quiet(bool quiet)
 {
-    extern bool g_boot_quiet;
-    extern bool g_boot_framebuffer_logging;
-    extern bool g_boot_user_stdout_to_framebuffer;
+    // Symbols declared in include/kernel/debug.h
     g_boot_quiet = quiet;
 #ifdef DEBUG
     bool enable_framebuffer_output = !quiet;

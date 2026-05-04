@@ -49,7 +49,7 @@ static inline void io_wait()
 // Memory-mapped I/O with barriers
 static inline uint8_t mmio_read8(volatile void *addr)
 {
-    uint8_t val = *(volatile uint8_t *)addr;
+    uint8_t val = *static_cast<volatile uint8_t *>(const_cast<void *>(addr));
     asm volatile("mfence" ::: "memory");
     return val;
 }
@@ -57,13 +57,13 @@ static inline uint8_t mmio_read8(volatile void *addr)
 static inline void mmio_write8(volatile void *addr, uint8_t val)
 {
     asm volatile("mfence" ::: "memory");
-    *(volatile uint8_t *)addr = val;
+    *static_cast<volatile uint8_t *>(const_cast<void *>(addr)) = val;
     asm volatile("mfence" ::: "memory");
 }
 
 static inline uint16_t mmio_read16(volatile void *addr)
 {
-    uint16_t val = *(volatile uint16_t *)addr;
+    uint16_t val = *static_cast<volatile uint16_t *>(const_cast<void *>(addr));
     asm volatile("mfence" ::: "memory");
     return val;
 }
@@ -71,13 +71,13 @@ static inline uint16_t mmio_read16(volatile void *addr)
 static inline void mmio_write16(volatile void *addr, uint16_t val)
 {
     asm volatile("mfence" ::: "memory");
-    *(volatile uint16_t *)addr = val;
+    *static_cast<volatile uint16_t *>(const_cast<void *>(addr)) = val;
     asm volatile("mfence" ::: "memory");
 }
 
 static inline uint32_t mmio_read32(volatile void *addr)
 {
-    uint32_t val = *(volatile uint32_t *)addr;
+    uint32_t val = *static_cast<volatile uint32_t *>(const_cast<void *>(addr));
     asm volatile("mfence" ::: "memory");
     return val;
 }
@@ -85,13 +85,13 @@ static inline uint32_t mmio_read32(volatile void *addr)
 static inline void mmio_write32(volatile void *addr, uint32_t val)
 {
     asm volatile("mfence" ::: "memory");
-    *(volatile uint32_t *)addr = val;
+    *static_cast<volatile uint32_t *>(const_cast<void *>(addr)) = val;
     asm volatile("mfence" ::: "memory");
 }
 
 static inline uint64_t mmio_read64(volatile void *addr)
 {
-    uint64_t val = *(volatile uint64_t *)addr;
+    uint64_t val = *static_cast<volatile uint64_t *>(const_cast<void *>(addr));
     asm volatile("mfence" ::: "memory");
     return val;
 }
@@ -99,6 +99,6 @@ static inline uint64_t mmio_read64(volatile void *addr)
 static inline void mmio_write64(volatile void *addr, uint64_t val)
 {
     asm volatile("mfence" ::: "memory");
-    *(volatile uint64_t *)addr = val;
+    *static_cast<volatile uint64_t *>(const_cast<void *>(addr)) = val;
     asm volatile("mfence" ::: "memory");
 }

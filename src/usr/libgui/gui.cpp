@@ -37,17 +37,21 @@ GuiStylePalette g_gui_style = {};
 GuiChromePalette g_gui_chrome = {};
 }
 
-static const Theme k_gui_theme_dark = {0xFF111214, 0xFFF2F2F0, 0xFF6E7784, 0xFF2F343A, 0xFF1A1C20, 0xFF15171A};
+static constexpr uint32_t k_gui_accent = 0xFF007AFF;
+static constexpr uint32_t k_gui_accent_soft_dark = 0xFF1A2B3E;
+static constexpr uint32_t k_gui_accent_soft_light = 0xFFE5F1FF;
 
-static const Theme k_gui_theme_light = {0xFFF4F5F7, 0xFF15181D, 0xFF4B6EAE, 0xFFD6D9E0, 0xFFF6F7F9, 0xFFF6F7F9};
+static const Theme k_gui_theme_dark = {0xFF111214, 0xFFF2F2F0, k_gui_accent, 0xFF2F343A, 0xFF1A1C20, 0xFF15171A};
+
+static const Theme k_gui_theme_light = {0xFFF4F5F7, 0xFF15181D, k_gui_accent, 0xFFD6D9E0, 0xFFF6F7F9, 0xFFF6F7F9};
 
 static const GuiStylePalette k_gui_style_dark = {0xFF111214, 0xFF15171A, 0xFF1A1D21, 0xFF1D2025, 0xFF242830, 0xFF2B3037,
-                                                 0xFF333942, 0xFF555E6A, 0xFF484F59, 0xFF626C78, 0xFF2A2F36, 0xFFF2F2F0,
-                                                 0xFFC5C8CC, 0xFF8E949C, 0xFF55B36A, 0xFFE2AF45, 0xFFFF625E};
+                                                 0xFF333942, 0xFF555E6A, 0xFF484F59, k_gui_accent, k_gui_accent_soft_dark,
+                                                 0xFFF2F2F0, 0xFFC5C8CC, 0xFF8E949C, 0xFF55B36A, 0xFFE2AF45, 0xFFFF625E};
 
 static const GuiStylePalette k_gui_style_light = {
-    0xFFF4F5F7, 0xFFFFFFFF, 0xFFF8F9FB, 0xFFF0F2F5, 0xFFE9EDF3, 0xFFD7DCE4, 0xFFD4D9E2, 0xFF4B6EAE, 0xFFB9C4D5,
-    0xFF4B6EAE, 0xFFDDE6F4, 0xFF15181D, 0xFF5D6470, 0xFF808792, 0xFF267A46, 0xFF9A6A00, 0xFFD43D35};
+    0xFFF4F5F7, 0xFFFFFFFF, 0xFFF8F9FB, 0xFFF0F2F5, 0xFFE9EDF3, 0xFFD7DCE4, 0xFFD4D9E2, 0xFF8FA1C0, 0xFFB9C4D5,
+    k_gui_accent, k_gui_accent_soft_light, 0xFF15181D, 0xFF5D6470, 0xFF808792, 0xFF267A46, 0xFF9A6A00, 0xFFD43D35};
 
 static const GuiChromePalette k_gui_chrome_dark = {0xFF101113, 0xFF17191D, 0xFF1E2126, 0xFF181A1F, 0xFF23272D,
                                                    0xFFF2F2F0, 0xFF9A9FA7, 0x22000000, 0xFF333942, 0xFFFF5F57,
@@ -463,11 +467,40 @@ Surface gui_create_surface(uint32_t width, uint32_t height)
 
     s.width = width;
     s.height = height;
-    s.buffer = static_cast<uint32_t *>(malloc(size));
-    s.owns_buffer = (s.buffer != nullptr);
+
+    // Use 64-byte alignment for better performance (SIMD/NT-stores)
+    size_t alignment = 64;
+    size_t total_size = size + alignment + sizeof(void *);
+    void *raw = malloc(total_size);
+    if (!raw)
+        return s;
+
+    uintptr_t raw_addr = reinterpret_cast<uintptr_t>(raw);
+    uintptr_t aligned_addr = (raw_addr + sizeof(void *) + alignment - 1) & ~(alignment - 1);
+    void **ptr_slot = reinterpret_cast<void **>(aligned_addr) - 1;
+    *ptr_slot = raw;
+
+    s.buffer = reinterpret_cast<uint32_t *>(aligned_addr);
+    s.owns_buffer = true;
     if (s.buffer)
         memset(s.buffer, 0, size);
     return s;
+}
+
+void gui_destroy_surface(Surface *s)
+{
+    if (!s)
+        return;
+    if (s->owns_buffer && s->buffer) {
+        void **ptr_slot = reinterpret_cast<void **>(s->buffer) - 1;
+        free(*ptr_slot);
+    }
+    s->buffer = nullptr;
+    s->width = 0;
+    s->height = 0;
+    s->pitch = 0;
+    s->owns_buffer = false;
+    s->display_handle = 0;
 }
 
 void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color)

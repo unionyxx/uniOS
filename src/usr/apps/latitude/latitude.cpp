@@ -2230,14 +2230,12 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     rects->editor_rect = edit_area;
 
     gui_fill_rect(win, edit_area.x, edit_area.y, edit_area.w, edit_area.h, editor_bg());
+    // Separators and gutter fill
     gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h,
                   g_gui_style.app_surface_alt);
     gui_draw_separator_h(win, panel_x + 1, edit_area.y - 1, panel_w - 2, g_gui_style.chrome_edge);
     if (edit_area.w > gutter_w)
         gui_fill_rect(win, edit_area.x + gutter_w - 1, edit_area.y - 1, 1, edit_area.h + 1, g_gui_style.chrome_edge);
-
-    if (state->focus == FOCUS_EDITOR)
-        gui_draw_focus_frame(win, panel_x + 1, edit_y, panel_w - 2, edit_h, true, false);
 
     const GuiFont *mono = gui_font_mono();
     int cell_w = gui_font_mono_cell_width(mono);
@@ -2278,6 +2276,14 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
         int caret_x = text_x + (state->cursor_col - state->first_col) * cell_w;
         int caret_y = edit_area.y + (state->cursor_line - state->first_line) * cell_h;
         gui_fill_rect(win, caret_x, caret_y + 2, gui_scaled_metric(2), cell_h - 4, g_gui_style.accent);
+    }
+
+    if (state->focus == FOCUS_EDITOR) {
+        // Draw a sharp focus frame to avoid rounding artifacts over the gutter
+        gui_draw_rect(win, panel_x + 1, edit_y, panel_w - 2, edit_h, g_gui_style.border_focus);
+        if (panel_w > 4 && edit_h > 4) {
+            gui_draw_rect(win, panel_x + 2, edit_y + 1, panel_w - 4, edit_h - 2, g_gui_style.accent_soft);
+        }
     }
 
     if (minimap_w > 0)

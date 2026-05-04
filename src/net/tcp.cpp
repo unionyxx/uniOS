@@ -360,7 +360,6 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
     (void)ack;
 }
 
-// Create TCP socket
 int tcp_socket()
 {
     for (int i = 0; i < TCP_MAX_SOCKETS; i++) {
@@ -375,7 +374,6 @@ int tcp_socket()
     return -1;
 }
 
-// Bind socket
 bool tcp_bind(int sock, uint16_t port)
 {
     if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || port == 0) {
@@ -389,7 +387,6 @@ bool tcp_bind(int sock, uint16_t port)
     return true;
 }
 
-// Listen on socket
 bool tcp_listen(int sock)
 {
     if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || sockets[sock].local_port == 0) {
@@ -399,7 +396,6 @@ bool tcp_listen(int sock)
     return true;
 }
 
-// Accept connection (returns new socket)
 int tcp_accept(int sock)
 {
     if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || sockets[sock].state != TCP_LISTEN) {
@@ -417,7 +413,6 @@ int tcp_accept(int sock)
     return -1; // No connection ready
 }
 
-// Connect to remote host
 bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
 {
     if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use || dst_ip == 0 || dst_port == 0) {
@@ -461,7 +456,6 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
     return true;
 }
 
-// Send data
 int tcp_send(int sock, const void *data, uint16_t length)
 {
     if ((!data && length > 0) || sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use ||
@@ -483,7 +477,6 @@ int tcp_send(int sock, const void *data, uint16_t length)
     return send_len;
 }
 
-// Receive data
 int tcp_recv(int sock, void *buffer, uint16_t max_len)
 {
     if ((!buffer && max_len > 0) || sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
@@ -502,7 +495,6 @@ int tcp_recv(int sock, void *buffer, uint16_t max_len)
     return count;
 }
 
-// Close connection
 void tcp_close(int sock)
 {
     if (sock < 0 || sock >= TCP_MAX_SOCKETS || !sockets[sock].in_use) {
@@ -527,7 +519,6 @@ void tcp_close(int sock)
     }
 }
 
-// Get socket state
 TcpState tcp_get_state(int sock)
 {
     if (sock < 0 || sock >= TCP_MAX_SOCKETS) {

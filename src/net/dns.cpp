@@ -5,12 +5,10 @@
 #include <kernel/net/udp.h>
 #include <kernel/time/timer.h>
 
-// DNS query state
 static uint16_t dns_transaction_id = 0;
 static bool dns_response_received = false;
 static uint32_t dns_resolved_ip = 0;
 
-// DNS receive buffer
 static uint8_t dns_rx_buffer[512];
 static uint16_t dns_rx_length = 0;
 
@@ -19,7 +17,6 @@ void dns_init()
     dns_transaction_id = timer_get_ticks() & 0xFFFF;
 }
 
-// Check if string is an IP address (contains only digits and dots)
 bool dns_is_ip_address(const char *str)
 {
     if (!str || !*str)
@@ -50,7 +47,6 @@ bool dns_is_ip_address(const char *str)
     return dots == 3 && has_digit;
 }
 
-// Parse IP address string to uint32_t
 uint32_t dns_parse_ip(const char *str)
 {
     if (!dns_is_ip_address(str))
@@ -74,7 +70,6 @@ uint32_t dns_parse_ip(const char *str)
     return ip;
 }
 
-// Encode hostname into DNS name format (e.g., "www.google.com" -> "\3www\6google\3com\0")
 static int dns_encode_name(const char *hostname, uint8_t *out)
 {
     if (!hostname || !*hostname || !out)
@@ -117,44 +112,34 @@ static int dns_encode_name(const char *hostname, uint8_t *out)
     return pos;
 }
 
-// Build DNS query packet
 static int dns_build_query(const char *hostname, uint8_t *buffer)
 {
     if (!hostname || !buffer)
         return 0;
     DnsHeader *hdr = (DnsHeader *)buffer;
 
-    // Transaction ID
     dns_transaction_id++;
     hdr->id = htons(dns_transaction_id);
 
-    // Flags: Standard query, recursion desired
     hdr->flags = htons(DNS_FLAG_RD);
 
-    // One question
     hdr->qdcount = htons(1);
     hdr->ancount = 0;
     hdr->nscount = 0;
     hdr->arcount = 0;
 
-    // Encode hostname
     int name_len = dns_encode_name(hostname, buffer + DNS_HEADER_SIZE);
     if (name_len <= 1)
         return 0;
     int pos = DNS_HEADER_SIZE + name_len;
 
-    // Query type (A record)
-    buffer[pos++] = 0;
     buffer[pos++] = DNS_TYPE_A;
 
-    // Query class (Internet)
-    buffer[pos++] = 0;
     buffer[pos++] = DNS_CLASS_IN;
 
     return pos;
 }
 
-// Parse DNS response and extract IP
 static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
 {
     if (length < DNS_HEADER_SIZE) {
@@ -163,20 +148,17 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
 
     const DnsHeader *hdr = (const DnsHeader *)buffer;
 
-    // Check transaction ID
     if (ntohs(hdr->id) != dns_transaction_id) {
         DEBUG_WARN("dns: transaction ID mismatch");
         return 0;
     }
 
-    // Check flags
     uint16_t flags = ntohs(hdr->flags);
     if (!(flags & DNS_FLAG_QR)) {
         DEBUG_WARN("dns: not a response");
         return 0;
     }
 
-    // Check response code
     uint8_t rcode = flags & DNS_FLAG_RCODE;
     if (rcode != 0) {
         DEBUG_WARN("dns: error response code %d", rcode);
@@ -191,10 +173,8 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
         return 0;
     }
 
-    // Skip past header
     int pos = DNS_HEADER_SIZE;
 
-    // Skip questions
     for (int i = 0; i < qdcount && pos < length; i++) {
         // Skip name
         while (pos < length) {
@@ -220,7 +200,6 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
         pos += 4;
     }
 
-    // Parse answers
     for (int i = 0; i < ancount && pos < length; i++) {
         // Skip name (possibly compressed)
         while (pos < length) {
@@ -253,7 +232,6 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
         pos += 10;
 
         if (type == DNS_TYPE_A && rdlength == 4 && pos + 4 <= length) {
-            // Found an A record!
             uint32_t ip = buffer[pos] | (buffer[pos + 1] << 8) | (buffer[pos + 2] << 16) | (buffer[pos + 3] << 24);
             return ip;
         }
@@ -267,7 +245,6 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
     return 0;
 }
 
-// DNS receive callback (called from UDP layer)
 void dns_receive(const void *data, uint16_t length)
 {
     if (!data)
@@ -284,18 +261,15 @@ void dns_receive(const void *data, uint16_t length)
     dns_response_received = true;
 }
 
-// Resolve hostname to IP address
 uint32_t dns_resolve(const char *hostname)
 {
     if (!hostname || !*hostname)
         return 0;
 
-    // Check if it's already an IP
     if (dns_is_ip_address(hostname)) {
         return dns_parse_ip(hostname);
     }
 
-    // Get DNS server
     uint32_t dns_server = net_get_dns();
     if (dns_server == 0) {
         // Use Google DNS as fallback
@@ -310,7 +284,6 @@ uint32_t dns_resolve(const char *hostname)
         return 0;
     }
 
-    // Create UDP socket
     int sock = udp_socket();
     if (sock < 0) {
         DEBUG_ERROR("dns: failed to create socket");
@@ -323,18 +296,15 @@ uint32_t dns_resolve(const char *hostname)
         return 0;
     }
 
-    // Reset state
     dns_response_received = false;
     dns_resolved_ip = 0;
 
-    // Send query
     if (!udp_sendto(sock, dns_server, DNS_PORT, query, query_len)) {
         DEBUG_ERROR("dns: failed to send query");
         udp_close(sock);
         return 0;
     }
 
-    // Wait for response
     uint64_t start = timer_get_ticks();
     uint64_t timeout = (DNS_TIMEOUT_MS * timer_get_frequency()) / 1000;
 
@@ -342,7 +312,6 @@ uint32_t dns_resolve(const char *hostname)
         // Poll network
         net_poll();
 
-        // Check for UDP data
         uint8_t buffer[512];
         uint32_t src_ip;
         uint16_t src_port;
