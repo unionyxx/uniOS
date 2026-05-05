@@ -524,7 +524,7 @@ static int collect_file_matches(const char *token, CompletionMatch *matches, int
         return 0;
 
     int count = 0;
-    char name[256];
+    char name[256] = {};
     while (count < max_matches && syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
             continue;

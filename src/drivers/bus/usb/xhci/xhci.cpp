@@ -1284,10 +1284,10 @@ void xhci_poll_events()
     struct PendingAction
     {
         XhciInterruptCallback cb;
-        uint8_t slot;
-        uint8_t ep;
         void *data;
         uint32_t len;
+        uint8_t slot;
+        uint8_t ep;
         bool invoke_cb;
         bool recover;
     };
@@ -1344,10 +1344,10 @@ void xhci_poll_events()
                         action_count < static_cast<int>(sizeof(actions) / sizeof(actions[0]))) {
                         uint32_t transferred = g_intr_length[slot][ep] - (evt->status & 0xFFFFFF);
                         actions[action_count++] = {g_xhci.intr_callbacks[slot][ep],
-                                                   slot,
-                                                   ep,
                                                    reinterpret_cast<void *>(g_intr_buffer_dma[slot][ep].virt),
                                                    transferred,
+                                                   slot,
+                                                   ep,
                                                    true,
                                                    false};
                     }
@@ -1356,7 +1356,7 @@ void xhci_poll_events()
                          xhci_completion_code_str(cc));
                     g_intr_recovery_needed[slot][ep] = true;
                     if (action_count < static_cast<int>(sizeof(actions) / sizeof(actions[0]))) {
-                        actions[action_count++] = {nullptr, slot, ep, nullptr, 0, false, true};
+                        actions[action_count++] = {nullptr, nullptr, 0, slot, ep, false, true};
                     }
                 }
             } else if (ep != 1) {
@@ -1365,11 +1365,12 @@ void xhci_poll_events()
                      "xHCI: Unexpected transfer event on Slot %d, EP %d without a pending TD", slot, ep);
                 g_intr_recovery_needed[slot][ep] = true;
                 if (action_count < static_cast<int>(sizeof(actions) / sizeof(actions[0]))) {
-                    actions[action_count++] = {nullptr, slot, ep, nullptr, 0, false, true};
+                    actions[action_count++] = {nullptr, nullptr, 0, slot, ep, false, true};
                 }
             }
         } else if (type == TRB_TYPE_COMMAND_COMPLETION) {
             const uint8_t cc = static_cast<uint8_t>((evt->status >> 24) & 0xFF);
+            (void)cc;
             KLOG(LogModule::Usb, LogLevel::Trace, "xHCI: Command Completion: CC=%s", xhci_completion_code_str(cc));
             g_xhci.last_command_event = *evt;
             g_xhci.command_event_ready = true;
@@ -1475,6 +1476,7 @@ void xhci_dump_status()
          mmio_read32(const_cast<uint32_t *>(&g_xhci.op->usbsts)));
     for (uint8_t i = 0; i < g_xhci.max_ports && i < 8; i++) {
         const uint32_t portsc = mmio_read32(const_cast<uint32_t *>(&g_xhci.ports[i].portsc));
+        (void)portsc;
         KLOG(LogModule::Usb, LogLevel::Trace, "Port %d: PORTSC=0x%x CCS=%d PED=%d Speed=%d", i + 1, portsc,
              (portsc & PORTSC_CCS) ? 1 : 0, (portsc & PORTSC_PED) ? 1 : 0, (portsc >> PORTSC_SPEED_SHIFT) & 0xF);
     }

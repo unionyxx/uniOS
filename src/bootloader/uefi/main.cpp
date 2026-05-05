@@ -935,21 +935,21 @@ static bool parse_cta_vic_hint(uint8_t vic, BootEdidModeHint *out_hint)
 
     struct CtaVicTiming
     {
-        uint8_t vic;
         uint16_t width;
         uint16_t height;
         uint16_t refresh_hz;
+        uint8_t vic;
         bool interlaced;
     };
 
     static const CtaVicTiming k_cta_vics[] = {
-        {1, 640, 480, 60, false},      {4, 1280, 720, 60, false},     {5, 1920, 1080, 60, true},
-        {16, 1920, 1080, 60, false},   {31, 1920, 1080, 50, false},   {63, 1920, 1080, 120, false},
-        {64, 1920, 1080, 100, false},  {95, 3840, 2160, 30, false},   {96, 3840, 2160, 25, false},
-        {97, 3840, 2160, 24, false},   {98, 4096, 2160, 24, false},   {102, 3840, 2160, 60, false},
-        {103, 3840, 2160, 50, false},  {104, 4096, 2160, 60, false},  {105, 4096, 2160, 50, false},
-        {117, 3840, 2160, 100, false}, {118, 3840, 2160, 120, false}, {119, 3840, 2160, 100, false},
-        {120, 3840, 2160, 120, false},
+        {640, 480, 60, 1, false},      {1280, 720, 60, 4, false},     {1920, 1080, 60, 5, true},
+        {1920, 1080, 60, 16, false},   {1920, 1080, 50, 31, false},   {1920, 1080, 120, 63, false},
+        {1920, 1080, 100, 64, false},  {3840, 2160, 30, 95, false},   {3840, 2160, 25, 96, false},
+        {3840, 2160, 24, 97, false},   {4096, 2160, 24, 98, false},   {3840, 2160, 60, 102, false},
+        {3840, 2160, 50, 103, false},  {4096, 2160, 60, 104, false},  {4096, 2160, 50, 105, false},
+        {3840, 2160, 100, 117, false}, {3840, 2160, 120, 118, false}, {3840, 2160, 100, 119, false},
+        {3840, 2160, 120, 120, false},
     };
 
     for (UINTN i = 0; i < sizeof(k_cta_vics) / sizeof(k_cta_vics[0]); i++) {

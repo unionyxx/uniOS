@@ -1160,8 +1160,11 @@ extern "C" int main()
 
     AppState *state = static_cast<AppState *>(malloc(sizeof(AppState)));
     LayoutCache *cache = static_cast<LayoutCache *>(malloc(sizeof(LayoutCache)));
-    if (!state || !cache)
+    if (!state || !cache) {
+        if (state) free(state);
+        if (cache) free(cache);
         return 1;
+    }
     memset(state, 0, sizeof(AppState));
     memset(cache, 0, sizeof(LayoutCache));
     state->active_volume = -1;
@@ -1265,7 +1268,7 @@ extern "C" int main()
                             activate_row(state, i);
                         state->needs_redraw = true;
                     }
-                    handled_left_click = true;
+                    (void)handled_left_click;
                     break;
                 }
             } else if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 2) {

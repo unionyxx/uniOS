@@ -199,7 +199,7 @@ bool execute_script_line(const char *line)
     if (*line == '#')
         return true;
 
-    char trimmed[256];
+    char trimmed[256] = {};
     int len = 0;
     while (line[len] && line[len] != '\n' && line[len] != '\r' && len < 255) {
         trimmed[len] = line[len];

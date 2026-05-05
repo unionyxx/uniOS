@@ -649,7 +649,7 @@ void gui_draw_text_rect_clipped(Surface *s, const GuiFont *font, int32_t x, int3
     if (!s || !s->buffer || !str || max_width <= 0 || clip_w <= 0 || clip_h <= 0 || !font)
         return;
 
-    char safe_text[512];
+    char safe_text[512] = {};
     size_t safe_len = gui_bounded_line_length(str, sizeof(safe_text) - 1u);
     for (size_t i = 0; i < safe_len; i++)
         safe_text[i] = str[i];

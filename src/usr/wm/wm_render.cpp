@@ -553,7 +553,7 @@ static void blur_surface_box(Surface *s, int radius)
     if (!s || !s->buffer || radius <= 0)
         return;
     uint32_t w = s->width, h = s->height, stride = s->pitch / 4;
-    uint32_t *tmp = static_cast<uint32_t *>(malloc(w * h * 4));
+    uint32_t *tmp = static_cast<uint32_t *>(calloc(w * h, 4));
     if (!tmp)
         return;
 
