@@ -36,6 +36,7 @@ typedef struct EventKeyData
 typedef struct EventResizeData
 {
     int32_t width, height;
+    uint32_t serial;
 } EventResizeData;
 
 typedef struct EventWindowData

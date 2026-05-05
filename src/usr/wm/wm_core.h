@@ -121,6 +121,8 @@ struct Window
     uint32_t buffer_generation_acked;
     uint32_t configure_serial;
     uint32_t pending_configure_serial;
+    uint32_t entry_resize_serial;
+    uint32_t buffer_resize_serial;
     uint64_t last_commit_ticks;
     uint64_t last_configure_ticks;
     bool resize_configure_pending;

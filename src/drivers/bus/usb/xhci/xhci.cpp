@@ -1359,7 +1359,7 @@ void xhci_poll_events()
                         actions[action_count++] = {nullptr, nullptr, 0, slot, ep, false, true};
                     }
                 }
-            } else if (ep != 1) {
+            } else {
                 g_intr_last_cc[slot][ep] = 0;
                 KLOG(LogModule::Usb, LogLevel::Warn,
                      "xHCI: Unexpected transfer event on Slot %d, EP %d without a pending TD", slot, ep);

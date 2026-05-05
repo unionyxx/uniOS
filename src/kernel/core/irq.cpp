@@ -206,6 +206,7 @@ void apic_timer_init(uint32_t frequency)
     lapic_write(LAPIC_LVT_TIMER, kVectorTimer | LAPIC_TIMER_PER);
     lapic_write(LAPIC_INITCNT, static_cast<uint32_t>(initcnt));
 
+    timer_set_frequency(frequency);
     BOOT_LOG("APIC: timer initialized at %u Hz (initcnt=%u)", frequency, static_cast<uint32_t>(initcnt));
 }
 

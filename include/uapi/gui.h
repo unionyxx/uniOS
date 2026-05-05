@@ -77,6 +77,13 @@ typedef struct WindowEntry
     volatile uint32_t flags;
     volatile uint32_t owner_pid;
     volatile uint32_t state;
+    // Resize/configure protocol:
+    //   resize_serial is written by the WM when it requests a new client size.
+    //   buffer_resize_serial is written by the client when it has redrawn and
+    //   committed a buffer for that resize_serial.  This keeps visible frame
+    //   geometry separate from the asynchronously committed client backing.
+    volatile uint32_t resize_serial;
+    volatile uint32_t buffer_resize_serial;
     volatile uint32_t buffer_generation;
     volatile uint32_t buffer_ack_generation;
     volatile DisplayBufferHandle buffer_handle;

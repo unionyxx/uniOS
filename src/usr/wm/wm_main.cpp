@@ -72,6 +72,8 @@ struct WindowEntrySnapshot
     uint32_t flags;
     uint32_t state;
     uint32_t owner_pid;
+    uint32_t resize_serial;
+    uint32_t buffer_resize_serial;
     uint32_t buffer_generation;
     uint32_t buffer_ack_generation;
     bool active;
@@ -150,6 +152,8 @@ static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
     s.flags = e.flags;
     s.state = e.state;
     s.owner_pid = e.owner_pid;
+    s.resize_serial = e.resize_serial;
+    s.buffer_resize_serial = e.buffer_resize_serial;
     s.buffer_generation = e.buffer_generation;
     s.buffer_ack_generation = e.buffer_ack_generation;
     s.active = e.active;
@@ -169,7 +173,8 @@ static bool window_entry_snapshot_equal_for_commit(const WindowEntrySnapshot &a,
     return a.shm_id == b.shm_id && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h && a.buffer_w == b.buffer_w &&
            a.buffer_h == b.buffer_h && a.content_w == b.content_w && a.content_h == b.content_h && a.min_w == b.min_w &&
            a.min_h == b.min_h && a.scroll_x == b.scroll_x && a.scroll_y == b.scroll_y && a.flags == b.flags &&
-           a.state == b.state && a.owner_pid == b.owner_pid && a.buffer_generation == b.buffer_generation &&
+           a.state == b.state && a.owner_pid == b.owner_pid && a.resize_serial == b.resize_serial &&
+           a.buffer_resize_serial == b.buffer_resize_serial && a.buffer_generation == b.buffer_generation &&
            a.buffer_ack_generation == b.buffer_ack_generation && a.active == b.active && a.ready == b.ready &&
            memcmp(a.title, b.title, sizeof(a.title)) == 0;
 }
@@ -530,14 +535,26 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
 
     const int desired_buffer_w = entry.buffer_w > 0 ? entry.buffer_w : entry.w;
     const int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
-    if (desired_buffer_w > 0 && desired_buffer_h > 0 &&
-        (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h)) {
-        w.buffer_w = desired_buffer_w;
-        w.buffer_h = desired_buffer_h;
+    const bool buffer_size_changed = desired_buffer_w > 0 && desired_buffer_h > 0 &&
+                                     (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h);
+    const bool resize_serial_changed = w.entry_resize_serial != entry.resize_serial;
+    const bool buffer_resize_serial_changed = w.buffer_resize_serial != entry.buffer_resize_serial;
 
-        if (w.buffer_w == w.target_w && w.buffer_h == w.target_h) {
+    if (buffer_size_changed || resize_serial_changed || buffer_resize_serial_changed) {
+        Window old = w;
+
+        if (desired_buffer_w > 0 && desired_buffer_h > 0) {
+            w.buffer_w = desired_buffer_w;
+            w.buffer_h = desired_buffer_h;
+        }
+        w.entry_resize_serial = entry.resize_serial;
+        w.buffer_resize_serial = entry.buffer_resize_serial;
+
+        if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
+            w.buffer_resize_serial == w.pending_configure_serial) {
             w.resize_configure_pending = false;
             w.last_configure_ticks = 0;
+            w.last_commit_ticks = get_ticks();
         }
 
         if (clamp_window_scroll(w) && w.entry) {
@@ -545,9 +562,14 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
             w.entry->scroll_y = w.scroll_y;
             asm volatile("sfence" ::: "memory");
         }
+
         w.needs_full_redraw = true;
+        invalidate_window_decoration_cache(w);
         DirtyRect client = window_visible_client_bounds(w);
         enqueue_damage_rect(client.x, client.y, client.w, client.h);
+        if (buffer_size_changed)
+            mark_window_transition_damage(old, w);
+        invalidate_window_visibility_cache();
     }
 
     const int new_content_w = entry.content_w;
@@ -1170,7 +1192,7 @@ extern "C" int main(int argc, char **argv)
                     g_input.hover_resize_edges = RESIZE_NONE;
                     g_input.hover_button = -1;
                     invalidate_window_visibility_cache();
-                    enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+                    enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
                     focus_window(find_top_visible_user_window(), false);
                 }
             } else if (ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) {
@@ -1202,7 +1224,7 @@ extern "C" int main(int argc, char **argv)
                 applied_theme_mode = next_theme;
                 gui_apply_theme(next_theme);
                 reload_wallpaper(registry, true);
-                enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+                enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             } else if (flags_changed) {
                 enqueue_damage_rect(0, 0, g_screen.width, wm_menubar_h());
                 if (registry->window_count > 1)
@@ -1210,8 +1232,8 @@ extern "C" int main(int argc, char **argv)
                                         registry->windows[1].h);
             }
             if (transparency_changed) {
-                capture_shell_backdrop_for_rect({0, 0, (int)g_screen.width, (int)g_screen.height}, registry);
-                enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+                capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)}, registry);
+                enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             }
         }
 
@@ -1230,7 +1252,7 @@ extern "C" int main(int argc, char **argv)
         if (registry->wallpaper_reload_requested) {
             registry->wallpaper_reload_requested = false;
             reload_wallpaper(registry, true);
-            enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
+            enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
         }
 
         registry->mouse_x = g_input.mouse_x;
@@ -1287,7 +1309,7 @@ extern "C" int main(int argc, char **argv)
 
                     int old_shm_id = w.shm_id;
                     w.shm_id = entry_snapshot.shm_id;
-                    w.buffer = reinterpret_cast<uint32_t *>(mapped);
+                    w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
                     if (gui_shm_id_is_valid(old_shm_id))
                         syscall1(SYS_SHM_UNMAP, old_shm_id);
 
@@ -1302,15 +1324,20 @@ extern "C" int main(int argc, char **argv)
                 }
 
                 sync_window_runtime_metadata(w, entry_snapshot);
-                int nx = entry_snapshot.x, ny = entry_snapshot.y, nw = entry_snapshot.w, nh = entry_snapshot.h;
-                // Clamp snapshots to sanity
+                int nx = entry_snapshot.x, ny = entry_snapshot.y;
+                int nw = w.resize_configure_pending ? w.w : entry_snapshot.w;
+                int nh = w.resize_configure_pending ? w.h : entry_snapshot.h;
+                // Clamp snapshots to sanity. During a WM-driven resize, keep the
+                // compositor's live geometry authoritative until the client
+                // publishes a matching buffer_resize_serial.
                 if (nw > (int)g_screen.width * 2)
                     nw = (int)g_screen.width * 2;
                 if (nh > (int)g_screen.height * 2)
                     nh = (int)g_screen.height * 2;
                 w.min_w = entry_snapshot.min_w > 0 ? entry_snapshot.min_w : 0;
                 w.min_h = entry_snapshot.min_h > 0 ? entry_snapshot.min_h : 0;
-                if (nw > 0 && nh > 0 && (w.x != nx || w.y != ny || w.w != nw || w.h != nh)) {
+                if (!w.resize_configure_pending && nw > 0 && nh > 0 &&
+                    (w.x != nx || w.y != ny || w.w != nw || w.h != nh)) {
                     Window old = w;
                     w.x = nx;
                     w.y = ny;
@@ -1329,12 +1356,12 @@ extern "C" int main(int argc, char **argv)
                     w.owner_pid = entry_snapshot.owner_pid;
                 w.buffer_generation_seen = entry_snapshot.buffer_generation;
                 w.buffer_generation_acked = entry_snapshot.buffer_ack_generation;
-                if (w.resize_configure_pending && w.buffer_w == w.target_w && w.buffer_h == w.target_h) {
+                if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
+                    w.buffer_resize_serial == w.pending_configure_serial) {
                     w.resize_configure_pending = false;
                     w.last_configure_ticks = 0;
                     w.last_commit_ticks = get_ticks();
-                } else if (w.resize_configure_pending && w.owner_pid &&
-                           (w.buffer_w != w.target_w || w.buffer_h != w.target_h)) {
+                } else if (w.resize_configure_pending && w.owner_pid) {
                     uint64_t now = get_ticks();
                     if (w.last_configure_ticks == 0 || now - w.last_configure_ticks >= WM_RESIZE_CONFIGURE_RETRY_TICKS)
                         post_window_resize_configure(w);

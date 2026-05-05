@@ -139,7 +139,7 @@ public:
 template <typename T, typename... Args>
 unique_ptr<T> make_unique(Args &&...args)
 {
-    T *ptr = (T *)malloc(sizeof(T));
+    T *ptr = static_cast<T *>(malloc(sizeof(T)));
     if (ptr)
         new (ptr) T(static_cast<Args &&>(args)...);
     return unique_ptr<T>(ptr);
@@ -154,12 +154,34 @@ class KBuffer
 public:
     explicit KBuffer(size_t s) : size(s)
     {
-        ptr = (T *)malloc(s * sizeof(T));
+        ptr = static_cast<T *>(malloc(s * sizeof(T)));
     }
     ~KBuffer()
     {
         if (ptr)
             free(ptr);
+    }
+
+    KBuffer(const KBuffer &) = delete;
+    KBuffer &operator=(const KBuffer &) = delete;
+
+    KBuffer(KBuffer &&other) noexcept : ptr(other.ptr), size(other.size)
+    {
+        other.ptr = nullptr;
+        other.size = 0;
+    }
+
+    KBuffer &operator=(KBuffer &&other) noexcept
+    {
+        if (this != &other) {
+            if (ptr)
+                free(ptr);
+            ptr = other.ptr;
+            size = other.size;
+            other.ptr = nullptr;
+            other.size = 0;
+        }
+        return *this;
     }
 
     T *get()

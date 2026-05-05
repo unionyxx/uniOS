@@ -162,7 +162,7 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
             current_msc = {};
             last_endpoint = ParsedEndpointKind::None;
 
-            auto *iface = reinterpret_cast<UsbInterfaceDescriptor *>(&data[offset]);
+            auto *iface = reinterpret_cast<const UsbInterfaceDescriptor *>(&data[offset]);
             KLOG(LogModule::Usb, LogLevel::Trace, "Interface %d alt %d: Class 0x%x, SubClass 0x%x, Protocol 0x%x",
                  iface->bInterfaceNumber, iface->bAlternateSetting, iface->bInterfaceClass, iface->bInterfaceSubClass,
                  iface->bInterfaceProtocol);
@@ -184,10 +184,10 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
                 current_msc.alt_setting = iface->bAlternateSetting;
             }
         } else if (type == USB_DESC_HID && current_hid.present && len >= sizeof(UsbHidDescriptor)) {
-            auto *hid = reinterpret_cast<UsbHidDescriptor *>(&data[offset]);
+            auto *hid = reinterpret_cast<const UsbHidDescriptor *>(&data[offset]);
             current_hid.report_desc_length = hid->wReportDescriptorLength;
         } else if (type == USB_DESC_ENDPOINT && len >= sizeof(UsbEndpointDescriptor)) {
-            auto *ep = reinterpret_cast<UsbEndpointDescriptor *>(&data[offset]);
+            auto *ep = reinterpret_cast<const UsbEndpointDescriptor *>(&data[offset]);
             KLOG(LogModule::Usb, LogLevel::Trace, "Endpoint 0x%x: Attr 0x%x, MaxPkt %d, Interval %d",
                  ep->bEndpointAddress, ep->bmAttributes, ep->wMaxPacketSize, ep->bInterval);
 
@@ -223,13 +223,13 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
         } else if (type == USB_DESC_SS_ENDPOINT_COMPANION && current_hid.present &&
                    last_endpoint == ParsedEndpointKind::HidInterruptIn && current_hid.has_interrupt_in &&
                    len >= sizeof(UsbSsEpCompDescriptor)) {
-            auto *companion = reinterpret_cast<UsbSsEpCompDescriptor *>(&data[offset]);
+            auto *companion = reinterpret_cast<const UsbSsEpCompDescriptor *>(&data[offset]);
             current_hid.max_burst = companion->bMaxBurst;
             current_hid.mult = static_cast<uint8_t>(companion->bmAttributes & 0x3);
             current_hid.max_esit_payload = companion->wBytesPerInterval;
         } else if (type == USB_DESC_SS_ENDPOINT_COMPANION && current_msc.present &&
                    len >= sizeof(UsbSsEpCompDescriptor)) {
-            auto *companion = reinterpret_cast<UsbSsEpCompDescriptor *>(&data[offset]);
+            auto *companion = reinterpret_cast<const UsbSsEpCompDescriptor *>(&data[offset]);
             if (last_endpoint == ParsedEndpointKind::MscBulkIn)
                 current_msc.bulk_in_max_burst = companion->bMaxBurst;
             else if (last_endpoint == ParsedEndpointKind::MscBulkOut)
@@ -320,7 +320,6 @@ int usb_enumerate_device(uint8_t port, uint8_t parent_hub_slot, uint8_t parent_h
     }
 
     // Update the packet size using the 8th byte we just read safely
-    extern bool xhci_update_ep0_packet_size(uint8_t slot_id, uint16_t max_packet);
     uint16_t actual_mps = (speed >= XHCI_SPEED_SUPER && dev_desc.bMaxPacketSize0 == 9) ? 512 : dev_desc.bMaxPacketSize0;
     xhci_update_ep0_packet_size(static_cast<uint8_t>(slot_id), actual_mps);
 
@@ -368,7 +367,7 @@ int usb_enumerate_device(uint8_t port, uint8_t parent_hub_slot, uint8_t parent_h
         xhci_disable_slot(slot_id);
         return -1;
     }
-    auto *cfg = reinterpret_cast<UsbConfigDescriptor *>(config_header);
+    auto *cfg = reinterpret_cast<const UsbConfigDescriptor *>(config_header);
     const uint16_t total_length = cfg->wTotalLength;
     kstd::unique_ptr<uint8_t[]> full_config(new uint8_t[total_length]);
     if (!full_config) {

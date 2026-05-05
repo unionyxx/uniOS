@@ -182,14 +182,22 @@ int memcmp(const void *s1, const void *s2, size_t n)
 
 int itoa(int64_t value, char *buf, int base)
 {
+    if (!buf || base < 2 || base > 36)
+        return 0;
+
     char *p = buf;
     char *p1;
     int negative = 0;
+    uint64_t uvalue;
+
     if (value < 0 && base == 10) {
         negative = 1;
-        value = -value;
+        // Avoid signed overflow for INT64_MIN.
+        uvalue = (uint64_t)(-(value + 1)) + 1u;
+    } else {
+        uvalue = (uint64_t)value;
     }
-    uint64_t uvalue = (uint64_t)value;
+
     do {
         int digit = (int)(uvalue % (uint64_t)base);
         *p++ = (char)((digit < 10) ? ('0' + digit) : ('a' + digit - 10));

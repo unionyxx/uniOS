@@ -141,17 +141,25 @@ static uint32_t next_configure_serial(Window &w)
 
 bool post_window_resize_configure(Window &w)
 {
-    if (!w.entry || !(w.entry->flags & WIN_FLAG_RESIZABLE) || !w.owner_pid || w.w <= 0 || w.h <= 0)
+    if (!w.entry || !(w.entry->flags & WIN_FLAG_RESIZABLE) || !w.owner_pid || w.target_w <= 0 || w.target_h <= 0)
         return false;
 
     w.pending_configure_serial = next_configure_serial(w);
+    w.entry_resize_serial = w.pending_configure_serial;
     w.resize_configure_pending = true;
     w.last_configure_ticks = get_ticks();
 
+    // Publish the requested client size and serial to the client-visible entry.
+    // The visible compositor frame is allowed to move/resize immediately; this
+    // serial only proves when the client has committed matching content.
+    w.entry->resize_serial = w.pending_configure_serial;
+    asm volatile("sfence" ::: "memory");
+
     Event resize_ev = {};
     resize_ev.type = EVT_WINDOW_RESIZE;
-    resize_ev.resize.width = w.w;
-    resize_ev.resize.height = w.h;
+    resize_ev.resize.width = w.target_w;
+    resize_ev.resize.height = w.target_h;
+    resize_ev.resize.serial = w.pending_configure_serial;
     syscall2(SYS_POST_EVENT, w.owner_pid, (uint64_t)&resize_ev);
     return true;
 }

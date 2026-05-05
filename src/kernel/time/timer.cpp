@@ -41,6 +41,13 @@ static void pit_channel2_wait_ticks(uint16_t reload)
 
 } // namespace
 
+void timer_set_frequency(uint32_t frequency)
+{
+    if (frequency == 0)
+        return;
+    tick_frequency = frequency;
+}
+
 void timer_init(uint32_t frequency)
 {
     if (frequency == 0)
@@ -50,8 +57,11 @@ void timer_init(uint32_t frequency)
 
     if (apic_is_enabled()) {
         // The LAPIC timer is already programmed during APIC bring-up. Re-enabling
-        // the PIT IRQ here would double-fire vector 32 on APIC boots.
-        tick_frequency = frequency;
+        // the PIT IRQ here would double-fire vector 32 on APIC boots. Preserve
+        // the real LAPIC rate published by apic_timer_init(); only fall back to
+        // the caller's rate if APIC setup did not publish one.
+        if (tick_frequency == 0)
+            tick_frequency = frequency;
         return;
     }
 
@@ -67,8 +77,8 @@ void timer_init(uint32_t frequency)
 
     outb(PIT_COMMAND, 0x36);
 
-    outb(PIT_CHANNEL0_DATA, (uint8_t)(divisor & 0xFF));
-    outb(PIT_CHANNEL0_DATA, (uint8_t)((divisor >> 8) & 0xFF));
+    outb(PIT_CHANNEL0_DATA, static_cast<uint8_t>(divisor & 0xFFu));
+    outb(PIT_CHANNEL0_DATA, static_cast<uint8_t>((divisor >> 8) & 0xFFu));
 
     pic_clear_mask(0);
 }
@@ -94,7 +104,7 @@ void timer_poll_wait_ms(uint32_t ms)
 {
     while (ms != 0) {
         uint32_t chunk_ms = ms > 50u ? 50u : ms;
-        uint64_t reload = ((uint64_t)PIT_BASE_HZ * (uint64_t)chunk_ms + 999u) / 1000u;
+        uint64_t reload = (static_cast<uint64_t>(PIT_BASE_HZ) * static_cast<uint64_t>(chunk_ms) + 999u) / 1000u;
         if (reload == 0)
             reload = 1;
         if (reload > 0xFFFFu)

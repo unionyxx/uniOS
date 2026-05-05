@@ -688,6 +688,20 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
 
 void scheduler_notify_input_waiters()
 {
+    // Wake processes waiting for input events to minimize latency.
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    Process *p = g_proc_list;
+    if (p) {
+        do {
+            wait_queue_wake_all(&p->event_wait_queue);
+            p = p->next;
+        } while (p && p != g_proc_list);
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
 }
 
 extern "C" uint64_t g_kernel_scratch_rsp;
@@ -1030,9 +1044,26 @@ void scheduler_sleep(uint64_t ticks)
 
 void scheduler_sleep_ms(uint64_t ms)
 {
+    if (ms == 0)
+        return;
+
     const uint32_t freq = timer_get_frequency();
-    uint64_t ticks = (ms * freq) / 1000;
-    if (ticks == 0 && ms > 0)
+    if (freq == 0) {
+        timer_poll_wait_ms(static_cast<uint32_t>(ms > UINT32_MAX ? UINT32_MAX : ms));
+        return;
+    }
+
+    // Ceil(ms * freq / 1000) without overflowing for very large values.
+    uint64_t whole = ms / 1000u;
+    uint64_t rem = ms % 1000u;
+    uint64_t ticks = whole * static_cast<uint64_t>(freq);
+    uint64_t rem_ticks = (rem * static_cast<uint64_t>(freq) + 999u) / 1000u;
+    if (UINT64_MAX - ticks < rem_ticks)
+        ticks = UINT64_MAX;
+    else
+        ticks += rem_ticks;
+    if (ticks == 0)
         ticks = 1;
+
     scheduler_sleep(ticks);
 }

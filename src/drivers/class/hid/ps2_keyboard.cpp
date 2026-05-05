@@ -58,6 +58,7 @@ static void push_char(char c)
     if (tail - head < KB_BUFFER_SIZE) {
         kb_buffer[tail & (KB_BUFFER_SIZE - 1)] = c;
         __atomic_store_n(&kb_buffer_end, tail + 1, __ATOMIC_RELEASE);
+        scheduler_notify_input_waiters();
     }
 }
 

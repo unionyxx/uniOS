@@ -103,7 +103,7 @@ static void ioapic_mask_all(const IoApic &ioapic)
 
 void ioapic_init()
 {
-    AcpiMadtHeader *madt = reinterpret_cast<AcpiMadtHeader *>(acpi_find_table("APIC"));
+    const auto *madt = reinterpret_cast<const AcpiMadtHeader *>(acpi_find_table("APIC"));
     if (!madt) {
         BOOT_WARN("APIC: MADT not found, IOAPIC not initialized");
         return;
@@ -112,11 +112,11 @@ void ioapic_init()
     g_num_ioapics = 0;
     g_num_isos = 0;
 
-    uint8_t *ptr = reinterpret_cast<uint8_t *>(madt) + sizeof(AcpiMadtHeader);
-    uint8_t *end = reinterpret_cast<uint8_t *>(madt) + madt->header.length;
+    const uint8_t *ptr = reinterpret_cast<const uint8_t *>(madt) + sizeof(AcpiMadtHeader);
+    const uint8_t *end = reinterpret_cast<const uint8_t *>(madt) + madt->header.length;
 
     while (ptr + sizeof(AcpiMadtRecord) <= end) {
-        auto *record = reinterpret_cast<AcpiMadtRecord *>(ptr);
+        const auto *record = reinterpret_cast<const AcpiMadtRecord *>(ptr);
 
         if (record->length < sizeof(AcpiMadtRecord) || ptr + record->length > end) {
             BOOT_WARN("MADT: malformed record type %u length %u", record->type, record->length);
@@ -135,7 +135,7 @@ void ioapic_init()
                     break;
                 }
 
-                auto *ioapic = reinterpret_cast<AcpiMadtIoApic *>(ptr);
+                const auto *ioapic = reinterpret_cast<const AcpiMadtIoApic *>(ptr);
                 const uint64_t base = vmm_map_mmio(ioapic->io_apic_address, 0x1000);
                 if (!base) {
                     BOOT_WARN("IOAPIC: failed to map MMIO at 0x%x", ioapic->io_apic_address);
@@ -166,7 +166,7 @@ void ioapic_init()
                     break;
                 }
 
-                auto *iso = reinterpret_cast<AcpiMadtIso *>(ptr);
+                const auto *iso = reinterpret_cast<const AcpiMadtIso *>(ptr);
 
                 if (iso->bus != 0) {
                     BOOT_WARN("MADT: unsupported ISO bus %u for source %u", iso->bus, iso->irq);

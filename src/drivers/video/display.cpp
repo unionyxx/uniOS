@@ -2845,30 +2845,57 @@ uint32_t display_compose_submit(const DisplayComposeRequest &request)
     if (!s_device.ops || !request.layers || request.layer_count == 0)
         return primary_head()->status.completed_sequence;
 
-    Rect local_damage[64] = {};
+    static constexpr uint32_t kMaxLocalDamageRects = 128u;
+    Rect local_damage[kMaxLocalDamageRects] = {};
     uint32_t damage_count = request.damage_rect_count;
-    if (damage_count > 64u) {
-        // Collapse to bounding box if too many rects
-        int32_t x0 = primary_head()->caps.width, y0 = primary_head()->caps.height, x1 = 0, y1 = 0;
-        for (uint32_t i = 0; i < damage_count; i++) {
-            if (request.damage_rects[i].x < x0) x0 = request.damage_rects[i].x;
-            if (request.damage_rects[i].y < y0) y0 = request.damage_rects[i].y;
-            int32_t r = request.damage_rects[i].x + request.damage_rects[i].w;
-            if (r > x1) x1 = r;
-            int32_t b = request.damage_rects[i].y + request.damage_rects[i].h;
-            if (b > y1) y1 = b;
-        }
-        int32_t cw = (x1 > x0) ? (x1 - x0) : 0;
-        int32_t ch = (y1 > y0) ? (y1 - y0) : 0;
-        local_damage[0] = gui_rect_make(x0, y0, cw, ch);
-        damage_count = 1u;
-    }
 
-    for (uint32_t i = 0; i < damage_count; i++) {
-        local_damage[i] = request.damage_rects[i];
-        if (!display_clip_rect(local_damage[i], primary_head()->caps)) {
-            local_damage[i] = gui_rect_make(0, 0, 0, 0);
+    if (damage_count == 0 || !request.damage_rects) {
+        local_damage[0] = gui_rect_make(0, 0, (int32_t)primary_head()->caps.width, (int32_t)primary_head()->caps.height);
+        damage_count = 1u;
+    } else if (damage_count > kMaxLocalDamageRects) {
+        // Never truncate damage. Collapse excessive damage into one safe clipped
+        // bounding box so every dirty pixel is still presented.
+        bool have_bounds = false;
+        int32_t x0 = (int32_t)primary_head()->caps.width;
+        int32_t y0 = (int32_t)primary_head()->caps.height;
+        int32_t x1 = 0;
+        int32_t y1 = 0;
+        for (uint32_t i = 0; i < damage_count; i++) {
+            Rect r = request.damage_rects[i];
+            if (!display_clip_rect(r, primary_head()->caps))
+                continue;
+            if (!have_bounds) {
+                x0 = r.x;
+                y0 = r.y;
+                x1 = r.x + r.w;
+                y1 = r.y + r.h;
+                have_bounds = true;
+            } else {
+                if (r.x < x0)
+                    x0 = r.x;
+                if (r.y < y0)
+                    y0 = r.y;
+                if (r.x + r.w > x1)
+                    x1 = r.x + r.w;
+                if (r.y + r.h > y1)
+                    y1 = r.y + r.h;
+            }
         }
+        if (!have_bounds)
+            return primary_head()->status.completed_sequence;
+        local_damage[0] = gui_rect_make(x0, y0, x1 - x0, y1 - y0);
+        damage_count = 1u;
+    } else {
+        uint32_t out_count = 0;
+        for (uint32_t i = 0; i < damage_count; i++) {
+            Rect r = request.damage_rects[i];
+            if (!display_clip_rect(r, primary_head()->caps))
+                continue;
+            local_damage[out_count++] = r;
+        }
+        damage_count = out_count;
+        if (damage_count == 0)
+            return primary_head()->status.completed_sequence;
     }
 
     uint32_t fast_submitted = compose_fast_single_layer(&s_device, request, local_damage, damage_count);
