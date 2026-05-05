@@ -290,7 +290,7 @@ static bool dirty_set_contains_rect(const DirtyRect &target)
     return false;
 }
 
-static bool prepare_cursor_overlay_damage(DirtyRect *cursor_rect_out)
+static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_rect_out)
 {
     if (!cursor_rect_out)
         return false;
@@ -305,6 +305,7 @@ static bool prepare_cursor_overlay_damage(DirtyRect *cursor_rect_out)
 
     if (!dirty_set_contains_rect(cursor_rect)) {
         enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
+        normalize_dirty_rects(interactive);
         gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y, &cursor_rect.x, &cursor_rect.y,
                               &cursor_rect.w, &cursor_rect.h);
         if (!clip_dirty_rect_to_screen(cursor_rect))
@@ -397,17 +398,11 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
 
     int stale_count = clamp_dirty_rect_count(dst.stale_count);
     wm_stats_note_stale_repair(stale_count);
-
-    if (stale_count > 8) {
-        // High stale count, cheaper to just copy the full buffer
-        gui_blit_rect(&dst.surface, &g_backbuffer, 0, 0, 0, 0, g_screen.width, g_screen.height);
-    } else {
-        for (int i = 0; i < stale_count; i++) {
-            DirtyRect stale = dst.stale_rects[i];
-            if (!clip_dirty_rect_to_screen(stale))
-                continue;
-            gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
-        }
+    for (int i = 0; i < stale_count; i++) {
+        DirtyRect stale = dst.stale_rects[i];
+        if (!clip_dirty_rect_to_screen(stale))
+            continue;
+        gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
     }
     clear_presentbuffer_slot_stale(dst);
     return true;
@@ -537,22 +532,12 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
     const int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
     if (desired_buffer_w > 0 && desired_buffer_h > 0 &&
         (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h)) {
-        Window old = w;
         w.buffer_w = desired_buffer_w;
         w.buffer_h = desired_buffer_h;
 
-        // Finalize geometry sync if buffer matches target
         if (w.buffer_w == w.target_w && w.buffer_h == w.target_h) {
-            w.x = w.target_x;
-            w.y = w.target_y;
-            w.w = w.target_w;
-            w.h = w.target_h;
             w.resize_configure_pending = false;
-        } else {
-            // App provided a buffer that doesn't match our latest target yet,
-            // but we must update w/h to match buffer for rendering integrity.
-            w.w = w.buffer_w;
-            w.h = w.buffer_h;
+            w.last_configure_ticks = 0;
         }
 
         if (clamp_window_scroll(w) && w.entry) {
@@ -561,9 +546,8 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
             asm volatile("sfence" ::: "memory");
         }
         w.needs_full_redraw = true;
-        invalidate_window_decoration_cache(w);
-        mark_window_transition_damage(old, w);
-        invalidate_window_visibility_cache();
+        DirtyRect client = window_visible_client_bounds(w);
+        enqueue_damage_rect(client.x, client.y, client.w, client.h);
     }
 
     const int new_content_w = entry.content_w;
@@ -807,7 +791,6 @@ extern "C" int main(int argc, char **argv)
     sync_control_center_state_from_registry(registry);
     Event ev;
 
-    uint64_t next_frame_ticks = get_ticks();
     while (true) {
         while (get_event(&ev)) {
             if (ev.type == EVT_MOUSE_MOVE) {
@@ -1205,11 +1188,6 @@ extern "C" int main(int argc, char **argv)
         }
         drain_display_events();
 
-        if (g_input.have_pending_move) {
-            apply_mouse_move(registry, g_input.pending_mouse_x, g_input.pending_mouse_y);
-            g_input.have_pending_move = false;
-        }
-
         if (registry->settings_generation != last_settings_gen) {
             last_settings_gen = registry->settings_generation;
             GuiThemeMode next_theme = registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK;
@@ -1351,11 +1329,12 @@ extern "C" int main(int argc, char **argv)
                     w.owner_pid = entry_snapshot.owner_pid;
                 w.buffer_generation_seen = entry_snapshot.buffer_generation;
                 w.buffer_generation_acked = entry_snapshot.buffer_ack_generation;
-                if (w.resize_configure_pending && w.buffer_w >= w.w && w.buffer_h >= w.h) {
+                if (w.resize_configure_pending && w.buffer_w == w.target_w && w.buffer_h == w.target_h) {
                     w.resize_configure_pending = false;
                     w.last_configure_ticks = 0;
                     w.last_commit_ticks = get_ticks();
-                } else if (w.resize_configure_pending && w.owner_pid && (w.buffer_w < w.w || w.buffer_h < w.h)) {
+                } else if (w.resize_configure_pending && w.owner_pid &&
+                           (w.buffer_w != w.target_w || w.buffer_h != w.target_h)) {
                     uint64_t now = get_ticks();
                     if (w.last_configure_ticks == 0 || now - w.last_configure_ticks >= WM_RESIZE_CONFIGURE_RETRY_TICKS)
                         post_window_resize_configure(w);
@@ -1419,16 +1398,6 @@ extern "C" int main(int argc, char **argv)
                 collapse_dirty_rects_to_bounds();
         }
 
-        uint64_t now = get_ticks();
-        if (now < next_frame_ticks && !g_input.pointer_down) {
-            uint32_t wait_ms = (uint32_t)(next_frame_ticks - now);
-            if (wait_ms > 100) wait_ms = 100;
-            if (wait_ms > 1) {
-                yield();
-                continue;
-            }
-        }
-
         if (!g_dirty_frame_ready && g_dirty_count > 0) {
             uint32_t build_pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
             if (build_pending) {
@@ -1445,7 +1414,7 @@ extern "C" int main(int argc, char **argv)
             }
 
             DirtyRect cursor_rect = {};
-            bool draw_cursor = prepare_cursor_overlay_damage(&cursor_rect);
+            bool draw_cursor = prepare_cursor_overlay_damage(inter, &cursor_rect);
             g_frame_cursor_handle = 0;
             g_frame_cursor_x = 0;
             g_frame_cursor_y = 0;
@@ -1461,40 +1430,15 @@ extern "C" int main(int argc, char **argv)
                     g_cursor_backend_disabled = true;
                 }
             }
-
-            uint64_t build_start = get_ticks();
-            g_frame_stats.last_build_ticks = build_start;
-
             if (select_presentbuffer_slot_for_frame()) {
                 int focus = find_registry_focused_user_window(registry);
                 int dirty_count = clamp_dirty_rect_count(g_dirty_count);
-
-                g_frame_stats.alpha_pixels_last_frame = 0;
-                uint64_t compose_start = get_ticks();
-
                 for (int d = 0; d < dirty_count; d++) {
                     DirtyRect &r = g_dirty_rects[d];
                     if (!clip_dirty_rect_to_screen(r))
                         continue;
                     if (!compose_rect_clipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry))
                         compose_rect_unclipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry);
-                }
-
-                g_frame_stats.last_compose_ticks = get_ticks() - compose_start;
-
-                // Honest CPU present timing: Wait before copying to framebuffer
-                uint64_t copy_wait_now = get_ticks();
-                if (copy_wait_now < next_frame_ticks) {
-                    while (get_ticks() < next_frame_ticks) {
-                        asm volatile("pause" ::: "memory");
-                    }
-                }
-                uint64_t copy_start = get_ticks();
-
-                for (int d = 0; d < dirty_count; d++) {
-                    DirtyRect &r = g_dirty_rects[d];
-                    if (!clip_dirty_rect_to_screen(r))
-                        continue;
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, r.x, r.y, r.x, r.y, r.w, r.h);
                 }
                 flush_shell_blur_updates(registry);
@@ -1508,16 +1452,6 @@ extern "C" int main(int argc, char **argv)
                         g_frame_stats.cursor_backend_frames++;
                     }
                 }
-
-                // Draw debug overlay to backbuffer to avoid VRAM reads
-                if (g_system_flags & SYSTEM_FLAG_SHOW_DEBUG_STATS) {
-                    draw_debug_overlay(&g_backbuffer);
-                    DirtyRect debug_rect = {gui_space_1(), (int)g_backbuffer.height - (gui_line_height() * 11) - gui_space_1(), gui_scaled_metric(220), (gui_line_height() * 11) + gui_space_1()};
-                    gui_blit_rect(&g_presentbuffer, &g_backbuffer, debug_rect.x, debug_rect.y, debug_rect.x, debug_rect.y, debug_rect.w, debug_rect.h);
-                }
-
-                g_frame_stats.last_copy_ticks = get_ticks() - copy_start;
-
                 wm_stats_note_dirty_set(g_dirty_rects, g_dirty_count);
                 g_frame_stats.frames_built++;
                 g_dirty_frame_ready = true;
@@ -1547,15 +1481,6 @@ extern "C" int main(int argc, char **argv)
                 frame_seq = sub + 1;
                 g_dirty_count = 0;
                 g_dirty_frame_ready = false;
-                g_frame_stats.last_submit_ticks = get_ticks();
-
-                // Track missed frames
-                if (g_display_queue.vblank_count > g_frame_stats.last_vblank_count + 1 && g_frame_stats.last_vblank_count != 0) {
-                    g_frame_stats.missed_frames += (g_display_queue.vblank_count - g_frame_stats.last_vblank_count - 1);
-                }
-                g_frame_stats.last_vblank_count = g_display_queue.vblank_count;
-
-                next_frame_ticks = get_ticks() + WM_FRAME_TICKS;
             }
         } else if (!g_dirty_frame_ready || action == wm::PresentPolicyDecision::Skip) {
             if (action == wm::PresentPolicyDecision::Skip)

@@ -143,7 +143,6 @@ static void blit_alpha_blend_rect(uint32_t *dst, uint32_t dst_stride, const uint
 
             uint32_t d = drow[x];
             uint32_t da = d >> 24;
-            g_frame_stats.alpha_pixels_last_frame++;
             if (da == 255) {
                 uint32_t inv_sa = 255u - sa;
                 uint32_t s_rb = s & 0x00FF00FFu;
@@ -553,7 +552,7 @@ static void blur_surface_box(Surface *s, int radius)
     if (!s || !s->buffer || radius <= 0)
         return;
     uint32_t w = s->width, h = s->height, stride = s->pitch / 4;
-    uint32_t *tmp = static_cast<uint32_t *>(calloc(w * h, 4));
+    uint32_t *tmp = static_cast<uint32_t *>(malloc(w * h * 4));
     if (!tmp)
         return;
 
@@ -736,15 +735,6 @@ static void mark_shell_blur_dirty(Registry *registry, const DirtyRect &screen_re
 
     DirtyRect menubar_rect = {0, 0, (int)g_screen.width, wm_menubar_h()};
     DirtyRect overlap = {};
-
-    bool manip = g_input.pointer_down && g_input.drag_index >= 2;
-    bool interaction = manip || g_input.hover_resize_edges != RESIZE_NONE || g_input.hover_button >= 0;
-    if (interaction) {
-        g_menubar_blur_dirty = false;
-        g_dock_blur_dirty = false;
-        return;
-    }
-
     if (g_menubar_blur_source.buffer && rect_intersection(screen_rect, menubar_rect, &overlap)) {
         copy_surface_rect(&g_menubar_blur_source, overlap.x, overlap.y, &g_backbuffer, overlap.x, overlap.y, overlap.w,
                           overlap.h);
@@ -1276,29 +1266,192 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
     }
 }
 
-void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &clip)
+static bool compute_window_client_copy_rect(const Window &w, const DirtyRect &visible, const DirtyRect &client,
+                                            DirtyRect *dst_rect, int *src_x_out, int *src_y_out)
 {
-    int ix, iy, iw, ih;
-    if (!gui_intersect_rect(w.x, w.y, w.w, w.h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
-        return;
-    if (w.buffer_w <= 0 || w.buffer_h <= 0 || !w.buffer)
+    if (!dst_rect || !src_x_out || !src_y_out || !w.buffer || w.buffer_w <= 0 || w.buffer_h <= 0)
+        return false;
+
+    DirtyRect copy = visible;
+    int src_x = copy.x - client.x + w.scroll_x;
+    int src_y = copy.y - client.y + w.scroll_y;
+
+    if (src_x < 0) {
+        int delta = -src_x;
+        copy.x += delta;
+        copy.w -= delta;
+        src_x = 0;
+    }
+    if (src_y < 0) {
+        int delta = -src_y;
+        copy.y += delta;
+        copy.h -= delta;
+        src_y = 0;
+    }
+    if (copy.w <= 0 || copy.h <= 0)
+        return false;
+
+    if (src_x >= w.buffer_w || src_y >= w.buffer_h)
+        return false;
+    if (src_x + copy.w > w.buffer_w)
+        copy.w = w.buffer_w - src_x;
+    if (src_y + copy.h > w.buffer_h)
+        copy.h = w.buffer_h - src_y;
+    if (copy.w <= 0 || copy.h <= 0)
+        return false;
+
+    *dst_rect = copy;
+    *src_x_out = src_x;
+    *src_y_out = src_y;
+    return true;
+}
+
+static void fill_opaque_window_client_background_clipped(Surface *dst, const Window &w, const DirtyRect &clip)
+{
+    if (!dst || !dst->buffer || clip.w <= 0 || clip.h <= 0)
         return;
 
-    int src_x = ix - w.x + w.scroll_x, src_y = iy - w.y + w.scroll_y;
-    int copy_w = iw, copy_h = ih;
-    if (src_x + copy_w > w.buffer_w)
-        copy_w = w.buffer_w - src_x;
-    if (src_y + copy_h > w.buffer_h)
-        copy_h = w.buffer_h - src_y;
-    if (copy_w <= 0 || copy_h <= 0)
+    const int border = wm_frame_border();
+    const int radius = gui_radius_xl();
+    int detail_inset = gui_scaled_metric(1);
+    if (detail_inset < 1)
+        detail_inset = 1;
+
+    const int body_inset = border + detail_inset;
+    int inner_left = w.x + border;
+    int inner_top = w.y;
+    int inner_w = w.w - border * 2;
+    int inner_h = w.h - border;
+    if (inner_w <= 0 || inner_h <= 0)
         return;
+
+    DirtyRect inner = {inner_left, inner_top, inner_w, inner_h};
+    DirtyRect area = {};
+    if (!rect_intersection(inner, clip, &area))
+        return;
+    DirtyRect surface_bounds = {0, 0, (int)dst->width, (int)dst->height};
+    if (!rect_intersection(area, surface_bounds, &area))
+        return;
+
+    uint32_t fill = g_gui_style.app_bg ? g_gui_style.app_bg : g_gui_chrome.desktop_bg;
+    int inner_r = radius - body_inset;
+    if (inner_r > inner_w / 2)
+        inner_r = inner_w / 2;
+    if (inner_r > inner_h / 2)
+        inner_r = inner_h / 2;
+
+    if (inner_r <= 0) {
+        gui_fill_rect(dst, area.x, area.y, area.w, area.h, fill);
+        return;
+    }
+
+    const int area_bottom = area.y + area.h;
+    const int rounded_start_y = inner_top + inner_h - inner_r;
+    if (area.y < rounded_start_y) {
+        int top_h = rounded_start_y - area.y;
+        if (top_h > area.h)
+            top_h = area.h;
+        if (top_h > 0)
+            gui_fill_rect(dst, area.x, area.y, area.w, top_h, fill);
+    }
+
+    int y0 = area.y > rounded_start_y ? area.y : rounded_start_y;
+    if (y0 >= area_bottom)
+        return;
+
+    const int center_start_x = inner_left + inner_r;
+    const int center_end_x = inner_left + inner_w - inner_r;
+    const uint32_t dst_stride = dst->pitch / 4;
+    for (int y = y0; y < area_bottom; y++) {
+        if (y < 0 || y >= (int)dst->height)
+            continue;
+        uint32_t *row = &dst->buffer[(size_t)y * dst_stride];
+        for (int x = area.x; x < area.x + area.w;) {
+            if (x >= center_start_x && x < center_end_x) {
+                int run_end = center_end_x;
+                if (run_end > area.x + area.w)
+                    run_end = area.x + area.w;
+                int run_len = run_end - x;
+                if (run_len > 0) {
+                    for (int i = 0; i < run_len; i++)
+                        row[x + i] = fill;
+                    x += run_len;
+                    continue;
+                }
+            }
+
+            uint8_t coverage = gui_rounded_rect_coverage_local(x - inner_left, y - inner_top, inner_w, inner_h, inner_r,
+                                                               GUI_ROUNDED_EDGE_BOTTOM);
+            if (coverage == 255)
+                row[x] = fill;
+            else if (coverage > 0)
+                row[x] = blend_rgb(row[x], fill, coverage);
+            x++;
+        }
+    }
+}
+
+static void fill_opaque_window_client_exposed_area(Surface *dst, const Window &w, const DirtyRect &visible,
+                                                   const DirtyRect *copy_dst)
+{
+    if (!copy_dst || copy_dst->w <= 0 || copy_dst->h <= 0) {
+        fill_opaque_window_client_background_clipped(dst, w, visible);
+        return;
+    }
+
+    DirtyRect top = {visible.x, visible.y, visible.w, copy_dst->y - visible.y};
+    if (top.h > 0)
+        fill_opaque_window_client_background_clipped(dst, w, top);
+
+    int visible_bottom = visible.y + visible.h;
+    int copy_bottom = copy_dst->y + copy_dst->h;
+    DirtyRect bottom = {visible.x, copy_bottom, visible.w, visible_bottom - copy_bottom};
+    if (bottom.h > 0)
+        fill_opaque_window_client_background_clipped(dst, w, bottom);
+
+    int middle_y = copy_dst->y;
+    int middle_h = copy_dst->h;
+    DirtyRect left = {visible.x, middle_y, copy_dst->x - visible.x, middle_h};
+    if (left.w > 0 && left.h > 0)
+        fill_opaque_window_client_background_clipped(dst, w, left);
+
+    int visible_right = visible.x + visible.w;
+    int copy_right = copy_dst->x + copy_dst->w;
+    DirtyRect right = {copy_right, middle_y, visible_right - copy_right, middle_h};
+    if (right.w > 0 && right.h > 0)
+        fill_opaque_window_client_background_clipped(dst, w, right);
+}
+
+void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &clip)
+{
+    if (!dst || !dst->buffer)
+        return;
+
+    DirtyRect client = window_visible_client_bounds(w);
+    DirtyRect visible = {};
+    if (!rect_intersection(client, clip, &visible))
+        return;
+    DirtyRect surface_bounds = {0, 0, (int)dst->width, (int)dst->height};
+    if (!rect_intersection(visible, surface_bounds, &visible))
+        return;
+
+    DirtyRect copy_dst = {};
+    int src_x = 0;
+    int src_y = 0;
+    const bool has_copy = compute_window_client_copy_rect(w, visible, client, &copy_dst, &src_x, &src_y);
 
     uint32_t dst_stride = dst->pitch / 4;
     if (w.transparent) {
-        blit_alpha_blend_rect(&dst->buffer[(size_t)iy * dst_stride + ix], dst_stride,
-                              &w.buffer[(size_t)src_y * w.buffer_w + src_x], w.buffer_w, copy_w, copy_h);
+        if (!has_copy)
+            return;
+        blit_alpha_blend_rect(&dst->buffer[(size_t)copy_dst.y * dst_stride + copy_dst.x], dst_stride,
+                              &w.buffer[(size_t)src_y * w.buffer_w + src_x], w.buffer_w, copy_dst.w, copy_dst.h);
         return;
     }
+
+    fill_opaque_window_client_exposed_area(dst, w, visible, has_copy ? &copy_dst : nullptr);
+    if (!has_copy)
+        return;
 
     int radius = gui_radius_xl();
     int border = wm_frame_border();
@@ -1309,19 +1462,22 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     int inner_r = radius - body_inset;
     int inner_left = w.x + border, inner_top = w.y;
     int inner_w = w.w - border * 2, inner_h = w.h - border;
+    if (inner_w <= 0 || inner_h <= 0)
+        return;
     if (inner_r > inner_w / 2)
         inner_r = inner_w / 2;
     if (inner_r > inner_h / 2)
         inner_r = inner_h / 2;
 
     int rx, ry, rw, rh;
-    if (!gui_intersect_rect(ix, iy, copy_w, copy_h, inner_left, inner_top, inner_w, inner_h, &rx, &ry, &rw, &rh))
+    if (!gui_intersect_rect(copy_dst.x, copy_dst.y, copy_dst.w, copy_dst.h, inner_left, inner_top, inner_w, inner_h,
+                            &rx, &ry, &rw, &rh))
         return;
 
     if (inner_r <= 0) {
         Surface src_surface = {w.buffer, (uint32_t)w.buffer_w, (uint32_t)w.buffer_h, (uint32_t)w.buffer_w * 4, false,
                                0};
-        copy_surface_rect(dst, rx, ry, &src_surface, src_x + (rx - ix), src_y + (ry - iy), rw, rh);
+        copy_surface_rect(dst, rx, ry, &src_surface, src_x + (rx - copy_dst.x), src_y + (ry - copy_dst.y), rw, rh);
     } else {
         const int rounded_start_y = inner_top + inner_h - inner_r;
         const int center_start_x = inner_left + inner_r;
@@ -1329,7 +1485,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
 
         for (int py = 0; py < rh; py++) {
             int dst_y = ry + py;
-            int src_row_base = src_y + (dst_y - iy);
+            int src_row_base = src_y + (dst_y - copy_dst.y);
             if (dst_y < 0 || dst_y >= (int)dst->height || src_row_base < 0 || src_row_base >= w.buffer_h)
                 continue;
 
@@ -1337,7 +1493,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             const uint32_t *src_ptr = &w.buffer[(size_t)src_row_base * w.buffer_w];
 
             if (dst_y < rounded_start_y) {
-                memcpy(&dst_ptr[rx], &src_ptr[src_x + (rx - ix)], (size_t)rw * 4u);
+                memcpy(&dst_ptr[rx], &src_ptr[src_x + (rx - copy_dst.x)], (size_t)rw * 4u);
             } else {
                 for (int dst_x = rx; dst_x < rx + rw;) {
                     if (dst_x >= center_start_x && dst_x < center_end_x) {
@@ -1346,13 +1502,13 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                             run_end = rx + rw;
                         int run_len = run_end - dst_x;
                         if (run_len > 0) {
-                            memcpy(&dst_ptr[dst_x], &src_ptr[src_x + (dst_x - ix)], (size_t)run_len * 4u);
+                            memcpy(&dst_ptr[dst_x], &src_ptr[src_x + (dst_x - copy_dst.x)], (size_t)run_len * 4u);
                             dst_x += run_len;
                             continue;
                         }
                     }
 
-                    int src_col = src_x + (dst_x - ix);
+                    int src_col = src_x + (dst_x - copy_dst.x);
                     if (src_col < 0 || src_col >= w.buffer_w) {
                         dst_x++;
                         continue;
@@ -1365,13 +1521,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                         if (coverage == 255) {
                             dp = sp;
                         } else {
-                            uint32_t inv = 255u - coverage;
-                            uint32_t dr = (dp >> 16) & 0xFFu, dg = (dp >> 8) & 0xFFu, db = dp & 0xFFu;
-                            uint32_t sr = (sp >> 16) & 0xFFu, sg = (sp >> 8) & 0xFFu, sb = sp & 0xFFu;
-                            uint32_t r = (sr * coverage + dr * inv + 127u) / 255u;
-                            uint32_t g = (sg * coverage + dg * inv + 127u) / 255u;
-                            uint32_t b = (sb * coverage + db * inv + 127u) / 255u;
-                            dp = 0xFF000000u | (r << 16) | (g << 8) | b;
+                            dp = blend_rgb(dp, sp, coverage);
                         }
                     }
                     dst_x++;
@@ -1380,7 +1530,6 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         }
     }
 }
-
 void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                             const Registry *registry)
 {
@@ -1664,7 +1813,7 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
 
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border, g_gui_style.chrome_bg_alt);
+                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
 
     DirtyRect search = wm_index_search_bounds();
     const char *query = g_index.query_len > 0 ? g_index.query : "";
@@ -1834,7 +1983,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
 
     // Main panel surface with inset highlight
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border, g_gui_style.chrome_bg_alt);
+                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
 
     // Card header (drawn inside the panel inset border)
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Control Panel", "uniOS");
@@ -1860,44 +2009,4 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
                         g_control_center.hovered_item == CONTROL_ITEM_STORAGE);
     gui_app_draw_button(&g_backbuffer, settings.x, settings.y, settings.w, settings.h, "Settings", true, false,
                         g_control_center.hovered_item == CONTROL_ITEM_SETTINGS);
-}
-void draw_debug_overlay(Surface *dst)
-{
-    if (!dst || !dst->buffer)
-        return;
-
-    int pad = gui_space_1();
-    int line_h = gui_line_height();
-    int x = pad;
-    int w = gui_scaled_metric(220);
-    int h = (line_h * 11) + pad;
-    int y = (int)dst->height - h - pad;
-
-    gui_fill_rect(dst, x - pad / 2, y - pad / 2, w, h, 0x80000000u);
-    gui_draw_rect(dst, x - pad / 2, y - pad / 2, w, h, 0xFFFFFFFFu);
-
-    auto draw_stat = [&](const char *label, uint64_t val, const char *unit = "") {
-        char buf[64];
-        if (unit[0])
-            snprintf(buf, sizeof(buf), "%s: %llu %s", label, (unsigned long long)val, unit);
-        else
-            snprintf(buf, sizeof(buf), "%s: %llu", label, (unsigned long long)val);
-        gui_draw_text_clipped(dst, gui_font_default(), x, y, w - pad, buf, 0xFFFFFFFFu, 0);
-        y += line_h;
-    };
-
-    uint64_t frame_time = g_frame_stats.last_submit_ticks - g_frame_stats.last_build_ticks;
-    uint64_t fps = frame_time > 0 ? 1000 / frame_time : 0;
-
-    draw_stat("FPS", fps);
-    draw_stat("Frame Time", frame_time, "ms");
-    draw_stat("Compose Time", g_frame_stats.last_compose_ticks, "ms");
-    draw_stat("Copy Time", g_frame_stats.last_copy_ticks, "ms");
-    draw_stat("Blur Time", g_frame_stats.last_blur_ticks, "ms");
-    draw_stat("Dirty Rects", g_frame_stats.last_dirty_rects);
-    uint32_t area_pct = (uint32_t)(g_frame_stats.last_dirty_area * 100 / (dst->width * dst->height));
-    draw_stat("Dirty Area", area_pct, "%");
-    draw_stat("Alpha Pixels", g_frame_stats.alpha_pixels_last_frame);
-    draw_stat("Missed Frames", g_frame_stats.missed_frames);
-    draw_stat("Submits", g_frame_stats.frames_submitted);
 }

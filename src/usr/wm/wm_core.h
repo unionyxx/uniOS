@@ -49,8 +49,6 @@ static constexpr uint32_t MAX_PRESENT_BUFFER_SLOTS = MAX_PENDING_PRESENTS + 1u;
 static constexpr uint32_t DIRTY_COLLAPSE_RATIO_NUM = 5;
 static constexpr uint32_t DIRTY_COLLAPSE_RATIO_DEN = 4;
 static constexpr uint32_t WM_FRAME_STATS_HISTORY = 120;
-static constexpr uint32_t WM_TARGET_FPS = 60;
-static constexpr uint32_t WM_FRAME_TICKS = 1000 / WM_TARGET_FPS;
 static constexpr int WM_SNAP_THRESHOLD_BASE = 14;
 static constexpr int WM_SNAP_ESCAPE_BASE = 28;
 static constexpr uint64_t WM_RESIZE_CONFIGURE_RETRY_TICKS = 8;
@@ -163,21 +161,6 @@ struct WmFrameStats
     uint32_t max_dirty_rects;
     uint64_t max_dirty_area;
     uint32_t present_queue_depth;
-
-    // Timing (ticks)
-    uint64_t last_build_ticks;
-    uint64_t last_submit_ticks;
-    uint64_t last_compose_ticks;
-    uint64_t last_copy_ticks;
-    uint64_t last_blur_ticks;
-
-    // Missed frames
-    uint64_t missed_frames;
-    uint64_t last_vblank_count;
-
-    // Alpha count
-    uint64_t alpha_pixels_last_frame;
-    uint64_t damage_collapse_count;
 };
 
 struct RuntimeGuiSettings
@@ -228,7 +211,6 @@ enum IndexActionKind
     INDEX_ACTION_TOGGLE_CLOCK_SECONDS,
     INDEX_ACTION_TOGGLE_ANIMATIONS,
     INDEX_ACTION_TOGGLE_TRANSPARENCY,
-    INDEX_ACTION_TORTURE_TEST,
 };
 
 enum ControlPanelItem
@@ -617,7 +599,6 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
 void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                             const Registry *registry);
 void paint_desktop_base(Surface *surface);
-void draw_debug_overlay(Surface *dst);
 void mark_presentbuffer_slots_stale(const DirtyRect &dirty);
 void wm_stats_note_dirty_set(const DirtyRect *rects, int rect_count);
 void wm_stats_note_stale_repair(int rect_count);
