@@ -22,7 +22,7 @@
 
 #define MAX_WINDOWS 32
 #define MAX_DIRTY_RECTS 128
-#define MAX_VISIBLE_REGIONS 256
+#define MAX_VISIBLE_REGIONS 512
 #define CURSOR_WIDTH 16
 #define CURSOR_HEIGHT 16
 #define CURSOR_DAMAGE_PAD 4
@@ -320,7 +320,7 @@ extern DirtyRect g_window_client_cache[MAX_WINDOWS];
 extern bool g_window_visible_cache[MAX_WINDOWS];
 extern DirtyRect g_window_visible_regions[MAX_WINDOWS][MAX_VISIBLE_REGIONS];
 extern int g_window_visible_region_count[MAX_WINDOWS];
-extern bool g_window_visible_region_overflow;
+extern bool g_window_visible_region_overflow[MAX_WINDOWS];
 
 extern IndexState g_index;
 extern ControlCenterState g_control_center;
@@ -462,23 +462,38 @@ static inline DirtyRect from_policy_rect(const wm::DirtyRect &rect)
 
 static inline int wm_resize_grip()
 {
-    return gui_scaled_metric(RESIZE_GRIP);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(RESIZE_GRIP); }
+    return cache_value;
 }
 static inline int wm_button_size()
 {
-    return gui_scaled_metric(BTN_SIZE);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_SIZE); }
+    return cache_value;
 }
 static inline int wm_button_inset_x()
 {
-    return gui_scaled_metric(BTN_INSET_X);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_INSET_X); }
+    return cache_value;
 }
 static inline int wm_button_inset_y()
 {
-    return gui_scaled_metric(BTN_INSET_Y);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_INSET_Y); }
+    return cache_value;
 }
 static inline int wm_button_spacing()
 {
-    return gui_scaled_metric(BTN_SPACING);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_SPACING); }
+    return cache_value;
 }
 static inline int wm_title_bar_h()
 {
@@ -490,7 +505,10 @@ static inline int wm_menubar_h()
 }
 static inline int wm_desktop_margin()
 {
-    return gui_scaled_metric(DESKTOP_MARGIN);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(DESKTOP_MARGIN); }
+    return cache_value;
 }
 static inline int wm_dock_reserved_h()
 {
@@ -498,29 +516,53 @@ static inline int wm_dock_reserved_h()
 }
 static inline int wm_default_min_w()
 {
-    return gui_scaled_metric(MIN_WINDOW_W);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(MIN_WINDOW_W); }
+    return cache_value;
 }
 static inline int wm_default_min_h()
 {
-    return gui_scaled_metric(MIN_WINDOW_H);
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(MIN_WINDOW_H); }
+    return cache_value;
 }
 static inline int wm_frame_border()
 {
-    int border = gui_scaled_metric(FRAME_BORDER);
-    return border < 1 ? 1 : border;
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        int border = gui_scaled_metric(FRAME_BORDER);
+        cache_value = border < 1 ? 1 : border;
+    }
+    return cache_value;
 }
 static inline int wm_frame_shadow_offset_x()
 {
-    int offset = gui_scaled_metric(1);
-    return offset < 1 ? 1 : offset;
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        int offset = gui_scaled_metric(1);
+        cache_value = offset < 1 ? 1 : offset;
+    }
+    return cache_value;
 }
 static inline int wm_frame_shadow_offset_y()
 {
     // Focused frames draw a slightly deeper shadow. Use the maximum compositor shadow
     // extent in geometry/damage calculations so moves and resizes do not leave
     // single-pixel shadow remnants behind.
-    int offset = gui_scaled_metric(3);
-    return offset < 1 ? 1 : offset;
+    static int cache_value = -1, cache_scale = -1;
+    int scale = gui_ui_scale_pct();
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        int offset = gui_scaled_metric(3);
+        cache_value = offset < 1 ? 1 : offset;
+    }
+    return cache_value;
 }
 static inline int wm_window_damage_pad()
 {
@@ -587,6 +629,29 @@ static inline bool point_hits_window_visible_pixel(const Window &w, int px, int 
     uint32_t pixel = w.buffer[(size_t)local_y * (size_t)w.buffer_w + (size_t)local_x];
     return ((pixel >> 24) & 0xFFu) >= min_alpha;
 }
+
+static inline uint32_t div255(uint32_t x)
+{
+    return (x + 128u + ((x + 128u) >> 8)) >> 8;
+}
+
+static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
+{
+    return (uint8_t)div255((uint32_t)alpha * (uint32_t)coverage);
+}
+
+uint32_t mix_rgb(uint32_t a, uint32_t b, uint8_t t);
+uint32_t mix_rgb_keep_alpha(uint32_t base, uint32_t tint, uint8_t t);
+int color_luma(uint32_t color);
+uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage);
+void copy_surface_rect(Surface *dst, int dst_x, int dst_y, const Surface *src, int src_x, int src_y, int w, int h);
+bool ensure_surface_capacity(Surface *surface, uint32_t width, uint32_t height);
+void blur_surface_box(const Surface *src, Surface *dst, int radius);
+void blur_surface_material(const Surface *src, Surface *dst, float sigma, int saturation_pct, int brightness_bias);
+void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &clip, bool focused, bool hovered_frame,
+                                    int hovered_button);
+void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &clip);
+void draw_storage_prompt_overlay_clipped(const DirtyRect &clip);
 
 void init_wallpaper();
 void reload_wallpaper(Registry *registry, bool prefer_requested);
@@ -687,3 +752,25 @@ DirtyRect context_menu_bounds();
 int build_context_menu_items(const Registry *registry, GuiMenuItem *items, int max_items);
 RuntimeGuiSettings load_runtime_settings();
 bool persist_runtime_settings(const Registry *registry);
+
+#define MAX_NOTIFICATIONS 32
+#define TOAST_DURATION_TICKS 4000
+
+struct Notification {
+    char title[64];
+    char message[128];
+    uint64_t timestamp_ticks;
+    bool read;
+    bool active_toast;
+};
+
+struct NotificationCenterState {
+    Notification history[MAX_NOTIFICATIONS];
+    int count;
+    int head; // Ring buffer head
+};
+
+extern NotificationCenterState g_notifications;
+void wm_push_notification(const char* title, const char* message);
+void draw_toast_overlay_clipped(const DirtyRect &clip);
+void draw_notification_center_clipped(const DirtyRect &clip, int start_y);

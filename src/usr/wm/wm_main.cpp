@@ -36,7 +36,7 @@ DirtyRect g_window_client_cache[MAX_WINDOWS];
 bool g_window_visible_cache[MAX_WINDOWS];
 DirtyRect g_window_visible_regions[MAX_WINDOWS][MAX_VISIBLE_REGIONS];
 int g_window_visible_region_count[MAX_WINDOWS];
-bool g_window_visible_region_overflow = false;
+bool g_window_visible_region_overflow[MAX_WINDOWS] = {};
 int g_dirty_count = 0;
 bool g_window_visibility_cache_dirty = true;
 bool g_dirty_frame_ready = false;
@@ -267,9 +267,8 @@ static bool dirty_set_is_single_fullscreen_rect()
 {
     if (clamp_dirty_rect_count(g_dirty_count) != 1)
         return false;
-    DirtyRect rect = g_dirty_rects[0];
-    if (!clip_dirty_rect_to_screen(rect))
-        return false;
+    // Dirty rects are invariant-screen-clipped after normalize_dirty_rects
+    const DirtyRect &rect = g_dirty_rects[0];
     return rect.x == 0 && rect.y == 0 && rect.w == (int)g_screen.width && rect.h == (int)g_screen.height;
 }
 
@@ -277,8 +276,7 @@ static bool dirty_set_intersects_rect(const DirtyRect &target)
 {
     int count = clamp_dirty_rect_count(g_dirty_count);
     for (int i = 0; i < count; i++) {
-        DirtyRect dirty = g_dirty_rects[i];
-        if (clip_dirty_rect_to_screen(dirty) && rect_intersection(dirty, target, nullptr))
+        if (rect_intersection(g_dirty_rects[i], target, nullptr))
             return true;
     }
     return false;
@@ -288,8 +286,7 @@ static bool dirty_set_contains_rect(const DirtyRect &target)
 {
     int count = clamp_dirty_rect_count(g_dirty_count);
     for (int i = 0; i < count; i++) {
-        DirtyRect dirty = g_dirty_rects[i];
-        if (clip_dirty_rect_to_screen(dirty) && rect_contains(dirty, target))
+        if (rect_contains(g_dirty_rects[i], target))
             return true;
     }
     return false;
@@ -324,22 +321,14 @@ static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_re
 static void collapse_dirty_rects_to_bounds()
 {
     int count = clamp_dirty_rect_count(g_dirty_count);
-    DirtyRect bounds = {};
-    bool have_bounds = false;
-    for (int i = 0; i < count; i++) {
-        DirtyRect dirty = g_dirty_rects[i];
-        if (!clip_dirty_rect_to_screen(dirty))
-            continue;
-        bounds = have_bounds ? rect_union(bounds, dirty) : dirty;
-        have_bounds = true;
-    }
-
-    if (!have_bounds) {
-        g_dirty_count = 0;
+    if (count <= 0) {
         invalidate_dirty_frame();
         return;
     }
-
+    // Dirty rects are invariant-screen-clipped after normalize_dirty_rects
+    DirtyRect bounds = g_dirty_rects[0];
+    for (int i = 1; i < count; i++)
+        bounds = rect_union(bounds, g_dirty_rects[i]);
     g_dirty_rects[0] = bounds;
     g_dirty_count = 1;
     invalidate_dirty_frame();
@@ -403,12 +392,40 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
 
     int stale_count = clamp_dirty_rect_count(dst.stale_count);
     wm_stats_note_stale_repair(stale_count);
-    for (int i = 0; i < stale_count; i++) {
-        DirtyRect stale = dst.stale_rects[i];
-        if (!clip_dirty_rect_to_screen(stale))
-            continue;
-        gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
+    DirtyRect cursor_rect = {};
+    gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y,
+                          &cursor_rect.x, &cursor_rect.y, &cursor_rect.w, &cursor_rect.h);
+    bool cursor_on_screen = clip_dirty_rect_to_screen(cursor_rect);
+    bool cursor_erased = false;
+
+    // Batch repair: if there are many small stale rects, collapse to a bounding box
+    // to reduce per-rect blit overhead.  Threshold tuned for typical 2-3 slots.
+    if (stale_count > 4) {
+        DirtyRect bounds = {};
+        bool have_bounds = false;
+        for (int i = 0; i < stale_count; i++) {
+            DirtyRect stale = dst.stale_rects[i];
+            if (!clip_dirty_rect_to_screen(stale))
+                continue;
+            bounds = have_bounds ? rect_union(bounds, stale) : stale;
+            have_bounds = true;
+            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr))
+                cursor_erased = true;
+        }
+        if (have_bounds)
+            gui_blit_rect(&dst.surface, &g_backbuffer, bounds.x, bounds.y, bounds.x, bounds.y, bounds.w, bounds.h);
+    } else {
+        for (int i = 0; i < stale_count; i++) {
+            DirtyRect stale = dst.stale_rects[i];
+            if (!clip_dirty_rect_to_screen(stale))
+                continue;
+            gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
+            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr))
+                cursor_erased = true;
+        }
     }
+    if (cursor_erased)
+        enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
     clear_presentbuffer_slot_stale(dst);
     return true;
 }
@@ -807,6 +824,7 @@ extern "C" int main(int argc, char **argv)
     registry->magic = REGISTRY_MAGIC;
     asm volatile("sfence" ::: "memory");
     LOG_INFO("wm", "first desktop frame submitted at %llu ms", (unsigned long long)get_ticks());
+    wm_push_notification("uniOS", "System successfully booted.");
 
     uint32_t last_settings_gen = registry->settings_generation, last_storage_gen = registry->storage_request_generation;
     GuiThemeMode applied_theme_mode = runtime_settings.theme_mode;
@@ -1218,8 +1236,10 @@ extern "C" int main(int argc, char **argv)
             bool transparency_changed = registry->transparency_level != g_control_center.transparency_level;
             g_system_flags = registry->system_flags;
             sync_control_center_state_from_registry(registry);
-            if (!persist_runtime_settings(registry))
+            if (!persist_runtime_settings(registry)) {
                 LOG_WARN("wm", "failed to persist system settings");
+                wm_push_notification("System", "Failed to save settings.");
+            }
             if (theme_changed) {
                 applied_theme_mode = next_theme;
                 gui_apply_theme(next_theme);
@@ -1232,7 +1252,8 @@ extern "C" int main(int argc, char **argv)
                                         registry->windows[1].h);
             }
             if (transparency_changed) {
-                capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)}, registry);
+                capture_shell_backdrop_for_rect(
+                    {0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)}, registry);
                 enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             }
         }
@@ -1310,7 +1331,7 @@ extern "C" int main(int argc, char **argv)
                     int old_shm_id = w.shm_id;
                     w.shm_id = entry_snapshot.shm_id;
                     w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
-                    if (gui_shm_id_is_valid(old_shm_id))
+                    if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id)
                         syscall1(SYS_SHM_UNMAP, old_shm_id);
 
                     w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
@@ -1440,33 +1461,125 @@ extern "C" int main(int argc, char **argv)
                 continue;
             }
 
-            DirtyRect cursor_rect = {};
-            bool draw_cursor = prepare_cursor_overlay_damage(inter, &cursor_rect);
             g_frame_cursor_handle = 0;
             g_frame_cursor_x = 0;
             g_frame_cursor_y = 0;
-            bool draw_software_cursor = draw_cursor;
-            if (draw_cursor && cursor_backend_allowed()) {
-                CursorPresentBuffer *cursor_buffer = ensure_cursor_present_buffer(g_input.cursor_kind);
-                if (cursor_buffer && cursor_buffer->handle != 0) {
-                    g_frame_cursor_handle = cursor_buffer->handle;
-                    g_frame_cursor_x = cursor_rect.x;
-                    g_frame_cursor_y = cursor_rect.y;
-                    draw_software_cursor = false;
-                } else {
-                    g_cursor_backend_disabled = true;
-                }
-            }
             if (select_presentbuffer_slot_for_frame()) {
+                // Pass 0: Expire stale toasts even if no other screen activity
+                uint64_t now = get_ticks();
+                bool toast_expired = false;
+                int toast_idx = g_notifications.head - 1;
+                if (toast_idx < 0)
+                    toast_idx = MAX_NOTIFICATIONS - 1;
+                for (int i = 0; i < g_notifications.count; i++) {
+                    Notification &notif = g_notifications.history[toast_idx];
+                    if (notif.active_toast && (now - notif.timestamp_ticks > TOAST_DURATION_TICKS)) {
+                        notif.active_toast = false;
+                        toast_expired = true;
+                    }
+                    toast_idx--;
+                    if (toast_idx < 0)
+                        toast_idx = MAX_NOTIFICATIONS - 1;
+                }
+                if (toast_expired) {
+                    int toast_w = gui_scaled_metric(320);
+                    int toast_h = gui_scaled_metric(76);
+                    int margin = gui_space_2();
+                    DirtyRect toast_box = {(int)g_backbuffer.width - toast_w - margin, wm_menubar_h() + margin, toast_w, toast_h};
+                    enqueue_damage_rect(toast_box.x - 16, toast_box.y - 16, toast_box.w + 32, toast_h + 32);
+                }
+
                 int focus = find_registry_focused_user_window(registry);
+
+                auto rect_union_local = [](const DirtyRect &a, const DirtyRect &b) -> DirtyRect {
+                    int x1 = a.x < b.x ? a.x : b.x;
+                    int y1 = a.y < b.y ? a.y : b.y;
+                    int x2 = (a.x + a.w) > (b.x + b.w) ? (a.x + a.w) : (b.x + b.w);
+                    int y2 = (a.y + a.h) > (b.y + b.h) ? (a.y + a.h) : (b.y + b.h);
+                    return {x1, y1, x2 - x1, y2 - y1};
+                };
+
+                DirtyRect cc_damage = {};
+                bool has_cc_damage = false;
+                if (g_control_center.open) {
+                    DirtyRect cc_box = control_center_bounds();
+                    DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_2(), cc_box.w, gui_scaled_metric(240)};
+                    DirtyRect total_cc = rect_union_local(cc_box, notif_box);
+                    cc_damage = rect_expand(total_cc, gui_scaled_metric(14));
+                    has_cc_damage = true;
+                }
+
+                DirtyRect toast_damage = {};
+                bool has_toast_damage = false;
+                if (g_notifications.count > 0) {
+                    int toast_w = gui_scaled_metric(320);
+                    int toast_h = gui_scaled_metric(76);
+                    int margin = gui_space_2();
+                    DirtyRect toast_box = {(int)g_backbuffer.width - toast_w - margin, wm_menubar_h() + margin, toast_w, toast_h};
+                    toast_damage = rect_expand(toast_box, gui_scaled_metric(14));
+                    has_toast_damage = true;
+                }
+
+                for (int d = 0; d < g_dirty_count; d++) {
+                    DirtyRect &r = g_dirty_rects[d];
+                    if (has_cc_damage && rect_intersection(r, cc_damage, nullptr)) {
+                        r = rect_union_local(r, cc_damage);
+                        clip_dirty_rect_to_screen(r);
+                    }
+                    if (has_toast_damage && rect_intersection(r, toast_damage, nullptr)) {
+                        r = rect_union_local(r, toast_damage);
+                        clip_dirty_rect_to_screen(r);
+                    }
+                }
+
+                wm::DirtyRect optimized_rects[MAX_DIRTY_RECTS] = {};
+                int optimized_count = 0;
+                for (int d = 0; d < g_dirty_count; d++) {
+                    DirtyRect &r = g_dirty_rects[d];
+                    if (r.w > 0 && r.h > 0) {
+                        wm::enqueue_damage_rect(optimized_rects, &optimized_count, MAX_DIRTY_RECTS, (int)g_screen.width, (int)g_screen.height, to_policy_rect(r));
+                    }
+                }
+                
+                for (int d = 0; d < optimized_count; d++) {
+                    g_dirty_rects[d] = from_policy_rect(optimized_rects[d]);
+                }
+                g_dirty_count = optimized_count;
+
+                DirtyRect cursor_rect = {};
+                bool draw_cursor = prepare_cursor_overlay_damage(inter, &cursor_rect);
+                bool draw_software_cursor = draw_cursor;
+                if (draw_cursor && cursor_backend_allowed()) {
+                    CursorPresentBuffer *cursor_buffer = ensure_cursor_present_buffer(g_input.cursor_kind);
+                    if (cursor_buffer && cursor_buffer->handle != 0) {
+                        g_frame_cursor_handle = cursor_buffer->handle;
+                        g_frame_cursor_x = cursor_rect.x;
+                        g_frame_cursor_y = cursor_rect.y;
+                        draw_software_cursor = false;
+                    } else {
+                        g_cursor_backend_disabled = true;
+                    }
+                }
+
+                DirtyRect compose_union = {0, 0, 0, 0};
+                bool has_compose_union = false;
                 int dirty_count = clamp_dirty_rect_count(g_dirty_count);
                 for (int d = 0; d < dirty_count; d++) {
                     DirtyRect &r = g_dirty_rects[d];
-                    if (!clip_dirty_rect_to_screen(r))
+                    if (r.w <= 0 || r.h <= 0)
                         continue;
+                    if (!has_compose_union) {
+                        compose_union = r;
+                        has_compose_union = true;
+                    } else {
+                        compose_union = rect_union_local(compose_union, r);
+                    }
                     if (!compose_rect_clipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry))
                         compose_rect_unclipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry);
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, r.x, r.y, r.x, r.y, r.w, r.h);
+                }
+                if (has_compose_union) {
+                    capture_shell_backdrop_for_rect(compose_union, const_cast<Registry *>(registry));
                 }
                 flush_shell_blur_updates(registry);
                 if (draw_cursor) {

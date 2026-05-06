@@ -4,6 +4,35 @@
 
 IndexState g_index = {};
 ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true, true, false, true, 180, false};
+NotificationCenterState g_notifications = {};
+
+void wm_push_notification(const char* title, const char* message) {
+    int index = g_notifications.head;
+    Notification& notif = g_notifications.history[index];
+
+    strncpy(notif.title, title, sizeof(notif.title) - 1);
+    notif.title[sizeof(notif.title) - 1] = '\0';
+
+    strncpy(notif.message, message, sizeof(notif.message) - 1);
+    notif.message[sizeof(notif.message) - 1] = '\0';
+
+    notif.timestamp_ticks = get_ticks();
+    notif.read = false;
+    notif.active_toast = true;
+
+    g_notifications.head = (g_notifications.head + 1) % MAX_NOTIFICATIONS;
+    if (g_notifications.count < MAX_NOTIFICATIONS) {
+        g_notifications.count++;
+    }
+
+    int toast_w = gui_scaled_metric(320);
+    int toast_h = gui_scaled_metric(76);
+    int margin = gui_space_2();
+    int toast_x = g_screen.width - toast_w - margin;
+    int toast_y = wm_menubar_h() + margin;
+
+    enqueue_damage_rect(toast_x - 16, toast_y - 16, toast_w + 32, toast_h + 32);
+}
 
 static int resolve_context_menu_target_index();
 static bool context_menu_targets_window_entry(const WindowEntry *entry);
@@ -28,7 +57,33 @@ void enqueue_damage_rect(int x, int y, int w, int h)
     if (!clip_dirty_rect_to_screen(incoming))
         return;
 
-    wm::DirtyRect policy_rects[MAX_DIRTY_RECTS] = {};
+    // Full-screen dirty collapses everything to a single rect
+    if (incoming.x == 0 && incoming.y == 0 && incoming.w == (int)g_screen.width &&
+        incoming.h == (int)g_screen.height) {
+        g_dirty_rects[0] = incoming;
+        g_dirty_count = 1;
+        invalidate_dirty_frame();
+        return;
+    }
+
+    // Fast path: append if there is room and the incoming rect does not overlap any existing rect
+    if (g_dirty_count < MAX_DIRTY_RECTS) {
+        bool overlaps = false;
+        for (int i = 0; i < g_dirty_count; i++) {
+            if (dirty_rects_intersect(g_dirty_rects[i], incoming)) {
+                overlaps = true;
+                break;
+            }
+        }
+        if (!overlaps) {
+            g_dirty_rects[g_dirty_count++] = incoming;
+            invalidate_dirty_frame();
+            return;
+        }
+    }
+
+    // Full policy merge path (deduplication, coalescing, and collapse heuristics)
+    wm::DirtyRect policy_rects[MAX_DIRTY_RECTS];
     int policy_count = clamp_dirty_rect_count(g_dirty_count);
     copy_dirty_rects_to_policy(policy_rects, policy_count);
 
@@ -51,19 +106,52 @@ void invalidate_window_visibility_cache()
     g_dirty_frame_ready = false;
 }
 
+static bool dirty_rect_less(const DirtyRect &a, const DirtyRect &b)
+{
+    if (a.y != b.y)
+        return a.y < b.y;
+    return a.x < b.x;
+}
+
+static void swap_dirty_rect(DirtyRect *a, DirtyRect *b)
+{
+    DirtyRect t = *a;
+    *a = *b;
+    *b = t;
+}
+
+static int partition_dirty_rects(DirtyRect *arr, int low, int high)
+{
+    DirtyRect pivot = arr[high];
+    int i = low - 1;
+    for (int j = low; j < high; j++) {
+        if (dirty_rect_less(arr[j], pivot)) {
+            i++;
+            swap_dirty_rect(&arr[i], &arr[j]);
+        }
+    }
+    swap_dirty_rect(&arr[i + 1], &arr[high]);
+    return i + 1;
+}
+
+static void quicksort_dirty_rects(DirtyRect *arr, int low, int high)
+{
+    while (low < high) {
+        int pi = partition_dirty_rects(arr, low, high);
+        if (pi - low < high - pi) {
+            quicksort_dirty_rects(arr, low, pi - 1);
+            low = pi + 1;
+        } else {
+            quicksort_dirty_rects(arr, pi + 1, high);
+            high = pi - 1;
+        }
+    }
+}
+
 static void sort_dirty_rects()
 {
-    for (int i = 1; i < g_dirty_count; i++) {
-        DirtyRect key = g_dirty_rects[i];
-        int j = i - 1;
-        while (j >= 0) {
-            if (!((g_dirty_rects[j].y > key.y) || (g_dirty_rects[j].y == key.y && g_dirty_rects[j].x > key.x)))
-                break;
-            g_dirty_rects[j + 1] = g_dirty_rects[j];
-            j--;
-        }
-        g_dirty_rects[j + 1] = key;
-    }
+    if (g_dirty_count > 1)
+        quicksort_dirty_rects(g_dirty_rects, 0, g_dirty_count - 1);
 }
 
 void normalize_dirty_rects(bool interactive)
@@ -386,52 +474,35 @@ static void merge_adjacent_regions(DirtyRect *regions, int *count)
     if (!regions || !count || *count <= 1)
         return;
 
-    bool merged_any = true;
-    while (merged_any) {
-        merged_any = false;
-        for (int i = 0; i < *count; i++) {
-            for (int j = i + 1; j < *count;) {
-                DirtyRect &a = regions[i];
-                DirtyRect &b = regions[j];
-                bool can_merge = false;
-                DirtyRect result = {};
-                if (a.x == b.x && a.w == b.w) {
-                    int a_bottom = a.y + a.h, b_bottom = b.y + b.h;
-                    if (a_bottom == b.y) {
-                        result = {a.x, a.y, a.w, a.h + b.h};
-                        can_merge = true;
-                    } else if (b_bottom == a.y) {
-                        result = {a.x, b.y, a.w, b.h + a.h};
-                        can_merge = true;
-                    }
-                } else if (a.y == b.y && a.h == b.h) {
-                    int a_right = a.x + a.w, b_right = b.x + b.w;
-                    if (a_right == b.x) {
-                        result = {a.x, a.y, a.w + b.w, a.h};
-                        can_merge = true;
-                    } else if (b_right == a.x) {
-                        result = {b.x, a.y, b.w + a.w, a.h};
-                        can_merge = true;
-                    }
-                }
-                if (can_merge) {
-                    a = result;
-                    regions[j] = regions[*count - 1];
-                    (*count)--;
-                    merged_any = true;
-                } else {
-                    j++;
-                }
-            }
+    quicksort_dirty_rects(regions, 0, *count - 1);
+
+    int write = 0;
+    for (int read = 1; read < *count; read++) {
+        DirtyRect &a = regions[write];
+        DirtyRect &b = regions[read];
+        bool merged = false;
+
+        if (a.x == b.x && a.w == b.w && a.y + a.h == b.y) {
+            a.h += b.h;
+            merged = true;
+        } else if (a.y == b.y && a.h == b.h && a.x + a.w == b.x) {
+            a.w += b.w;
+            merged = true;
+        }
+
+        if (!merged) {
+            write++;
+            regions[write] = b;
         }
     }
+    *count = write + 1;
 }
 
 void refresh_window_visible_regions()
 {
-    g_window_visible_region_overflow = false;
     for (int i = 0; i < (g_window_count > MAX_WINDOWS ? MAX_WINDOWS : g_window_count); i++) {
         g_window_visible_region_count[i] = 0;
+        g_window_visible_region_overflow[i] = false;
         if (!g_window_visible_cache[i] || !g_windows[i].buffer || g_windows[i].transparent)
             continue;
 
@@ -448,16 +519,14 @@ void refresh_window_visible_regions()
             get_window_opaque_cover_rects(cover, cover_rects, &cover_rect_count);
             for (int c = 0; c < cover_rect_count; c++) {
                 if (!subtract_region_list(regions, &region_count, cover_rects[c])) {
-                    g_window_visible_region_overflow = true;
+                    g_window_visible_region_overflow[i] = true;
                     region_count = 0;
                     break;
                 }
                 if (region_count == 0)
                     break;
             }
-            if (g_window_visible_region_overflow || region_count == 0)
-                break;
-            if (region_count == 0)
+            if (g_window_visible_region_overflow[i] || region_count == 0)
                 break;
         }
 
@@ -1661,9 +1730,22 @@ DirtyRect control_center_bounds()
     return {x, y, bw, bh};
 }
 
-static DirtyRect control_center_damage_bounds()
+static DirtyRect control_center_panel_damage_bounds()
 {
     return rect_expand(control_center_bounds(), gui_scaled_metric(14));
+}
+
+static DirtyRect control_center_damage_bounds()
+{
+    DirtyRect cc = control_center_bounds();
+    DirtyRect damage = rect_expand(cc, gui_scaled_metric(14));
+    if (g_notifications.count > 0) {
+        int notif_h = gui_scaled_metric(240);
+        int notif_y = cc.y + cc.h + gui_space_2();
+        DirtyRect notif_damage = rect_expand({cc.x, notif_y, cc.w, notif_h}, gui_scaled_metric(14));
+        damage = rect_union(damage, notif_damage);
+    }
+    return damage;
 }
 
 static int control_panel_card_h()
@@ -1757,7 +1839,7 @@ static bool set_control_center_volume_from_x(int mouse_x)
         registry->volume_level = next;
         publish_settings_changed(registry);
     }
-    DirtyRect damage = control_center_damage_bounds();
+    DirtyRect damage = control_center_panel_damage_bounds();
     enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
     return true;
 }
@@ -1856,7 +1938,8 @@ bool handle_control_center_pointer_down(Registry *registry, int mouse_x, int mou
 {
     if (!g_control_center.open)
         return false;
-    if (!point_in_rect(control_center_bounds(), mouse_x, mouse_y))
+    DirtyRect cc_box = control_center_bounds();
+    if (!point_in_rect(cc_box, mouse_x, mouse_y))
         return false;
 
     ControlPanelItem hit = control_panel_item_at(mouse_x, mouse_y);
@@ -1891,7 +1974,7 @@ bool handle_control_center_pointer_down(Registry *registry, int mouse_x, int mou
         return true;
     }
 
-    DirtyRect damage = control_center_damage_bounds();
+    DirtyRect damage = control_center_panel_damage_bounds();
     enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
     return true;
 }
@@ -1901,7 +1984,7 @@ void handle_control_center_pointer_up()
     if (!g_control_center.volume_dragging)
         return;
     g_control_center.volume_dragging = false;
-    DirtyRect damage = control_center_damage_bounds();
+    DirtyRect damage = control_center_panel_damage_bounds();
     enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
 }
 
@@ -1913,7 +1996,7 @@ void update_control_center_hover(int mouse_x, int mouse_y)
     if (hit == g_control_center.hovered_item)
         return;
     g_control_center.hovered_item = hit;
-    DirtyRect damage = control_center_damage_bounds();
+    DirtyRect damage = control_center_panel_damage_bounds();
     enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
 }
 
@@ -1939,7 +2022,7 @@ bool handle_control_center_scroll(Registry *registry, int mouse_x, int mouse_y, 
         if ((uint32_t)next != g_control_center.volume) {
             g_control_center.volume = (uint32_t)next;
             publish_control_center_settings(registry);
-            DirtyRect damage = control_center_damage_bounds();
+            DirtyRect damage = control_center_panel_damage_bounds();
             enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
         }
     }
