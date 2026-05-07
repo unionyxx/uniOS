@@ -114,9 +114,7 @@ struct Window
     bool button_cache_hovered_frame;
     int button_cache_hovered_button;
 
-    // Compositor-side commit/configure bookkeeping. These fields are local WM
-    // state, not ABI. They let the WM distinguish a stable committed surface
-    // generation from transient registry mutations during resize or buffer swaps.
+    // Internal state.
     uint32_t buffer_generation_seen;
     uint32_t buffer_generation_acked;
     uint32_t configure_serial;
@@ -346,7 +344,7 @@ void sync_control_center_state_from_registry(const Registry *registry);
 void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry);
 void draw_control_center_overlay_clipped(const DirtyRect &clip);
 
-// Special key codes (matching ps2_keyboard.cpp)
+// Key codes.
 #define KEY_UP_ARROW 0x80
 #define KEY_DOWN_ARROW 0x81
 #define KEY_LEFT_ARROW 0x82
@@ -464,35 +462,50 @@ static inline int wm_resize_grip()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(RESIZE_GRIP); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(RESIZE_GRIP);
+    }
     return cache_value;
 }
 static inline int wm_button_size()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_SIZE); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(BTN_SIZE);
+    }
     return cache_value;
 }
 static inline int wm_button_inset_x()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_INSET_X); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(BTN_INSET_X);
+    }
     return cache_value;
 }
 static inline int wm_button_inset_y()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_INSET_Y); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(BTN_INSET_Y);
+    }
     return cache_value;
 }
 static inline int wm_button_spacing()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(BTN_SPACING); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(BTN_SPACING);
+    }
     return cache_value;
 }
 static inline int wm_title_bar_h()
@@ -507,7 +520,10 @@ static inline int wm_desktop_margin()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(DESKTOP_MARGIN); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(DESKTOP_MARGIN);
+    }
     return cache_value;
 }
 static inline int wm_dock_reserved_h()
@@ -518,14 +534,20 @@ static inline int wm_default_min_w()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(MIN_WINDOW_W); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(MIN_WINDOW_W);
+    }
     return cache_value;
 }
 static inline int wm_default_min_h()
 {
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) { cache_scale = scale; cache_value = gui_scaled_metric(MIN_WINDOW_H); }
+    if (cache_scale != scale) {
+        cache_scale = scale;
+        cache_value = gui_scaled_metric(MIN_WINDOW_H);
+    }
     return cache_value;
 }
 static inline int wm_frame_border()
@@ -552,9 +574,7 @@ static inline int wm_frame_shadow_offset_x()
 }
 static inline int wm_frame_shadow_offset_y()
 {
-    // Focused frames draw a slightly deeper shadow. Use the maximum compositor shadow
-    // extent in geometry/damage calculations so moves and resizes do not leave
-    // single-pixel shadow remnants behind.
+    // Max shadow extent.
     static int cache_value = -1, cache_scale = -1;
     int scale = gui_ui_scale_pct();
     if (cache_scale != scale) {
@@ -670,7 +690,7 @@ void mark_presentbuffer_slots_stale(const DirtyRect &dirty);
 void wm_stats_note_dirty_set(const DirtyRect *rects, int rect_count);
 void wm_stats_note_stale_repair(int rect_count);
 
-// Logic (Damage & Window State)
+// Window logic.
 void enqueue_damage_rect(int x, int y, int w, int h);
 void invalidate_dirty_frame();
 void invalidate_window_visibility_cache();
@@ -756,7 +776,8 @@ bool persist_runtime_settings(const Registry *registry);
 #define MAX_NOTIFICATIONS 32
 #define TOAST_DURATION_TICKS 4000
 
-struct Notification {
+struct Notification
+{
     char title[64];
     char message[128];
     uint64_t timestamp_ticks;
@@ -764,13 +785,14 @@ struct Notification {
     bool active_toast;
 };
 
-struct NotificationCenterState {
+struct NotificationCenterState
+{
     Notification history[MAX_NOTIFICATIONS];
     int count;
     int head; // Ring buffer head
 };
 
 extern NotificationCenterState g_notifications;
-void wm_push_notification(const char* title, const char* message);
+void wm_push_notification(const char *title, const char *message);
 void draw_toast_overlay_clipped(const DirtyRect &clip);
 void draw_notification_center_clipped(const DirtyRect &clip, int start_y);

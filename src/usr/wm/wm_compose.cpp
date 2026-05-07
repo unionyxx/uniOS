@@ -1,5 +1,6 @@
 #include "wm_core.h"
 
+// Compose dirty rect without cached visible regions. Fallback for overflows.
 void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                             const Registry *registry)
 {
@@ -10,7 +11,7 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
         if (!g_window_visible_cache[i] || w.transparent || !w.buffer)
             continue;
         DirtyRect outer = window_occlusion_bounds(w);
-        if (r.x >= outer.x && r.y >= outer.y && r.x + r.w <= outer.x + outer.w && r.y + r.h <= outer.y + outer.h) {
+        if (rect_contains(outer, r)) {
             start_index = i;
             covered_by_opaque = true;
             break;
@@ -24,17 +25,18 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
         Window &w = g_windows[i];
         if (!g_window_visible_cache[i] || !w.buffer || w.transparent)
             continue;
-        DirtyRect outer = g_window_outer_cache[i];
-        if (!(r.x >= outer.x + outer.w || r.x + r.w <= outer.x || r.y >= outer.y + outer.h || r.y + r.h <= outer.y)) {
-            draw_window_decoration_clipped(&g_backbuffer, w, r, (i == focused_index), (i == hover_frame_index),
-                                           (i == hover_frame_index) ? hover_button : -1);
-        }
+        if (!dirty_rects_intersect(g_window_outer_cache[i], r))
+            continue;
+        draw_window_decoration_clipped(&g_backbuffer, w, r, (i == focused_index), (i == hover_frame_index),
+                                       (i == hover_frame_index) ? hover_button : -1);
         draw_window_client_clipped(&g_backbuffer, w, r);
     }
 
     for (int i = start_index; i < g_window_count; i++) {
         Window &w = g_windows[i];
         if (!g_window_visible_cache[i] || !w.buffer || !w.transparent)
+            continue;
+        if (!dirty_rects_intersect(g_window_outer_cache[i], r))
             continue;
         draw_window_client_clipped(&g_backbuffer, w, r);
     }
@@ -70,7 +72,7 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         if (!dirty_rects_intersect(r, g_window_outer_cache[i]))
             continue;
 
-        // Window overflowed its visible region cache — fall back to unclipped for this rect
+        // Cache overflow: fallback to unclipped path.
         if (g_window_visible_region_overflow[i])
             return false;
 

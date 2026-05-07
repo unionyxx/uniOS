@@ -44,7 +44,7 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 
     int box_r = gui_scaled_metric(20);
 
-    // Multi-layer soft shadow (unified with Control Panel and Index)
+    // Soft shadow.
     int shadow_1 = gui_scaled_metric(10);
     int shadow_2 = gui_scaled_metric(5);
     int shadow_3 = gui_scaled_metric(2);
@@ -134,7 +134,7 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
 
     int radius = gui_scaled_metric(20);
 
-    // Multi-layer soft shadow (unified with Control Panel)
+    // Soft shadow.
     int shadow_1 = gui_scaled_metric(8);
     int shadow_2 = gui_scaled_metric(4);
     int shadow_3 = gui_scaled_metric(2);
@@ -303,7 +303,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
 
     int radius = gui_scaled_metric(20);
 
-    // Multi-layer soft shadow for depth
+    // Soft shadow.
     int shadow_1 = gui_scaled_metric(8);
     int shadow_2 = gui_scaled_metric(4);
     int shadow_3 = gui_scaled_metric(2);
@@ -311,11 +311,11 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_2, box.w, box.h, radius, 0x0C000000u);
     gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
 
-    // Main panel surface with inset highlight
+    // Panel surface.
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
                              g_gui_style.border, g_gui_style.chrome_bg_alt);
 
-    // Card header (drawn inside the panel inset border)
+    // Card header.
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Control Panel", "uniOS");
 
     draw_control_toggle(CONTROL_ITEM_NETWORK, "Network", g_control_center.network_enabled ? "Ethernet" : "Disconnected",

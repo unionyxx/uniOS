@@ -57,7 +57,7 @@ void enqueue_damage_rect(int x, int y, int w, int h)
     if (!clip_dirty_rect_to_screen(incoming))
         return;
 
-    // Full-screen dirty collapses everything to a single rect
+    // Full-screen damage.
     if (incoming.x == 0 && incoming.y == 0 && incoming.w == (int)g_screen.width &&
         incoming.h == (int)g_screen.height) {
         g_dirty_rects[0] = incoming;
@@ -66,7 +66,7 @@ void enqueue_damage_rect(int x, int y, int w, int h)
         return;
     }
 
-    // Fast path: append if there is room and the incoming rect does not overlap any existing rect
+    // Fast path for non-overlapping rects.
     if (g_dirty_count < MAX_DIRTY_RECTS) {
         bool overlaps = false;
         for (int i = 0; i < g_dirty_count; i++) {
@@ -82,7 +82,7 @@ void enqueue_damage_rect(int x, int y, int w, int h)
         }
     }
 
-    // Full policy merge path (deduplication, coalescing, and collapse heuristics)
+    // Merge damage rects.
     wm::DirtyRect policy_rects[MAX_DIRTY_RECTS];
     int policy_count = clamp_dirty_rect_count(g_dirty_count);
     copy_dirty_rects_to_policy(policy_rects, policy_count);
@@ -237,9 +237,7 @@ bool post_window_resize_configure(Window &w)
     w.resize_configure_pending = true;
     w.last_configure_ticks = get_ticks();
 
-    // Publish the requested client size and serial to the client-visible entry.
-    // The visible compositor frame is allowed to move/resize immediately; this
-    // serial only proves when the client has committed matching content.
+    // Notify client of resize.
     w.entry->resize_serial = w.pending_configure_serial;
     asm volatile("sfence" ::: "memory");
 
@@ -2556,8 +2554,8 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.min_h = entry ? entry->min_h : 0;
     win.active = true;
     win.transparent = transparent;
-    win.needs_full_redraw = false;       // Wait for first damage to avoid black flash
-    win.last_commit_ticks = get_ticks(); // Track birth time for watchdog
+    win.needs_full_redraw = false;       // Initial state.
+    win.last_commit_ticks = get_ticks();
     win.damage_ptr = d_ptr;
     win.first_damage_received = false;
     win.entry = entry;

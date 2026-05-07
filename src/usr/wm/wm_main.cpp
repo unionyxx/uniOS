@@ -267,7 +267,7 @@ static bool dirty_set_is_single_fullscreen_rect()
 {
     if (clamp_dirty_rect_count(g_dirty_count) != 1)
         return false;
-    // Dirty rects are invariant-screen-clipped after normalize_dirty_rects
+    // Dirty rects are pre-clipped.
     const DirtyRect &rect = g_dirty_rects[0];
     return rect.x == 0 && rect.y == 0 && rect.w == (int)g_screen.width && rect.h == (int)g_screen.height;
 }
@@ -325,7 +325,7 @@ static void collapse_dirty_rects_to_bounds()
         invalidate_dirty_frame();
         return;
     }
-    // Dirty rects are invariant-screen-clipped after normalize_dirty_rects
+    // Dirty rects are pre-clipped.
     DirtyRect bounds = g_dirty_rects[0];
     for (int i = 1; i < count; i++)
         bounds = rect_union(bounds, g_dirty_rects[i]);
@@ -369,11 +369,39 @@ static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rec
     if (!rects || rect_count <= 0)
         return;
     rect_count = clamp_dirty_rect_count(rect_count);
+    if (rect_count == 0)
+        return;
+
+    // Pre-clip damage rects.
+    wm::DirtyRect new_rects[MAX_DIRTY_RECTS];
+    int new_count = 0;
+    for (int r = 0; r < rect_count; r++) {
+        DirtyRect clipped = rects[r];
+        if (!clip_dirty_rect_to_screen(clipped))
+            continue;
+        new_rects[new_count++] = to_policy_rect(clipped);
+    }
+    if (new_count == 0)
+        return;
+
     for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++) {
         if (i == fresh_slot)
             continue;
-        for (int r = 0; r < rect_count; r++)
-            mark_presentbuffer_slot_stale(g_presentbuffer_slots[i], rects[r]);
+        PresentBufferSlot &slot = g_presentbuffer_slots[i];
+
+        wm::DirtyRect merged[MAX_DIRTY_RECTS];
+        int merged_count = clamp_dirty_rect_count(slot.stale_count);
+        for (int j = 0; j < merged_count; j++)
+            merged[j] = to_policy_rect(slot.stale_rects[j]);
+
+        for (int r = 0; r < new_count; r++) {
+            wm::enqueue_damage_rect(merged, &merged_count, MAX_DIRTY_RECTS, (int)g_screen.width,
+                                    (int)g_screen.height, new_rects[r]);
+        }
+
+        slot.stale_count = clamp_dirty_rect_count(merged_count);
+        for (int j = 0; j < slot.stale_count; j++)
+            slot.stale_rects[j] = from_policy_rect(merged[j]);
     }
 }
 
@@ -398,8 +426,7 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     bool cursor_on_screen = clip_dirty_rect_to_screen(cursor_rect);
     bool cursor_erased = false;
 
-    // Batch repair: if there are many small stale rects, collapse to a bounding box
-    // to reduce per-rect blit overhead.  Threshold tuned for typical 2-3 slots.
+    // Batch repair stale rects.
     if (stale_count > 4) {
         DirtyRect bounds = {};
         bool have_bounds = false;
@@ -1348,9 +1375,7 @@ extern "C" int main(int argc, char **argv)
                 int nx = entry_snapshot.x, ny = entry_snapshot.y;
                 int nw = w.resize_configure_pending ? w.w : entry_snapshot.w;
                 int nh = w.resize_configure_pending ? w.h : entry_snapshot.h;
-                // Clamp snapshots to sanity. During a WM-driven resize, keep the
-                // compositor's live geometry authoritative until the client
-                // publishes a matching buffer_resize_serial.
+                // Clamp snapshots.
                 if (nw > (int)g_screen.width * 2)
                     nw = (int)g_screen.width * 2;
                 if (nh > (int)g_screen.height * 2)
@@ -1407,7 +1432,7 @@ extern "C" int main(int argc, char **argv)
                         w.entry->active = true;
                 }
 
-                // Startup watchdog: if no damage received for a while, force a redraw anyway
+                // Force redraw if no damage.
                 if (!w.first_damage_received && (get_ticks() - w.last_commit_ticks > 90)) {
                     w.first_damage_received = true;
                     w.needs_full_redraw = true;
@@ -1491,21 +1516,15 @@ extern "C" int main(int argc, char **argv)
 
                 int focus = find_registry_focused_user_window(registry);
 
-                auto rect_union_local = [](const DirtyRect &a, const DirtyRect &b) -> DirtyRect {
-                    int x1 = a.x < b.x ? a.x : b.x;
-                    int y1 = a.y < b.y ? a.y : b.y;
-                    int x2 = (a.x + a.w) > (b.x + b.w) ? (a.x + a.w) : (b.x + b.w);
-                    int y2 = (a.y + a.h) > (b.y + b.h) ? (a.y + a.h) : (b.y + b.h);
-                    return {x1, y1, x2 - x1, y2 - y1};
-                };
-
+                // Extend damage for overlays.
+                // helper `rect_union` performs the same math with i64 clamping.
                 DirtyRect cc_damage = {};
                 bool has_cc_damage = false;
                 if (g_control_center.open) {
                     DirtyRect cc_box = control_center_bounds();
-                    DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_2(), cc_box.w, gui_scaled_metric(240)};
-                    DirtyRect total_cc = rect_union_local(cc_box, notif_box);
-                    cc_damage = rect_expand(total_cc, gui_scaled_metric(14));
+                    DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_2(), cc_box.w,
+                                           gui_scaled_metric(240)};
+                    cc_damage = rect_expand(rect_union(cc_box, notif_box), gui_scaled_metric(14));
                     has_cc_damage = true;
                 }
 
@@ -1515,7 +1534,8 @@ extern "C" int main(int argc, char **argv)
                     int toast_w = gui_scaled_metric(320);
                     int toast_h = gui_scaled_metric(76);
                     int margin = gui_space_2();
-                    DirtyRect toast_box = {(int)g_backbuffer.width - toast_w - margin, wm_menubar_h() + margin, toast_w, toast_h};
+                    DirtyRect toast_box = {(int)g_backbuffer.width - toast_w - margin, wm_menubar_h() + margin,
+                                           toast_w, toast_h};
                     toast_damage = rect_expand(toast_box, gui_scaled_metric(14));
                     has_toast_damage = true;
                 }
@@ -1523,11 +1543,11 @@ extern "C" int main(int argc, char **argv)
                 for (int d = 0; d < g_dirty_count; d++) {
                     DirtyRect &r = g_dirty_rects[d];
                     if (has_cc_damage && rect_intersection(r, cc_damage, nullptr)) {
-                        r = rect_union_local(r, cc_damage);
+                        r = rect_union(r, cc_damage);
                         clip_dirty_rect_to_screen(r);
                     }
                     if (has_toast_damage && rect_intersection(r, toast_damage, nullptr)) {
-                        r = rect_union_local(r, toast_damage);
+                        r = rect_union(r, toast_damage);
                         clip_dirty_rect_to_screen(r);
                     }
                 }
@@ -1572,7 +1592,7 @@ extern "C" int main(int argc, char **argv)
                         compose_union = r;
                         has_compose_union = true;
                     } else {
-                        compose_union = rect_union_local(compose_union, r);
+                        compose_union = rect_union(compose_union, r);
                     }
                     if (!compose_rect_clipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry))
                         compose_rect_unclipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry);

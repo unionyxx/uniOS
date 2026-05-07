@@ -114,8 +114,9 @@ uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
     return (out_alpha << 24) | (r << 16) | (g << 8) | b;
 }
 
-static void blit_alpha_blend_rect(uint32_t *dst, uint32_t dst_stride, const uint32_t *src, uint32_t src_stride, int w,
-                                  int h)
+// Blit with alpha blend.
+static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_stride,
+                                  const uint32_t *__restrict__ src, uint32_t src_stride, int w, int h)
 {
     if (w <= 0 || h <= 0)
         return;
@@ -134,6 +135,7 @@ static void blit_alpha_blend_rect(uint32_t *dst, uint32_t dst_stride, const uint
 
             uint32_t d = drow[x];
             uint32_t da = d >> 24;
+            // Opaque destination fast path.
             if (da == 255) {
                 uint32_t inv_sa = 255u - sa;
                 uint32_t s_rb = s & 0x00FF00FFu;
@@ -141,12 +143,16 @@ static void blit_alpha_blend_rect(uint32_t *dst, uint32_t dst_stride, const uint
                 uint32_t d_rb = d & 0x00FF00FFu;
                 uint32_t d_g = (d >> 8) & 0xFFu;
 
-                uint32_t rb = (s_rb * sa + d_rb * inv_sa + 0x00800080u);
+                uint32_t rb = s_rb * sa + d_rb * inv_sa + 0x00800080u;
                 rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
                 rb &= 0x00FF00FFu;
 
-                uint32_t g = (s_g * sa + d_g * inv_sa + 127u) / 255u;
+                uint32_t g_acc = s_g * sa + d_g * inv_sa + 0x80u;
+                uint32_t g = (g_acc + (g_acc >> 8)) >> 8;
                 drow[x] = 0xFF000000u | rb | (g << 8);
+            } else if (da == 0) {
+                // Empty destination: store source directly with its own alpha.
+                drow[x] = s;
             } else {
                 drow[x] = blend_rgb(d, s, 255);
             }
@@ -301,6 +307,7 @@ static void mark_shell_blur_dirty(Registry *registry, const DirtyRect &screen_re
     }
 }
 
+// Fill top-rounded rect.
 static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color)
 {
     if (!dst || !dst->buffer || w <= 0 || h <= 0)
@@ -315,7 +322,7 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
     uint8_t base_alpha = (uint8_t)(color >> 24);
     if (base_alpha == 0)
         return;
-    uint32_t pitch = dst->pitch / 4;
+    const uint32_t pitch = dst->pitch / 4;
 
     int start_y = y < 0 ? 0 : y;
     int end_y = y + h;
@@ -326,15 +333,83 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
     if (end_x > (int)dst->width)
         end_x = (int)dst->width;
 
+    // No corner: degenerate to a simple fill. (Below we handle scanline splits.)
+    if (r <= 0) {
+        gui_fill_rect(dst, start_x, start_y, end_x - start_x, end_y - start_y, color);
+        return;
+    }
+
+    static constexpr int kCornerMaskMax = 64;
+    int local_r = r > kCornerMaskMax ? kCornerMaskMax : r;
+    uint8_t corner_mask[kCornerMaskMax];
+    int corner_mask_y = -1;
+
+    const int center_start_x = x + local_r;
+    const int center_end_x = x + w - local_r;
+    const int top_band_end = y + local_r;
+    const bool full_opaque = base_alpha == 255;
+
     for (int py = start_y; py < end_y; py++) {
-        int row = py - y;
+        const int row = py - y;
         uint32_t *dst_row = &dst->buffer[(size_t)py * pitch];
-        for (int px = start_x; px < end_x; px++) {
-            uint8_t coverage = gui_rounded_rect_coverage_local(px - x, row, w, h, r, GUI_ROUNDED_EDGE_TOP);
+
+        // Below the rounded band: solid fill across the row.
+        if (py >= top_band_end) {
+            if (full_opaque) {
+                for (int px = start_x; px < end_x; px++)
+                    dst_row[px] = color;
+            } else {
+                for (int px = start_x; px < end_x; px++)
+                    dst_row[px] = blend_rgb(dst_row[px], color, base_alpha);
+            }
+            continue;
+        }
+
+        if (row != corner_mask_y) {
+            for (int col = 0; col < local_r; col++) {
+                corner_mask[col] = gui_rounded_rect_coverage_local(col, row, w, h, local_r, GUI_ROUNDED_EDGE_TOP);
+            }
+            corner_mask_y = row;
+        }
+
+        // Left rounded corner.
+        int left_end = center_start_x < end_x ? center_start_x : end_x;
+        for (int px = start_x; px < left_end; px++) {
+            int local = px - x;
+            if (local < 0 || local >= local_r)
+                continue;
+            uint8_t coverage = corner_mask[local];
             if (coverage == 0)
                 continue;
             uint32_t &dst_px = dst_row[px];
-            if (coverage == 255 && base_alpha == 255)
+            if (coverage == 255 && full_opaque)
+                dst_px = color;
+            else
+                dst_px = blend_rgb(dst_px, color, coverage);
+        }
+
+        // Opaque center.
+        int center_lo = start_x > center_start_x ? start_x : center_start_x;
+        int center_hi = end_x < center_end_x ? end_x : center_end_x;
+        if (full_opaque) {
+            for (int px = center_lo; px < center_hi; px++)
+                dst_row[px] = color;
+        } else {
+            for (int px = center_lo; px < center_hi; px++)
+                dst_row[px] = blend_rgb(dst_row[px], color, base_alpha);
+        }
+
+        // Right rounded corner (mirrored).
+        int right_lo = start_x > center_end_x ? start_x : center_end_x;
+        for (int px = right_lo; px < end_x; px++) {
+            int local = w - 1 - (px - x);
+            if (local < 0 || local >= local_r)
+                continue;
+            uint8_t coverage = corner_mask[local];
+            if (coverage == 0)
+                continue;
+            uint32_t &dst_px = dst_row[px];
+            if (coverage == 255 && full_opaque)
                 dst_px = color;
             else
                 dst_px = blend_rgb(dst_px, color, coverage);
@@ -344,16 +419,25 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
 
 void paint_desktop_base(Surface *surface)
 {
-    if (!surface || !surface->buffer)
+    if (!surface || !surface->buffer || surface->pitch == 0)
         return;
-    uint32_t color_top = 0xFF0B1533;
-    uint32_t color_mid = 0xFF2C1F54;
-    uint32_t color_bottom = 0xFF140A12;
-    for (uint32_t y = 0; y < surface->height; y++) {
-        uint8_t t = surface->height > 1 ? (uint8_t)((y * 255u) / (surface->height - 1u)) : 0u;
+    const uint32_t color_top = 0xFF0B1533u;
+    const uint32_t color_mid = 0xFF2C1F54u;
+    const uint32_t color_bottom = 0xFF140A12u;
+    const uint32_t stride = surface->pitch / 4u;
+    const uint32_t height = surface->height;
+    const uint32_t width = surface->width;
+    if (height == 0 || width == 0)
+        return;
+
+    // Gradient fill.
+    for (uint32_t y = 0; y < height; y++) {
+        uint8_t t = height > 1 ? (uint8_t)((y * 255u) / (height - 1u)) : 0u;
         uint32_t row_color = t < 132 ? mix_rgb(color_top, color_mid, (uint8_t)((uint32_t)t * 255u / 132u))
                                      : mix_rgb(color_mid, color_bottom, (uint8_t)(((uint32_t)t - 132u) * 255u / 123u));
-        gui_fill_rect(surface, 0, (int)y, surface->width, 1, row_color);
+        uint32_t *row = &surface->buffer[(size_t)y * stride];
+        for (uint32_t x = 0; x < width; x++)
+            row[x] = row_color;
     }
 }
 
@@ -833,6 +917,17 @@ static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
+// Compute bottom corner row coverage.
+static void compute_bottom_corner_row(int local_y, int inner_w, int inner_h, int inner_r, uint8_t *out_mask)
+{
+    if (inner_r <= 0 || !out_mask)
+        return;
+    for (int col = 0; col < inner_r; col++) {
+        out_mask[col] =
+            gui_rounded_rect_coverage_local(col, local_y, inner_w, inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
+    }
+}
+
 void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &clip)
 {
     int ix, iy, iw, ih;
@@ -840,7 +935,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         !gui_intersect_rect(w.x, w.y, w.w, w.h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
         return;
 
-    uint32_t dst_stride = dst->pitch / 4;
+    const uint32_t dst_stride = dst->pitch / 4;
     int radius = gui_radius_xl();
     int border = wm_frame_border();
     int detail_inset = gui_scaled_metric(1);
@@ -866,6 +961,11 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     if (inner_r < 0)
         inner_r = 0;
 
+    // Per-row corner mask.
+    static constexpr int kCornerMaskMax = 64;
+    if (inner_r > kCornerMaskMax)
+        inner_r = kCornerMaskMax;
+
     int rx = 0, ry = 0, rw = 0, rh = 0;
     if (!gui_intersect_rect(ix, iy, iw, ih, inner_left, inner_top, inner_w, inner_h, &rx, &ry, &rw, &rh))
         return;
@@ -873,37 +973,67 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     const int rounded_start_y = inner_top + inner_h - inner_r;
     const int center_start_x = inner_left + inner_r;
     const int center_end_x = inner_left + inner_w - inner_r;
+    const int dst_height_int = (int)dst->height;
+
+    uint8_t corner_mask[kCornerMaskMax];
+    int corner_mask_y = -1;
+    auto refresh_corner_mask = [&](int local_y) {
+        if (inner_r <= 0 || local_y == corner_mask_y)
+            return;
+        compute_bottom_corner_row(local_y, inner_w, inner_h, inner_r, corner_mask);
+        corner_mask_y = local_y;
+    };
 
     if (!w.transparent) {
-        // Repair the visible client region before copying app pixels. During
-        // live resize the committed app buffer can lag behind the visible
-        // compositor frame; leaving uncovered pixels untouched shows stale
-        // backbuffer contents as side/bottom ghosting.
+        // Repair visible region.
         const uint32_t fill = g_gui_style.app_bg ? g_gui_style.app_bg : 0xFF15171Au;
         if (inner_r <= 0) {
             gui_fill_rect(dst, rx, ry, rw, rh, fill);
         } else {
+            const int rect_right = rx + rw;
             for (int py = 0; py < rh; py++) {
-                int dst_y = ry + py;
-                if (dst_y < 0 || dst_y >= (int)dst->height)
+                const int dst_y = ry + py;
+                if (dst_y < 0 || dst_y >= dst_height_int)
                     continue;
                 uint32_t *dst_ptr = &dst->buffer[(size_t)dst_y * dst_stride];
                 if (dst_y < rounded_start_y) {
-                    for (int x = rx; x < rx + rw; x++)
+                    for (int x = rx; x < rect_right; x++)
                         dst_ptr[x] = fill;
-                } else {
-                    for (int x = rx; x < rx + rw; x++) {
-                        uint8_t coverage = 0;
-                        if (x >= center_start_x && x < center_end_x)
-                            coverage = 255;
-                        else
-                            coverage = gui_rounded_rect_coverage_local(x - inner_left, dst_y - inner_top, inner_w,
-                                                                       inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
-                        if (coverage == 255)
-                            dst_ptr[x] = fill;
-                        else if (coverage > 0)
-                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
-                    }
+                    continue;
+                }
+
+                refresh_corner_mask(dst_y - inner_top);
+
+                // Left rounded corner: x in [inner_left, center_start_x)
+                int left_end = center_start_x < rect_right ? center_start_x : rect_right;
+                for (int x = rx; x < left_end; x++) {
+                    int local = x - inner_left;
+                    if (local < 0 || local >= inner_r)
+                        continue;
+                    uint8_t coverage = corner_mask[local];
+                    if (coverage == 255)
+                        dst_ptr[x] = fill;
+                    else if (coverage > 0)
+                        dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                }
+
+                // Center: opaque, single fill loop.
+                int center_lo = rx > center_start_x ? rx : center_start_x;
+                int center_hi = rect_right < center_end_x ? rect_right : center_end_x;
+                for (int x = center_lo; x < center_hi; x++)
+                    dst_ptr[x] = fill;
+
+                // Right rounded corner: mirror of left mask.
+                int right_lo = rx > center_end_x ? rx : center_end_x;
+                for (int x = right_lo; x < rect_right; x++) {
+                    int local = inner_w - 1 - (x - inner_left);
+                    if (local < 0 || local >= inner_r)
+                        continue;
+                    uint8_t coverage = corner_mask[local];
+                    if (coverage == 255)
+                        dst_ptr[x] = fill;
+                    else if (coverage > 0)
+                        dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
                 }
             }
         }
@@ -951,43 +1081,71 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         return;
     }
 
+    // Body copy.
+    const int copy_right = copy_x + copy_w;
     for (int py = 0; py < copy_h; py++) {
-        int dst_y = copy_y + py;
-        int src_row_base = src_y + py;
-        if (dst_y < 0 || dst_y >= (int)dst->height || src_row_base < 0 || src_row_base >= w.buffer_h)
+        const int dst_y = copy_y + py;
+        const int src_row_base = src_y + py;
+        if (dst_y < 0 || dst_y >= dst_height_int || src_row_base < 0 || src_row_base >= w.buffer_h)
             continue;
 
         uint32_t *dst_ptr = &dst->buffer[(size_t)dst_y * dst_stride];
         const uint32_t *src_ptr = &w.buffer[(size_t)src_row_base * w.buffer_w];
 
         if (dst_y < rounded_start_y) {
-            memcpy(&dst_ptr[copy_x], &src_ptr[src_x], (size_t)copy_w * 4u);
-        } else {
-            for (int dst_x = copy_x; dst_x < copy_x + copy_w;) {
-                if (dst_x >= center_start_x && dst_x < center_end_x) {
-                    int run_end = center_end_x;
-                    if (run_end > copy_x + copy_w)
-                        run_end = copy_x + copy_w;
-                    int run_len = run_end - dst_x;
-                    if (run_len > 0) {
-                        memcpy(&dst_ptr[dst_x], &src_ptr[src_x + (dst_x - copy_x)], (size_t)run_len * 4u);
-                        dst_x += run_len;
-                        continue;
-                    }
-                }
+            memcpy(&dst_ptr[copy_x], &src_ptr[src_x], (size_t)copy_w * sizeof(uint32_t));
+            continue;
+        }
 
-                int src_col = src_x + (dst_x - copy_x);
-                if (src_col >= 0 && src_col < w.buffer_w) {
-                    uint8_t coverage = gui_rounded_rect_coverage_local(dst_x - inner_left, dst_y - inner_top, inner_w,
-                                                                       inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
-                    if (coverage > 0) {
-                        uint32_t &dp = dst_ptr[dst_x];
-                        uint32_t sp = src_ptr[src_col];
-                        dp = blend_coverage_rgb(dp, sp, coverage);
-                    }
-                }
-                dst_x++;
+        refresh_corner_mask(dst_y - inner_top);
+
+        // Left rounded corner.
+        int left_end = center_start_x < copy_right ? center_start_x : copy_right;
+        for (int x = copy_x; x < left_end; x++) {
+            int local = x - inner_left;
+            if (local < 0 || local >= inner_r)
+                continue;
+            int src_col = src_x + (x - copy_x);
+            if ((unsigned)src_col >= (unsigned)w.buffer_w)
+                continue;
+            uint8_t coverage = corner_mask[local];
+            if (coverage == 255)
+                dst_ptr[x] = src_ptr[src_col];
+            else if (coverage > 0)
+                dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], src_ptr[src_col], coverage);
+        }
+
+        // Opaque center: one memcpy.
+        int center_lo = copy_x > center_start_x ? copy_x : center_start_x;
+        int center_hi = copy_right < center_end_x ? copy_right : center_end_x;
+        if (center_hi > center_lo) {
+            int src_col_start = src_x + (center_lo - copy_x);
+            int center_w = center_hi - center_lo;
+            if (src_col_start < 0) {
+                center_lo += -src_col_start;
+                center_w -= -src_col_start;
+                src_col_start = 0;
             }
+            if (src_col_start + center_w > w.buffer_w)
+                center_w = w.buffer_w - src_col_start;
+            if (center_w > 0)
+                memcpy(&dst_ptr[center_lo], &src_ptr[src_col_start], (size_t)center_w * sizeof(uint32_t));
+        }
+
+        // Right rounded corner.
+        int right_lo = copy_x > center_end_x ? copy_x : center_end_x;
+        for (int x = right_lo; x < copy_right; x++) {
+            int local = inner_w - 1 - (x - inner_left);
+            if (local < 0 || local >= inner_r)
+                continue;
+            int src_col = src_x + (x - copy_x);
+            if ((unsigned)src_col >= (unsigned)w.buffer_w)
+                continue;
+            uint8_t coverage = corner_mask[local];
+            if (coverage == 255)
+                dst_ptr[x] = src_ptr[src_col];
+            else if (coverage > 0)
+                dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], src_ptr[src_col], coverage);
         }
     }
 }
