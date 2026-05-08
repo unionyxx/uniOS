@@ -249,6 +249,9 @@ app_sources = {
   'latitude' : ['src/usr/apps/latitude'],
   'about' : ['src/usr/apps/about'],
   'preferences' : ['src/usr/apps/preferences'],
+  'clock' : ['src/usr/apps/clock'],
+  'calendar' : ['src/usr/apps/calendar'],
+  'calculator' : ['src/usr/apps/calculator'],
 }
 
 user_apps = {}

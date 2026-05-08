@@ -58,6 +58,7 @@ static const GuiChromePalette k_gui_chrome_light = {0xFFF4F5F7, 0xFFE6E9EF, 0xFF
                                                     0xFFF1BC4C, 0xFF36BD64, 0xFF6D7584, 0xFF15181D};
 
 static GuiThemeMode g_applied_theme_mode = GUI_THEME_DARK;
+static bool g_theme_tables_init = false;
 
 static uint32_t g_font_mask[256][8];
 static bool g_font_mask_init = false;
@@ -76,7 +77,7 @@ static void init_font_masks()
 
 static bool theme_tables_initialized()
 {
-    return g_gui_style.text != 0 && g_gui_chrome.desktop_bg != 0;
+    return g_theme_tables_init;
 }
 
 static bool gui_clip_rect_to_bounds(int32_t *x, int32_t *y, int32_t *w, int32_t *h, int32_t max_w, int32_t max_h)
@@ -324,7 +325,9 @@ static void copy_theme_tables(GuiThemeMode mode)
     g_current_theme = *theme;
     g_gui_style = *style;
     g_gui_chrome = *chrome;
+    asm volatile("sfence" ::: "memory");
     g_applied_theme_mode = mode;
+    g_theme_tables_init = true;
 }
 
 static int clamp_metric(int value, int min_value, int max_value)
@@ -1750,18 +1753,21 @@ void gui_apply_theme(GuiThemeMode mode)
 bool gui_sync_theme_from_registry(void)
 {
     Registry *registry = gui_registry();
-    if (!registry) {
-        if (!theme_tables_initialized()) {
-            copy_theme_tables(GUI_THEME_DARK);
-            return true;
-        }
+    if (!registry)
         return false;
+
+    asm volatile("lfence" ::: "memory");
+    if (!theme_tables_initialized()) {
+        copy_theme_tables(GUI_THEME_DARK);
     }
+
     GuiThemeMode next = (registry->theme_mode == GUI_THEME_LIGHT) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
-    if (next == g_applied_theme_mode && theme_tables_initialized())
-        return false;
-    copy_theme_tables(next);
-    return true;
+    if (next != g_applied_theme_mode) {
+        g_applied_theme_mode = next;
+        copy_theme_tables(next);
+        return true;
+    }
+    return false;
 }
 
 int gui_ui_scale_pct(void)

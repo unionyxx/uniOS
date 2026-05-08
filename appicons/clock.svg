@@ -8,13 +8,16 @@
 <path d="M192 0H64C28.6538 0 0 28.6538 0 64V192C0 227.346 28.6538 256 64 256H192C227.346 256 256 227.346 256 192V64C256 28.6538 227.346 0 192 0Z" fill="url(#overlay_grad)"/>
 <path d="M192 1.5H64C29.4822 1.5 1.5 29.4822 1.5 64V192C1.5 226.518 29.4822 254.5 64 254.5H192C226.518 254.5 254.5 226.518 254.5 192V64C254.5 29.4822 226.518 1.5 192 1.5Z" stroke="white" stroke-opacity="0.2" stroke-width="3"/>
 <g filter="url(#shadow)">
-<path fill-rule="evenodd" clip-rule="evenodd" d="M132.994 55C139.606 55 145.288 59.553 146.532 65.8498L147.086 68.6497C149.259 79.6555 161.001 86.2278 171.919 82.5508L174.698 81.6149C180.945 79.5112 187.852 82.0046 191.158 87.5567L196.153 95.9428C199.459 101.495 198.232 108.542 193.23 112.735L191.005 114.599C182.261 121.927 182.261 135.073 191.005 142.401L193.23 144.266C198.232 148.458 199.459 155.504 196.153 161.057L191.159 169.443C187.852 174.996 180.945 177.488 174.697 175.385L171.92 174.449C161.001 170.771 149.259 177.343 147.086 188.35L146.532 191.15C145.288 197.447 139.606 202 132.994 202H123.006C116.394 202 110.712 197.447 109.468 191.151L108.914 188.349C106.74 177.343 94.9978 170.771 84.0795 174.449L81.3023 175.384C75.0556 177.488 68.1478 174.995 64.8412 169.442L59.8473 161.057C56.541 155.504 57.7674 148.458 62.7699 144.266L64.995 142.401C73.7387 135.072 73.7387 121.927 64.995 114.599L62.7699 112.735C57.7674 108.542 56.541 101.495 59.8473 95.943L64.8414 87.5569C68.1479 82.0047 75.0554 79.5113 81.3021 81.6151L84.0801 82.5507C94.9982 86.2278 106.74 79.6559 108.914 68.6504L109.468 65.8492C110.712 59.5528 116.393 55 123.006 55H132.994ZM128 149.5C139.597 149.5 149 140.098 149 128.5C149 116.902 139.597 107.5 128 107.5C116.402 107.5 107 116.902 107 128.5C107 140.098 116.402 149.5 128 149.5Z" fill="white" fill-opacity="0.96"/>
-<path d="M128 142.707C135.846 142.707 142.207 136.346 142.207 128.5C142.207 120.654 135.846 114.293 128 114.293C120.154 114.293 113.793 120.654 113.793 128.5C113.793 136.346 120.154 142.707 128 142.707Z" fill="#334155" fill-opacity="0.34"/>
+<path d="M128 216C176.601 216 216 176.601 216 128C216 79.3989 176.601 40 128 40C79.3989 40 40 79.3989 40 128C40 176.601 79.3989 216 128 216Z" fill="#F4F6F9"/>
+<path d="M128 216C176.601 216 216 176.601 216 128C216 79.3989 176.601 40 128 40C79.3989 40 40 79.3989 40 128C40 176.601 79.3989 216 128 216Z" stroke="white" stroke-width="2"/>
+<path d="M128 128V74" stroke="#3A4049" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M128 128L166 166" stroke="#3A4049" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M128 138C133.523 138 138 133.523 138 128C138 122.477 133.523 118 128 118C122.477 118 118 122.477 118 128C118 133.523 122.477 138 128 138Z" fill="#3A4049"/>
 </g>
 </g>
 </g>
 <defs>
-<filter id="shadow" x="30" y="35" width="196" height="203" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<filter id="shadow" x="0" y="0" width="256" height="256" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
 <feFlood flood-opacity="0" result="bg"/>
 <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
 <feOffset dy="8"/>
@@ -24,13 +27,13 @@
 <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/>
 </filter>
 <linearGradient id="bg_grad" x1="128" y1="0" x2="128" y2="256" gradientUnits="userSpaceOnUse">
-<stop stop-color="#94A3B8"/>
-<stop offset="1" stop-color="#475569"/>
+<stop stop-color="#656D77"/>
+<stop offset="1" stop-color="#3C424A"/>
 </linearGradient>
 <linearGradient id="overlay_grad" x1="128" y1="0" x2="128" y2="256" gradientUnits="userSpaceOnUse">
 <stop stop-color="white" stop-opacity="0.14"/>
 <stop offset="0.3" stop-color="white" stop-opacity="0.03"/>
-<stop offset="1" stop-color="#334155" stop-opacity="0.14"/>
+<stop offset="1" stop-color="#1E293B" stop-opacity="0.14"/>
 </linearGradient>
 <clipPath id="clip0">
 <rect width="256" height="256" fill="white"/>

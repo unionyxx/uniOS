@@ -23,13 +23,6 @@ int g_window_count = 0;
 int g_add_fail_logs = 0;
 uint32_t g_system_flags = SYSTEM_FLAG_SHOW_DESKTOP_GRID;
 
-static void reap_exited_children()
-{
-    int status = 0;
-    while (waitpid_nohang(-1, &status) > 0) {
-    }
-}
-
 DirtyRect g_dirty_rects[MAX_DIRTY_RECTS];
 DirtyRect g_window_outer_cache[MAX_WINDOWS];
 DirtyRect g_window_client_cache[MAX_WINDOWS];
@@ -86,15 +79,34 @@ struct WindowEntrySnapshot
     char title[64];
 };
 
+inline void smp_rmb()
+{
+    asm volatile("lfence" ::: "memory");
+}
+inline void smp_wmb()
+{
+    asm volatile("sfence" ::: "memory");
+}
+
+static void reap_exited_children()
+{
+    int status = 0;
+    while (waitpid_nohang(-1, &status) > 0) {
+    }
+}
+
 static void apply_display_event(const DisplayEvent &event)
 {
-    if (event.type == DISPLAY_EVENT_FLIP_COMPLETE && event.sequence > g_display_queue.completed_sequence)
+    if (event.type == DISPLAY_EVENT_FLIP_COMPLETE && event.sequence > g_display_queue.completed_sequence) {
         g_display_queue.completed_sequence = event.sequence;
+    }
     if ((event.type == DISPLAY_EVENT_FLIP_COMPLETE || event.type == DISPLAY_EVENT_VBLANK) &&
-        event.timestamp_ticks > g_display_queue.last_vblank_ticks)
+        event.timestamp_ticks > g_display_queue.last_vblank_ticks) {
         g_display_queue.last_vblank_ticks = event.timestamp_ticks;
-    if (event.vblank_count > g_display_queue.vblank_count)
+    }
+    if (event.vblank_count > g_display_queue.vblank_count) {
         g_display_queue.vblank_count = event.vblank_count;
+    }
 }
 
 static uint64_t dirty_area_sum(const DirtyRect *rects, int rect_count)
@@ -105,7 +117,7 @@ static uint64_t dirty_area_sum(const DirtyRect *rects, int rect_count)
         DirtyRect clipped = rects[i];
         if (!clip_dirty_rect_to_screen(clipped))
             continue;
-        area += (uint64_t)clipped.w * (uint64_t)clipped.h;
+        area += static_cast<uint64_t>(clipped.w) * static_cast<uint64_t>(clipped.h);
     }
     return area;
 }
@@ -114,23 +126,26 @@ void wm_stats_note_dirty_set(const DirtyRect *rects, int rect_count)
 {
     rect_count = clamp_dirty_rect_count(rect_count);
     uint64_t area = dirty_area_sum(rects, rect_count);
-    g_frame_stats.last_dirty_rects = (uint32_t)rect_count;
+    g_frame_stats.last_dirty_rects = static_cast<uint32_t>(rect_count);
     g_frame_stats.last_dirty_area = area;
     g_frame_stats.dirty_area_accum += area;
-    if ((uint32_t)rect_count > g_frame_stats.max_dirty_rects)
-        g_frame_stats.max_dirty_rects = (uint32_t)rect_count;
+
+    if (static_cast<uint32_t>(rect_count) > g_frame_stats.max_dirty_rects)
+        g_frame_stats.max_dirty_rects = static_cast<uint32_t>(rect_count);
     if (area > g_frame_stats.max_dirty_area)
         g_frame_stats.max_dirty_area = area;
-    if (rect_count == 1 && area == (uint64_t)g_screen.width * (uint64_t)g_screen.height)
+
+    if (rect_count == 1 && area == static_cast<uint64_t>(g_screen.width) * static_cast<uint64_t>(g_screen.height)) {
         g_frame_stats.full_repaints++;
-    else
+    } else {
         g_frame_stats.clipped_repaints++;
+    }
 }
 
 void wm_stats_note_stale_repair(int rect_count)
 {
     if (rect_count > 0)
-        g_frame_stats.stale_slot_repairs += (uint64_t)rect_count;
+        g_frame_stats.stale_slot_repairs += static_cast<uint64_t>(rect_count);
 }
 
 static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
@@ -163,6 +178,7 @@ static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
     s.request_minimize = e.request_minimize;
     s.request_maximize = e.request_maximize;
     s.request_restore = e.request_restore;
+
     memcpy(s.title, e.title, sizeof(s.title));
     s.title[sizeof(s.title) - 1] = '\0';
     return s;
@@ -179,11 +195,13 @@ static bool window_entry_snapshot_equal_for_commit(const WindowEntrySnapshot &a,
            memcmp(a.title, b.title, sizeof(a.title)) == 0;
 }
 
+// Ensures atomic observation of the shared WindowEntry to prevent tearing over IPC boundaries.
 static bool sample_stable_window_entry(const WindowEntry &entry, WindowEntrySnapshot *out)
 {
     WindowEntrySnapshot a = read_window_entry_snapshot(entry);
-    asm volatile("lfence" ::: "memory");
+    smp_rmb();
     WindowEntrySnapshot b = read_window_entry_snapshot(entry);
+
     if (!window_entry_snapshot_equal_for_commit(a, b))
         return false;
     if (out)
@@ -200,8 +218,8 @@ static bool cursor_backend_allowed()
 
 static CursorPresentBuffer *ensure_cursor_present_buffer(GuiCursorKind kind)
 {
-    int index = (int)kind;
-    if (index < 0 || index > (int)GUI_CURSOR_RESIZE_D2 || !cursor_backend_allowed())
+    int index = static_cast<int>(kind);
+    if (index < 0 || index > static_cast<int>(GUI_CURSOR_RESIZE_D2) || !cursor_backend_allowed())
         return nullptr;
 
     CursorPresentBuffer &slot = g_cursor_present_buffers[index];
@@ -214,31 +232,32 @@ static CursorPresentBuffer *ensure_cursor_present_buffer(GuiCursorKind kind)
         return nullptr;
 
     DisplayBufferCreate create = {};
-    create.width = (uint32_t)bw;
-    create.height = (uint32_t)bh;
+    create.width = static_cast<uint32_t>(bw);
+    create.height = static_cast<uint32_t>(bh);
     create.pixel_format = DISPLAY_PIXEL_FORMAT_XRGB8888;
     create.flags = DISPLAY_BUFFER_FLAG_CPU_VISIBLE | DISPLAY_BUFFER_FLAG_LINEAR | DISPLAY_BUFFER_FLAG_RENDER_TARGET;
+
     if (display_buffer_create(&create) != 0 || create.handle == 0)
         return nullptr;
 
     DisplayBufferMap map = {};
     map.handle = create.handle;
-    if (display_buffer_map(&map) != 0 || map.address == 0 || map.stride < (uint32_t)bw) {
+    if (display_buffer_map(&map) != 0 || map.address == 0 || map.stride < static_cast<uint32_t>(bw)) {
         display_buffer_destroy(create.handle);
         return nullptr;
     }
 
     memset(&slot, 0, sizeof(slot));
     slot.handle = create.handle;
-    slot.surface.width = (uint32_t)bw;
-    slot.surface.height = (uint32_t)bh;
+    slot.surface.width = static_cast<uint32_t>(bw);
+    slot.surface.height = static_cast<uint32_t>(bh);
     slot.surface.pitch = map.stride * 4u;
     slot.surface.buffer = reinterpret_cast<uint32_t *>(map.address);
     slot.kind = kind;
     gui_get_cursor_hotspot(kind, &slot.hot_x, &slot.hot_y);
     gui_fill_rect(&slot.surface, 0, 0, bw, bh, 0x00000000u);
     gui_draw_cursor_kind(&slot.surface, slot.hot_x, slot.hot_y, kind);
-    asm volatile("sfence" ::: "memory");
+    smp_wmb();
     slot.valid = true;
     return &slot;
 }
@@ -247,8 +266,9 @@ static void retire_completed_present_buffers()
 {
     for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++) {
         if (g_presentbuffer_slots[i].in_flight_sequence &&
-            g_presentbuffer_slots[i].in_flight_sequence <= g_display_queue.completed_sequence)
+            g_presentbuffer_slots[i].in_flight_sequence <= g_display_queue.completed_sequence) {
             g_presentbuffer_slots[i].in_flight_sequence = 0;
+        }
     }
 }
 
@@ -267,9 +287,9 @@ static bool dirty_set_is_single_fullscreen_rect()
 {
     if (clamp_dirty_rect_count(g_dirty_count) != 1)
         return false;
-    // Dirty rects are pre-clipped.
     const DirtyRect &rect = g_dirty_rects[0];
-    return rect.x == 0 && rect.y == 0 && rect.w == (int)g_screen.width && rect.h == (int)g_screen.height;
+    return rect.x == 0 && rect.y == 0 && rect.w == static_cast<int>(g_screen.width) &&
+           rect.h == static_cast<int>(g_screen.height);
 }
 
 static bool dirty_set_intersects_rect(const DirtyRect &target)
@@ -325,10 +345,10 @@ static void collapse_dirty_rects_to_bounds()
         invalidate_dirty_frame();
         return;
     }
-    // Dirty rects are pre-clipped.
     DirtyRect bounds = g_dirty_rects[0];
-    for (int i = 1; i < count; i++)
+    for (int i = 1; i < count; i++) {
         bounds = rect_union(bounds, g_dirty_rects[i]);
+    }
     g_dirty_rects[0] = bounds;
     g_dirty_count = 1;
     invalidate_dirty_frame();
@@ -347,21 +367,24 @@ static void mark_presentbuffer_slot_stale(PresentBufferSlot &slot, const DirtyRe
 
     wm::DirtyRect rects[MAX_DIRTY_RECTS];
     int count = clamp_dirty_rect_count(slot.stale_count);
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
         rects[i] = to_policy_rect(slot.stale_rects[i]);
+    }
 
-    wm::enqueue_damage_rect(rects, &count, MAX_DIRTY_RECTS, (int)g_screen.width, (int)g_screen.height,
-                            to_policy_rect(clipped));
+    wm::enqueue_damage_rect(rects, &count, MAX_DIRTY_RECTS, static_cast<int>(g_screen.width),
+                            static_cast<int>(g_screen.height), to_policy_rect(clipped));
 
     slot.stale_count = clamp_dirty_rect_count(count);
-    for (int i = 0; i < slot.stale_count; i++)
+    for (int i = 0; i < slot.stale_count; i++) {
         slot.stale_rects[i] = from_policy_rect(rects[i]);
+    }
 }
 
 void mark_presentbuffer_slots_stale(const DirtyRect &dirty)
 {
-    for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++)
+    for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++) {
         mark_presentbuffer_slot_stale(g_presentbuffer_slots[i], dirty);
+    }
 }
 
 static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rect_count, uint32_t fresh_slot)
@@ -372,7 +395,6 @@ static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rec
     if (rect_count == 0)
         return;
 
-    // Pre-clip damage rects.
     wm::DirtyRect new_rects[MAX_DIRTY_RECTS];
     int new_count = 0;
     for (int r = 0; r < rect_count; r++) {
@@ -391,17 +413,19 @@ static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rec
 
         wm::DirtyRect merged[MAX_DIRTY_RECTS];
         int merged_count = clamp_dirty_rect_count(slot.stale_count);
-        for (int j = 0; j < merged_count; j++)
+        for (int j = 0; j < merged_count; j++) {
             merged[j] = to_policy_rect(slot.stale_rects[j]);
+        }
 
         for (int r = 0; r < new_count; r++) {
-            wm::enqueue_damage_rect(merged, &merged_count, MAX_DIRTY_RECTS, (int)g_screen.width,
-                                    (int)g_screen.height, new_rects[r]);
+            wm::enqueue_damage_rect(merged, &merged_count, MAX_DIRTY_RECTS, static_cast<int>(g_screen.width),
+                                    static_cast<int>(g_screen.height), new_rects[r]);
         }
 
         slot.stale_count = clamp_dirty_rect_count(merged_count);
-        for (int j = 0; j < slot.stale_count; j++)
+        for (int j = 0; j < slot.stale_count; j++) {
             slot.stale_rects[j] = from_policy_rect(merged[j]);
+        }
     }
 }
 
@@ -413,6 +437,7 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     PresentBufferSlot &dst = g_presentbuffer_slots[slot_index];
     if (!dst.surface.buffer)
         return false;
+
     if (overwrite_full_frame) {
         clear_presentbuffer_slot_stale(dst);
         return true;
@@ -420,13 +445,14 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
 
     int stale_count = clamp_dirty_rect_count(dst.stale_count);
     wm_stats_note_stale_repair(stale_count);
+
     DirtyRect cursor_rect = {};
-    gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y,
-                          &cursor_rect.x, &cursor_rect.y, &cursor_rect.w, &cursor_rect.h);
+    gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y, &cursor_rect.x, &cursor_rect.y,
+                          &cursor_rect.w, &cursor_rect.h);
     bool cursor_on_screen = clip_dirty_rect_to_screen(cursor_rect);
     bool cursor_erased = false;
 
-    // Batch repair stale rects.
+    // Batched bounding box repair handles scattered staleness efficiently on SW composers.
     if (stale_count > 4) {
         DirtyRect bounds = {};
         bool have_bounds = false;
@@ -436,21 +462,25 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
                 continue;
             bounds = have_bounds ? rect_union(bounds, stale) : stale;
             have_bounds = true;
-            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr))
+            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr)) {
                 cursor_erased = true;
+            }
         }
-        if (have_bounds)
+        if (have_bounds) {
             gui_blit_rect(&dst.surface, &g_backbuffer, bounds.x, bounds.y, bounds.x, bounds.y, bounds.w, bounds.h);
+        }
     } else {
         for (int i = 0; i < stale_count; i++) {
             DirtyRect stale = dst.stale_rects[i];
             if (!clip_dirty_rect_to_screen(stale))
                 continue;
             gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
-            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr))
+            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr)) {
                 cursor_erased = true;
+            }
         }
     }
+
     if (cursor_erased)
         enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
     clear_presentbuffer_slot_stale(dst);
@@ -462,6 +492,7 @@ static bool select_presentbuffer_slot_for_frame()
     retire_completed_present_buffers();
     if (g_presentbuffer_slot_count == 0)
         return false;
+
     bool overwrite_full_frame = dirty_set_is_single_fullscreen_rect();
     for (uint32_t offset = 0; offset < g_presentbuffer_slot_count; offset++) {
         uint32_t index = (g_presentbuffer_active_slot + offset) % g_presentbuffer_slot_count;
@@ -469,10 +500,12 @@ static bool select_presentbuffer_slot_for_frame()
             continue;
         if (!sync_presentbuffer_slot_from_active(index, overwrite_full_frame))
             continue;
+
         g_presentbuffer_active_slot = index;
         sync_presentbuffer_alias_from_active_slot();
         return true;
     }
+
     sync_presentbuffer_alias_from_active_slot();
     return false;
 }
@@ -480,8 +513,9 @@ static bool select_presentbuffer_slot_for_frame()
 static void drain_display_events()
 {
     DisplayEvent event = {};
-    while (display_poll_event(&event) == 0)
+    while (display_poll_event(&event) == 0) {
         apply_display_event(event);
+    }
     retire_completed_present_buffers();
 }
 
@@ -505,12 +539,14 @@ static uint32_t present_frame(const Surface *source, const DirtyRect *rects, int
     rect_count = clamp_dirty_rect_count(rect_count);
     if (!source || !source->buffer || rect_count <= 0)
         return 0;
+
     Rect present_rects[MAX_DIRTY_RECTS];
     int present_count = 0;
     for (int i = 0; i < rect_count; i++) {
         DirtyRect clipped = rects[i];
-        if (clip_dirty_rect_to_screen(clipped))
+        if (clip_dirty_rect_to_screen(clipped)) {
             present_rects[present_count++] = gui_rect_make(clipped.x, clipped.y, clipped.w, clipped.h);
+        }
     }
     if (present_count == 0)
         return 0;
@@ -527,7 +563,7 @@ static uint32_t present_frame(const Surface *source, const DirtyRect *rects, int
         req.layers = &layer;
         req.layer_count = 1;
         req.damage_rects = present_rects;
-        req.damage_rect_count = (uint32_t)present_count;
+        req.damage_rect_count = static_cast<uint32_t>(present_count);
         req.frame_sequence = frame_sequence;
         req.flags = DISPLAY_PRESENT_VBLANK;
         req.cursor_buffer_handle = cursor_handle;
@@ -540,12 +576,9 @@ static uint32_t present_frame(const Surface *source, const DirtyRect *rects, int
     req.buffer = source->buffer;
     req.stride = source->pitch / 4;
     req.rects = present_rects;
-    req.rect_count = (uint32_t)present_count;
+    req.rect_count = static_cast<uint32_t>(present_count);
     req.frame_sequence = frame_sequence;
     req.flags = DISPLAY_PRESENT_VBLANK;
-    (void)cursor_handle;
-    (void)cursor_x;
-    (void)cursor_y;
     return display_present(&req);
 }
 
@@ -579,6 +612,7 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
 
     const int desired_buffer_w = entry.buffer_w > 0 ? entry.buffer_w : entry.w;
     const int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
+
     const bool buffer_size_changed = desired_buffer_w > 0 && desired_buffer_h > 0 &&
                                      (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h);
     const bool resize_serial_changed = w.entry_resize_serial != entry.resize_serial;
@@ -604,7 +638,7 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
         if (clamp_window_scroll(w) && w.entry) {
             w.entry->scroll_x = w.scroll_x;
             w.entry->scroll_y = w.scroll_y;
-            asm volatile("sfence" ::: "memory");
+            smp_wmb();
         }
 
         w.needs_full_redraw = true;
@@ -625,7 +659,7 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
             if (w.entry) {
                 w.entry->scroll_x = w.scroll_x;
                 w.entry->scroll_y = w.scroll_y;
-                asm volatile("sfence" ::: "memory");
+                smp_wmb();
             }
             DirtyRect client = window_visible_client_bounds(w);
             enqueue_damage_rect(client.x, client.y, client.w, client.h);
@@ -661,15 +695,18 @@ extern "C" int main(int argc, char **argv)
     g_screen = gui_init_framebuffer();
     if (!g_screen.buffer)
         return 1;
-    if (display_get_caps(&g_display_caps) == 0)
+
+    if (display_get_caps(&g_display_caps) == 0) {
         g_display_copy_path = (g_display_caps.flags & DISPLAY_FLAG_USES_COPY_PATH) != 0 &&
                               (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) == 0;
+    }
 
-    int reg_shm = (int)syscall1(SYS_SHM_GET, (sizeof(Registry) + 0xFFFu) & ~0xFFFu);
+    int reg_shm = static_cast<int>(syscall1(SYS_SHM_GET, (sizeof(Registry) + 0xFFFu) & ~0xFFFu));
     if (reg_shm < 0)
         return 1;
-    uint64_t reg_ptr = syscall1(SYS_SHM_MAP, (uint64_t)reg_shm);
-    if (reg_ptr == 0 || reg_ptr == (uint64_t)-1)
+
+    uint64_t reg_ptr = syscall1(SYS_SHM_MAP, static_cast<uint64_t>(reg_shm));
+    if (reg_ptr == 0 || reg_ptr == static_cast<uint64_t>(-1))
         return 1;
 
     Registry *registry = reinterpret_cast<Registry *>(reg_ptr);
@@ -679,6 +716,7 @@ extern "C" int main(int argc, char **argv)
     registry->mb_blur_shm_id = WIN_SHM_INVALID;
     registry->dk_blur_shm_id = WIN_SHM_INVALID;
     registry->focused_window = -1;
+
     for (int i = 0; i < MAX_WINDOWS; i++) {
         memset(&registry->windows[i], 0, sizeof(WindowEntry));
         registry->windows[i].shm_id = WIN_SHM_INVALID;
@@ -709,6 +747,7 @@ extern "C" int main(int argc, char **argv)
                 DISPLAY_BUFFER_FLAG_CPU_VISIBLE | DISPLAY_BUFFER_FLAG_LINEAR | DISPLAY_BUFFER_FLAG_RENDER_TARGET;
             if (!g_display_copy_path)
                 create.flags |= DISPLAY_BUFFER_FLAG_SCANOUT;
+
             if (display_buffer_create(&create) != 0)
                 break;
 
@@ -729,13 +768,15 @@ extern "C" int main(int argc, char **argv)
             slot.in_flight_sequence = 0;
         }
     }
+
     if (g_presentbuffer_slot_count == 0) {
         PresentBufferSlot &slot = g_presentbuffer_slots[0];
         memset(&slot, 0, sizeof(PresentBufferSlot));
         slot.surface.width = g_screen.width;
         slot.surface.height = g_screen.height;
         slot.surface.pitch = g_screen.pitch;
-        slot.surface.buffer = static_cast<uint32_t *>(malloc((size_t)g_screen.pitch * (size_t)g_screen.height));
+        slot.surface.buffer =
+            static_cast<uint32_t *>(malloc(static_cast<size_t>(g_screen.pitch) * static_cast<size_t>(g_screen.height)));
         slot.handle = 0;
         slot.in_flight_sequence = 0;
         if (slot.surface.buffer)
@@ -743,17 +784,20 @@ extern "C" int main(int argc, char **argv)
     }
     if (g_presentbuffer_slot_count == 0)
         return 1;
+
     sync_presentbuffer_alias_from_active_slot();
     if (!g_presentbuffer.buffer)
         return 1;
+
     init_wallpaper();
 
-    uint32_t dock_w = (uint32_t)shell_dock_window_w(SHELL_DOCK_ITEM_COUNT);
-    uint32_t dock_h = (uint32_t)shell_dock_window_h();
+    uint32_t dock_w = static_cast<uint32_t>(shell_dock_window_w(SHELL_DOCK_ITEM_COUNT));
+    uint32_t dock_h = static_cast<uint32_t>(shell_dock_window_h());
     int menubar_h = wm_menubar_h();
+
     int mb_shm = syscall1(SYS_SHM_GET, g_screen.width * gui_system_menubar_canvas_h() * 4);
     int dk_shm = syscall1(SYS_SHM_GET, dock_w * dock_h * 4);
-    int mb_blur_shm = syscall1(SYS_SHM_GET, g_screen.width * (uint32_t)menubar_h * 4);
+    int mb_blur_shm = syscall1(SYS_SHM_GET, g_screen.width * static_cast<uint32_t>(menubar_h) * 4);
     int dk_blur_shm = syscall1(SYS_SHM_GET, dock_w * dock_h * 4);
 
     registry->mb_shm_id = mb_shm;
@@ -777,7 +821,7 @@ extern "C" int main(int argc, char **argv)
     we0.shm_id = mb_shm;
     we0.x = 0;
     we0.y = 0;
-    we0.w = (int)g_screen.width;
+    we0.w = static_cast<int>(g_screen.width);
     we0.h = menubar_h;
     we0.restore_x = we0.x;
     we0.restore_y = we0.y;
@@ -792,15 +836,16 @@ extern "C" int main(int argc, char **argv)
     we0.active = true;
     we0.ready = true;
     strncpy(we0.title, "Menubar", 63);
+    we0.title[63] = '\0';
     damage_reset(&we0.damage);
 
     WindowEntry &we1 = registry->windows[1];
     memset(&we1, 0, sizeof(WindowEntry));
     we1.shm_id = dk_shm;
-    we1.x = (int)(g_screen.width - dock_w) / 2;
-    we1.y = (int)(g_screen.height - dock_h - shell_dock_bottom_inset());
-    we1.w = (int)dock_w;
-    we1.h = (int)dock_h;
+    we1.x = static_cast<int>(g_screen.width - dock_w) / 2;
+    we1.y = static_cast<int>(g_screen.height - dock_h - shell_dock_bottom_inset());
+    we1.w = static_cast<int>(dock_w);
+    we1.h = static_cast<int>(dock_h);
     we1.restore_x = we1.x;
     we1.restore_y = we1.y;
     we1.restore_w = we1.w;
@@ -814,15 +859,17 @@ extern "C" int main(int argc, char **argv)
     we1.active = true;
     we1.ready = true;
     strncpy(we1.title, "Dock", 63);
+    we1.title[63] = '\0';
     damage_reset(&we1.damage);
 
-    add_win_internal(mb_shm, 0, 0, g_screen.width, menubar_h, "Menubar", &registry->windows[0].damage,
+    add_win_internal(mb_shm, 0, 0, static_cast<int>(g_screen.width), menubar_h, "Menubar", &registry->windows[0].damage,
                      &registry->windows[0], true);
-    add_win_internal(dk_shm, (g_screen.width - dock_w) / 2, g_screen.height - dock_h - shell_dock_bottom_inset(),
-                     dock_w, dock_h, "Dock", &registry->windows[1].damage, &registry->windows[1], true);
+    add_win_internal(dk_shm, static_cast<int>(g_screen.width - dock_w) / 2,
+                     static_cast<int>(g_screen.height - dock_h - shell_dock_bottom_inset()), dock_w, dock_h, "Dock",
+                     &registry->windows[1].damage, &registry->windows[1], true);
 
     syscall1(SYS_SET_QUIET, 1);
-    asm volatile("sfence" ::: "memory");
+    smp_wmb();
 
     if (!init_shell_blur_buffers(registry, dock_w, dock_h)) {
         registry->mb_blur_generation = 0;
@@ -834,26 +881,35 @@ extern "C" int main(int argc, char **argv)
     reload_wallpaper(registry, false);
     sync_storage_prompt_state(false);
     ensure_default_user_storage_layout();
+
     gui_blit_rect(&g_backbuffer, &g_wallpaper, 0, 0, 0, 0, g_screen.width, g_screen.height);
-    capture_shell_backdrop_for_rect({0, 0, (int)g_screen.width, (int)g_screen.height}, registry);
+    capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)},
+                                    registry);
     flush_shell_blur_updates(registry);
     select_presentbuffer_slot_for_frame();
+
     gui_blit_rect(&g_presentbuffer, &g_backbuffer, 0, 0, 0, 0, g_screen.width, g_screen.height);
     gui_draw_cursor_kind(&g_presentbuffer, g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind);
 
-    DirtyRect init_pres = {0, 0, (int)g_screen.width, (int)g_screen.height};
+    DirtyRect init_pres = {0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)};
     uint32_t last_seq = present_frame(&g_presentbuffer, &init_pres, 1, 1, 0, 0, 0);
-    if (last_seq && g_presentbuffer_slot_count)
+
+    if (last_seq && g_presentbuffer_slot_count) {
         g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = last_seq;
+    }
+
     mark_other_presentbuffer_slots_stale(&init_pres, 1, g_presentbuffer_active_slot);
     uint32_t frame_seq = (last_seq ? last_seq : 1) + 1;
-    asm volatile("sfence" ::: "memory");
+
+    smp_wmb();
     registry->magic = REGISTRY_MAGIC;
-    asm volatile("sfence" ::: "memory");
-    LOG_INFO("wm", "first desktop frame submitted at %llu ms", (unsigned long long)get_ticks());
+    smp_wmb();
+
+    LOG_INFO("wm", "first desktop frame submitted at %llu ms", static_cast<unsigned long long>(get_ticks()));
     wm_push_notification("uniOS", "System successfully booted.");
 
-    uint32_t last_settings_gen = registry->settings_generation, last_storage_gen = registry->storage_request_generation;
+    uint32_t last_settings_gen = registry->settings_generation;
+    uint32_t last_storage_gen = registry->storage_request_generation;
     GuiThemeMode applied_theme_mode = runtime_settings.theme_mode;
     sync_control_center_state_from_registry(registry);
     Event ev;
@@ -932,7 +988,7 @@ extern "C" int main(int argc, char **argv)
 
             if ((ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) && g_input.mouse_y >= registry->windows[0].h) {
                 registry->mb_menu_dismiss_requested = true;
-                asm volatile("sfence" ::: "memory");
+                smp_wmb();
             }
 
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
@@ -947,15 +1003,18 @@ extern "C" int main(int argc, char **argv)
                     }
                     close_context_menu();
                 }
+
                 g_input.pointer_down = true;
                 g_input.drag_index = -1;
                 g_input.drag_edges = RESIZE_NONE;
+
                 int hit_idx = -1;
                 bool fwd_client = false;
                 int sys_hit = system_window_hit(g_input.mouse_x, g_input.mouse_y);
+
                 if (sys_hit >= 0) {
                     if (sys_hit == 0) {
-                        if (g_input.mouse_x > (int)g_screen.width - 120) {
+                        if (g_input.mouse_x > static_cast<int>(g_screen.width) - 120) {
                             g_input.pointer_down = false;
                             g_input.drag_index = -1;
                             g_input.drag_edges = RESIZE_NONE;
@@ -970,13 +1029,15 @@ extern "C" int main(int argc, char **argv)
                         registry->dk_click_y = g_input.mouse_y;
                         registry->dk_clicked = true;
                     }
-                    asm volatile("sfence" ::: "memory");
+                    smp_wmb();
                     hit_idx = sys_hit;
                 }
+
                 for (int i = g_window_count - 1; i >= 2 && hit_idx < 0; i--) {
                     Window &w = g_windows[i];
                     if (!is_window_visible(w))
                         continue;
+
                     if (w.transparent) {
                         if (!point_targets_window_client_for_input(w, g_input.mouse_x, g_input.mouse_y))
                             continue;
@@ -1048,9 +1109,10 @@ extern "C" int main(int argc, char **argv)
                     break;
                 }
                 if (hit_idx >= 0) {
-                    if (hit_idx >= 2 && fwd_client)
+                    if (hit_idx >= 2 && fwd_client) {
                         post_mouse_event_to_window(g_windows[focus_window(hit_idx, true)], EVT_MOUSE_DOWN,
                                                    g_input.mouse_x, g_input.mouse_y, ev.mouse.button);
+                    }
                 } else {
                     clear_window_focus(registry);
                     g_input.drag_index = -1;
@@ -1065,6 +1127,7 @@ extern "C" int main(int argc, char **argv)
                     for (int i = g_window_count - 1; i >= 2; i--) {
                         if (!is_window_visible(g_windows[i]))
                             continue;
+
                         if (g_windows[i].transparent) {
                             if (!point_targets_window_client_for_input(g_windows[i], g_input.mouse_x, g_input.mouse_y))
                                 continue;
@@ -1077,6 +1140,7 @@ extern "C" int main(int argc, char **argv)
                         }
                         if (!point_in_outer(g_windows[i], g_input.mouse_x, g_input.mouse_y))
                             continue;
+
                         if (point_in_client(g_windows[i], g_input.mouse_x, g_input.mouse_y)) {
                             if (is_user_window(g_windows[i])) {
                                 post_mouse_event_to_window(g_windows[focus_window(i, true)], EVT_MOUSE_DOWN,
@@ -1104,6 +1168,7 @@ extern "C" int main(int argc, char **argv)
                 g_input.drag_edges = RESIZE_NONE;
                 mark_cursor_transition_damage(g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind, g_input.mouse_x,
                                               g_input.mouse_y, g_input.cursor_kind);
+
                 if (g_input.hover_frame_index >= 2 && g_input.hover_button >= 0) {
                     DirtyRect outer = window_outer_bounds(g_windows[g_input.hover_frame_index]);
                     int title_h = wm_title_bar_h() + wm_frame_border() + wm_frame_shadow_offset_y();
@@ -1114,12 +1179,13 @@ extern "C" int main(int argc, char **argv)
                 if (c_idx < 2) {
                     int focus = find_registry_focused_user_window(registry);
                     if (focus >= 2 && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y) &&
-                        point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y))
+                        point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y)) {
                         post_mouse_event_to_window(g_windows[focus], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,
                                                    ev.mouse.button);
+                    }
                 }
             } else if (ev.type == EVT_KEY_DOWN) {
-                if (ev.key.c == 29) { // Alt+Space / Index trigger
+                if (ev.key.c == 29) {
                     if (g_index.active)
                         close_index();
                     else
@@ -1128,7 +1194,7 @@ extern "C" int main(int argc, char **argv)
                 }
 
                 if (g_index.active) {
-                    if (ev.key.c == 27) { // ESC
+                    if (ev.key.c == 27) {
                         close_index();
                     } else if (ev.key.c == '\b') {
                         if (g_index.query_len > 0) {
@@ -1137,7 +1203,7 @@ extern "C" int main(int argc, char **argv)
                         }
                     } else if (ev.key.c == '\n') {
                         activate_index_selection(registry);
-                    } else if ((uint8_t)ev.key.c == KEY_UP_ARROW) {
+                    } else if (static_cast<uint8_t>(ev.key.c) == KEY_UP_ARROW) {
                         if (g_index.result_count > 0) {
                             if (g_index.selected_index <= 0)
                                 g_index.selected_index = g_index.result_count - 1;
@@ -1146,7 +1212,7 @@ extern "C" int main(int argc, char **argv)
                             DirtyRect r = index_overlay_bounds();
                             enqueue_damage_rect(r.x, r.y, r.w, r.h);
                         }
-                    } else if ((uint8_t)ev.key.c == KEY_DOWN_ARROW) {
+                    } else if (static_cast<uint8_t>(ev.key.c) == KEY_DOWN_ARROW) {
                         if (g_index.result_count > 0) {
                             if (g_index.selected_index >= g_index.result_count - 1)
                                 g_index.selected_index = 0;
@@ -1200,13 +1266,15 @@ extern "C" int main(int argc, char **argv)
                 }
                 if (g_input.pointer_down || g_storage_prompt.visible || g_context_menu.open)
                     continue;
+
                 int tgt = -1;
-                for (int i = g_window_count - 1; i >= 2; i--)
+                for (int i = g_window_count - 1; i >= 2; i--) {
                     if (is_window_visible(g_windows[i]) &&
                         point_targets_window_client_for_input(g_windows[i], g_input.mouse_x, g_input.mouse_y)) {
                         tgt = i;
                         break;
                     }
+                }
                 if (tgt >= 2) {
                     int scroll_step = gui_scaled_metric(48);
                     if (scroll_step < 16)
@@ -1220,17 +1288,19 @@ extern "C" int main(int argc, char **argv)
                 }
                 if (system_window_hit(g_input.mouse_x, g_input.mouse_y) >= 0)
                     continue;
+
                 int reorder = -1;
                 if (ev.mouse.scroll_y > 0) {
                     int top = find_top_visible_user_window();
                     if (top >= 2)
                         reorder = send_window_to_back(top);
                 } else if (ev.mouse.scroll_y < 0) {
-                    for (int i = 2; i < g_window_count; i++)
+                    for (int i = 2; i < g_window_count; i++) {
                         if (is_window_visible(g_windows[i])) {
                             reorder = bring_window_to_front(i);
                             break;
                         }
+                    }
                 }
                 if (reorder >= 2) {
                     g_input.hover_frame_index = -1;
@@ -1243,9 +1313,10 @@ extern "C" int main(int argc, char **argv)
             } else if (ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) {
                 int focus = find_registry_focused_user_window(registry);
                 if (focus >= 2 && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y) &&
-                    point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y))
+                    point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y)) {
                     post_mouse_event_to_window(g_windows[focus], ev.type, g_input.mouse_x, g_input.mouse_y,
                                                ev.mouse.button);
+                }
             }
         }
 
@@ -1254,6 +1325,7 @@ extern "C" int main(int argc, char **argv)
             g_input.have_pending_move = false;
         }
         drain_display_events();
+        smp_rmb();
 
         if (registry->settings_generation != last_settings_gen) {
             last_settings_gen = registry->settings_generation;
@@ -1261,12 +1333,10 @@ extern "C" int main(int argc, char **argv)
             bool theme_changed = next_theme != applied_theme_mode;
             bool flags_changed = registry->system_flags != g_system_flags;
             bool transparency_changed = registry->transparency_level != g_control_center.transparency_level;
+
             g_system_flags = registry->system_flags;
             sync_control_center_state_from_registry(registry);
-            if (!persist_runtime_settings(registry)) {
-                LOG_WARN("wm", "failed to persist system settings");
-                wm_push_notification("System", "Failed to save settings.");
-            }
+
             if (theme_changed) {
                 applied_theme_mode = next_theme;
                 gui_apply_theme(next_theme);
@@ -1274,9 +1344,10 @@ extern "C" int main(int argc, char **argv)
                 enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             } else if (flags_changed) {
                 enqueue_damage_rect(0, 0, g_screen.width, wm_menubar_h());
-                if (registry->window_count > 1)
+                if (registry->window_count > 1) {
                     enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
                                         registry->windows[1].h);
+                }
             }
             if (transparency_changed) {
                 capture_shell_backdrop_for_rect(
@@ -1289,13 +1360,13 @@ extern "C" int main(int argc, char **argv)
             last_storage_gen = registry->storage_request_generation;
             if (!apply_storage_mode_request(registry, registry->storage_request_mode)) {
                 registry->storage_mode = get_storage_mode();
-                asm volatile("sfence" ::: "memory");
+                smp_wmb();
             }
         }
 
-        if (registry->storage_mode != (uint32_t)get_storage_mode()) {
+        if (registry->storage_mode != static_cast<uint32_t>(get_storage_mode())) {
             registry->storage_mode = get_storage_mode();
-            asm volatile("sfence" ::: "memory");
+            smp_wmb();
         }
         if (registry->wallpaper_reload_requested) {
             registry->wallpaper_reload_requested = false;
@@ -1307,12 +1378,13 @@ extern "C" int main(int argc, char **argv)
         registry->mouse_y = g_input.mouse_y;
         update_hover_feedback();
         update_cursor_kind();
-        if (g_context_menu.open)
+        if (g_context_menu.open) {
             update_context_menu_hover(registry, g_input.mouse_x, g_input.mouse_y);
+        }
 
         if (registry->window_count > 2) {
-            for (uint32_t i = 2; i < (registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count);
-                 i++) {
+            uint32_t max_windows = registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count;
+            for (uint32_t i = 2; i < max_windows; i++) {
                 WindowEntry &e = registry->windows[i];
                 if (!e.ready || !gui_shm_id_is_valid(e.shm_id) || e.w <= 0 || e.h <= 0 || !e.owner_pid || !e.title[0])
                     continue;
@@ -1350,7 +1422,7 @@ extern "C" int main(int argc, char **argv)
                 }
                 if (gui_shm_id_is_valid(entry_snapshot.shm_id) && entry_snapshot.shm_id != w.shm_id) {
                     uint64_t mapped = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
-                    if (mapped == 0 || mapped == (uint64_t)-1) {
+                    if (mapped == 0 || mapped == static_cast<uint64_t>(-1)) {
                         w.needs_full_redraw = true;
                         continue;
                     }
@@ -1358,13 +1430,15 @@ extern "C" int main(int argc, char **argv)
                     int old_shm_id = w.shm_id;
                     w.shm_id = entry_snapshot.shm_id;
                     w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
-                    if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id)
+                    if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id) {
                         syscall1(SYS_SHM_UNMAP, old_shm_id);
+                    }
 
                     w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
                     w.buffer_generation_acked = entry_snapshot.buffer_generation;
                     w.buffer_generation_seen = entry_snapshot.buffer_generation;
-                    asm volatile("sfence" ::: "memory");
+                    smp_wmb();
+
                     w.needs_full_redraw = true;
                     invalidate_window_decoration_cache(w);
                     mark_window_frame_damage(w);
@@ -1372,16 +1446,19 @@ extern "C" int main(int argc, char **argv)
                 }
 
                 sync_window_runtime_metadata(w, entry_snapshot);
+
                 int nx = entry_snapshot.x, ny = entry_snapshot.y;
                 int nw = w.resize_configure_pending ? w.w : entry_snapshot.w;
                 int nh = w.resize_configure_pending ? w.h : entry_snapshot.h;
-                // Clamp snapshots.
-                if (nw > (int)g_screen.width * 2)
-                    nw = (int)g_screen.width * 2;
-                if (nh > (int)g_screen.height * 2)
-                    nh = (int)g_screen.height * 2;
+
+                if (nw > static_cast<int>(g_screen.width) * 2)
+                    nw = static_cast<int>(g_screen.width) * 2;
+                if (nh > static_cast<int>(g_screen.height) * 2)
+                    nh = static_cast<int>(g_screen.height) * 2;
+
                 w.min_w = entry_snapshot.min_w > 0 ? entry_snapshot.min_w : 0;
                 w.min_h = entry_snapshot.min_h > 0 ? entry_snapshot.min_h : 0;
+
                 if (!w.resize_configure_pending && nw > 0 && nh > 0 &&
                     (w.x != nx || w.y != ny || w.w != nw || w.h != nh)) {
                     Window old = w;
@@ -1393,15 +1470,17 @@ extern "C" int main(int argc, char **argv)
                     if (clamp_window_scroll(w) && w.entry) {
                         w.entry->scroll_x = w.scroll_x;
                         w.entry->scroll_y = w.scroll_y;
-                        asm volatile("sfence" ::: "memory");
+                        smp_wmb();
                     }
                     mark_window_transition_damage(old, w);
                     invalidate_window_visibility_cache();
                 }
+
                 if (entry_snapshot.owner_pid)
                     w.owner_pid = entry_snapshot.owner_pid;
                 w.buffer_generation_seen = entry_snapshot.buffer_generation;
                 w.buffer_generation_acked = entry_snapshot.buffer_ack_generation;
+
                 if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
                     w.buffer_resize_serial == w.pending_configure_serial) {
                     w.resize_configure_pending = false;
@@ -1409,8 +1488,10 @@ extern "C" int main(int argc, char **argv)
                     w.last_commit_ticks = get_ticks();
                 } else if (w.resize_configure_pending && w.owner_pid) {
                     uint64_t now = get_ticks();
-                    if (w.last_configure_ticks == 0 || now - w.last_configure_ticks >= WM_RESIZE_CONFIGURE_RETRY_TICKS)
+                    if (w.last_configure_ticks == 0 ||
+                        now - w.last_configure_ticks >= WM_RESIZE_CONFIGURE_RETRY_TICKS) {
                         post_window_resize_configure(w);
+                    }
                 }
             }
             if (w.damage_ptr) {
@@ -1424,15 +1505,15 @@ extern "C" int main(int argc, char **argv)
                         DirtyRect damaged = {w.x + d.x - w.scroll_x, w.y + d.y - w.scroll_y, d.w, d.h};
                         DirtyRect client = window_visible_client_bounds(w);
                         DirtyRect visible = {};
-                        if (rect_intersection(damaged, client, &visible))
+                        if (rect_intersection(damaged, client, &visible)) {
                             enqueue_damage_rect(visible.x, visible.y, visible.w, visible.h);
+                        }
                     }
                     w.active = true;
                     if (w.entry)
                         w.entry->active = true;
                 }
 
-                // Force redraw if no damage.
                 if (!w.first_damage_received && (get_ticks() - w.last_commit_ticks > 90)) {
                     w.first_damage_received = true;
                     w.needs_full_redraw = true;
@@ -1467,19 +1548,20 @@ extern "C" int main(int argc, char **argv)
                 g_window_visibility_cache_dirty = false;
             }
             normalize_dirty_rects(inter);
-            if (resizing && g_dirty_count > 1)
+            if (resizing && g_dirty_count > 1) {
                 collapse_dirty_rects_to_bounds();
-        }
+            }
 
-        if (!g_dirty_frame_ready && g_dirty_count > 0) {
             uint32_t build_pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
             if (build_pending) {
                 refresh_display_queue_from_status();
                 build_pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
             }
+
             wm::PresentPolicyDecision build_action = wm::choose_present_policy(
                 {build_pending, limit, (g_display_caps.flags & DISPLAY_FLAG_STRICT_SYNC_ONLY) != 0, inter,
                  g_display_copy_path, manip});
+
             if (build_action == wm::PresentPolicyDecision::Skip) {
                 g_frame_stats.frames_skipped++;
                 yield();
@@ -1489,35 +1571,32 @@ extern "C" int main(int argc, char **argv)
             g_frame_cursor_handle = 0;
             g_frame_cursor_x = 0;
             g_frame_cursor_y = 0;
+
             if (select_presentbuffer_slot_for_frame()) {
-                // Pass 0: Expire stale toasts even if no other screen activity
                 uint64_t now = get_ticks();
                 bool toast_expired = false;
-                int toast_idx = g_notifications.head - 1;
-                if (toast_idx < 0)
-                    toast_idx = MAX_NOTIFICATIONS - 1;
+
+                int toast_idx = (g_notifications.head - 1 + MAX_NOTIFICATIONS) % MAX_NOTIFICATIONS;
                 for (int i = 0; i < g_notifications.count; i++) {
                     Notification &notif = g_notifications.history[toast_idx];
                     if (notif.active_toast && (now - notif.timestamp_ticks > TOAST_DURATION_TICKS)) {
                         notif.active_toast = false;
                         toast_expired = true;
                     }
-                    toast_idx--;
-                    if (toast_idx < 0)
-                        toast_idx = MAX_NOTIFICATIONS - 1;
+                    toast_idx = (toast_idx - 1 + MAX_NOTIFICATIONS) % MAX_NOTIFICATIONS;
                 }
+
                 if (toast_expired) {
                     int toast_w = gui_scaled_metric(320);
                     int toast_h = gui_scaled_metric(76);
                     int margin = gui_space_2();
-                    DirtyRect toast_box = {(int)g_backbuffer.width - toast_w - margin, wm_menubar_h() + margin, toast_w, toast_h};
+                    DirtyRect toast_box = {static_cast<int>(g_backbuffer.width) - toast_w - margin,
+                                           wm_menubar_h() + margin, toast_w, toast_h};
                     enqueue_damage_rect(toast_box.x - 16, toast_box.y - 16, toast_box.w + 32, toast_h + 32);
                 }
 
                 int focus = find_registry_focused_user_window(registry);
 
-                // Extend damage for overlays.
-                // helper `rect_union` performs the same math with i64 clamping.
                 DirtyRect cc_damage = {};
                 bool has_cc_damage = false;
                 if (g_control_center.open) {
@@ -1534,8 +1613,8 @@ extern "C" int main(int argc, char **argv)
                     int toast_w = gui_scaled_metric(320);
                     int toast_h = gui_scaled_metric(76);
                     int margin = gui_space_2();
-                    DirtyRect toast_box = {(int)g_backbuffer.width - toast_w - margin, wm_menubar_h() + margin,
-                                           toast_w, toast_h};
+                    DirtyRect toast_box = {static_cast<int>(g_backbuffer.width) - toast_w - margin,
+                                           wm_menubar_h() + margin, toast_w, toast_h};
                     toast_damage = rect_expand(toast_box, gui_scaled_metric(14));
                     has_toast_damage = true;
                 }
@@ -1557,10 +1636,12 @@ extern "C" int main(int argc, char **argv)
                 for (int d = 0; d < g_dirty_count; d++) {
                     DirtyRect &r = g_dirty_rects[d];
                     if (r.w > 0 && r.h > 0) {
-                        wm::enqueue_damage_rect(optimized_rects, &optimized_count, MAX_DIRTY_RECTS, (int)g_screen.width, (int)g_screen.height, to_policy_rect(r));
+                        wm::enqueue_damage_rect(optimized_rects, &optimized_count, MAX_DIRTY_RECTS,
+                                                static_cast<int>(g_screen.width), static_cast<int>(g_screen.height),
+                                                to_policy_rect(r));
                     }
                 }
-                
+
                 for (int d = 0; d < optimized_count; d++) {
                     g_dirty_rects[d] = from_policy_rect(optimized_rects[d]);
                 }
@@ -1584,24 +1665,30 @@ extern "C" int main(int argc, char **argv)
                 DirtyRect compose_union = {0, 0, 0, 0};
                 bool has_compose_union = false;
                 int dirty_count = clamp_dirty_rect_count(g_dirty_count);
+
                 for (int d = 0; d < dirty_count; d++) {
                     DirtyRect &r = g_dirty_rects[d];
                     if (r.w <= 0 || r.h <= 0)
                         continue;
+
                     if (!has_compose_union) {
                         compose_union = r;
                         has_compose_union = true;
                     } else {
                         compose_union = rect_union(compose_union, r);
                     }
-                    if (!compose_rect_clipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry))
+
+                    if (!compose_rect_clipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry)) {
                         compose_rect_unclipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry);
+                    }
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, r.x, r.y, r.x, r.y, r.w, r.h);
                 }
+
                 if (has_compose_union) {
                     capture_shell_backdrop_for_rect(compose_union, const_cast<Registry *>(registry));
                 }
                 flush_shell_blur_updates(registry);
+
                 if (draw_cursor) {
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, cursor_rect.x, cursor_rect.y, cursor_rect.x,
                                   cursor_rect.y, cursor_rect.w, cursor_rect.h);
@@ -1632,8 +1719,9 @@ extern "C" int main(int argc, char **argv)
             uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
                                          frame_seq, g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
             if (sub) {
-                if (g_presentbuffer_slot_count)
+                if (g_presentbuffer_slot_count) {
                     g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = sub;
+                }
                 mark_other_presentbuffer_slots_stale(g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
                                                      g_presentbuffer_active_slot);
                 g_frame_stats.frames_submitted++;

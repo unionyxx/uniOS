@@ -36,12 +36,17 @@ struct DockIconAsset
 };
 
 static constexpr DockItem k_dock_items[] = {
-    {"Terminal", "/bin/terminal.elf", ">", "terminal", 0xFF151A22},
     {"Files", "/bin/files.elf", "F", "files", 0xFFEAF0F8},
     {"Latitude", "/bin/latitude.elf", "L", "latitude", 0xFF26323F},
+    {"Terminal", "/bin/terminal.elf", ">", "terminal", 0xFF151A22},
+    {"Calculator", "/bin/calculator.elf", "C", "calculator", 0xFF4A90E2},
+    {"Calendar", "/bin/calendar.elf", "D", "calendar", 0xFFD0021B},
+    {"Clock", "/bin/clock.elf", "T", "clock", 0xFF417505},
     {"Settings", "/bin/preferences.elf", "S", "preferences", 0xFF818A99},
 };
 static DockIconAsset g_dock_icon_assets[(int)(sizeof(k_dock_items) / sizeof(k_dock_items[0]))] = {};
+static DockIconAsset g_calendar_day_assets[7] = {};
+static DockIconAsset g_calendar_num_assets[10] = {};
 static Surface g_blur_surface = {};
 static uint32_t g_last_blur_generation = 0;
 static int g_last_blur_shm_id = -1;
@@ -95,6 +100,29 @@ static void load_dock_icons()
         snprintf(path, sizeof(path), "/usr/share/appicons/%s.uoic", k_dock_items[i].icon_name);
         if (gui_load_uoic(path, SHELL_DOCK_ICON_SIZE, (uint32_t)gui_ui_scale_pct(), &asset.surface)) {
             asset.loaded = true;
+        }
+    }
+
+    static const char *day_names[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+    for (int i = 0; i < 7; i++) {
+        if (g_calendar_day_assets[i].loaded)
+            continue;
+        char path[128];
+        snprintf(path, sizeof(path), "/usr/share/calendar/%s.uoic", day_names[i]);
+        if (gui_load_uoic(path, SHELL_DOCK_ICON_SIZE / 2, (uint32_t)gui_ui_scale_pct(),
+                          &g_calendar_day_assets[i].surface)) {
+            g_calendar_day_assets[i].loaded = true;
+        }
+    }
+
+    for (int i = 0; i < 10; i++) {
+        if (g_calendar_num_assets[i].loaded)
+            continue;
+        char path[128];
+        snprintf(path, sizeof(path), "/usr/share/calendar/%d.uoic", i);
+        if (gui_load_uoic(path, SHELL_DOCK_ICON_SIZE / 2, (uint32_t)gui_ui_scale_pct(),
+                          &g_calendar_num_assets[i].surface)) {
+            g_calendar_num_assets[i].loaded = true;
         }
     }
 }
@@ -514,15 +542,16 @@ static inline uint32_t bilinear_sample(uint32_t p00, uint32_t p10, uint32_t p01,
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-static void draw_scaled_app_icon(Surface *canvas, const Surface *icon, int x, int y, int size)
+static void draw_scaled_app_icon(Surface *canvas, const Surface *icon, int x, int y, int w, int h)
 {
-    if (!canvas || !canvas->buffer || !icon || !icon->buffer || size <= 0 || icon->width == 0 || icon->height == 0)
+    if (!canvas || !canvas->buffer || !icon || !icon->buffer || w <= 0 || h <= 0 || icon->width == 0 ||
+        icon->height == 0)
         return;
 
     int clip_left = x < 0 ? 0 : x;
     int clip_top = y < 0 ? 0 : y;
-    int clip_right = x + size > (int)canvas->width ? (int)canvas->width : x + size;
-    int clip_bottom = y + size > (int)canvas->height ? (int)canvas->height : y + size;
+    int clip_right = x + w > (int)canvas->width ? (int)canvas->width : x + w;
+    int clip_bottom = y + h > (int)canvas->height ? (int)canvas->height : y + h;
     if (clip_left >= clip_right || clip_top >= clip_bottom)
         return;
 
@@ -534,7 +563,7 @@ static void draw_scaled_app_icon(Surface *canvas, const Surface *icon, int x, in
     for (int py = clip_top; py < clip_bottom; py++) {
         int local_y = py - y;
         // Fixed-point 16.16 source coordinate
-        uint64_t src_y_fp = ((uint64_t)local_y * (uint64_t)src_h * 65536u) / (uint32_t)size;
+        uint64_t src_y_fp = ((uint64_t)local_y * (uint64_t)src_h * 65536u) / (uint32_t)h;
         uint32_t sy0 = (uint32_t)(src_y_fp >> 16);
         uint32_t frac_y = ((uint32_t)src_y_fp >> 8) & 0xFFu;
         uint32_t sy1 = sy0 + 1u < src_h ? sy0 + 1u : sy0;
@@ -545,7 +574,7 @@ static void draw_scaled_app_icon(Surface *canvas, const Surface *icon, int x, in
 
         for (int px = clip_left; px < clip_right; px++) {
             int local_x = px - x;
-            uint64_t src_x_fp = ((uint64_t)local_x * (uint64_t)src_w * 65536u) / (uint32_t)size;
+            uint64_t src_x_fp = ((uint64_t)local_x * (uint64_t)src_w * 65536u) / (uint32_t)w;
             uint32_t sx0 = (uint32_t)(src_x_fp >> 16);
             uint32_t frac_x = ((uint32_t)src_x_fp >> 8) & 0xFFu;
             uint32_t sx1 = sx0 + 1u < src_w ? sx0 + 1u : sx0;
@@ -563,6 +592,68 @@ static void draw_scaled_app_icon(Surface *canvas, const Surface *icon, int x, in
                 dst_row[px] = pixel;
             else
                 dst_row[px] = dock_blend_premultiplied_pixel(dst_row[px], pixel);
+        }
+    }
+}
+
+static inline void draw_scaled_app_icon(Surface *canvas, const Surface *icon, int x, int y, int size)
+{
+    draw_scaled_app_icon(canvas, icon, x, y, size, size);
+}
+
+static int day_of_week(int year, int month, int day)
+{
+    static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    int y = year;
+    int m = month;
+    int d = day;
+    y -= m < 3;
+    return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+static void draw_calendar_contents(Surface *canvas, int x, int y, int size)
+{
+    SysTime t;
+    if (get_time(&t) != 0)
+        return;
+
+    int weekday_h = size * 40 / 100;
+    int date_h = size * 50 / 100;
+    int gap = size * 1 / 100;
+    int total_h = weekday_h + gap + date_h;
+    int start_y = y + (size - total_h) / 2 - size * 2 / 100;
+
+    int wday = day_of_week((int)t.year, (int)t.month, (int)t.day);
+    if (g_calendar_day_assets[wday].loaded) {
+        const Surface &ws = g_calendar_day_assets[wday].surface;
+        int day_w = weekday_h * (int)ws.width / (int)ws.height; // maintain aspect ratio
+        int day_x = x + (size - day_w) / 2;
+        draw_scaled_app_icon(canvas, &ws, day_x, start_y, day_w, weekday_h);
+    }
+
+    int date = (int)t.day;
+    if (date < 10) {
+        if (g_calendar_num_assets[date].loaded) {
+            const Surface &ns = g_calendar_num_assets[date].surface;
+            int num_w = date_h * (int)ns.width / (int)ns.height;
+            int num_x = x + (size - num_w) / 2;
+            int num_y = start_y + weekday_h + gap;
+            draw_scaled_app_icon(canvas, &ns, num_x, num_y, num_w, date_h);
+        }
+    } else {
+        int d1 = date / 10;
+        int d2 = date % 10;
+        if (g_calendar_num_assets[d1].loaded && g_calendar_num_assets[d2].loaded) {
+            const Surface &s1 = g_calendar_num_assets[d1].surface;
+            const Surface &s2 = g_calendar_num_assets[d2].surface;
+            int w1 = date_h * (int)s1.width / (int)s1.height;
+            int w2 = date_h * (int)s2.width / (int)s2.height;
+            int digit_gap = size * 2 / 100;
+            int total_w = w1 + w2 + digit_gap;
+            int num_x = x + (size - total_w) / 2;
+            int num_y = start_y + weekday_h + gap;
+            draw_scaled_app_icon(canvas, &s1, num_x, num_y, w1, date_h);
+            draw_scaled_app_icon(canvas, &s2, num_x + w1 + digit_gap, num_y, w2, date_h);
         }
     }
 }
@@ -627,6 +718,9 @@ static void draw_dock(Surface *canvas, Registry *registry, int hovered_idx)
 
         if (g_dock_icon_assets[i].loaded) {
             draw_scaled_app_icon(canvas, &g_dock_icon_assets[i].surface, x_ptr, icon_y, icon_size);
+            if (strcmp(k_dock_items[i].icon_name, "calendar") == 0) {
+                draw_calendar_contents(canvas, x_ptr, icon_y, icon_size);
+            }
         } else {
             draw_fallback_icon(canvas, i, x_ptr, icon_y, icon_size);
         }

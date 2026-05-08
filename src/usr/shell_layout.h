@@ -2,7 +2,7 @@
 
 #include "libgui/gui.h"
 
-static constexpr int SHELL_DOCK_ITEM_COUNT = 4;
+static constexpr int SHELL_DOCK_ITEM_COUNT = 7;
 static constexpr int SHELL_DOCK_ICON_SIZE = 48;
 static constexpr int SHELL_DOCK_ICON_SPACING = 14;
 static constexpr int SHELL_DOCK_INDICATOR_SIZE = 3;
