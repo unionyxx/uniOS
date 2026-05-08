@@ -1,5 +1,32 @@
 #include "wm_core.h"
 
+// Clipped wrapper around gui_fill_rounded_rect. When the requested rect is
+// fully contained inside the dirty clip we draw the rounded shape, otherwise
+// we fall back to a clipped axis-aligned fill so we never overdraw beyond the
+// dirty region (which would corrupt neighbouring windows already composited
+// into this frame).
+static void gui_fill_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
+                                          const DirtyRect &clip)
+{
+    int ix, iy, iw, ih;
+    if (!gui_intersect_rect(x, y, w, h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
+        return;
+    if (rect_contains(clip, {x, y, w, h})) {
+        gui_fill_rounded_rect(dst, x, y, w, h, r, color);
+    } else {
+        gui_fill_rect(dst, ix, iy, iw, ih, color);
+    }
+}
+
+static void gui_draw_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
+                                          const DirtyRect &clip)
+{
+    int ix, iy, iw, ih;
+    if (!gui_intersect_rect(x, y, w, h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
+        return;
+    gui_draw_rounded_rect(dst, x, y, w, h, r, color);
+}
+
 static Surface g_icon_close = {};
 static Surface g_icon_minimize = {};
 static Surface g_icon_maximize = {};
@@ -676,19 +703,20 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
 
     int shadow_offset = focused ? gui_scaled_metric(3) : gui_scaled_metric(2);
     uint32_t shadow_color = focused ? 0x20000000u : 0x12000000u;
-    gui_fill_rounded_rect(dst, sx, sy + shadow_offset, sw, sh, radius + gui_scaled_metric(1), shadow_color);
+    gui_fill_rounded_rect_clipped(dst, sx, sy + shadow_offset, sw, sh, radius + gui_scaled_metric(1), shadow_color,
+                                  clip);
 
-    gui_fill_rounded_rect(dst, sx, sy, sw, sh, radius, outline_color);
+    gui_fill_rounded_rect_clipped(dst, sx, sy, sw, sh, radius, outline_color, clip);
     if (sw > border * 2 && sh > border * 2) {
-        gui_fill_rounded_rect(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
-                              frame_fill_color);
+        gui_fill_rounded_rect_clipped(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
+                                      frame_fill_color, clip);
     }
 
     if (sw > body_inset * 2 && sh > body_inset * 2) {
-        gui_fill_rounded_rect(dst, sx + body_inset, sy + body_inset, sw - body_inset * 2, sh - body_inset * 2,
-                              body_radius, body_color);
-        gui_draw_rounded_rect(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
-                              inner_stroke_color);
+        gui_fill_rounded_rect_clipped(dst, sx + body_inset, sy + body_inset, sw - body_inset * 2, sh - body_inset * 2,
+                                      body_radius, body_color, clip);
+        gui_draw_rounded_rect_clipped(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
+                                      inner_stroke_color, clip);
     }
 
     int title_fill_x = sx + border;

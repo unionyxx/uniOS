@@ -1716,6 +1716,11 @@ extern "C" int main(int argc, char **argv)
                                        inter, g_display_copy_path, manip});
 
         if (g_dirty_frame_ready && action == wm::PresentPolicyDecision::Submit) {
+            // Publish all backbuffer stores before the display engine can latch
+            // the present buffer. Without this fence, weakly-ordered cores or
+            // write-combining stores can cause partially composited frames to
+            // appear as tearing or sparkle on the screen.
+            asm volatile("sfence" ::: "memory");
             uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
                                          frame_seq, g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
             if (sub) {

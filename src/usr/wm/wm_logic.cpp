@@ -343,8 +343,10 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
         return;
     *out_count = 0;
     if (w.transparent) {
-        out_rects[0] = window_client_bounds(w);
-        *out_count = 1;
+        // Transparent windows have no opaque coverage. Treating them as
+        // opaque causes the compositor to skip painting windows underneath
+        // (dock, menubar, and stacked windows behind them), which manifests
+        // as black or stale pixels showing through the transparent surface.
         return;
     }
 
@@ -384,7 +386,7 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
 DirtyRect window_opaque_bounds(const Window &w)
 {
     if (w.transparent)
-        return window_client_bounds(w);
+        return {0, 0, 0, 0};
     int side_inset = window_safe_side_inset();
     int title_h = wm_title_bar_h();
     int radius = gui_scaled_metric(12) - wm_frame_border();
@@ -401,6 +403,8 @@ DirtyRect window_opaque_bounds(const Window &w)
 
 DirtyRect window_occlusion_bounds(const Window &w)
 {
+    if (w.transparent)
+        return {0, 0, 0, 0};
     return window_opaque_bounds(w);
 }
 
