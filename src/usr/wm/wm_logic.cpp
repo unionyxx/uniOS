@@ -2751,7 +2751,10 @@ void update_cursor_kind()
         n_k = g_input.drag_edges == RESIZE_NONE ? GUI_CURSOR_MOVE : ck_edges(g_input.drag_edges);
     else if (g_input.hover_resize_edges != RESIZE_NONE)
         n_k = ck_edges(g_input.hover_resize_edges);
-    else if (g_input.hover_frame_index >= 2)
+    else if (g_input.hover_frame_index >= 2 && g_input.hover_button < 0)
+        // Only show the move cursor when hovering the title bar itself; over
+        // a chrome button the user expects an arrow cursor so the click
+        // affordance is unambiguous.
         n_k = GUI_CURSOR_MOVE;
     if (!g_input.pointer_down)
         reset_window_snap_state();
