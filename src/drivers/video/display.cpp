@@ -2915,8 +2915,8 @@ bool display_event_wait(DisplayEvent *out_event, bool block)
     if (!out_event)
         return false;
 
+    spinlock_acquire(&s_display_event_lock);
     for (;;) {
-        spinlock_acquire(&s_display_event_lock);
         if (display_pop_event_locked(out_event)) {
             spinlock_release(&s_display_event_lock);
             return true;
@@ -2926,9 +2926,9 @@ bool display_event_wait(DisplayEvent *out_event, bool block)
             return false;
         }
 
+        // scheduler_wait atomically drops the lock and sleeps.
+        // It returns with the lock re-acquired.
         scheduler_wait(&s_display_event_wait_queue, &s_display_event_lock);
-        // scheduler_wait re-acquires the lock on wake, but display_event_wait 
-        // doesn't need to release it again here since the loop will handle it.
     }
 }
 

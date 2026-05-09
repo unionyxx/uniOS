@@ -31,10 +31,23 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 
     uint32_t stride = g_backbuffer.pitch / 4;
     uint32_t scrim = storage_prompt_scrim_color();
+
+    // Pre-calculate scrim blending constants outside the loop
+    uint32_t scrim_a = scrim >> 24;
+    uint32_t inv_sa = 255u - scrim_a;
+    uint32_t scrim_r = ((scrim >> 16) & 0xFFu) * scrim_a;
+    uint32_t scrim_g = ((scrim >> 8) & 0xFFu) * scrim_a;
+    uint32_t scrim_b = (scrim & 0xFFu) * scrim_a;
+
     for (int y = dim.y; y < dim.y + dim.h; y++) {
         uint32_t *row = &g_backbuffer.buffer[(size_t)y * stride + dim.x];
         for (int x = 0; x < dim.w; x++) {
-            row[x] = blend_rgb(row[x], scrim, 255);
+            uint32_t dst = row[x];
+            uint32_t dr = (dst >> 16) & 0xFFu, dg = (dst >> 8) & 0xFFu, db = dst & 0xFFu;
+            uint32_t out_r = (scrim_r + dr * inv_sa) >> 8;
+            uint32_t out_g = (scrim_g + dg * inv_sa) >> 8;
+            uint32_t out_b = (scrim_b + db * inv_sa) >> 8;
+            row[x] = 0xFF000000u | (out_r << 16) | (out_g << 8) | out_b;
         }
     }
 

@@ -7,17 +7,15 @@ void Bitmap::init(void *buffer, size_t size_in_bits)
     m_size = size_in_bits;
     m_next_free_hint = 0;
 
-    size_t size_in_bytes = (size_in_bits + 7) / 8;
-    for (size_t i = 0; i < size_in_bytes; i++) {
-        m_buffer[i] = 0;
-    }
+    size_t size_in_bytes = (size_in_bits + 7) >> 3;
+    __builtin_memset(m_buffer, 0, size_in_bytes);
 }
 
 bool Bitmap::operator[](size_t index) const
 {
     if (index >= m_size)
         return false;
-    return (m_buffer[index / 8] & (1 << (index % 8))) != 0;
+    return (m_buffer[index >> 3] & (1 << (index & 7))) != 0;
 }
 
 void Bitmap::set(size_t index, bool value)
@@ -25,9 +23,9 @@ void Bitmap::set(size_t index, bool value)
     if (index >= m_size)
         return;
     if (value) {
-        m_buffer[index / 8] |= (uint8_t)(1 << (index % 8));
+        m_buffer[index >> 3] |= static_cast<uint8_t>(1 << (index & 7));
     } else {
-        m_buffer[index / 8] &= (uint8_t) ~(1 << (index % 8));
+        m_buffer[index >> 3] &= static_cast<uint8_t>(~(1 << (index & 7)));
     }
 }
 
@@ -41,18 +39,26 @@ void Bitmap::set_range(size_t start, size_t count, bool value)
         end = m_size;
 
     size_t i = start;
-    while (i < end && (i & 7U) != 0) {
-        set(i++, value);
+    while (i < end && (i & 7)) {
+        if (value)
+            m_buffer[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+        else
+            m_buffer[i >> 3] &= static_cast<uint8_t>(~(1 << (i & 7)));
+        i++;
     }
 
-    const uint8_t fill = value ? 0xFF : 0x00;
-    while (i + 8 <= end) {
-        m_buffer[i / 8] = fill;
-        i += 8;
+    size_t bytes_to_fill = (end - i) >> 3;
+    if (bytes_to_fill > 0) {
+        __builtin_memset(m_buffer + (i >> 3), value ? 0xFF : 0x00, bytes_to_fill);
+        i += bytes_to_fill << 3;
     }
 
     while (i < end) {
-        set(i++, value);
+        if (value)
+            m_buffer[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+        else
+            m_buffer[i >> 3] &= static_cast<uint8_t>(~(1 << (i & 7)));
+        i++;
     }
 }
 
@@ -75,40 +81,40 @@ size_t Bitmap::find_first_free(size_t start_index) const
             return static_cast<size_t>(-1);
 
         size_t i = begin;
-        while (i < end && (i & 7U) != 0) {
+        while (i < end && (i & 63)) {
             if (!(*this)[i])
                 return i;
-            ++i;
+            i++;
         }
 
-        const size_t full_byte_end = end & ~static_cast<size_t>(7);
-        while (i < full_byte_end) {
-            const uint8_t byte = m_buffer[i / 8];
-            if (byte != 0xFF) {
-                const uint8_t free_bits = static_cast<uint8_t>(~byte);
-                const unsigned bit = __builtin_ctz(static_cast<unsigned>(free_bits));
-                const size_t index = i + bit;
-                if (index < end)
-                    return index;
+        const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
+        size_t qword_end = end & ~static_cast<size_t>(63);
+
+        while (i < qword_end) {
+            uint64_t qw = qwords[i >> 6];
+            if (qw != ~0ULL) {
+                return i + __builtin_ctzll(~qw);
             }
-            i += 8;
+            i += 64;
         }
 
         while (i < end) {
             if (!(*this)[i])
                 return i;
-            ++i;
+            i++;
         }
 
         return static_cast<size_t>(-1);
     };
 
     size_t index = scan_range(search_start, m_size);
-    if (index == static_cast<size_t>(-1) && search_start != 0)
+    if (index == static_cast<size_t>(-1) && search_start != 0) {
         index = scan_range(0, search_start);
+    }
 
-    if (index != static_cast<size_t>(-1))
+    if (index != static_cast<size_t>(-1)) {
         m_next_free_hint = (index + 1 < m_size) ? (index + 1) : 0;
+    }
 
     return index;
 }
@@ -123,66 +129,65 @@ size_t Bitmap::find_first_free_sequence(size_t count, size_t start_index) const
     size_t current_run = 0;
     size_t run_start = static_cast<size_t>(-1);
 
-    // 1. Align to 8-bit boundary for fast hopping
     size_t i = start_index;
-    while (i < m_size && (i % 8) != 0) {
+    size_t qword_start = (i + 63) & ~static_cast<size_t>(63);
+    if (qword_start > m_size)
+        qword_start = m_size;
+
+    while (i < qword_start) {
         if (!(*this)[i]) {
             if (current_run == 0)
                 run_start = i;
-            current_run++;
-            if (current_run >= count)
+            if (++current_run == count)
                 return run_start;
         } else {
             current_run = 0;
-            run_start = static_cast<size_t>(-1);
         }
         i++;
     }
 
-    // 2. Fast byte-level scanning
-    size_t b = i / 8;
-    size_t bytes_total = m_size / 8;
-    while (b < bytes_total) {
-        if (m_buffer[b] == 0xFF) {
-            // Entire byte allocated, reset run
+    const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
+    size_t qword_end = m_size & ~static_cast<size_t>(63);
+
+    while (i < qword_end) {
+        size_t q_idx = i >> 6;
+        uint64_t qw = qwords[q_idx];
+
+        if (qw == 0) {
+            if (current_run == 0)
+                run_start = i;
+            current_run += 64;
+            if (current_run >= count)
+                return run_start;
+            i += 64;
+        } else if (qw == ~0ULL) {
             current_run = 0;
-            run_start = static_cast<size_t>(-1);
-            b++;
+            i += 64;
         } else {
-            // Found a byte with space, check bit-by-bit
-            for (int bit = 0; bit < 8; bit++) {
-                size_t index = b * 8 + bit;
-                if (index >= m_size)
-                    break;
-                if (!(*this)[index]) {
+            for (int bit = 0; bit < 64; bit++) {
+                if (!(qw & (1ULL << bit))) {
                     if (current_run == 0)
-                        run_start = index;
-                    current_run++;
-                    if (current_run >= count)
+                        run_start = i + bit;
+                    if (++current_run == count)
                         return run_start;
                 } else {
                     current_run = 0;
-                    run_start = static_cast<size_t>(-1);
                 }
             }
-            b++;
+            i += 64;
         }
     }
 
-    // 3. Remainder
-    for (size_t j = (bytes_total * 8); j < m_size; j++) {
-        if (j < i)
-            continue; // Already scanned in step 1 if bytes_total was small
-        if (!(*this)[j]) {
+    while (i < m_size) {
+        if (!(*this)[i]) {
             if (current_run == 0)
-                run_start = j;
-            current_run++;
-            if (current_run >= count)
+                run_start = i;
+            if (++current_run == count)
                 return run_start;
         } else {
             current_run = 0;
-            run_start = static_cast<size_t>(-1);
         }
+        i++;
     }
 
     return static_cast<size_t>(-1);
@@ -194,57 +199,39 @@ size_t Bitmap::find_last_free_sequence(size_t count) const
         return static_cast<size_t>(-1);
 
     size_t current_run = 0;
-
-    // 1. Handle remainder bits at the end
     size_t i = m_size;
-    while (i > 0 && (i % 8) != 0) {
-        size_t idx = i - 1;
-        if (!(*this)[idx]) {
-            current_run++;
-            if (current_run >= count)
-                return idx;
+
+    size_t qword_end = m_size & ~static_cast<size_t>(63);
+    while (i > qword_end) {
+        i--;
+        if (!(*this)[i]) {
+            if (++current_run == count)
+                return i;
         } else {
             current_run = 0;
         }
-        i--;
     }
 
-    // 2. Fast byte-level scanning backwards
     if (i > 0) {
-        size_t b = i / 8;
-        while (b > 0) {
-            b--;
-            if (m_buffer[b] == 0xFF) {
-                // Entire byte allocated, reset
-                current_run = 0;
-            } else if (m_buffer[b] == 0x00) {
-                // Entire byte free, possibly fast-forward
-                current_run += 8;
+        const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
+        size_t q_idx = i >> 6;
+        while (q_idx > 0) {
+            q_idx--;
+            uint64_t qw = qwords[q_idx];
+
+            if (qw == 0) {
+                current_run += 64;
                 if (current_run >= count) {
-                    // We found enough 0s. The start is somewhere in this byte or earlier.
-                    // To be safe and simple, just fall back to bit-scan from the end of this run.
-                    // But wait, we need the LOWEST index.
-                    // Let's just continue bit-by-bit within THIS byte to be precise.
-                    current_run -= 8; // Backtrack to check bits in this byte correctly
-                    for (int bit = 7; bit >= 0; bit--) {
-                        size_t idx = b * 8 + bit;
-                        if (!(*this)[idx]) {
-                            current_run++;
-                            if (current_run >= count)
-                                return idx;
-                        } else {
-                            current_run = 0;
-                        }
-                    }
+                    return (q_idx << 6) + (current_run - count);
                 }
+            } else if (qw == ~0ULL) {
+                current_run = 0;
             } else {
-                // Mixed byte, check bits
-                for (int bit = 7; bit >= 0; bit--) {
-                    size_t idx = b * 8 + bit;
-                    if (!(*this)[idx]) {
-                        current_run++;
-                        if (current_run >= count)
-                            return idx;
+                for (int bit = 63; bit >= 0; bit--) {
+                    if (!(qw & (1ULL << bit))) {
+                        if (++current_run == count) {
+                            return (q_idx << 6) + bit;
+                        }
                     } else {
                         current_run = 0;
                     }

@@ -1309,10 +1309,28 @@ void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
     uint32_t dp = dest->pitch / 4;
     uint32_t sp = src->pitch / 4;
 
-    for (int32_t y = 0; y < h; y++) {
+    bool same_buffer = dest->buffer == src->buffer;
+    bool overlap = same_buffer && !(dx + w <= sx || sx + w <= dx || dy + h <= sy || sy + h <= dy);
+
+    int32_t start_y = 0, end_y = h, step_y = 1;
+    if (overlap && dy > sy) {
+        start_y = h - 1;
+        end_y = -1;
+        step_y = -1;
+    }
+
+    for (int32_t y = start_y; y != end_y; y += step_y) {
+        int32_t start_x = 0, end_x = w, step_x = 1;
+        if (overlap && dx > sx) {
+            start_x = w - 1;
+            end_x = -1;
+            step_x = -1;
+        }
+
         uint32_t *drow = &dest->buffer[static_cast<size_t>(dy + y) * dp + static_cast<size_t>(dx)];
         uint32_t *srow = &src->buffer[static_cast<size_t>(sy + y) * sp + static_cast<size_t>(sx)];
-        for (int32_t x = 0; x < w; x++) {
+
+        for (int32_t x = start_x; x != end_x; x += step_x) {
             uint32_t pixel = srow[x];
             uint8_t alpha = static_cast<uint8_t>(pixel >> 24);
             if (alpha == 0)

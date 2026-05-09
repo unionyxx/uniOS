@@ -36,19 +36,22 @@ struct PageSlot
 };
 
 constexpr int MAX_TRACKED_PAGES = 65536;
+constexpr uint64_t SLOT_EMPTY = 0;
+constexpr uint64_t SLOT_TOMBSTONE = 1;
+
 static PageSlot g_page_slots[MAX_TRACKED_PAGES];
 
-[[nodiscard]] static bool is_power_of_two(size_t value)
+[[nodiscard]] static constexpr bool is_power_of_two(size_t value)
 {
     return value != 0 && (value & (value - 1)) == 0;
 }
 
-[[nodiscard]] static bool add_overflow(size_t a, size_t b, size_t *out)
+[[nodiscard]] static inline bool add_overflow(size_t a, size_t b, size_t *out)
 {
     return __builtin_add_overflow(a, b, out);
 }
 
-[[nodiscard]] static bool mul_overflow(size_t a, size_t b, size_t *out)
+[[nodiscard]] static inline bool mul_overflow(size_t a, size_t b, size_t *out)
 {
     return __builtin_mul_overflow(a, b, out);
 }
@@ -94,22 +97,36 @@ static PageSlot g_page_slots[MAX_TRACKED_PAGES];
     return reinterpret_cast<AllocHeader *>(raw_addr) - 1;
 }
 
+static inline uint32_t hash_page(uint64_t virt)
+{
+    virt ^= virt >> 33;
+    virt *= 0xff51afd7ed558ccdULL;
+    virt ^= virt >> 33;
+    return static_cast<uint32_t>(virt & (MAX_TRACKED_PAGES - 1));
+}
+
 static void page_tracker_add(uint64_t page_virt, int bucket_idx, uint16_t total)
 {
-    for (auto &slot : g_page_slots) {
-        if (slot.page_virt == 0) {
-            slot = {page_virt, bucket_idx, total, total};
+    uint32_t idx = hash_page(page_virt);
+    for (int i = 0; i < MAX_TRACKED_PAGES; i++) {
+        uint32_t probe = (idx + i) & (MAX_TRACKED_PAGES - 1);
+        if (g_page_slots[probe].page_virt == SLOT_EMPTY || g_page_slots[probe].page_virt == SLOT_TOMBSTONE) {
+            g_page_slots[probe] = {page_virt, bucket_idx, total, total};
             return;
         }
     }
-    DEBUG_WARN("heap: page_tracker full, coalescing disabled for page %llx\n", page_virt);
+    DEBUG_WARN("heap: page_tracker full, coalescing disabled for page %llx", (unsigned long long)page_virt);
 }
 
 [[nodiscard]] static PageSlot *page_tracker_find(uint64_t page_virt)
 {
-    for (auto &slot : g_page_slots) {
-        if (slot.page_virt == page_virt)
-            return &slot;
+    uint32_t idx = hash_page(page_virt);
+    for (int i = 0; i < MAX_TRACKED_PAGES; i++) {
+        uint32_t probe = (idx + i) & (MAX_TRACKED_PAGES - 1);
+        if (g_page_slots[probe].page_virt == page_virt)
+            return &g_page_slots[probe];
+        if (g_page_slots[probe].page_virt == SLOT_EMPTY)
+            return nullptr;
     }
     return nullptr;
 }
@@ -133,7 +150,7 @@ static void page_tracker_alloc_block(uint64_t block_virt)
     if (slot->free_count == slot->total_count) {
         out_page_virt = slot->page_virt;
         out_bucket_idx = slot->bucket_idx;
-        slot->page_virt = 0;
+        slot->page_virt = SLOT_TOMBSTONE;
         return true;
     }
     return false;
@@ -163,27 +180,13 @@ static void bucket_remove_page_blocks(int bucket_idx, uint64_t page_virt)
     g_buckets[bucket_idx] = new_head;
 }
 
-[[nodiscard]] static int get_bucket_index(size_t size)
+[[nodiscard]] static inline int get_bucket_index(size_t size)
 {
     if (size <= 16)
         return 0;
-    if (size <= 32)
-        return 1;
-    if (size <= 64)
-        return 2;
-    if (size <= 128)
-        return 3;
-    if (size <= 256)
-        return 4;
-    if (size <= 512)
-        return 5;
-    if (size <= 1024)
-        return 6;
-    if (size <= 2048)
-        return 7;
-    if (size <= 4096)
-        return 8;
-    return -1;
+    if (size > 4096)
+        return -1;
+    return 64 - __builtin_clzll(size - 1) - 4;
 }
 
 [[nodiscard]] static constexpr size_t get_bucket_size(int index)
@@ -223,9 +226,8 @@ void heap_init(void *start, size_t size)
     size_t total_size = 0;
     if (add_overflow(size, sizeof(AllocHeader), &total_size)) [[unlikely]]
         return nullptr;
-    if (total_size > MAX_BUCKET_SIZE) [[unlikely]] {
+    if (total_size > MAX_BUCKET_SIZE) [[unlikely]]
         return heap_alloc_large(total_size);
-    }
 
     int bucket_idx = get_bucket_index(total_size);
     size_t bucket_size = get_bucket_size(bucket_idx);
@@ -275,10 +277,9 @@ void heap_init(void *start, size_t size)
         return malloc(size);
 
     size_t total = 0;
-    if (add_overflow(size, alignment - 1, &total))
+    if (add_overflow(size, alignment - 1, &total) || add_overflow(total, sizeof(AllocHeader), &total))
         return nullptr;
-    if (add_overflow(total, sizeof(AllocHeader), &total))
-        return nullptr;
+
     const void *raw = malloc(total);
     if (!raw) [[unlikely]]
         return nullptr;
@@ -367,14 +368,14 @@ void free(void *ptr)
     void *base_user_ptr = ptr;
     bool was_aligned = false;
     const AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr, &was_aligned);
-    if (!header || header->magic != HEAP_MAGIC)
-        return nullptr;
-    if (header->size < sizeof(AllocHeader))
+
+    if (!header || header->magic != HEAP_MAGIC || header->size < sizeof(AllocHeader))
         return nullptr;
 
     size_t total_usable = header->size - sizeof(AllocHeader);
     uintptr_t user_addr = reinterpret_cast<uintptr_t>(ptr);
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_user_ptr);
+
     if (user_addr < base_addr)
         return nullptr;
 
@@ -420,6 +421,24 @@ void operator delete[](void *ptr, size_t) noexcept
     free(ptr);
 }
 
+static void print_uint(uint64_t val)
+{
+    if (val == 0) {
+        g_terminal.write("0");
+        return;
+    }
+    char buf[32];
+    int i = 0;
+    while (val > 0) {
+        buf[i++] = '0' + (val % 10);
+        val /= 10;
+    }
+    while (i > 0) {
+        char c[2] = {buf[--i], '\0'};
+        g_terminal.write(c);
+    }
+}
+
 extern "C" void heap_dump_stats()
 {
     g_terminal.write_line("Kernel Heap Stats:");
@@ -431,23 +450,7 @@ extern "C" void heap_dump_stats()
         int count = 0;
         for (const FreeBlock *cur = g_buckets[i]; cur; cur = cur->next)
             count++;
-
-        char buf[16];
-        int bi = 0;
-        if (count == 0) {
-            buf[bi++] = '0';
-        } else {
-            char tmp[16];
-            int ti = 0, n = count;
-            while (n > 0) {
-                tmp[ti++] = '0' + (n % 10);
-                n /= 10;
-            }
-            while (ti > 0)
-                buf[bi++] = tmp[--ti];
-        }
-        buf[bi] = '\0';
-        g_terminal.write(buf);
+        print_uint(static_cast<uint64_t>(count));
         if (i < NUM_BUCKETS - 1)
             g_terminal.write(", ");
     }
@@ -455,43 +458,14 @@ extern "C" void heap_dump_stats()
 
     int tracked_pages = 0;
     for (const auto &slot : g_page_slots) {
-        if (slot.page_virt != 0)
+        if (slot.page_virt != SLOT_EMPTY && slot.page_virt != SLOT_TOMBSTONE)
             tracked_pages++;
     }
 
     g_terminal.write("  Tracked Pages: ");
-    char buf[16];
-    int bi = 0;
-    if (tracked_pages == 0) {
-        buf[bi++] = '0';
-    } else {
-        char tmp[16];
-        int ti = 0, n = tracked_pages;
-        while (n > 0) {
-            tmp[ti++] = '0' + (n % 10);
-            n /= 10;
-        }
-        while (ti > 0)
-            buf[bi++] = tmp[--ti];
-    }
-    buf[bi] = '\0';
-    g_terminal.write(buf);
+    print_uint(static_cast<uint64_t>(tracked_pages));
     g_terminal.write(" / ");
-
-    char cap_buf[16];
-    bi = 0;
-    int cap_val = MAX_TRACKED_PAGES;
-    char tmp[16];
-    int ti = 0;
-    while (cap_val > 0) {
-        tmp[ti++] = '0' + (cap_val % 10);
-        cap_val /= 10;
-    }
-    while (ti > 0)
-        cap_buf[bi++] = tmp[--ti];
-
-    cap_buf[bi] = '\0';
-    g_terminal.write(cap_buf);
+    print_uint(static_cast<uint64_t>(MAX_TRACKED_PAGES));
     g_terminal.write("\n");
 
     spinlock_release(&g_heap_lock);

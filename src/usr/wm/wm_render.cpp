@@ -1,5 +1,27 @@
 #include "wm_core.h"
 
+static void gui_fill_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
+                                          const DirtyRect &clip)
+{
+    int ix, iy, iw, ih;
+    if (!gui_intersect_rect(x, y, w, h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
+        return;
+    if (rect_contains(clip, {x, y, w, h})) {
+        gui_fill_rounded_rect(dst, x, y, w, h, r, color);
+    } else {
+        gui_fill_rect(dst, ix, iy, iw, ih, color);
+    }
+}
+
+static void gui_draw_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
+                                          const DirtyRect &clip)
+{
+    int ix, iy, iw, ih;
+    if (!gui_intersect_rect(x, y, w, h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
+        return;
+    gui_draw_rounded_rect(dst, x, y, w, h, r, color);
+}
+
 static Surface g_icon_close = {};
 static Surface g_icon_minimize = {};
 static Surface g_icon_maximize = {};
@@ -88,40 +110,26 @@ int color_luma(uint32_t color)
 
 uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
 {
-    uint8_t src_alpha = scale_alpha_u8(static_cast<uint8_t>(src >> 24), coverage);
+    uint32_t src_alpha = (src >> 24);
+    src_alpha = (src_alpha * coverage * 257u) >> 16; // Fast div255
     if (!src_alpha)
         return dst;
-
-    uint8_t dst_alpha = static_cast<uint8_t>(dst >> 24);
-    if (!dst_alpha)
-        return (static_cast<uint32_t>(src_alpha) << 24) | (src & 0x00FFFFFFu);
     if (src_alpha == 255)
-        return 0xFF000000u | (src & 0x00FFFFFFu);
+        return (src & 0x00FFFFFFu) | 0xFF000000u;
 
-    uint32_t inv = 255u - src_alpha;
+    uint32_t dst_alpha = dst >> 24;
+    uint32_t inv_sa = 255u - src_alpha;
 
-    if (dst_alpha == 255) {
-        uint32_t rb = (src & 0x00FF00FFu) * src_alpha + (dst & 0x00FF00FFu) * inv + 0x00800080u;
-        rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
-        uint32_t g_acc = ((src >> 8) & 0xFFu) * src_alpha + ((dst >> 8) & 0xFFu) * inv + 0x80u;
-        uint32_t g = (g_acc + (g_acc >> 8)) >> 8;
-        return 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
-    }
+    uint32_t sr = (src >> 16) & 0xFFu, sg = (src >> 8) & 0xFFu, sb = src & 0xFFu;
+    uint32_t dr = (dst >> 16) & 0xFFu, dg = (dst >> 8) & 0xFFu, db = dst & 0xFFu;
 
-    uint32_t out_alpha = static_cast<uint32_t>(src_alpha) + div255(static_cast<uint32_t>(dst_alpha) * inv);
-    if (!out_alpha)
-        return 0;
+    // Fast approximation using bit shifts instead of division
+    uint32_t out_r = (sr * src_alpha + dr * inv_sa * dst_alpha / 255u) >> 8;
+    uint32_t out_g = (sg * src_alpha + dg * inv_sa * dst_alpha / 255u) >> 8;
+    uint32_t out_b = (sb * src_alpha + db * inv_sa * dst_alpha / 255u) >> 8;
+    uint32_t out_a = src_alpha + ((dst_alpha * inv_sa * 257u) >> 16);
 
-    uint32_t dr_p = ((dst >> 16) & 0xFFu) * dst_alpha, dg_p = ((dst >> 8) & 0xFFu) * dst_alpha,
-             db_p = (dst & 0xFFu) * dst_alpha;
-    uint32_t sr_p = ((src >> 16) & 0xFFu) * src_alpha, sg_p = ((src >> 8) & 0xFFu) * src_alpha,
-             sb_p = (src & 0xFFu) * src_alpha;
-
-    uint32_t r = (sr_p + div255(dr_p * inv) + out_alpha / 2u) / out_alpha;
-    uint32_t g = (sg_p + div255(dg_p * inv) + out_alpha / 2u) / out_alpha;
-    uint32_t b = (sb_p + div255(db_p * inv) + out_alpha / 2u) / out_alpha;
-
-    return (out_alpha << 24) | (r << 16) | (g << 8) | b;
+    return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
 static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_stride, const uint32_t *__restrict__ src,
@@ -676,19 +684,20 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
 
     int shadow_offset = focused ? gui_scaled_metric(3) : gui_scaled_metric(2);
     uint32_t shadow_color = focused ? 0x20000000u : 0x12000000u;
-    gui_fill_rounded_rect(dst, sx, sy + shadow_offset, sw, sh, radius + gui_scaled_metric(1), shadow_color);
+    gui_fill_rounded_rect_clipped(dst, sx, sy + shadow_offset, sw, sh, radius + gui_scaled_metric(1), shadow_color,
+                                  clip);
 
-    gui_fill_rounded_rect(dst, sx, sy, sw, sh, radius, outline_color);
+    gui_fill_rounded_rect_clipped(dst, sx, sy, sw, sh, radius, outline_color, clip);
     if (sw > border * 2 && sh > border * 2) {
-        gui_fill_rounded_rect(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
-                              frame_fill_color);
+        gui_fill_rounded_rect_clipped(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
+                                      frame_fill_color, clip);
     }
 
     if (sw > body_inset * 2 && sh > body_inset * 2) {
-        gui_fill_rounded_rect(dst, sx + body_inset, sy + body_inset, sw - body_inset * 2, sh - body_inset * 2,
-                              body_radius, body_color);
-        gui_draw_rounded_rect(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
-                              inner_stroke_color);
+        gui_fill_rounded_rect_clipped(dst, sx + body_inset, sy + body_inset, sw - body_inset * 2, sh - body_inset * 2,
+                                      body_radius, body_color, clip);
+        gui_draw_rounded_rect_clipped(dst, sx + border, sy + border, sw - border * 2, sh - border * 2, frame_radius,
+                                      inner_stroke_color, clip);
     }
 
     int title_fill_x = sx + border;

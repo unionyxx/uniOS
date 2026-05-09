@@ -58,6 +58,7 @@ struct WindowEntrySnapshot
 {
     int shm_id;
     int x, y, w, h;
+    uint32_t position_serial;
     int buffer_w, buffer_h;
     int content_w, content_h;
     int min_w, min_h;
@@ -86,6 +87,14 @@ inline void smp_rmb()
 inline void smp_wmb()
 {
     asm volatile("sfence" ::: "memory");
+}
+
+static bool process_is_alive(uint32_t pid)
+{
+    if (pid == 0)
+        return false;
+    // signal 0 is standard for existence check.
+    return syscall2(SYS_KILL, (uint64_t)pid, 0) == 0;
 }
 
 static void reap_exited_children()
@@ -156,6 +165,7 @@ static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
     s.y = e.y;
     s.w = e.w;
     s.h = e.h;
+    s.position_serial = e.position_serial;
     s.buffer_w = e.buffer_w;
     s.buffer_h = e.buffer_h;
     s.content_w = e.content_w;
@@ -186,10 +196,11 @@ static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
 
 static bool window_entry_snapshot_equal_for_commit(const WindowEntrySnapshot &a, const WindowEntrySnapshot &b)
 {
-    return a.shm_id == b.shm_id && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h && a.buffer_w == b.buffer_w &&
-           a.buffer_h == b.buffer_h && a.content_w == b.content_w && a.content_h == b.content_h && a.min_w == b.min_w &&
-           a.min_h == b.min_h && a.scroll_x == b.scroll_x && a.scroll_y == b.scroll_y && a.flags == b.flags &&
-           a.state == b.state && a.owner_pid == b.owner_pid && a.resize_serial == b.resize_serial &&
+    return a.shm_id == b.shm_id && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h &&
+           a.position_serial == b.position_serial && a.buffer_w == b.buffer_w && a.buffer_h == b.buffer_h &&
+           a.content_w == b.content_w && a.content_h == b.content_h && a.min_w == b.min_w && a.min_h == b.min_h &&
+           a.scroll_x == b.scroll_x && a.scroll_y == b.scroll_y && a.flags == b.flags && a.state == b.state &&
+           a.owner_pid == b.owner_pid && a.resize_serial == b.resize_serial &&
            a.buffer_resize_serial == b.buffer_resize_serial && a.buffer_generation == b.buffer_generation &&
            a.buffer_ack_generation == b.buffer_ack_generation && a.active == b.active && a.ready == b.ready &&
            memcmp(a.title, b.title, sizeof(a.title)) == 0;
@@ -338,7 +349,7 @@ static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_re
     return true;
 }
 
-static void collapse_dirty_rects_to_bounds()
+void collapse_dirty_rects_to_bounds()
 {
     int count = clamp_dirty_rect_count(g_dirty_count);
     if (count <= 0) {
@@ -610,8 +621,14 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
     if (!w.entry)
         return;
 
-    const int desired_buffer_w = entry.buffer_w > 0 ? entry.buffer_w : entry.w;
-    const int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
+    static constexpr int MAX_SAFE_TEXTURE_DIM = 8192;
+    int desired_buffer_w = entry.buffer_w > 0 ? entry.buffer_w : entry.w;
+    int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
+
+    if (desired_buffer_w > MAX_SAFE_TEXTURE_DIM)
+        desired_buffer_w = MAX_SAFE_TEXTURE_DIM;
+    if (desired_buffer_h > MAX_SAFE_TEXTURE_DIM)
+        desired_buffer_h = MAX_SAFE_TEXTURE_DIM;
 
     const bool buffer_size_changed = desired_buffer_w > 0 && desired_buffer_h > 0 &&
                                      (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h);
@@ -731,6 +748,7 @@ extern "C" int main(int argc, char **argv)
     g_control_center.transparency_level = runtime_settings.transparency_level;
     g_control_center.volume = runtime_settings.volume_level;
     gui_apply_theme(runtime_settings.theme_mode);
+    refresh_wm_metrics();
 
     g_backbuffer = gui_create_surface(g_screen.width, g_screen.height);
     if (!g_backbuffer.buffer)
@@ -915,7 +933,8 @@ extern "C" int main(int argc, char **argv)
     Event ev;
 
     while (true) {
-        while (get_event(&ev)) {
+        uint32_t event_budget = 256;
+        while (event_budget-- > 0 && get_event(&ev)) {
             if (ev.type == EVT_MOUSE_MOVE) {
                 g_input.pending_mouse_x = ev.mouse.x;
                 g_input.pending_mouse_y = ev.mouse.y;
@@ -1340,6 +1359,7 @@ extern "C" int main(int argc, char **argv)
             if (theme_changed) {
                 applied_theme_mode = next_theme;
                 gui_apply_theme(next_theme);
+                refresh_wm_metrics();
                 reload_wallpaper(registry, true);
                 enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             } else if (flags_changed) {
@@ -1386,7 +1406,12 @@ extern "C" int main(int argc, char **argv)
             uint32_t max_windows = registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count;
             for (uint32_t i = 2; i < max_windows; i++) {
                 WindowEntry &e = registry->windows[i];
-                if (!e.ready || !gui_shm_id_is_valid(e.shm_id) || e.w <= 0 || e.h <= 0 || !e.owner_pid || !e.title[0])
+                if (!e.ready)
+                    continue;
+
+                asm volatile("lfence" ::: "memory");
+
+                if (!gui_shm_id_is_valid(e.shm_id) || e.w <= 0 || e.h <= 0 || !e.owner_pid || !e.title[0])
                     continue;
                 if (find_window_by_entry(&e) >= 0 || find_window_by_shm(e.shm_id) >= 0)
                     continue;
@@ -1421,6 +1446,12 @@ extern "C" int main(int argc, char **argv)
                     continue;
                 }
                 if (gui_shm_id_is_valid(entry_snapshot.shm_id) && entry_snapshot.shm_id != w.shm_id) {
+                    uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
+                    if (shm_owner != entry_snapshot.owner_pid && shm_owner != 0) {
+                        w.needs_full_redraw = true;
+                        continue;
+                    }
+
                     uint64_t mapped = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
                     if (mapped == 0 || mapped == static_cast<uint64_t>(-1)) {
                         w.needs_full_redraw = true;
@@ -1488,8 +1519,8 @@ extern "C" int main(int argc, char **argv)
                     w.last_commit_ticks = get_ticks();
                 } else if (w.resize_configure_pending && w.owner_pid) {
                     uint64_t now = get_ticks();
-                    if (w.last_configure_ticks == 0 ||
-                        now - w.last_configure_ticks >= WM_RESIZE_CONFIGURE_RETRY_TICKS) {
+                    uint64_t retry_interval = WM_RESIZE_CONFIGURE_RETRY_TICKS << 4;
+                    if (w.last_configure_ticks == 0 || now - w.last_configure_ticks >= retry_interval) {
                         post_window_resize_configure(w);
                     }
                 }
@@ -1502,7 +1533,9 @@ extern "C" int main(int argc, char **argv)
                         w.needs_full_redraw = true;
                     }
                     if (is_window_visible(w)) {
-                        DirtyRect damaged = {w.x + d.x - w.scroll_x, w.y + d.y - w.scroll_y, d.w, d.h};
+                        int64_t dx64 = (int64_t)w.x + d.x - w.scroll_x;
+                        int64_t dy64 = (int64_t)w.y + d.y - w.scroll_y;
+                        DirtyRect damaged = {clamp_i64_to_int(dx64), clamp_i64_to_int(dy64), d.w, d.h};
                         DirtyRect client = window_visible_client_bounds(w);
                         DirtyRect visible = {};
                         if (rect_intersection(damaged, client, &visible)) {
@@ -1716,6 +1749,7 @@ extern "C" int main(int argc, char **argv)
                                        inter, g_display_copy_path, manip});
 
         if (g_dirty_frame_ready && action == wm::PresentPolicyDecision::Submit) {
+            asm volatile("sfence" ::: "memory");
             uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
                                          frame_seq, g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
             if (sub) {
@@ -1736,12 +1770,18 @@ extern "C" int main(int argc, char **argv)
             yield();
         } else {
             uint32_t tgt = wm::completion_target_for_available_slot(last_seq, limit);
+            uint64_t hw_sync_start = get_ticks();
             while (g_display_queue.completed_sequence < tgt) {
                 DisplayEvent ev_w = {};
                 if (display_wait_event(&ev_w) != 0) {
                     display_wait();
                     refresh_display_queue_from_status();
                     drain_display_events();
+                    if (get_ticks() - hw_sync_start > 250) {
+                        LOG_ERROR("wm", "Display driver timeout, forcing sequence");
+                        g_display_queue.completed_sequence = tgt;
+                        break;
+                    }
                     break;
                 }
                 apply_display_event(ev_w);
@@ -1749,6 +1789,14 @@ extern "C" int main(int argc, char **argv)
             }
         }
         reap_exited_children();
+        for (int i = 0; i < g_window_count;) {
+            Window &w = g_windows[i];
+            if (w.owner_pid != 0 && !process_is_alive(w.owner_pid)) {
+                close_window(i);
+                continue;
+            }
+            ++i;
+        }
     }
     return 0;
 }

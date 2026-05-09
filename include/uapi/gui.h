@@ -68,6 +68,7 @@ typedef struct WindowEntry
 {
     volatile int shm_id;
     volatile int x, y, w, h;
+    volatile uint32_t position_serial;
     volatile int restore_x, restore_y, restore_w, restore_h;
     volatile int buffer_w, buffer_h;
     volatile int content_w, content_h;

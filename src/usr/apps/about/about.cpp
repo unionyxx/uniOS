@@ -10,14 +10,14 @@
 
 static void format_size_kb(uint64_t kb, char *out, size_t out_size)
 {
-    if (kb >= 1024ull * 1024ull) {
-        uint64_t gib10 = (kb * 10ull) / (1024ull * 1024ull);
+    if (kb >= 1048576ull) {
+        uint64_t gib10 = (kb * 10ull) >> 20;
         snprintf(out, out_size, "%llu.%llu GiB", (unsigned long long)(gib10 / 10ull),
                  (unsigned long long)(gib10 % 10ull));
         return;
     }
 
-    uint64_t mib10 = (kb * 10ull) / 1024ull;
+    uint64_t mib10 = (kb * 10ull) >> 10;
     snprintf(out, out_size, "%llu.%llu MiB", (unsigned long long)(mib10 / 10ull), (unsigned long long)(mib10 % 10ull));
 }
 
@@ -39,21 +39,39 @@ static void format_uptime(uint64_t uptime, char *out, size_t out_size)
 static void format_display_flags(uint32_t flags, char *out, size_t out_size)
 {
     out[0] = '\0';
+    char *p = out;
+    size_t rem = out_size;
+
+    auto append = [&](const char *str) {
+        if (p != out && rem > 2) {
+            *p++ = ',';
+            *p++ = ' ';
+            rem -= 2;
+        }
+        size_t len = strlen(str);
+        if (len >= rem)
+            len = rem - 1;
+        memcpy(p, str, len);
+        p += len;
+        rem -= len;
+        *p = '\0';
+    };
+
     if (flags & DISPLAY_FLAG_HAS_VBLANK)
-        strncat(out, out[0] ? ", VBlank" : "VBlank", out_size - strlen(out) - 1);
+        append("VBlank");
     if (flags & DISPLAY_FLAG_HAS_PAGE_FLIP)
-        strncat(out, out[0] ? ", Page Flip" : "Page Flip", out_size - strlen(out) - 1);
+        append("Page Flip");
     if (flags & DISPLAY_FLAG_HAS_CURSOR_PLANE)
-        strncat(out, out[0] ? ", Cursor Plane" : "Cursor Plane", out_size - strlen(out) - 1);
+        append("Cursor Plane");
     if (flags & DISPLAY_FLAG_HAS_OVERLAY)
-        strncat(out, out[0] ? ", Overlay" : "Overlay", out_size - strlen(out) - 1);
+        append("Overlay");
     if (flags & DISPLAY_FLAG_HAS_COMPOSITOR)
-        strncat(out, out[0] ? ", Compositor" : "Compositor", out_size - strlen(out) - 1);
+        append("Compositor");
     if (flags & DISPLAY_FLAG_USES_COPY_PATH)
-        strncat(out, out[0] ? ", Copy Path" : "Copy Path", out_size - strlen(out) - 1);
+        append("Copy Path");
     if (flags & DISPLAY_FLAG_STRICT_SYNC_ONLY)
-        strncat(out, out[0] ? ", Strict Sync" : "Strict Sync", out_size - strlen(out) - 1);
-    if (!out[0])
+        append("Strict Sync");
+    if (p == out)
         snprintf(out, out_size, "Basic");
 }
 
@@ -88,7 +106,7 @@ struct DetailItem
     const char *value;
 };
 
-static int about_row_h()
+static inline int about_row_h()
 {
     int compact_row_h = gui_line_height() + gui_space_1() / 2;
     if (compact_row_h < gui_scaled_metric(20))
@@ -96,7 +114,7 @@ static int about_row_h()
     return compact_row_h;
 }
 
-static int about_summary_h()
+static inline int about_summary_h()
 {
     int title_line_h = gui_font_line_height(gui_font_title());
     int badge_h = gui_badge_h();
@@ -140,7 +158,7 @@ static void draw_detail_row(Surface *win, int x, int y, int w, int h, const Deta
     draw_detail_cell(win, x, y, w, h, item, bg);
 }
 
-static int panel_content_top(int y)
+static inline int panel_content_top(int y)
 {
     return y + gui_card_header_h() + gui_space_2();
 }
@@ -151,9 +169,9 @@ struct AboutSnapshot
     MemInfo mem;
     DisplayCaps caps;
     SysTime now;
-    int proc_count;
-    char vendor[13];
     uint64_t uptime_seconds;
+    int proc_count;
+    char vendor[16];
 };
 
 static void collect_about_snapshot(AboutSnapshot *snapshot)
@@ -161,61 +179,44 @@ static void collect_about_snapshot(AboutSnapshot *snapshot)
     if (!snapshot)
         return;
     memset(snapshot, 0, sizeof(*snapshot));
-    cpu_vendor(snapshot->vendor);
-    get_sysinfo(&snapshot->profile);
+
+    static char s_vendor[16] = {0};
+    static SystemProfile s_profile = {};
+    static bool s_static_loaded = false;
+
+    if (!s_static_loaded) {
+        cpu_vendor(s_vendor);
+        get_sysinfo(&s_profile);
+        s_static_loaded = true;
+    }
+
+    memcpy(snapshot->vendor, s_vendor, sizeof(snapshot->vendor));
+    snapshot->profile = s_profile;
+
     get_meminfo(&snapshot->mem);
     display_get_caps(&snapshot->caps);
     get_time(&snapshot->now);
+
     ProcessInfo procs[64];
     snapshot->proc_count = get_procs(procs, 64);
     if (snapshot->proc_count < 0)
         snapshot->proc_count = 0;
-    snapshot->uptime_seconds = get_uptime();
-}
 
-static uint32_t hash_cstr(const char *s)
-{
-    uint32_t hash = 2166136261u;
-    if (!s)
-        return hash;
-    while (*s) {
-        hash ^= (uint8_t)*s++;
-        hash *= 16777619u;
-    }
-    return hash;
+    snapshot->uptime_seconds = get_uptime();
 }
 
 static uint32_t about_signature(const AboutSnapshot *snapshot)
 {
     if (!snapshot)
         return 0;
-    const SystemProfile *profile = &snapshot->profile;
-    const MemInfo *mem = &snapshot->mem;
-    const DisplayCaps *caps = &snapshot->caps;
-    const SysTime *now = &snapshot->now;
 
-    uint32_t sig = 0xA80Fu;
-    sig = sig * 33u + (uint32_t)profile->kernel_build_debug;
-    sig = sig * 33u + (uint32_t)mem->used_kb;
-    sig = sig * 33u + (uint32_t)mem->free_kb;
-    sig = sig * 33u + (uint32_t)mem->heap_used_kb;
-    sig = sig * 33u + (uint32_t)mem->heap_total_kb;
-    sig = sig * 33u + (uint32_t)caps->width;
-    sig = sig * 33u + (uint32_t)caps->height;
-    sig = sig * 33u + (uint32_t)caps->bpp;
-    sig = sig * 33u + caps->flags;
-    sig = sig * 33u + caps->nominal_refresh_millihz;
-    sig = sig * 33u + caps->measured_refresh_millihz;
-    sig = sig * 33u + (uint32_t)snapshot->proc_count;
-    sig = sig * 33u + (uint32_t)now->year;
-    sig = sig * 33u + (uint32_t)now->month;
-    sig = sig * 33u + (uint32_t)now->day;
-    sig = sig * 33u + (uint32_t)now->hour;
-    sig = sig * 33u + (uint32_t)now->minute;
-    sig = sig * 33u + (uint32_t)now->second;
-    sig ^= hash_cstr(profile->kernel_commit);
-    sig ^= hash_cstr(profile->bootloader_name);
-    sig ^= hash_cstr(profile->bootloader_version);
+    // Fast FNV-1a hash over the fully zero-initialized snapshot structure
+    uint32_t sig = 2166136261u;
+    const uint8_t *data = reinterpret_cast<const uint8_t *>(snapshot);
+    for (size_t i = 0; i < sizeof(AboutSnapshot); i++) {
+        sig ^= data[i];
+        sig *= 16777619u;
+    }
     return sig;
 }
 
@@ -253,25 +254,25 @@ static void draw_summary(Surface *win, int x, int y, int w, int h, const char *k
                           "Core system profile and runtime state", g_gui_style.text_muted, g_gui_style.app_surface);
 }
 
-static int get_panel_height(int rows)
+static inline int get_panel_height(int rows, int row_h)
 {
-    return gui_card_header_h() + gui_space_2() + (rows * about_row_h()) + gui_space_1();
+    return gui_card_header_h() + gui_space_2() + (rows * row_h) + gui_space_1();
 }
 
-static void draw_runtime_panel(Surface *win, int x, int y, int w, int h, const char *time_buf, const char *uptime_buf,
-                               const char *proc_buf)
+static void draw_runtime_panel(Surface *win, int x, int y, int w, int h, int row_h, const char *time_buf,
+                               const char *uptime_buf, const char *proc_buf)
 {
     draw_section(win, x, y, w, h, "Runtime");
     int inner_y = panel_content_top(y);
     DetailItem items[3] = {{"Local Time", time_buf}, {"Uptime", uptime_buf}, {"Processes", proc_buf}};
     for (int i = 0; i < 3; i++) {
-        draw_detail_row(win, x + gui_space_2(), inner_y + i * about_row_h(), w - gui_space_3(), about_row_h(), items[i],
+        draw_detail_row(win, x + gui_space_2(), inner_y + i * row_h, w - gui_space_3(), row_h, items[i],
                         g_gui_style.app_surface);
     }
 }
 
-static void draw_display_panel(Surface *win, int x, int y, int w, int h, const char *resolution, const char *nominal,
-                               const char *measured, const char *depth, const char *flags)
+static void draw_display_panel(Surface *win, int x, int y, int w, int h, int row_h, const char *resolution,
+                               const char *nominal, const char *measured, const char *depth, const char *flags)
 {
     draw_section(win, x, y, w, h, "Display");
     int inner_y = panel_content_top(y);
@@ -280,12 +281,12 @@ static void draw_display_panel(Surface *win, int x, int y, int w, int h, const c
         {"Flags", flags},
     };
     for (int i = 0; i < 5; i++) {
-        draw_detail_row(win, x + gui_space_2(), inner_y + i * about_row_h(), w - gui_space_3(), about_row_h(), items[i],
+        draw_detail_row(win, x + gui_space_2(), inner_y + i * row_h, w - gui_space_3(), row_h, items[i],
                         g_gui_style.app_surface);
     }
 }
 
-static void draw_memory_panel(Surface *win, int x, int y, int w, int h, const char *total, const char *used,
+static void draw_memory_panel(Surface *win, int x, int y, int w, int h, int row_h, const char *total, const char *used,
                               const char *free_kb, const char *heap_total, const char *heap_used)
 {
     draw_section(win, x, y, w, h, "Memory");
@@ -293,35 +294,33 @@ static void draw_memory_panel(Surface *win, int x, int y, int w, int h, const ch
     DetailItem items[5] = {
         {"Total", total}, {"Used", used}, {"Free", free_kb}, {"Heap Total", heap_total}, {"Heap Used", heap_used}};
     for (int i = 0; i < 5; i++) {
-        draw_detail_row(win, x + gui_space_2(), inner_y + i * about_row_h(), w - gui_space_3(), about_row_h(), items[i],
+        draw_detail_row(win, x + gui_space_2(), inner_y + i * row_h, w - gui_space_3(), row_h, items[i],
                         g_gui_style.app_surface);
     }
 }
 
-static void draw_platform_panel(Surface *win, int x, int y, int w, int h, const char *vendor, const char *timer_hz,
-                                const char *bootloader)
+static void draw_platform_panel(Surface *win, int x, int y, int w, int h, int row_h, const char *vendor,
+                                const char *timer_hz, const char *bootloader)
 {
     draw_section(win, x, y, w, h, "Platform");
     int inner_y = panel_content_top(y);
     DetailItem items[3] = {{"CPU Vendor", vendor}, {"Timer", timer_hz}, {"Bootloader", bootloader}};
     for (int i = 0; i < 3; i++) {
-        draw_detail_row(win, x + gui_space_2(), inner_y + i * about_row_h(), w - gui_space_3(), about_row_h(), items[i],
+        draw_detail_row(win, x + gui_space_2(), inner_y + i * row_h, w - gui_space_3(), row_h, items[i],
                         g_gui_style.app_surface);
     }
 }
 
-static int compute_about_content_height(const Surface *win, int content_w)
+static int compute_about_content_height(int content_w, int row_h, int summary_h)
 {
-    (void)win;
     int gap = gui_app_section_gap();
-    int h_summary = about_summary_h();
-    int h_runtime = get_panel_height(3);
-    int h_display = get_panel_height(5);
-    int h_memory = get_panel_height(5);
-    int h_platform = get_panel_height(3);
+    int h_runtime = get_panel_height(3, row_h);
+    int h_display = get_panel_height(5, row_h);
+    int h_memory = get_panel_height(5, row_h);
+    int h_platform = get_panel_height(3, row_h);
 
     int min_panel_w = gui_scaled_metric(280);
-    int total = h_summary + gap;
+    int total = summary_h + gap;
     if (content_w >= min_panel_w * 2 + gap) {
         int left_h = h_runtime + gap + h_memory;
         int right_h = h_display + gap + h_platform;
@@ -341,6 +340,7 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
     const MemInfo &mem = snapshot->mem;
     const DisplayCaps &caps = snapshot->caps;
     const SysTime &now = snapshot->now;
+
     char uptime_buf[64];
     char proc_buf[32];
     char total[32], used[32], free_kb[32], heap_total[32], heap_used[32];
@@ -356,12 +356,14 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
     format_size_kb(mem.heap_used_kb, heap_used, sizeof(heap_used));
     snprintf(resolution, sizeof(resolution), "%ux%u", caps.width, caps.height);
     snprintf(depth, sizeof(depth), "%u-bit", caps.bpp);
+
     uint32_t nominal_refresh_millihz = caps.nominal_refresh_millihz
                                            ? caps.nominal_refresh_millihz
                                            : (caps.refresh_millihz ? caps.refresh_millihz : caps.refresh_hz * 1000u);
     format_refresh_value(nominal_refresh_millihz, nominal_refresh, sizeof(nominal_refresh));
     format_refresh_value(caps.measured_refresh_millihz, measured_refresh, sizeof(measured_refresh));
     format_display_flags(caps.flags, flags, sizeof(flags));
+
     if (profile.bootloader_version[0]) {
         snprintf(bootloader, sizeof(bootloader), "%s %s",
                  profile.bootloader_name[0] ? profile.bootloader_name : "Unknown", profile.bootloader_version);
@@ -377,18 +379,21 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
     int view_w = layout.outer_w + layout.outer_x * 2;
     int content_w = layout.body_rect.w;
     int bottom_pad = gui_app_outer_padding();
-    int content_total = compute_about_content_height(win, content_w) + layout.body_rect.y + bottom_pad;
+
+    int row_h = about_row_h();
+    int summary_h = about_summary_h();
+
+    int content_total = compute_about_content_height(content_w, row_h, summary_h) + layout.body_rect.y + bottom_pad;
     gui_set_content_size(win, view_w, content_total);
     const int outer = layout.body_rect.x;
     const int gap = gui_app_section_gap();
 
-    int h_runtime = get_panel_height(3);
-    int h_display = get_panel_height(5);
-    int h_memory = get_panel_height(5);
-    int h_platform = get_panel_height(3);
+    int h_runtime = get_panel_height(3, row_h);
+    int h_display = get_panel_height(5, row_h);
+    int h_memory = get_panel_height(5, row_h);
+    int h_platform = get_panel_height(3, row_h);
     int y = layout.body_rect.y;
 
-    int summary_h = about_summary_h();
     draw_summary(win, outer, y, content_w, summary_h, profile.kernel_commit, profile.kernel_build_debug != 0);
     y += summary_h + gap;
 
@@ -398,23 +403,23 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
         int left_x = outer;
         int right_x = outer + col_w + gap;
 
-        draw_runtime_panel(win, left_x, y, col_w, h_runtime, time_buf, uptime_buf, proc_buf);
-        draw_display_panel(win, right_x, y, col_w, h_display, resolution, nominal_refresh, measured_refresh, depth,
-                           flags);
+        draw_runtime_panel(win, left_x, y, col_w, h_runtime, row_h, time_buf, uptime_buf, proc_buf);
+        draw_display_panel(win, right_x, y, col_w, h_display, row_h, resolution, nominal_refresh, measured_refresh,
+                           depth, flags);
 
-        draw_memory_panel(win, left_x, y + h_runtime + gap, col_w, h_memory, total, used, free_kb, heap_total,
+        draw_memory_panel(win, left_x, y + h_runtime + gap, col_w, h_memory, row_h, total, used, free_kb, heap_total,
                           heap_used);
-        draw_platform_panel(win, right_x, y + h_display + gap, col_w, h_platform, snapshot->vendor, timer_hz,
+        draw_platform_panel(win, right_x, y + h_display + gap, col_w, h_platform, row_h, snapshot->vendor, timer_hz,
                             bootloader);
     } else {
-        draw_runtime_panel(win, outer, y, content_w, h_runtime, time_buf, uptime_buf, proc_buf);
+        draw_runtime_panel(win, outer, y, content_w, h_runtime, row_h, time_buf, uptime_buf, proc_buf);
         y += h_runtime + gap;
-        draw_display_panel(win, outer, y, content_w, h_display, resolution, nominal_refresh, measured_refresh, depth,
-                           flags);
+        draw_display_panel(win, outer, y, content_w, h_display, row_h, resolution, nominal_refresh, measured_refresh,
+                           depth, flags);
         y += h_display + gap;
-        draw_memory_panel(win, outer, y, content_w, h_memory, total, used, free_kb, heap_total, heap_used);
+        draw_memory_panel(win, outer, y, content_w, h_memory, row_h, total, used, free_kb, heap_total, heap_used);
         y += h_memory + gap;
-        draw_platform_panel(win, outer, y, content_w, h_platform, snapshot->vendor, timer_hz, bootloader);
+        draw_platform_panel(win, outer, y, content_w, h_platform, row_h, snapshot->vendor, timer_hz, bootloader);
     }
 
     gui_app_draw_header(win, &layout, "About uniOS", "Hardware, runtime, and display overview", nullptr);

@@ -5,10 +5,34 @@
 IndexState g_index = {};
 ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true, true, false, true, 180, false};
 NotificationCenterState g_notifications = {};
+WmMetrics g_metrics = {};
 
-void wm_push_notification(const char* title, const char* message) {
+void refresh_wm_metrics()
+{
+    int scale = gui_ui_scale_pct();
+    g_metrics.resize_grip = gui_scaled_metric(RESIZE_GRIP);
+    g_metrics.button_size = gui_scaled_metric(BTN_SIZE);
+    g_metrics.button_inset_x = gui_scaled_metric(BTN_INSET_X);
+    g_metrics.button_inset_y = gui_scaled_metric(BTN_INSET_Y);
+    g_metrics.button_spacing = gui_scaled_metric(BTN_SPACING);
+    g_metrics.title_bar_h = gui_title_bar_h();
+    g_metrics.menubar_h = gui_menubar_h();
+    g_metrics.desktop_margin = gui_scaled_metric(DESKTOP_MARGIN);
+    g_metrics.dock_reserved_h = shell_dock_reserved_h();
+    g_metrics.default_min_w = gui_scaled_metric(MIN_WINDOW_W);
+    g_metrics.default_min_h = gui_scaled_metric(MIN_WINDOW_H);
+    int border = gui_scaled_metric(FRAME_BORDER);
+    g_metrics.frame_border = border < 1 ? 1 : border;
+    int shadow_x = gui_scaled_metric(1);
+    g_metrics.frame_shadow_offset_x = shadow_x < 1 ? 1 : shadow_x;
+    int shadow_y = gui_scaled_metric(3);
+    g_metrics.frame_shadow_offset_y = shadow_y < 1 ? 1 : shadow_y;
+}
+
+void wm_push_notification(const char *title, const char *message)
+{
     int index = g_notifications.head;
-    Notification& notif = g_notifications.history[index];
+    Notification &notif = g_notifications.history[index];
 
     strncpy(notif.title, title, sizeof(notif.title) - 1);
     notif.title[sizeof(notif.title) - 1] = '\0';
@@ -58,8 +82,7 @@ void enqueue_damage_rect(int x, int y, int w, int h)
         return;
 
     // Full-screen damage.
-    if (incoming.x == 0 && incoming.y == 0 && incoming.w == (int)g_screen.width &&
-        incoming.h == (int)g_screen.height) {
+    if (incoming.x == 0 && incoming.y == 0 && incoming.w == (int)g_screen.width && incoming.h == (int)g_screen.height) {
         g_dirty_rects[0] = incoming;
         g_dirty_count = 1;
         invalidate_dirty_frame();
@@ -83,6 +106,11 @@ void enqueue_damage_rect(int x, int y, int w, int h)
     }
 
     // Merge damage rects.
+    bool resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE;
+    if (resizing && g_dirty_count > 1) {
+        collapse_dirty_rects_to_bounds();
+    }
+
     wm::DirtyRect policy_rects[MAX_DIRTY_RECTS];
     int policy_count = clamp_dirty_rect_count(g_dirty_count);
     copy_dirty_rects_to_policy(policy_rects, policy_count);
@@ -296,12 +324,15 @@ static void apply_window_move_snap(const Window &w, int *x, int *y, int width, i
     if (edges != RESIZE_NONE) {
         g_input.snap_edges = edges;
         g_input.snap_preview = {nx, ny, width, height};
+        enqueue_damage_rect(nx, ny, width, height);
     } else if (g_input.snap_edges != RESIZE_NONE) {
         int escape = wm_snap_escape();
         if (wm_fabsf((float)(*x - g_input.snap_preview.x)) > (float)escape ||
             wm_fabsf((float)(*y - g_input.snap_preview.y)) > (float)escape) {
+            DirtyRect old_preview = g_input.snap_preview;
             g_input.snap_edges = RESIZE_NONE;
             g_input.snap_preview = {};
+            enqueue_damage_rect(old_preview.x, old_preview.y, old_preview.w, old_preview.h);
         }
     }
 
@@ -343,8 +374,6 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
         return;
     *out_count = 0;
     if (w.transparent) {
-        out_rects[0] = window_client_bounds(w);
-        *out_count = 1;
         return;
     }
 
@@ -384,7 +413,7 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
 DirtyRect window_opaque_bounds(const Window &w)
 {
     if (w.transparent)
-        return window_client_bounds(w);
+        return {0, 0, 0, 0};
     int side_inset = window_safe_side_inset();
     int title_h = wm_title_bar_h();
     int radius = gui_scaled_metric(12) - wm_frame_border();
@@ -401,6 +430,8 @@ DirtyRect window_opaque_bounds(const Window &w)
 
 DirtyRect window_occlusion_bounds(const Window &w)
 {
+    if (w.transparent)
+        return {0, 0, 0, 0};
     return window_opaque_bounds(w);
 }
 
@@ -432,37 +463,39 @@ void refresh_window_cache()
     }
 }
 
+static void merge_adjacent_regions(DirtyRect *regions, int *count);
+
 static bool subtract_region_list(DirtyRect *regions, int *region_count, const DirtyRect &cut)
 {
-    for (int i = 0; i < *region_count;) {
+    int initial_count = *region_count;
+    for (int i = 0; i < initial_count;) {
         DirtyRect current = regions[i], overlap = {};
         if (!rect_intersection(current, cut, &overlap)) {
             i++;
             continue;
         }
+
+        // If fragmentation limit approached, aggressively merge or discard sub-pixel slivers
+        if (*region_count > MAX_VISIBLE_REGIONS - 4) {
+            merge_adjacent_regions(regions, region_count);
+            if (*region_count > MAX_VISIBLE_REGIONS - 4)
+                return false; // Force fallback to painter's alg
+        }
+
         regions[i] = regions[*region_count - 1];
         (*region_count)--;
 
-        DirtyRect pieces[4];
-        int piece_count = 0;
-        if (current.y < overlap.y)
-            pieces[piece_count++] = {current.x, current.y, current.w, overlap.y - current.y};
         int o_b = overlap.y + overlap.h, c_b = current.y + current.h;
-        if (o_b < c_b)
-            pieces[piece_count++] = {current.x, o_b, current.w, c_b - o_b};
-        if (current.x < overlap.x)
-            pieces[piece_count++] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
         int o_r = overlap.x + overlap.w, c_r = current.x + current.w;
-        if (o_r < c_r)
-            pieces[piece_count++] = {o_r, overlap.y, c_r - o_r, overlap.h};
 
-        for (int p = 0; p < piece_count; p++) {
-            if (pieces[p].w <= 0 || pieces[p].h <= 0)
-                continue;
-            if (*region_count >= MAX_VISIBLE_REGIONS)
-                return false;
-            regions[(*region_count)++] = pieces[p];
-        }
+        if (current.y < overlap.y)
+            regions[(*region_count)++] = {current.x, current.y, current.w, overlap.y - current.y};
+        if (o_b < c_b)
+            regions[(*region_count)++] = {current.x, o_b, current.w, c_b - o_b};
+        if (current.x < overlap.x)
+            regions[(*region_count)++] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
+        if (o_r < c_r)
+            regions[(*region_count)++] = {o_r, overlap.y, c_r - o_r, overlap.h};
     }
     return true;
 }
@@ -630,7 +663,7 @@ int find_registry_focused_user_window(const Registry *registry)
 
 void focus_window_owner(const Window *w)
 {
-    syscall1(SYS_GUI_SET_FOCUS, w ? (w->entry && w->entry->owner_pid ? w->entry->owner_pid : w->owner_pid) : 0);
+    syscall1(SYS_GUI_SET_FOCUS, w ? w->owner_pid : 0);
 }
 
 void publish_focus(Registry *registry, const Window *w)
@@ -957,6 +990,13 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         w.entry->y = y;
         w.entry->w = width;
         w.entry->h = height;
+        w.entry->position_serial++;
+        asm volatile("sfence" ::: "memory");
+
+        DirtyRect old_covered = window_opaque_bounds(old);
+        DirtyRect new_covered = window_opaque_bounds(w);
+        capture_shell_backdrop_for_rect(old_covered, gui_registry());
+        capture_shell_backdrop_for_rect(new_covered, gui_registry());
 
         if (size_changed) {
             invalidate_window_decoration_cache(w);
@@ -1115,6 +1155,21 @@ void minimize_window(int index)
     w.entry->state = WIN_MINIMIZED;
     asm volatile("sfence" ::: "memory");
     mark_window_frame_damage(w);
+
+    DirtyRect covered = window_opaque_bounds(w);
+    capture_shell_backdrop_for_rect(covered, gui_registry());
+
+    if (g_input.drag_index == index) {
+        g_input.drag_index = -1;
+        g_input.drag_edges = RESIZE_NONE;
+        g_input.pointer_down = false;
+    }
+    if (g_input.hover_frame_index == index) {
+        g_input.hover_frame_index = -1;
+        g_input.hover_resize_edges = RESIZE_NONE;
+        g_input.hover_button = -1;
+    }
+
     if (context_menu_targets_window_entry(w.entry))
         close_context_menu();
     invalidate_window_visibility_cache();
@@ -1131,9 +1186,13 @@ void close_window(int index)
     if (index < 2 || index >= g_window_count)
         return;
     Window doomed = g_windows[index];
-    uint32_t owner = (doomed.entry && doomed.entry->owner_pid) ? doomed.entry->owner_pid : doomed.owner_pid;
+    uint32_t owner = doomed.owner_pid;
 
     mark_window_frame_damage(doomed);
+
+    DirtyRect covered = window_opaque_bounds(doomed);
+    capture_shell_backdrop_for_rect(covered, gui_registry());
+
     if (context_menu_targets_window_entry(doomed.entry))
         close_context_menu();
     if (gui_shm_id_is_valid(doomed.shm_id))
@@ -1240,19 +1299,22 @@ static bool point_in_rounded_window_client(const Window &w, int px, int py)
     if (w.transparent)
         return true;
 
-    int inner_left = client.x;
-    int inner_top = client.y;
-    int inner_w = client.w;
-    int inner_h = client.h;
-
     int inner_r = gui_scaled_metric(12) - wm_frame_border();
-    if (inner_r < 0)
-        inner_r = 0;
-    if (inner_r > inner_w / 2)
-        inner_r = inner_w / 2;
-    if (inner_r > inner_h / 2)
-        inner_r = inner_h / 2;
-    return gui_rounded_rect_coverage_local(px - inner_left, py - inner_top, inner_w, inner_h, inner_r,
+    if (inner_r <= 0)
+        return true; // Fast path for square windows
+
+    // Fast path: Point is inside the core un-rounded rectangle
+    if (px >= client.x + inner_r && px < client.x + client.w - inner_r)
+        return true;
+    if (py < client.y + client.h - inner_r)
+        return true;
+
+    if (inner_r > client.w / 2)
+        inner_r = client.w / 2;
+    if (inner_r > client.h / 2)
+        inner_r = client.h / 2;
+
+    return gui_rounded_rect_coverage_local(px - client.x, py - client.y, client.w, client.h, inner_r,
                                            GUI_ROUNDED_EDGE_BOTTOM) != 0;
 }
 
@@ -1295,10 +1357,7 @@ bool pointer_blocked_by_shell_overlay(int px, int py)
 
 void post_mouse_event_to_window(const Window &w, EventType type, int px, int py, uint8_t button, int8_t scroll_y)
 {
-    if (!is_user_window(w) || !is_window_visible(w))
-        return;
-    uint32_t owner = (w.entry && w.entry->owner_pid) ? w.entry->owner_pid : w.owner_pid;
-    if (!owner)
+    if (!is_user_window(w) || !is_window_visible(w) || !w.owner_pid)
         return;
     Event ev = {};
     ev.type = type;
@@ -1306,21 +1365,18 @@ void post_mouse_event_to_window(const Window &w, EventType type, int px, int py,
     ev.mouse.y = py - w.y + w.scroll_y;
     ev.mouse.button = button;
     ev.mouse.scroll_y = scroll_y;
-    syscall2(SYS_POST_EVENT, owner, (uint64_t)&ev);
+    syscall2(SYS_POST_EVENT, w.owner_pid, (uint64_t)&ev);
 }
 
 void post_key_event_to_window(const Window &w, EventType type, char c, uint8_t scancode)
 {
-    if (!is_user_window(w) || !is_window_visible(w))
-        return;
-    uint32_t owner = (w.entry && w.entry->owner_pid) ? w.entry->owner_pid : w.owner_pid;
-    if (!owner)
+    if (!is_user_window(w) || !is_window_visible(w) || !w.owner_pid)
         return;
     Event ev = {};
     ev.type = type;
     ev.key.c = c;
     ev.key.scancode = scancode;
-    syscall2(SYS_POST_EVENT, owner, (uintptr_t)&ev);
+    syscall2(SYS_POST_EVENT, w.owner_pid, (uintptr_t)&ev);
 }
 
 static void copy_cstr(char *dst, size_t dst_size, const char *src)
@@ -2554,7 +2610,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.min_h = entry ? entry->min_h : 0;
     win.active = true;
     win.transparent = transparent;
-    win.needs_full_redraw = false;       // Initial state.
+    win.needs_full_redraw = false; // Initial state.
     win.last_commit_ticks = get_ticks();
     win.damage_ptr = d_ptr;
     win.first_damage_received = false;
@@ -2747,7 +2803,7 @@ void update_cursor_kind()
         n_k = g_input.drag_edges == RESIZE_NONE ? GUI_CURSOR_MOVE : ck_edges(g_input.drag_edges);
     else if (g_input.hover_resize_edges != RESIZE_NONE)
         n_k = ck_edges(g_input.hover_resize_edges);
-    else if (g_input.hover_frame_index >= 2)
+    else if (g_input.hover_frame_index >= 2 && g_input.hover_button < 0)
         n_k = GUI_CURSOR_MOVE;
     if (!g_input.pointer_down)
         reset_window_snap_state();

@@ -1,3 +1,4 @@
+#include <kernel/cpu.h>
 #include <kernel/debug.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/vma.h>
@@ -9,41 +10,25 @@
         if (addr >= current->start && addr < current->end) {
             return current;
         }
-        // Safety: catch potential cycles
-        if (current == current->next) {
-            DEBUG_ERROR("vma: cycle detected in list!");
-            break;
-        }
     }
-
-    // Debug: Log the list if we missed a likely range
-    // if (addr >= 0x100000000ULL && addr < 0x300000000ULL) {
-    //     DEBUG_ERROR("vma_find: missed heap addr 0x%llx. List dump:", addr);
-    //     vma_dump_list(list);
-    // }
     return nullptr;
 }
 
 [[nodiscard]] VMA *vma_add(VMA **list_ptr, uint64_t start, uint64_t end, uint64_t flags, VMAType type)
 {
-    if (start >= end)
+    if (start >= end || !list_ptr)
         return nullptr;
 
     VMA **link = list_ptr;
+
     while (*link && (*link)->start < start) {
-        if (start < (*link)->end && end > (*link)->start) {
-            DEBUG_ERROR("vma_add: detected overlap! NEW:[0x%llx, 0x%llx) EXIST:[0x%llx, 0x%llx)", start, end,
-                        (*link)->start, (*link)->end);
+        if (start < (*link)->end)
             return nullptr;
-        }
         link = &(*link)->next;
     }
 
-    if (*link && start < (*link)->end && end > (*link)->start) {
-        DEBUG_ERROR("vma_add: detected overlap! NEW:[0x%llx, 0x%llx) EXIST:[0x%llx, 0x%llx)", start, end,
-                    (*link)->start, (*link)->end);
+    if (*link && end > (*link)->start)
         return nullptr;
-    }
 
     VMA *new_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
     if (!new_vma)
@@ -62,22 +47,23 @@
 
 void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end)
 {
-    VMA **current = list_ptr;
-    while (*current) {
-        VMA *v = *current;
-        if (v->start == start && v->end == end) {
-            *current = v->next;
-            free(v);
+    if (!list_ptr)
+        return;
+
+    for (VMA **link = list_ptr; *link; link = &(*link)->next) {
+        if ((*link)->start == start && (*link)->end == end) {
+            VMA *target = *link;
+            *link = target->next;
+            free(target);
             return;
         }
-        current = &((*current)->next);
     }
 }
 
 [[nodiscard]] VMA *vma_clone(const VMA *src_list)
 {
     VMA *new_list = nullptr;
-    VMA **last_ptr = &new_list;
+    VMA **link = &new_list;
 
     for (const VMA *current = src_list; current; current = current->next) {
         VMA *new_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
@@ -89,57 +75,43 @@ void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end)
         *new_vma = *current;
         new_vma->next = nullptr;
 
-        *last_ptr = new_vma;
-        last_ptr = &(new_vma->next);
-
-        // DEBUG_INFO("vma_clone: cloned [0x%llx, 0x%llx) type=%d", current->start, current->end, (int)current->type);
-
-        if (current == current->next) {
-            DEBUG_ERROR("vma_clone: cycle detected!");
-            break;
-        }
+        *link = new_vma;
+        link = &new_vma->next;
     }
 
     return new_list;
 }
 
-#include <kernel/cpu.h>
 #define STAC()                                                                                                         \
-    if (g_cpu_features.has_smap)                                                                                       \
-    asm volatile("stac" ::: "memory")
+    do {                                                                                                               \
+        if (g_cpu_features.has_smap)                                                                                   \
+            asm volatile("stac" ::: "memory");                                                                         \
+    } while (0)
 #define CLAC()                                                                                                         \
-    if (g_cpu_features.has_smap)                                                                                       \
-    asm volatile("clac" ::: "memory")
+    do {                                                                                                               \
+        if (g_cpu_features.has_smap)                                                                                   \
+            asm volatile("clac" ::: "memory");                                                                         \
+    } while (0)
 
 void vma_dump_list(VMA *list)
 {
-    if (!list) {
-        DEBUG_INFO("  VMA list is NULL");
+    if (!list)
         return;
-    }
 
     STAC();
     int count = 0;
-    VMA *curr = list;
-    while (curr) {
-        DEBUG_INFO("  VMA #%d: [0x%llx, 0x%llx) flags=0x%llx type=%d cow=%d", count++, curr->start, curr->end,
-                   curr->flags, (int)curr->type, (int)curr->is_cow);
-
-        curr = curr->next;
-        if (count > 100) {
-            DEBUG_ERROR("  VMA dump aborted: possible cycle or list too long");
-            break;
-        }
+    for (VMA *curr = list; curr && count < 100; curr = curr->next, ++count) {
+        DEBUG_INFO("  VMA #%d: [0x%llx, 0x%llx) flags=0x%llx type=%d cow=%d", count, curr->start, curr->end,
+                   curr->flags, static_cast<int>(curr->type), static_cast<int>(curr->is_cow));
     }
     CLAC();
 }
 
 void vma_free_all(VMA *list)
 {
-    VMA *current = list;
-    while (current) {
-        VMA *next = current->next;
-        free(current);
-        current = next;
+    while (list) {
+        VMA *next = list->next;
+        free(list);
+        list = next;
     }
 }

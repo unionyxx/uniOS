@@ -506,6 +506,10 @@ void system_reboot()
 {
     shutdown_prepare(1, "System rebooting...");
 
+    asm volatile("wbinvd" ::: "memory");
+    asm volatile("cli" ::: "memory");
+
+    acpi_reboot();
     reboot_via_keyboard_controller();
     reboot_via_pci_reset_control();
     reboot_via_triple_fault();
@@ -515,6 +519,9 @@ void system_reboot()
 void system_poweroff()
 {
     shutdown_prepare(2, "System powering off...");
+
+    asm volatile("wbinvd" ::: "memory");
+    asm volatile("cli" ::: "memory");
 
     acpi_poweroff();
     DEBUG_WARN("Poweroff failed, halting CPU.");

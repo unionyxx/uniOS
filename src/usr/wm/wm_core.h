@@ -367,16 +367,9 @@ static inline float wm_fabsf(float x)
 
 static inline float wm_sqrtf(float n)
 {
-    if (n <= 0.0f)
-        return 0.0f;
-    float x = n, y = 1.0f, e = 0.000001f;
-    for (int i = 0; i < 15; i++) {
-        x = (x + y) * 0.5f;
-        y = n / x;
-        if (wm_fabsf(x - y) <= e)
-            break;
-    }
-    return x;
+    float result;
+    asm("sqrtss %1, %0" : "=x"(result) : "x"(n));
+    return result;
 }
 
 static inline int64_t rect_right_i64(const DirtyRect &rect)
@@ -458,132 +451,73 @@ static inline DirtyRect from_policy_rect(const wm::DirtyRect &rect)
     return {rect.x, rect.y, rect.w, rect.h};
 }
 
+struct WmMetrics
+{
+    int resize_grip, button_size, button_inset_x, button_inset_y, button_spacing, title_bar_h, menubar_h,
+        desktop_margin, dock_reserved_h, frame_border, frame_shadow_offset_x, frame_shadow_offset_y, default_min_w,
+        default_min_h;
+};
+extern WmMetrics g_metrics;
+void refresh_wm_metrics();
+
 static inline int wm_resize_grip()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(RESIZE_GRIP);
-    }
-    return cache_value;
+    return g_metrics.resize_grip;
 }
 static inline int wm_button_size()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(BTN_SIZE);
-    }
-    return cache_value;
+    return g_metrics.button_size;
 }
 static inline int wm_button_inset_x()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(BTN_INSET_X);
-    }
-    return cache_value;
+    return g_metrics.button_inset_x;
 }
 static inline int wm_button_inset_y()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(BTN_INSET_Y);
-    }
-    return cache_value;
+    return g_metrics.button_inset_y;
 }
 static inline int wm_button_spacing()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(BTN_SPACING);
-    }
-    return cache_value;
+    return g_metrics.button_spacing;
 }
 static inline int wm_title_bar_h()
 {
-    return gui_title_bar_h();
+    return g_metrics.title_bar_h;
 }
 static inline int wm_menubar_h()
 {
-    return gui_menubar_h();
+    return g_metrics.menubar_h;
 }
 static inline int wm_desktop_margin()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(DESKTOP_MARGIN);
-    }
-    return cache_value;
+    return g_metrics.desktop_margin;
 }
 static inline int wm_dock_reserved_h()
 {
-    return shell_dock_reserved_h();
+    return g_metrics.dock_reserved_h;
 }
 static inline int wm_default_min_w()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(MIN_WINDOW_W);
-    }
-    return cache_value;
+    return g_metrics.default_min_w;
 }
 static inline int wm_default_min_h()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        cache_value = gui_scaled_metric(MIN_WINDOW_H);
-    }
-    return cache_value;
+    return g_metrics.default_min_h;
 }
 static inline int wm_frame_border()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        int border = gui_scaled_metric(FRAME_BORDER);
-        cache_value = border < 1 ? 1 : border;
-    }
-    return cache_value;
+    return g_metrics.frame_border;
 }
 static inline int wm_frame_shadow_offset_x()
 {
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        int offset = gui_scaled_metric(1);
-        cache_value = offset < 1 ? 1 : offset;
-    }
-    return cache_value;
+    return g_metrics.frame_shadow_offset_x;
 }
 static inline int wm_frame_shadow_offset_y()
 {
-    // Max shadow extent.
-    static int cache_value = -1, cache_scale = -1;
-    int scale = gui_ui_scale_pct();
-    if (cache_scale != scale) {
-        cache_scale = scale;
-        int offset = gui_scaled_metric(3);
-        cache_value = offset < 1 ? 1 : offset;
-    }
-    return cache_value;
+    return g_metrics.frame_shadow_offset_y;
 }
+
+// Metrics functions are now inlined to g_metrics access.
 static inline int wm_window_damage_pad()
 {
     int pad = gui_scaled_metric(WINDOW_DAMAGE_PAD_BASE) + wm_frame_border() + wm_frame_shadow_offset_y();
@@ -652,7 +586,7 @@ static inline bool point_hits_window_visible_pixel(const Window &w, int px, int 
 
 static inline uint32_t div255(uint32_t x)
 {
-    return (x + 128u + ((x + 128u) >> 8)) >> 8;
+    return (uint32_t)(((uint64_t)x * 0x8081u) >> 23);
 }
 
 static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
@@ -692,6 +626,7 @@ void wm_stats_note_stale_repair(int rect_count);
 
 // Window logic.
 void enqueue_damage_rect(int x, int y, int w, int h);
+void collapse_dirty_rects_to_bounds();
 void invalidate_dirty_frame();
 void invalidate_window_visibility_cache();
 void refresh_window_cache();

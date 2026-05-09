@@ -34,7 +34,16 @@ struct AcpiSdtHeader
     uint32_t creator_revision;
 } __attribute__((packed));
 
-// ACPI FADT (Fixed ACPI Description Table) - partial, we only need power management fields
+struct AcpiGas
+{
+    uint8_t address_space;
+    uint8_t bit_width;
+    uint8_t bit_offset;
+    uint8_t access_size;
+    uint64_t address;
+} __attribute__((packed));
+
+// ACPI FADT (Fixed ACPI Description Table)
 struct AcpiFadt
 {
     AcpiSdtHeader header;
@@ -50,8 +59,8 @@ struct AcpiFadt
     uint8_t pstate_cnt;
     uint32_t pm1a_evt_blk;
     uint32_t pm1b_evt_blk;
-    uint32_t pm1a_cnt_blk; // PM1a Control Block (we need this for shutdown)
-    uint32_t pm1b_cnt_blk; // PM1b Control Block (optional)
+    uint32_t pm1a_cnt_blk;
+    uint32_t pm1b_cnt_blk;
     uint32_t pm2_cnt_blk;
     uint32_t pm_tmr_blk;
     uint32_t gpe0_blk;
@@ -60,7 +69,24 @@ struct AcpiFadt
     uint8_t pm1_cnt_len;
     uint8_t pm2_cnt_len;
     uint8_t pm_tmr_len;
-    // ... more fields we don't need
+    uint8_t gpe0_blk_len;
+    uint8_t gpe1_blk_len;
+    uint8_t gpe1_base;
+    uint8_t cstate_cnt;
+    uint16_t lvl2_lat;
+    uint16_t lvl3_lat;
+    uint16_t flush_size;
+    uint16_t flush_stride;
+    uint8_t duty_offset;
+    uint8_t duty_width;
+    uint8_t day_alrm;
+    uint8_t mon_alrm;
+    uint8_t century;
+    uint16_t iapc_boot_arch;
+    uint8_t reserved2;
+    uint32_t flags;
+    AcpiGas reset_reg;
+    uint8_t reset_value;
 } __attribute__((packed));
 
 // ACPI MCFG structure (PCI PCIe MMIO Configuration)
@@ -83,5 +109,6 @@ struct AcpiMcfg
 // ACPI functions
 void acpi_init();
 void *acpi_find_table(const char *signature);
+bool acpi_reboot();
 bool acpi_poweroff();
 bool acpi_is_available();

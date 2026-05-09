@@ -7,6 +7,7 @@
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
+#include <kernel/sync/spinlock.h>
 #include <libk/kstring.h>
 #include <stddef.h>
 
@@ -37,29 +38,28 @@ static uint64_t g_hhdm_offset = 0;
     kstring::zero_memory(next_table_virt, 512 * sizeof(uint64_t));
 
     uint64_t flags = (entry & 0xFFF) | (entry & (1ULL << 63));
-    flags &= ~(1ULL << 7); // Clear PS bit
+    if (entry & (1ULL << 12)) {
+        flags |= (1ULL << 7); // Move PAT bit from 12 (Huge) to 7 (4KB)
+    } else {
+        flags &= ~(1ULL << 7); // Strip Huge Page flag safely
+    }
 
-    if (level == 3) { // Splitting 1GB into 2MB pages
+    if (level == 3) {
         uint64_t base_phys = entry & 0x000FFFFFC0000000ULL;
         for (int i = 0; i < 512; i++) {
-            next_table_virt[i] = (base_phys + ((uint64_t)i * 0x200000)) | flags | (1ULL << 7);
+            next_table_virt[i] = (base_phys + (static_cast<uint64_t>(i) * 0x200000ULL)) | flags | (1ULL << 7);
         }
-    } else if (level == 2) { // Splitting 2MB into 4KB pages
+    } else if (level == 2) {
         uint64_t base_phys = entry & 0x000FFFFFFFE00000ULL;
         for (int i = 0; i < 512; i++) {
-            next_table_virt[i] = (base_phys + ((uint64_t)i * 0x1000)) | flags;
+            next_table_virt[i] = (base_phys + (static_cast<uint64_t>(i) * 0x1000ULL)) | flags;
         }
     } else {
-        // Level 4 (PML4) doesn't have PS, and Level 1 (PT) is already 4KB.
         pmm_free_frame(next_table_frame);
         return false;
     }
 
-    // Update the original entry to point to the new table
-    // For x86_64, the PAT bit moves from bit 7 (in huge pages) to bit 12 (in PTEs).
-    // In PDPTE/PDE that point to tables, bit 7 must be 0 (PS).
     table[index] = next_table_phys | (flags & ~0x80ULL);
-
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
     return true;
 }
@@ -68,7 +68,7 @@ static uint64_t g_hhdm_offset = 0;
                                               uint64_t virt)
 {
     if (current_level[index] & PTE_PRESENT) {
-        if (current_level[index] & (1ULL << 7)) { // PS bit
+        if (current_level[index] & (1ULL << 7)) {
             if (!split_huge_page(current_level, index, level))
                 return nullptr;
         }
@@ -84,7 +84,6 @@ static uint64_t g_hhdm_offset = 0;
         return nullptr;
 
     uint64_t phys = reinterpret_cast<uint64_t>(frame);
-    // Only set PTE_USER on directories if we are mapping a user address (lower half)
     uint64_t flags = PTE_PRESENT | PTE_WRITABLE;
     if (virt < 0x0000800000000000ULL)
         flags |= PTE_USER;
@@ -93,7 +92,13 @@ static uint64_t g_hhdm_offset = 0;
     kstring::zero_memory(next_level, 512 * sizeof(uint64_t));
     asm volatile("sfence" ::: "memory");
 
-    current_level[index] = phys | flags;
+    uint64_t expected = 0;
+    uint64_t desired = phys | flags;
+    if (!__atomic_compare_exchange_n(&current_level[index], &expected, desired, false, __ATOMIC_SEQ_CST,
+                                     __ATOMIC_SEQ_CST)) {
+        pmm_free_frame(frame); // Another thread beat us to it
+        return reinterpret_cast<uint64_t *>((expected & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    }
     return next_level;
 }
 
@@ -117,19 +122,14 @@ uint64_t vmm_phys_to_virt(uint64_t phys)
     return phys + g_hhdm_offset;
 }
 
-Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
+Result<void> vmm_map_page_in(uint64_t *target_pml4, uint64_t virt, uint64_t phys, uint64_t flags)
 {
     if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
         panic("vmm: kernel address with PTE_USER");
     if (virt < 0x0000800000000000ULL && !(flags & PTE_USER))
         panic("vmm: userspace address without PTE_USER");
 
-    uint64_t *pml4 = g_pml4;
-    Process *curr = process_get_current();
-    if (curr && curr->page_table)
-        pml4 = curr->page_table;
-
-    uint64_t *pdpt = get_next_level(pml4, (virt >> 39) & 0x1FF, 4, true, virt);
+    uint64_t *pdpt = get_next_level(target_pml4, (virt >> 39) & 0x1FF, 4, true, virt);
     if (!pdpt)
         return Error::NoMemory;
 
@@ -142,18 +142,32 @@ Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
         return Error::NoMemory;
 
     pt[(virt >> 12) & 0x1FF] = phys | flags;
-    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+    asm volatile("sfence" ::: "memory");
     return Result<void>::success();
 }
 
-[[nodiscard]] static bool vmm_map_page_no_flush(uint64_t virt, uint64_t phys, uint64_t flags)
+Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
+{
+    uint64_t *pml4 = g_pml4;
+    Process *curr = process_get_current();
+    if (curr && curr->page_table)
+        pml4 = curr->page_table;
+
+    Result<void> res = vmm_map_page_in(pml4, virt, phys, flags);
+    if (res.ok()) {
+        asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+    }
+    return res;
+}
+
+[[nodiscard]] static bool vmm_map_page_no_flush_in(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags)
 {
     if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
         panic("vmm: kernel address with PTE_USER");
     if (virt < 0x0000800000000000ULL && !(flags & PTE_USER))
         panic("vmm: userspace address without PTE_USER");
 
-    uint64_t *pdpt = get_next_level(g_pml4, (virt >> 39) & 0x1FF, 4, true, virt);
+    uint64_t *pdpt = get_next_level(pml4, (virt >> 39) & 0x1FF, 4, true, virt);
     if (!pdpt)
         return false;
 
@@ -178,29 +192,30 @@ uint64_t vmm_virt_to_phys_in(const uint64_t *pml4, uint64_t virt)
 {
     if (!pml4)
         return 0;
-    uint64_t pml4_index = (virt >> 39) & 0x1FF;
-    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
-    uint64_t pd_index = (virt >> 21) & 0x1FF;
-    uint64_t pt_index = (virt >> 12) & 0x1FF;
 
+    uint64_t pml4_index = (virt >> 39) & 0x1FF;
     if (!(pml4[pml4_index] & PTE_PRESENT))
         return 0;
 
-    const uint64_t *pdpt = reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pdpt =
+        reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
     if (!(pdpt[pdpt_index] & PTE_PRESENT))
         return 0;
-    if (pdpt[pdpt_index] & (1ULL << 7)) { // PS bit
+    if (pdpt[pdpt_index] & (1ULL << 7)) {
         return (pdpt[pdpt_index] & 0x000FFFFFC0000000ULL) + (virt & 0x3FFFFFFFULL);
     }
 
     const uint64_t *pd = reinterpret_cast<const uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pd_index = (virt >> 21) & 0x1FF;
     if (!(pd[pd_index] & PTE_PRESENT))
         return 0;
-    if (pd[pd_index] & (1ULL << 7)) { // PS bit
+    if (pd[pd_index] & (1ULL << 7)) {
         return (pd[pd_index] & 0x000FFFFFFFE00000ULL) + (virt & 0x1FFFFFULL);
     }
 
     const uint64_t *pt = reinterpret_cast<const uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pt_index = (virt >> 12) & 0x1FF;
     if (!(pt[pt_index] & PTE_PRESENT))
         return 0;
 
@@ -222,22 +237,22 @@ uint64_t vmm_get_page_flags_in(const uint64_t *pml4, uint64_t virt)
         return 0;
 
     uint64_t pml4_index = (virt >> 39) & 0x1FF;
-    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
-    uint64_t pd_index = (virt >> 21) & 0x1FF;
-    uint64_t pt_index = (virt >> 12) & 0x1FF;
-
     if (!(pml4[pml4_index] & PTE_PRESENT))
         return 0;
 
-    const uint64_t *pdpt = reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    const uint64_t *pdpt =
+        reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
     if (!(pdpt[pdpt_index] & PTE_PRESENT) || (pdpt[pdpt_index] & (1ULL << 7)))
         return 0;
 
     const uint64_t *pd = reinterpret_cast<const uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pd_index = (virt >> 21) & 0x1FF;
     if (!(pd[pd_index] & PTE_PRESENT) || (pd[pd_index] & (1ULL << 7)))
         return 0;
 
     const uint64_t *pt = reinterpret_cast<const uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pt_index = (virt >> 12) & 0x1FF;
     if (!(pt[pt_index] & PTE_PRESENT))
         return 0;
 
@@ -249,74 +264,17 @@ uint64_t *vmm_get_kernel_pml4()
     return g_pml4;
 }
 
-[[nodiscard]] static uint64_t *get_next_level_in(uint64_t *current_level, uint64_t index, bool alloc, uint64_t virt)
-{
-    if (current_level[index] & PTE_PRESENT) {
-        uint64_t phys = current_level[index] & 0x000FFFFFFFFFF000ULL;
-        return reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
-    }
-
-    if (!alloc)
-        return nullptr;
-
-    void *frame = pmm_alloc_frame();
-    if (!frame)
-        return nullptr;
-
-    uint64_t phys = reinterpret_cast<uint64_t>(frame);
-    // Only set PTE_USER on directories if we are mapping a user address (lower half)
-    uint64_t flags = PTE_PRESENT | PTE_WRITABLE;
-    if (virt < 0x0000800000000000ULL)
-        flags |= PTE_USER;
-
-    uint64_t *next_level = reinterpret_cast<uint64_t *>(phys + g_hhdm_offset);
-    kstring::zero_memory(next_level, 512 * sizeof(uint64_t));
-    asm volatile("sfence" ::: "memory");
-
-    current_level[index] = phys | flags;
-    return next_level;
-}
-
-Result<void> vmm_map_page_in(uint64_t *target_pml4, uint64_t virt, uint64_t phys, uint64_t flags)
-{
-    if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
-        panic("vmm: kernel address with PTE_USER");
-    if (virt < 0x0000800000000000ULL && !(flags & PTE_USER))
-        panic("vmm: userspace address without PTE_USER");
-
-    uint64_t *pdpt = get_next_level_in(target_pml4, (virt >> 39) & 0x1FF, true, virt);
-    if (!pdpt)
-        return Error::NoMemory;
-
-    uint64_t *pd = get_next_level_in(pdpt, (virt >> 30) & 0x1FF, true, virt);
-    if (!pd)
-        return Error::NoMemory;
-
-    uint64_t *pt = get_next_level_in(pd, (virt >> 21) & 0x1FF, true, virt);
-    if (!pt)
-        return Error::NoMemory;
-
-    pt[(virt >> 12) & 0x1FF] = phys | flags;
-
-    // FIX: Force a memory barrier to ensure the PTE is committed to RAM
-    asm volatile("mfence" ::: "memory");
-    // FIX: Explicitly invalidate this specific page in the TLB
-    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
-
-    return Result<void>::success();
-}
-
 void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
 {
-    uint64_t *pdpt = get_next_level_in(target_pml4, (virt >> 39) & 0x1FF, false, virt);
+    uint64_t *pdpt = get_next_level(target_pml4, (virt >> 39) & 0x1FF, 4, false, virt);
     if (!pdpt)
         return;
 
-    uint64_t *pd = get_next_level_in(pdpt, (virt >> 30) & 0x1FF, false, virt);
+    uint64_t *pd = get_next_level(pdpt, (virt >> 30) & 0x1FF, 3, false, virt);
     if (!pd)
         return;
 
-    uint64_t *pt = get_next_level_in(pd, (virt >> 21) & 0x1FF, false, virt);
+    uint64_t *pt = get_next_level(pd, (virt >> 21) & 0x1FF, 2, false, virt);
     if (!pt)
         return;
 
@@ -355,7 +313,7 @@ static void free_page_table_level(uint64_t *table, int level);
             continue;
         }
 
-        uint64_t src_phys = src[i] & 0x000FFFFFFFFFF000ULL; // Mask flags and NX bit
+        uint64_t src_phys = src[i] & 0x000FFFFFFFFFF000ULL;
         uint64_t flags = src[i] & (0xFFFULL | PTE_NX | PTE_SHARED);
 
         if (level == 1) {
@@ -371,7 +329,7 @@ static void free_page_table_level(uint64_t *table, int level);
                 dst[i] = src_phys | flags;
             }
         } else {
-            if (src[i] & (1ULL << 7)) { // PS bit
+            if (src[i] & (1ULL << 7)) {
                 panic("vmm_clone: huge pages in userspace not supported yet!");
             }
 
@@ -442,10 +400,8 @@ uint64_t *vmm_clone_address_space(const uint64_t *src_pml4)
         new_pml4[i] = reinterpret_cast<uint64_t>(new_pdpt) | flags;
     }
 
-    // Synchronize page table writes
-    asm volatile("mfence" ::: "memory");
+    asm volatile("sfence" ::: "memory");
 
-    // Flush the TLB so the CoW write-protection takes effect immediately
     uint64_t current_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(current_cr3));
     if ((current_cr3 & ~0xFFFULL) == (reinterpret_cast<uint64_t>(src_pml4) - g_hhdm_offset)) {
@@ -518,11 +474,12 @@ void vmm_set_page_flags(uint64_t virt, uint64_t flags)
 
     uint64_t index = (virt >> 12) & 0x1FF;
     if (!(pt[index] & PTE_PRESENT))
-        return; // Only update existing mappings
+        return;
 
     uint64_t old_entry = pt[index];
     uint64_t phys = old_entry & 0x000FFFFFFFFFF000ULL;
     uint64_t preserved = old_entry & (PTE_PRESENT | PTE_USER | PTE_SHARED);
+
     pt[index] = phys | flags | preserved;
     asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
 }
@@ -547,28 +504,19 @@ void vmm_protect_kernel()
     };
 
     DEBUG_INFO("Protecting kernel sections...");
-
-    // 1. .text: Read + Execute (No NX)
-    protect_range((uintptr_t)__text_start, (uintptr_t)__text_end, PTE_PRESENT);
-
-    // 2. .rodata: Read-Only + NX
-    protect_range((uintptr_t)__rodata_start, (uintptr_t)__rodata_end, PTE_PRESENT | PTE_NX);
-
-    // 3. .requests: Read-Only + NX
-    protect_range((uintptr_t)__requests_start, (uintptr_t)__requests_end, PTE_PRESENT | PTE_NX);
-
-    // 4. Everything from .data to kernel end: Read + Write + NX
-    protect_range((uintptr_t)__data_start, (uintptr_t)__kernel_end, PTE_PRESENT | PTE_WRITABLE | PTE_NX);
-
+    protect_range(reinterpret_cast<uintptr_t>(__text_start), reinterpret_cast<uintptr_t>(__text_end), PTE_PRESENT);
+    protect_range(reinterpret_cast<uintptr_t>(__rodata_start), reinterpret_cast<uintptr_t>(__rodata_end),
+                  PTE_PRESENT | PTE_NX);
+    protect_range(reinterpret_cast<uintptr_t>(__requests_start), reinterpret_cast<uintptr_t>(__requests_end),
+                  PTE_PRESENT | PTE_NX);
+    protect_range(reinterpret_cast<uintptr_t>(__data_start), reinterpret_cast<uintptr_t>(__kernel_end),
+                  PTE_PRESENT | PTE_WRITABLE | PTE_NX);
     DEBUG_SUCCESS("Kernel sections protected");
 }
 
-// Relocated to a larger hole in the higher half to prevent wrap-around panics.
-// From 0xFFFFFE0000000000 to 0xFFFFFF8000000000 (1.5 TB)
 static uint64_t g_mmio_next_virt = 0xFFFFFE0000000000ULL;
 static const uint64_t g_mmio_limit_virt = 0xFFFFFF8000000000ULL;
-
-// Sanity limit: 16 GB per single mapping request
+static Spinlock g_dma_lock = SPINLOCK_INIT;
 static constexpr uint64_t MASSIVE_MAPPING_THRESHOLD = 16ULL * 1024ULL * 1024ULL * 1024ULL;
 
 struct DMAVirtRange
@@ -582,6 +530,7 @@ static DMAVirtRange g_dma_free_ranges[MAX_DMA_FREE_RANGES] = {};
 
 static uint64_t dma_alloc_virt_range(uint64_t size)
 {
+    spinlock_acquire(&g_dma_lock);
     for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
         if (g_dma_free_ranges[i].size < size)
             continue;
@@ -591,17 +540,23 @@ static uint64_t dma_alloc_virt_range(uint64_t size)
         g_dma_free_ranges[i].size -= size;
         if (g_dma_free_ranges[i].size == 0)
             g_dma_free_ranges[i] = {};
+        spinlock_release(&g_dma_lock);
         return virt;
     }
 
-    if (size == 0 || size > MASSIVE_MAPPING_THRESHOLD)
+    if (size == 0 || size > MASSIVE_MAPPING_THRESHOLD) {
+        spinlock_release(&g_dma_lock);
         panic("vmm: sanity check failed: massive/invalid dma allocation requested");
+    }
 
-    if (g_mmio_next_virt > g_mmio_limit_virt || (g_mmio_limit_virt - g_mmio_next_virt) < size)
+    if (g_mmio_next_virt > g_mmio_limit_virt || (g_mmio_limit_virt - g_mmio_next_virt) < size) {
+        spinlock_release(&g_dma_lock);
         panic("vmm: mmio/dma virtual address space exhausted");
+    }
 
     uint64_t virt = g_mmio_next_virt;
     g_mmio_next_virt += size;
+    spinlock_release(&g_dma_lock);
     return virt;
 }
 
@@ -610,11 +565,37 @@ static void dma_free_virt_range(uint64_t virt, uint64_t size)
     if (virt == 0 || size == 0)
         return;
 
+    spinlock_acquire(&g_dma_lock);
+    bool inserted = false;
+
     for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
-        if (g_dma_free_ranges[i].size == 0) {
-            g_dma_free_ranges[i] = {virt, size};
+        if (g_dma_free_ranges[i].size == 0)
+            continue;
+        if (g_dma_free_ranges[i].virt + g_dma_free_ranges[i].size == virt) {
+            g_dma_free_ranges[i].size += size;
+            inserted = true;
             break;
         }
+        if (virt + size == g_dma_free_ranges[i].virt) {
+            g_dma_free_ranges[i].virt = virt;
+            g_dma_free_ranges[i].size += size;
+            inserted = true;
+            break;
+        }
+    }
+
+    if (!inserted) {
+        for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
+            if (g_dma_free_ranges[i].size == 0) {
+                g_dma_free_ranges[i] = {virt, size};
+                inserted = true;
+                break;
+            }
+        }
+    }
+
+    if (!inserted) {
+        DEBUG_ERROR("vmm: DMA free range list exhausted, leaking %llu bytes", size);
     }
 
     for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
@@ -638,6 +619,7 @@ static void dma_free_virt_range(uint64_t virt, uint64_t size)
             }
         }
     }
+    spinlock_release(&g_dma_lock);
 }
 
 uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
@@ -649,6 +631,7 @@ uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
     uint64_t offset = phys_addr & 0xFFF;
     if (size > UINT64_MAX - offset || size + offset > UINT64_MAX - 0xFFFULL)
         return 0;
+
     uint64_t pages = (size + offset + 0xFFFULL) / 0x1000ULL;
     if (pages == 0 || pages > UINT64_MAX / 0x1000ULL)
         return 0;
@@ -660,8 +643,7 @@ uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
     if (g_mmio_next_virt > g_mmio_limit_virt || (g_mmio_limit_virt - g_mmio_next_virt) < map_size)
         panic("vmm: mmio virtual address space exhausted");
 
-    uint64_t virt_base = g_mmio_next_virt;
-    g_mmio_next_virt += map_size;
+    uint64_t virt_base = dma_alloc_virt_range(map_size);
 
     if (pages > 1024) {
         BOOT_LOG("VMM: Mapping large MMIO region: %llu pages (0x%lx -> 0x%lx)", pages, phys_page, virt_base);
@@ -671,12 +653,11 @@ uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
         if (pages > 16384 && (i % 8192 == 0)) {
             BOOT_LOG("VMM: Mapping progress: %llu/%llu pages...", i, pages);
         }
-        if (!vmm_map_page_no_flush(virt_base + i * 0x1000, phys_page + i * 0x1000, PTE_MMIO)) {
-            while (i > 0) {
-                i--;
-                vmm_unmap_page_in(g_pml4, virt_base + i * 0x1000);
+        if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys_page + i * 0x1000, PTE_MMIO)) {
+            for (uint64_t j = 0; j < i; j++) {
+                vmm_unmap_page_in(g_pml4, virt_base + j * 0x1000);
             }
-            g_mmio_next_virt = virt_base;
+            dma_free_virt_range(virt_base, map_size);
             vmm_flush_tlb_all();
             return 0;
         }
@@ -697,20 +678,20 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
         return alloc;
 
     if (pages > UINT64_MAX / 0x1000ULL) {
-        for (size_t frame = 0; frame < pages; frame++)
+        for (size_t frame = 0; frame < pages; frame++) {
             pmm_free_frame(reinterpret_cast<void *>(reinterpret_cast<uint64_t>(phys_ptr) + frame * 0x1000ULL));
+        }
         return alloc;
     }
 
     uint64_t phys = reinterpret_cast<uint64_t>(phys_ptr);
-    uint64_t size = (uint64_t)pages * 0x1000ULL;
+    uint64_t size = static_cast<uint64_t>(pages) * 0x1000ULL;
     uint64_t virt_base = dma_alloc_virt_range(size);
 
     for (size_t i = 0; i < pages; i++) {
-        if (!vmm_map_page_no_flush(virt_base + i * 0x1000, phys + i * 0x1000, flags)) {
-            while (i > 0) {
-                i--;
-                vmm_unmap_page_in(g_pml4, virt_base + i * 0x1000);
+        if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys + i * 0x1000, flags)) {
+            for (size_t j = 0; j < i; j++) {
+                vmm_unmap_page_in(g_pml4, virt_base + j * 0x1000);
             }
             for (size_t frame = 0; frame < pages; frame++) {
                 pmm_free_frame(reinterpret_cast<void *>(phys + frame * 0x1000));
@@ -726,7 +707,6 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
     alloc.virt = virt_base;
     alloc.phys = phys;
     alloc.size = size;
-
     return alloc;
 }
 
@@ -739,7 +719,6 @@ void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
 {
     if (size == 0)
         return;
-
     if (virt_addr > UINT64_MAX - size || virt_addr + size > UINT64_MAX - 0xFFFULL)
         return;
 
@@ -747,6 +726,7 @@ void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
     uint64_t virt_end = (virt_addr + size + 0xFFFULL) & ~0xFFFULL;
     if (virt_end < virt_start)
         return;
+
     uint64_t pages = (virt_end - virt_start) / 0x1000ULL;
 
     for (uint64_t i = 0; i < pages; i++) {
@@ -756,7 +736,6 @@ void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
             continue;
 
         uint64_t pml4_index = (v >> 39) & 0x1FF;
-        // MUST include PRESENT and WRITABLE flags!
         uint64_t flags = PTE_PRESENT | PTE_WRITABLE | PTE_WC | PTE_SHARED;
         if (g_pml4[pml4_index] & PTE_USER)
             flags |= PTE_USER;
@@ -786,19 +765,26 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     const bool present_fault = (error_code & 0x1) != 0;
     const bool write_fault = (error_code & 0x2) != 0;
 
-    if (present_fault && !write_fault)
-        return false;
-
-    if (fault_addr >= 0x0000800000000000ULL)
-        return false;
-
     Process *curr = process_get_current();
     if (!curr || !curr->vma_list || !curr->page_table)
         return false;
 
-    VMA *vma = vma_find(curr->vma_list, fault_addr);
-    if (!vma)
+    spinlock_acquire(&curr->vma_lock);
+
+    if (present_fault && !write_fault) {
+        spinlock_release(&curr->vma_lock);
         return false;
+    }
+    if (fault_addr >= 0x0000800000000000ULL) {
+        spinlock_release(&curr->vma_lock);
+        return false;
+    }
+
+    VMA *vma = vma_find(curr->vma_list, fault_addr);
+    if (!vma) {
+        spinlock_release(&curr->vma_lock);
+        return false;
+    }
 
     uint64_t vma_flags = vma->flags;
     VMAType vma_type = vma->type;
@@ -808,25 +794,34 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         map_flags |= PTE_USER;
 
     if (write_fault && !(vma_flags & PTE_WRITABLE)) {
+        spinlock_release(&curr->vma_lock);
         return false;
     }
 
-    uint64_t phys = vmm_virt_to_phys(page_vaddr);
+    uint64_t phys = vmm_virt_to_phys_in(curr->page_table, page_vaddr);
 
     if (phys == 0) {
         void *new_frame = pmm_alloc_frame();
-        if (!new_frame)
-            return false;
-
-        if (!vmm_map_page(page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
-            pmm_free_frame(new_frame);
+        if (!new_frame) {
+            spinlock_release(&curr->vma_lock);
             return false;
         }
+
+        kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame))), 4096);
+
+        if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
+            pmm_free_frame(new_frame);
+            spinlock_release(&curr->vma_lock);
+            return false;
+        }
+        asm volatile("invlpg (%0)" ::"r"(page_vaddr) : "memory");
+        spinlock_release(&curr->vma_lock);
         return true;
     }
 
     if (vma_type == VMAType::Shared) {
         vmm_set_page_flags(page_vaddr, map_flags);
+        spinlock_release(&curr->vma_lock);
         return true;
     }
 
@@ -834,23 +829,29 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 
     if (refcount > 1) {
         void *new_frame = pmm_alloc_frame();
-        if (!new_frame)
+        if (!new_frame) {
+            spinlock_release(&curr->vma_lock);
             return false;
+        }
 
         uint8_t *src_virt = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(phys));
         uint8_t *dst_virt = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame)));
-
         kstring::memcpy(dst_virt, src_virt, 4096);
+
         if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
             pmm_free_frame(new_frame);
+            spinlock_release(&curr->vma_lock);
             return false;
         }
         pmm_refcount_dec(reinterpret_cast<void *>(phys));
     } else {
-        if (!vmm_map_page_in(curr->page_table, page_vaddr, phys, map_flags).ok())
+        if (!vmm_map_page_in(curr->page_table, page_vaddr, phys, map_flags).ok()) {
+            spinlock_release(&curr->vma_lock);
             return false;
+        }
     }
 
     asm volatile("invlpg (%0)" ::"r"(page_vaddr) : "memory");
+    spinlock_release(&curr->vma_lock);
     return true;
 }

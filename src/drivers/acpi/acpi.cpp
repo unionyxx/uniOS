@@ -14,7 +14,10 @@ static uint16_t slp_typa = 0;       // Sleep type value for S5
 static uint16_t slp_typb = 0;       // Sleep type value for S5 (optional)
 static uint32_t smi_cmd_port = 0;   // SMI command port
 static uint8_t acpi_enable_val = 0; // Value to write to enable ACPI
+static AcpiGas g_reset_reg = {};    // ACPI Reset Register
+static uint8_t g_reset_value = 0;   // ACPI Reset Value
 static bool g_rsdp_logged = false;
+
 
 // Sleep enable bit
 #define ACPI_SLP_EN (1 << 13)
@@ -269,6 +272,8 @@ void acpi_init()
             pm1b_cnt = fadt->pm1b_cnt_blk;
             smi_cmd_port = fadt->smi_cmd;
             acpi_enable_val = fadt->acpi_enable;
+            g_reset_reg = fadt->reset_reg;
+            g_reset_value = fadt->reset_value;
 
             // Parse DSDT to find S5 sleep type
             if (fadt->dsdt) {
@@ -276,7 +281,7 @@ void acpi_init()
             }
 
             acpi_available = true;
-            DEBUG_SUCCESS("ACPI ready (PM1a=0x%x)", pm1a_cnt);
+            DEBUG_SUCCESS("ACPI ready (PM1a=0x%x, Reset=0x%lx)", pm1a_cnt, g_reset_reg.address);
             return;
         }
     }
@@ -291,6 +296,30 @@ bool acpi_is_available()
 
 // SCI_EN bit in PM1_CNT register
 #define ACPI_SCI_EN (1 << 0)
+
+bool acpi_reboot()
+{
+    if (!acpi_available || g_reset_reg.address == 0)
+        return false;
+
+    DEBUG_INFO("acpi: attempting hardware reset via 0x%lx...", g_reset_reg.address);
+    asm volatile("cli");
+
+    if (g_reset_reg.address_space == 1) { // System I/O
+        outb((uint16_t)g_reset_reg.address, g_reset_value);
+    } else if (g_reset_reg.address_space == 0) { // System Memory
+        // We'd need to map this if it's not in HHDM or already mapped
+        // For simplicity, we assume HHDM or identity for now if low enough
+        if (g_reset_reg.address < 0x100000000ULL) {
+            uint8_t *ptr = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(g_reset_reg.address));
+            *ptr = g_reset_value;
+        }
+    }
+
+    for (volatile int i = 0; i < 1000000; i++)
+        ;
+    return false;
+}
 
 bool acpi_poweroff()
 {

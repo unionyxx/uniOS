@@ -542,7 +542,7 @@ extern "C" void signal_check(SyscallFrame *frame)
 
 [[nodiscard]] static uint64_t sys_kill(uint64_t pid, int sig)
 {
-    if (sig <= 0 || sig > 31)
+    if (sig < 0 || sig > 31)
         return static_cast<uint64_t>(-1);
 
     Process *current = process_get_current();
@@ -554,7 +554,9 @@ extern "C" void signal_check(SyscallFrame *frame)
         return static_cast<uint64_t>(-1);
     }
 
-    signal_send(target, sig);
+    if (sig != 0) {
+        signal_send(target, sig);
+    }
     return 0;
 }
 
@@ -2112,6 +2114,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint64_t size = g_shm_blocks[id].used ? g_shm_blocks[id].size : (uint64_t)-1;
             spinlock_release(&g_shm_lock);
             return size;
+        }
+        case SYS_SHM_GET_OWNER: {
+            int id = (int)arg1;
+            if (id < 0 || id >= 64)
+                return static_cast<uint64_t>(-1);
+            spinlock_acquire(&g_shm_lock);
+            uint32_t owner = g_shm_blocks[id].used ? g_shm_blocks[id].owner_pid : 0;
+            spinlock_release(&g_shm_lock);
+            return (uint64_t)owner;
         }
         case SYS_SHM_UNMAP:
             return shm_unmap_from_process(process_get_current(), (int)arg1) ? 0 : static_cast<uint64_t>(-1);
