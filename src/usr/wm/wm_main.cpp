@@ -206,7 +206,6 @@ static bool window_entry_snapshot_equal_for_commit(const WindowEntrySnapshot &a,
            memcmp(a.title, b.title, sizeof(a.title)) == 0;
 }
 
-// Ensures atomic observation of the shared WindowEntry to prevent tearing over IPC boundaries.
 static bool sample_stable_window_entry(const WindowEntry &entry, WindowEntrySnapshot *out)
 {
     WindowEntrySnapshot a = read_window_entry_snapshot(entry);
@@ -813,10 +812,17 @@ extern "C" int main(int argc, char **argv)
     uint32_t dock_h = static_cast<uint32_t>(shell_dock_window_h());
     int menubar_h = wm_menubar_h();
 
-    int mb_shm = syscall1(SYS_SHM_GET, g_screen.width * gui_system_menubar_canvas_h() * 4);
-    int dk_shm = syscall1(SYS_SHM_GET, dock_w * dock_h * 4);
-    int mb_blur_shm = syscall1(SYS_SHM_GET, g_screen.width * static_cast<uint32_t>(menubar_h) * 4);
-    int dk_blur_shm = syscall1(SYS_SHM_GET, dock_w * dock_h * 4);
+    uint64_t mb_size = (uint64_t)g_screen.width * gui_system_menubar_canvas_h() * 4;
+    uint64_t dk_size = (uint64_t)dock_w * dock_h * 4;
+    uint64_t mb_blur_size = (uint64_t)g_screen.width * static_cast<uint32_t>(menubar_h) * 4;
+    uint64_t dk_blur_size = (uint64_t)dock_w * dock_h * 4;
+    if (mb_size > UINT32_MAX || dk_size > UINT32_MAX || mb_blur_size > UINT32_MAX || dk_blur_size > UINT32_MAX)
+        return 1;
+
+    int mb_shm = syscall1(SYS_SHM_GET, mb_size);
+    int dk_shm = syscall1(SYS_SHM_GET, dk_size);
+    int mb_blur_shm = syscall1(SYS_SHM_GET, mb_blur_size);
+    int dk_blur_shm = syscall1(SYS_SHM_GET, dk_blur_size);
 
     registry->mb_shm_id = mb_shm;
     registry->dk_shm_id = dk_shm;
@@ -1143,7 +1149,7 @@ extern "C" int main(int argc, char **argv)
                 close_context_menu();
                 bool opened = false;
                 if (system_window_hit(g_input.mouse_x, g_input.mouse_y) < 0) {
-                    for (int i = g_window_count - 1; i >= 2; i--) {
+                    for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; i--) {
                         if (!is_window_visible(g_windows[i]))
                             continue;
 
@@ -1188,7 +1194,7 @@ extern "C" int main(int argc, char **argv)
                 mark_cursor_transition_damage(g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind, g_input.mouse_x,
                                               g_input.mouse_y, g_input.cursor_kind);
 
-                if (g_input.hover_frame_index >= 2 && g_input.hover_button >= 0) {
+                if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_button >= 0) {
                     DirtyRect outer = window_outer_bounds(g_windows[g_input.hover_frame_index]);
                     int title_h = wm_title_bar_h() + wm_frame_border() + wm_frame_shadow_offset_y();
                     if (title_h > outer.h)
@@ -1257,7 +1263,7 @@ extern "C" int main(int argc, char **argv)
                 }
 
                 int focus = find_registry_focused_user_window(registry);
-                if (focus >= 2) {
+                if (focus >= WM_FIRST_USER_WINDOW) {
                     post_key_event_to_window(g_windows[focus], EVT_KEY_DOWN, ev.key.c, ev.key.scancode);
                 }
             } else if (ev.type == EVT_MOUSE_SCROLL) {
@@ -1287,7 +1293,7 @@ extern "C" int main(int argc, char **argv)
                     continue;
 
                 int tgt = -1;
-                for (int i = g_window_count - 1; i >= 2; i--) {
+                for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; i--) {
                     if (is_window_visible(g_windows[i]) &&
                         point_targets_window_client_for_input(g_windows[i], g_input.mouse_x, g_input.mouse_y)) {
                         tgt = i;
@@ -1314,7 +1320,7 @@ extern "C" int main(int argc, char **argv)
                     if (top >= 2)
                         reorder = send_window_to_back(top);
                 } else if (ev.mouse.scroll_y < 0) {
-                    for (int i = 2; i < g_window_count; i++) {
+                    for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
                         if (is_window_visible(g_windows[i])) {
                             reorder = bring_window_to_front(i);
                             break;
@@ -1404,7 +1410,7 @@ extern "C" int main(int argc, char **argv)
 
         if (registry->window_count > 2) {
             uint32_t max_windows = registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count;
-            for (uint32_t i = 2; i < max_windows; i++) {
+            for (uint32_t i = WM_FIRST_USER_WINDOW; i < max_windows; i++) {
                 WindowEntry &e = registry->windows[i];
                 if (!e.ready)
                     continue;
@@ -1448,6 +1454,15 @@ extern "C" int main(int argc, char **argv)
                 if (gui_shm_id_is_valid(entry_snapshot.shm_id) && entry_snapshot.shm_id != w.shm_id) {
                     uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
                     if (shm_owner != entry_snapshot.owner_pid && shm_owner != 0) {
+                        w.needs_full_redraw = true;
+                        continue;
+                    }
+
+                    uint64_t req_size =
+                        (uint64_t)(entry_snapshot.buffer_w > 0 ? entry_snapshot.buffer_w : entry_snapshot.w) *
+                        (entry_snapshot.buffer_h > 0 ? entry_snapshot.buffer_h : entry_snapshot.h) * 4;
+                    uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)entry_snapshot.shm_id);
+                    if (shm_size == (uint64_t)-1 || req_size > shm_size) {
                         w.needs_full_redraw = true;
                         continue;
                     }
@@ -1573,6 +1588,17 @@ extern "C" int main(int argc, char **argv)
                      g_context_menu.open || g_storage_prompt.visible;
         bool resizing = manip && g_input.drag_edges != RESIZE_NONE;
         uint32_t limit = g_display_copy_path ? 1u : MAX_PENDING_PRESENTS;
+
+        // Reap dead processes before compositing to avoid dereferencing stale SHM buffers.
+        reap_exited_children();
+        for (int i = 0; i < g_window_count;) {
+            Window &w = g_windows[i];
+            if (w.owner_pid != 0 && !process_is_alive(w.owner_pid)) {
+                close_window(i);
+                continue;
+            }
+            ++i;
+        }
 
         if (!g_dirty_frame_ready && g_dirty_count > 0) {
             if (g_window_visibility_cache_dirty) {
@@ -1767,6 +1793,8 @@ extern "C" int main(int argc, char **argv)
         } else if (!g_dirty_frame_ready || action == wm::PresentPolicyDecision::Skip) {
             if (action == wm::PresentPolicyDecision::Skip)
                 g_frame_stats.frames_skipped++;
+            // Flush deferred settings persist during idle to avoid blocking I/O during compositing.
+            flush_pending_settings_persist(registry);
             yield();
         } else {
             uint32_t tgt = wm::completion_target_for_available_slot(last_seq, limit);
@@ -1787,15 +1815,6 @@ extern "C" int main(int argc, char **argv)
                 apply_display_event(ev_w);
                 drain_display_events();
             }
-        }
-        reap_exited_children();
-        for (int i = 0; i < g_window_count;) {
-            Window &w = g_windows[i];
-            if (w.owner_pid != 0 && !process_is_alive(w.owner_pid)) {
-                close_window(i);
-                continue;
-            }
-            ++i;
         }
     }
     return 0;

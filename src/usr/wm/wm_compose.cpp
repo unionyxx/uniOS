@@ -42,7 +42,7 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
     }
 
     if (g_context_menu.open && rect_intersection(r, context_menu_bounds(), nullptr))
-        draw_context_menu_overlay(registry);
+        draw_context_menu_overlay_clipped(r, registry);
     if (g_storage_prompt.visible)
         draw_storage_prompt_overlay_clipped(r);
     if (g_index.active)
@@ -98,14 +98,15 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         if (!g_window_visible_cache[i] || !w.buffer || !w.transparent)
             continue;
 
-        if (!dirty_rects_intersect(r, g_window_outer_cache[i]))
+        DirtyRect visible = {};
+        if (!rect_intersection(r, g_window_outer_cache[i], &visible))
             continue;
 
-        draw_window_client_clipped(&g_backbuffer, w, r);
+        draw_window_client_clipped(&g_backbuffer, w, visible);
     }
 
     if (g_context_menu.open && rect_intersection(r, context_menu_bounds(), nullptr))
-        draw_context_menu_overlay(registry);
+        draw_context_menu_overlay_clipped(r, registry);
     if (g_storage_prompt.visible)
         draw_storage_prompt_overlay_clipped(r);
     if (g_index.active)

@@ -21,6 +21,7 @@
 #include "../shell_layout.h"
 
 #define MAX_WINDOWS 32
+static constexpr int WM_FIRST_USER_WINDOW = 2; // Indices 0=menubar, 1=dock are system windows
 #define MAX_DIRTY_RECTS 128
 #define MAX_VISIBLE_REGIONS 512
 #define CURSOR_WIDTH 16
@@ -343,6 +344,8 @@ void sync_control_center_state_from_registry(const Registry *registry);
 
 void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry);
 void draw_control_center_overlay_clipped(const DirtyRect &clip);
+int control_panel_card_h();
+DirtyRect control_panel_item_rect(ControlPanelItem item);
 
 // Key codes.
 #define KEY_UP_ARROW 0x80
@@ -351,6 +354,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip);
 #define KEY_RIGHT_ARROW 0x83
 
 void persist_wm_settings();
+void flush_pending_settings_persist(const Registry *registry);
 void load_wm_settings();
 void enqueue_damage_rect(int x, int y, int w, int h);
 extern bool g_window_visibility_cache_dirty;
@@ -614,6 +618,7 @@ void capture_shell_backdrop_for_rect(const DirtyRect &rect, Registry *registry);
 void flush_shell_blur_updates(Registry *registry);
 bool move_backbuffer_rect(const DirtyRect &old_rect, const DirtyRect &new_rect);
 void draw_context_menu_overlay(const Registry *registry);
+void draw_context_menu_overlay_clipped(const DirtyRect &clip, const Registry *registry);
 void draw_storage_prompt_overlay();
 bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                           const Registry *registry);

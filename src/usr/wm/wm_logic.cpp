@@ -488,14 +488,26 @@ static bool subtract_region_list(DirtyRect *regions, int *region_count, const Di
         int o_b = overlap.y + overlap.h, c_b = current.y + current.h;
         int o_r = overlap.x + overlap.w, c_r = current.x + current.w;
 
-        if (current.y < overlap.y)
+        if (current.y < overlap.y) {
+            if (*region_count >= MAX_VISIBLE_REGIONS)
+                return false;
             regions[(*region_count)++] = {current.x, current.y, current.w, overlap.y - current.y};
-        if (o_b < c_b)
+        }
+        if (o_b < c_b) {
+            if (*region_count >= MAX_VISIBLE_REGIONS)
+                return false;
             regions[(*region_count)++] = {current.x, o_b, current.w, c_b - o_b};
-        if (current.x < overlap.x)
+        }
+        if (current.x < overlap.x) {
+            if (*region_count >= MAX_VISIBLE_REGIONS)
+                return false;
             regions[(*region_count)++] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
-        if (o_r < c_r)
+        }
+        if (o_r < c_r) {
+            if (*region_count >= MAX_VISIBLE_REGIONS)
+                return false;
             regions[(*region_count)++] = {o_r, overlap.y, c_r - o_r, overlap.h};
+        }
     }
     return true;
 }
@@ -620,7 +632,7 @@ bool rect_intersects_window_chrome(const Window &w, const DirtyRect &r)
 
 int find_top_visible_user_window()
 {
-    for (int i = g_window_count - 1; i >= 2; i--)
+    for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; i--)
         if (is_window_visible(g_windows[i]) && is_user_window(g_windows[i]))
             return i;
     return -1;
@@ -651,10 +663,10 @@ int find_window_by_shm(int shm_id)
 
 int find_registry_focused_user_window(const Registry *registry)
 {
-    if (!registry || registry->focused_window < 2 || registry->focused_window >= MAX_WINDOWS)
+    if (!registry || registry->focused_window < WM_FIRST_USER_WINDOW || registry->focused_window >= MAX_WINDOWS)
         return -1;
     const WindowEntry *focused_entry = &registry->windows[registry->focused_window];
-    for (int i = 2; i < g_window_count; i++) {
+    for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
         if (g_windows[i].entry == focused_entry && is_window_visible(g_windows[i]) && is_user_window(g_windows[i]))
             return i;
     }
@@ -685,13 +697,13 @@ void clear_window_focus(Registry *registry)
     int previous = find_registry_focused_user_window(registry);
     focus_window_owner(nullptr);
     publish_focus(registry, nullptr);
-    if (previous >= 2 && previous < g_window_count && is_window_visible(g_windows[previous]))
+    if (previous >= WM_FIRST_USER_WINDOW && previous < g_window_count && is_window_visible(g_windows[previous]))
         mark_window_chrome_damage(g_windows[previous]);
 }
 
 static void clear_hover_feedback_state()
 {
-    if (g_input.hover_frame_index >= 2 && g_input.hover_frame_index < g_window_count)
+    if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_frame_index < g_window_count)
         mark_window_chrome_damage(g_windows[g_input.hover_frame_index]);
     g_input.hover_frame_index = -1;
     g_input.hover_resize_edges = RESIZE_NONE;
@@ -700,7 +712,7 @@ static void clear_hover_feedback_state()
 
 int bring_window_to_front(int index)
 {
-    if (index < 2 || index >= g_window_count || index == g_window_count - 1)
+    if (index < WM_FIRST_USER_WINDOW || index >= g_window_count || index == g_window_count - 1)
         return index;
     Window temp = g_windows[index];
     for (int i = index; i < g_window_count - 1; i++)
@@ -711,10 +723,10 @@ int bring_window_to_front(int index)
 
 int send_window_to_back(int index)
 {
-    if (index < 2 || index >= g_window_count || index == 2)
+    if (index < WM_FIRST_USER_WINDOW || index >= g_window_count || index == WM_FIRST_USER_WINDOW)
         return index;
     Window temp = g_windows[index];
-    for (int i = index; i > 2; i--)
+    for (int i = index; i > WM_FIRST_USER_WINDOW; i--)
         g_windows[i] = g_windows[i - 1];
     g_windows[2] = temp;
     return 2;
@@ -926,7 +938,7 @@ static bool compositor_state_allows_fast_move()
 
 static bool can_fast_move_window(int moving_index, const DirtyRect &old_outer, const DirtyRect &new_outer)
 {
-    if (moving_index < 2 || moving_index != g_window_count - 1)
+    if (moving_index < WM_FIRST_USER_WINDOW || moving_index != g_window_count - 1)
         return false;
     if (!compositor_state_allows_fast_move())
         return false;
@@ -1007,7 +1019,7 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
 
         bool moved_fast = false;
         if (moved && !size_changed && !w.transparent && g_input.pointer_down && g_input.drag_edges == RESIZE_NONE &&
-            g_input.drag_index >= 2 && g_input.drag_index < g_window_count &&
+            g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count &&
             g_windows[g_input.drag_index].entry == w.entry) {
             DirtyRect old_outer = window_outer_bounds(old);
             DirtyRect new_outer = window_outer_bounds(w);
@@ -1019,6 +1031,11 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
             mark_presentbuffer_slots_stale(rect_union(window_outer_bounds(old), window_outer_bounds(w)));
             mark_exposed_transition_damage(window_outer_bounds(old), window_outer_bounds(w));
             mark_window_decoration_damage(w);
+
+            // Ensure the old drop shadow is cleared when moving windows quickly.
+            int shadow_pad = wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y() ? wm_frame_shadow_offset_x()
+                                                                                     : wm_frame_shadow_offset_y();
+            enqueue_damage_rect_expanded(window_outer_bounds(old), shadow_pad);
         } else {
             mark_window_transition_damage(old, w);
         }
@@ -1026,8 +1043,7 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
     }
 
     w.entry->active = true;
-    if (context_menu_targets_window_entry(w.entry))
-        close_context_menu();
+    close_context_menu();
     asm volatile("sfence" ::: "memory");
 }
 
@@ -1039,13 +1055,13 @@ int focus_window(int index, bool raise)
     WindowEntry *prev_entry = nullptr;
     WindowEntry *hover_entry = nullptr;
     int prev_idx = find_registry_focused_user_window(gui_registry());
-    if (prev_idx >= 2 && prev_idx < g_window_count)
+    if (prev_idx >= WM_FIRST_USER_WINDOW && prev_idx < g_window_count)
         prev_entry = g_windows[prev_idx].entry;
-    if (g_input.hover_frame_index >= 2 && g_input.hover_frame_index < g_window_count)
+    if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_frame_index < g_window_count)
         hover_entry = g_windows[g_input.hover_frame_index].entry;
 
     bool target_was_focused = (prev_idx == index);
-    if (!target_was_focused && prev_idx >= 2 && prev_idx < g_window_count && target_entry &&
+    if (!target_was_focused && prev_idx >= WM_FIRST_USER_WINDOW && prev_idx < g_window_count && target_entry &&
         g_windows[prev_idx].entry == target_entry) {
         target_was_focused = true;
     }
@@ -1064,7 +1080,7 @@ int focus_window(int index, bool raise)
     Window &w = g_windows[index];
     if (w.entry && w.entry->owner_pid)
         w.owner_pid = w.entry->owner_pid;
-    if (index >= 2 && is_window_visible(w)) {
+    if (index >= WM_FIRST_USER_WINDOW && is_window_visible(w)) {
         focus_window_owner(&w);
         publish_focus(gui_registry(), &w);
     } else {
@@ -1091,7 +1107,7 @@ int focus_window(int index, bool raise)
 
 void restore_window(int index, bool raise)
 {
-    if (index < 2 || index >= g_window_count)
+    if (index < WM_FIRST_USER_WINDOW || index >= g_window_count)
         return;
     Window &w = g_windows[index];
     if (!w.entry)
@@ -1101,8 +1117,7 @@ void restore_window(int index, bool raise)
     w.entry->state = WIN_NORMAL;
     w.active = true;
     set_window_bounds(w, w.entry->restore_x, w.entry->restore_y, rw, rh);
-    if (context_menu_targets_window_entry(w.entry))
-        close_context_menu();
+    close_context_menu();
     invalidate_window_visibility_cache();
     if (raise)
         focus_window(index, true);
@@ -1110,7 +1125,7 @@ void restore_window(int index, bool raise)
 
 void maximize_window(int index)
 {
-    if (index < 2 || index >= g_window_count || !g_windows[index].entry)
+    if (index < WM_FIRST_USER_WINDOW || index >= g_window_count || !g_windows[index].entry)
         return;
     Window &w = g_windows[index];
     if (w.entry->state != WIN_MAXIMIZED) {
@@ -1125,15 +1140,14 @@ void maximize_window(int index)
                       (int)g_screen.width - wm_desktop_margin() * 2,
                       (int)g_screen.height - wm_dock_reserved_h() -
                           (wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin()));
-    if (context_menu_targets_window_entry(w.entry))
-        close_context_menu();
+    close_context_menu();
     invalidate_window_visibility_cache();
     focus_window(index, true);
 }
 
 void toggle_maximize_window(int index)
 {
-    if (index >= 2 && index < g_window_count && g_windows[index].entry) {
+    if (index >= WM_FIRST_USER_WINDOW && index < g_window_count && g_windows[index].entry) {
         if (g_windows[index].entry->state == WIN_MAXIMIZED)
             restore_window(index, true);
         else
@@ -1143,7 +1157,7 @@ void toggle_maximize_window(int index)
 
 void minimize_window(int index)
 {
-    if (index < 2 || index >= g_window_count || !g_windows[index].entry)
+    if (index < WM_FIRST_USER_WINDOW || index >= g_window_count || !g_windows[index].entry)
         return;
     const Window &w = g_windows[index];
     if (w.entry->state == WIN_NORMAL) {
@@ -1170,20 +1184,19 @@ void minimize_window(int index)
         g_input.hover_button = -1;
     }
 
-    if (context_menu_targets_window_entry(w.entry))
-        close_context_menu();
+    close_context_menu();
     invalidate_window_visibility_cache();
 
     int focus_idx = find_top_visible_user_window();
     focus_window_owner(focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
     publish_focus(gui_registry(), focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
-    if (focus_idx >= 2)
+    if (focus_idx >= WM_FIRST_USER_WINDOW)
         mark_window_chrome_damage(g_windows[focus_idx]);
 }
 
 void close_window(int index)
 {
-    if (index < 2 || index >= g_window_count)
+    if (index < WM_FIRST_USER_WINDOW || index >= g_window_count)
         return;
     Window doomed = g_windows[index];
     uint32_t owner = doomed.owner_pid;
@@ -1193,8 +1206,7 @@ void close_window(int index)
     DirtyRect covered = window_opaque_bounds(doomed);
     capture_shell_backdrop_for_rect(covered, gui_registry());
 
-    if (context_menu_targets_window_entry(doomed.entry))
-        close_context_menu();
+    close_context_menu();
     if (gui_shm_id_is_valid(doomed.shm_id))
         syscall1(SYS_SHM_UNMAP, (uint64_t)doomed.shm_id);
     gui_destroy_surface(&doomed.decoration_cache);
@@ -1230,7 +1242,7 @@ void close_window(int index)
     int focus_idx = find_top_visible_user_window();
     focus_window_owner(focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
     publish_focus(gui_registry(), focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
-    if (focus_idx >= 2)
+    if (focus_idx >= WM_FIRST_USER_WINDOW)
         mark_window_chrome_damage(g_windows[focus_idx]);
     if (owner)
         syscall2(SYS_KILL, owner, SIGTERM);
@@ -1646,7 +1658,7 @@ static void publish_settings_changed(Registry *registry)
 
 static void show_desktop_windows()
 {
-    for (int i = g_window_count - 1; i >= 2; i--)
+    for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; i--)
         if (is_window_visible(g_windows[i]) && is_user_window(g_windows[i]))
             minimize_window(i);
 }
@@ -1802,13 +1814,13 @@ static DirtyRect control_center_damage_bounds()
     return damage;
 }
 
-static int control_panel_card_h()
+int control_panel_card_h()
 {
     int h = gui_scaled_metric(54);
     return h < gui_scaled_metric(44) ? gui_scaled_metric(44) : h;
 }
 
-static DirtyRect control_panel_item_rect(ControlPanelItem item)
+DirtyRect control_panel_item_rect(ControlPanelItem item)
 {
     DirtyRect box = control_center_bounds();
     int pad = gui_space_1_5();
@@ -2246,13 +2258,13 @@ static int resolve_context_menu_target_index()
         return -1;
     if (g_context_menu.target_entry) {
         int idx = find_window_by_entry(g_context_menu.target_entry);
-        if (idx >= 2 && idx < g_window_count && is_window_visible(g_windows[idx]) &&
+        if (idx >= WM_FIRST_USER_WINDOW && idx < g_window_count && is_window_visible(g_windows[idx]) &&
             g_windows[idx].entry == g_context_menu.target_entry) {
             g_context_menu.target_index = idx;
             return idx;
         }
     }
-    if (g_context_menu.target_index >= 2 && g_context_menu.target_index < g_window_count) {
+    if (g_context_menu.target_index >= WM_FIRST_USER_WINDOW && g_context_menu.target_index < g_window_count) {
         const Window &w = g_windows[g_context_menu.target_index];
         if (w.entry && is_window_visible(w)) {
             g_context_menu.target_entry = w.entry;
@@ -2272,7 +2284,7 @@ static bool ensure_context_menu_target_valid()
 {
     if (!g_context_menu.open || g_context_menu.kind != CONTEXT_MENU_WINDOW)
         return true;
-    if (resolve_context_menu_target_index() >= 2)
+    if (resolve_context_menu_target_index() >= WM_FIRST_USER_WINDOW)
         return true;
     close_context_menu();
     return false;
@@ -2293,7 +2305,7 @@ int build_context_menu_items(const Registry *registry, GuiMenuItem *items, int m
     }
     if (g_context_menu.kind == CONTEXT_MENU_WINDOW && max_items >= 5) {
         int target_index = resolve_context_menu_target_index();
-        bool can_act = target_index >= 2 && g_windows[target_index].entry;
+        bool can_act = target_index >= WM_FIRST_USER_WINDOW && g_windows[target_index].entry;
         bool maxed = can_act && g_windows[target_index].entry->state == WIN_MAXIMIZED;
         items[0] = {maxed ? "Restore Window" : "Maximize Window", can_act, false};
         items[1] = {"Minimize Window", can_act, false};
@@ -2319,9 +2331,10 @@ void open_context_menu(const Registry *registry, ContextMenuKind kind, int targe
     g_context_menu.open = true;
     g_context_menu.kind = kind;
     g_context_menu.target_index = target_index;
-    g_context_menu.target_entry = (kind == CONTEXT_MENU_WINDOW && target_index >= 2 && target_index < g_window_count)
-                                      ? g_windows[target_index].entry
-                                      : nullptr;
+    g_context_menu.target_entry =
+        (kind == CONTEXT_MENU_WINDOW && target_index >= WM_FIRST_USER_WINDOW && target_index < g_window_count)
+            ? g_windows[target_index].entry
+            : nullptr;
 
     GuiMenuItem items[8];
     int count = build_context_menu_items(registry, items, 8);
@@ -2377,7 +2390,8 @@ void update_context_menu_hover(const Registry *registry, int mx, int my)
 
 static void launch_or_focus_app(Registry *registry, const char *title, const char *path)
 {
-    for (uint32_t i = 2; i < (registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count); i++) {
+    for (uint32_t i = WM_FIRST_USER_WINDOW;
+         i < (registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count); i++) {
         WindowEntry &e = registry->windows[i];
         if (!e.ready || !gui_shm_id_is_valid(e.shm_id) || !e.owner_pid || strcmp(e.title, title) != 0)
             continue;
@@ -2402,7 +2416,7 @@ bool activate_context_menu_item(Registry *registry, int index)
             launch_or_focus_app(registry, "Terminal", "/bin/terminal.elf");
         else if (index == 1)
             launch_or_focus_app(registry, "Files", "/bin/files.elf");
-        else if (index == 2)
+        else if (index == WM_FIRST_USER_WINDOW)
             launch_or_focus_app(registry, "Settings", "/bin/preferences.elf");
         else if (index == 3)
             open_storage_prompt();
@@ -2415,7 +2429,7 @@ bool activate_context_menu_item(Registry *registry, int index)
     }
     if (g_context_menu.kind == CONTEXT_MENU_WINDOW) {
         int target_index = resolve_context_menu_target_index();
-        if (target_index < 2) {
+        if (target_index < WM_FIRST_USER_WINDOW) {
             close_context_menu();
             return false;
         }
@@ -2432,7 +2446,7 @@ bool activate_context_menu_item(Registry *registry, int index)
                 t.entry->request_maximize = true;
         } else if (index == 1)
             t.entry->request_minimize = true;
-        else if (index == 2)
+        else if (index == WM_FIRST_USER_WINDOW)
             t.entry->request_close = true;
         else if (index == 3)
             launch_or_focus_app(registry, "Settings", "/bin/preferences.elf");
@@ -2560,9 +2574,15 @@ bool persist_runtime_settings(const Registry *registry)
 void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
                       bool transparent)
 {
-    if (w <= 0 || h <= 0 || !gui_shm_id_is_valid(shm_id)) {
+    int bw = (entry && entry->buffer_w > 0) ? entry->buffer_w : w;
+    int bh = (entry && entry->buffer_h > 0) ? entry->buffer_h : h;
+    uint64_t req_size = (uint64_t)bw * bh * 4;
+    uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)shm_id);
+
+    // Bounds check shm to prevent out-of-bounds access
+    if (w <= 0 || h <= 0 || !gui_shm_id_is_valid(shm_id) || shm_size == (uint64_t)-1 || req_size > shm_size) {
         if (g_add_fail_logs < 8) {
-            LOG_WARN("wm", "add skipped: shm=%d", shm_id);
+            LOG_WARN("wm", "add skipped: shm=%d (invalid bounds/size)", shm_id);
             g_add_fail_logs++;
         }
         return;
@@ -2584,8 +2604,6 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
         return;
     }
 
-    int bw = (entry && entry->buffer_w > 0) ? entry->buffer_w : w;
-    int bh = (entry && entry->buffer_h > 0) ? entry->buffer_h : h;
     w = w > bw ? bw : w;
     h = h > bh ? bh : h;
 
@@ -2664,7 +2682,7 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
         return;
     }
 
-    if (g_input.pointer_down && g_input.drag_index >= 2 && g_input.drag_index < g_window_count) {
+    if (g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count) {
         Window &w = g_windows[g_input.drag_index];
         if (g_input.drag_edges == RESIZE_NONE) {
             int nx = g_input.mouse_x - g_input.drag_offset_x;
@@ -2726,9 +2744,9 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
     if (pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y))
         return;
 
-    if (g_input.drag_index < 2) {
+    if (g_input.drag_index < WM_FIRST_USER_WINDOW) {
         int focus = find_registry_focused_user_window(registry);
-        if (focus >= 2) {
+        if (focus >= WM_FIRST_USER_WINDOW) {
             const Window &fw = g_windows[focus];
             bool hit = fw.transparent ? point_hits_window_visible_pixel(fw, g_input.mouse_x, g_input.mouse_y)
                                       : point_in_client(fw, g_input.mouse_x, g_input.mouse_y);
@@ -2742,7 +2760,7 @@ void update_hover_feedback()
 {
     int nhf = -1, nre = RESIZE_NONE, nhb = -1;
     if (!g_input.pointer_down && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y)) {
-        for (int i = g_window_count - 1; i >= 2; i--) {
+        for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; i--) {
             const Window &w = g_windows[i];
             if (!is_window_visible(w))
                 continue;
@@ -2769,7 +2787,7 @@ void update_hover_feedback()
             break;
         }
     }
-    if (nhf >= 2 && nhf != g_window_count - 1) {
+    if (nhf >= WM_FIRST_USER_WINDOW && nhf != g_window_count - 1) {
         nhf = -1;
         nre = RESIZE_NONE;
         nhb = -1;
@@ -2777,12 +2795,12 @@ void update_hover_feedback()
     if (nhf == g_input.hover_frame_index && nre == g_input.hover_resize_edges && nhb == g_input.hover_button)
         return;
     int old_hover_frame = g_input.hover_frame_index;
-    if (old_hover_frame >= 2 && old_hover_frame < g_window_count)
+    if (old_hover_frame >= WM_FIRST_USER_WINDOW && old_hover_frame < g_window_count)
         mark_window_chrome_damage(g_windows[old_hover_frame]);
     g_input.hover_frame_index = nhf;
     g_input.hover_resize_edges = nre;
     g_input.hover_button = nhb;
-    if (g_input.hover_frame_index >= 2 && g_input.hover_frame_index < g_window_count &&
+    if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_frame_index < g_window_count &&
         g_input.hover_frame_index != old_hover_frame)
         mark_window_chrome_damage(g_windows[g_input.hover_frame_index]);
 }
@@ -2799,11 +2817,11 @@ void update_cursor_kind()
         return h ? GUI_CURSOR_RESIZE_H : (v ? GUI_CURSOR_RESIZE_V : GUI_CURSOR_ARROW);
     };
     GuiCursorKind n_k = GUI_CURSOR_ARROW;
-    if (g_input.pointer_down && g_input.drag_index >= 2)
+    if (g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW)
         n_k = g_input.drag_edges == RESIZE_NONE ? GUI_CURSOR_MOVE : ck_edges(g_input.drag_edges);
     else if (g_input.hover_resize_edges != RESIZE_NONE)
         n_k = ck_edges(g_input.hover_resize_edges);
-    else if (g_input.hover_frame_index >= 2 && g_input.hover_button < 0)
+    else if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_button < 0)
         n_k = GUI_CURSOR_MOVE;
     if (!g_input.pointer_down)
         reset_window_snap_state();
@@ -2813,25 +2831,23 @@ void update_cursor_kind()
         g_input.cursor_kind = n_k;
     }
 }
+// P3-8: Deferred persist — avoid blocking filesystem I/O on the compositor main loop.
+// Callers set the pending flag; the main loop flushes during idle.
+static bool g_persist_settings_pending = false;
+
 void persist_wm_settings()
 {
-    char config[512];
-    snprintf(config, sizeof(config),
-             "theme=%s\n"
-             "show_desktop_grid=%d\n"
-             "clock_show_seconds=%d\n"
-             "launch_terminal_on_boot=%d\n"
-             "ethernet_enabled=%d\n"
-             "ethernet_use_dhcp=%d\n"
-             "animations_enabled=%d\n"
-             "transparency_level=%u\n"
-             "volume_level=%u\n",
-             g_control_center.dark_mode ? "dark" : "light", g_control_center.desktop_grid ? 1 : 0,
-             g_control_center.clock_seconds ? 1 : 0, (g_system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) ? 1 : 0,
-             g_control_center.network_enabled ? 1 : 0, 1, g_control_center.animations_enabled ? 1 : 0,
-             g_control_center.transparency_level, g_control_center.volume);
+    g_persist_settings_pending = true;
+}
 
-    cfg_write_text_file(SYSTEM_CONFIG_PATH, config);
+void flush_pending_settings_persist(const Registry *registry)
+{
+    if (!g_persist_settings_pending || !registry)
+        return;
+    g_persist_settings_pending = false;
+    // P3-7: Unified persist — uses persist_runtime_settings for a single
+    // serialization format and the registry as the single source of truth.
+    persist_runtime_settings(registry);
 }
 
 void load_wm_settings()

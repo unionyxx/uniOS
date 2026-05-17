@@ -20,6 +20,20 @@ void draw_context_menu_overlay(const Registry *registry)
                             g_context_menu.hovered_index);
 }
 
+void draw_context_menu_overlay_clipped(const DirtyRect &clip, const Registry *registry)
+{
+    if (!g_context_menu.open)
+        return;
+    DirtyRect bounds = context_menu_bounds();
+    if (!rect_intersection(clip, bounds, nullptr))
+        return;
+    GuiMenuItem items[8];
+    int count = build_context_menu_items(registry, items, 8);
+    if (count > 0)
+        gui_draw_popup_menu(&g_backbuffer, g_context_menu.x, g_context_menu.y, g_context_menu.w, items, count,
+                            g_context_menu.hovered_index);
+}
+
 void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 {
     if (!g_storage_prompt.visible || !g_backbuffer.buffer)
@@ -207,64 +221,19 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     }
 }
 
-static int wm_control_panel_card_h()
-{
-    int h = gui_scaled_metric(54);
-    return h < gui_scaled_metric(44) ? gui_scaled_metric(44) : h;
-}
-
-static DirtyRect wm_control_item_rect(ControlPanelItem item)
-{
-    DirtyRect box = control_center_bounds();
-    int pad = gui_space_1_5();
-    int gap = gui_space_1();
-    int header_h = gui_card_header_h();
-    int card_h = wm_control_panel_card_h();
-    int half_w = (box.w - pad * 2 - gap) / 2;
-    int y = box.y + header_h + pad;
-
-    if (item == CONTROL_ITEM_NETWORK)
-        return {box.x + pad, y, half_w, card_h};
-    if (item == CONTROL_ITEM_DARK_MODE)
-        return {box.x + pad + half_w + gap, y, half_w, card_h};
-
-    y += card_h + gap;
-    if (item == CONTROL_ITEM_DESKTOP_GRID)
-        return {box.x + pad, y, half_w, card_h};
-    if (item == CONTROL_ITEM_CLOCK_SECONDS)
-        return {box.x + pad + half_w + gap, y, half_w, card_h};
-
-    y += card_h + gap;
-    if (item == CONTROL_ITEM_ANIMATIONS)
-        return {box.x + pad, y, half_w, card_h};
-    if (item == CONTROL_ITEM_TRANSPARENCY)
-        return {box.x + pad + half_w + gap, y, half_w, card_h};
-
-    y += card_h + gap;
-    if (item == CONTROL_ITEM_VOLUME)
-        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(62)};
-
-    int action_h = gui_app_control_h();
-    int action_y = box.y + box.h - pad - action_h;
-    int action_w = (box.w - pad * 2 - gap) / 2;
-    if (item == CONTROL_ITEM_STORAGE)
-        return {box.x + pad, action_y, action_w, action_h};
-    if (item == CONTROL_ITEM_SETTINGS)
-        return {box.x + pad + action_w + gap, action_y, action_w, action_h};
-
-    return {0, 0, 0, 0};
-}
+// Layout functions are defined in wm_logic.cpp and declared in wm_core.h:
+// control_panel_card_h(), control_panel_item_rect()
 
 static void draw_control_toggle(ControlPanelItem item, const char *label, const char *detail, bool on)
 {
-    DirtyRect r = wm_control_item_rect(item);
+    DirtyRect r = control_panel_item_rect(item);
     gui_app_draw_toggle_row(&g_backbuffer, r.x, r.y, r.w, r.h, label, detail, on, false,
                             g_control_center.hovered_item == item);
 }
 
 static void draw_control_volume_card()
 {
-    DirtyRect r = wm_control_item_rect(CONTROL_ITEM_VOLUME);
+    DirtyRect r = control_panel_item_rect(CONTROL_ITEM_VOLUME);
     bool hovered = g_control_center.hovered_item == CONTROL_ITEM_VOLUME || g_control_center.volume_dragging;
     uint32_t bg = hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface;
     int card_r = gui_radius_md();
@@ -346,8 +315,8 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
                         g_control_center.transparency_level < 255);
     draw_control_volume_card();
 
-    DirtyRect storage = wm_control_item_rect(CONTROL_ITEM_STORAGE);
-    DirtyRect settings = wm_control_item_rect(CONTROL_ITEM_SETTINGS);
+    DirtyRect storage = control_panel_item_rect(CONTROL_ITEM_STORAGE);
+    DirtyRect settings = control_panel_item_rect(CONTROL_ITEM_SETTINGS);
     gui_app_draw_button(&g_backbuffer, storage.x, storage.y, storage.w, storage.h, "Storage", false, false,
                         g_control_center.hovered_item == CONTROL_ITEM_STORAGE);
     gui_app_draw_button(&g_backbuffer, settings.x, settings.y, settings.w, settings.h, "Settings", true, false,

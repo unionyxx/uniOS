@@ -111,7 +111,9 @@ int color_luma(uint32_t color)
 uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
 {
     uint32_t src_alpha = (src >> 24);
-    src_alpha = (src_alpha * coverage * 257u) >> 16; // Fast div255
+    // Apply coverage using accurate div255: (x + 128 + (x >> 8)) >> 8
+    uint32_t sa_cov = src_alpha * (uint32_t)coverage + 128u;
+    src_alpha = (sa_cov + (sa_cov >> 8)) >> 8;
     if (!src_alpha)
         return dst;
     if (src_alpha == 255)
@@ -123,11 +125,40 @@ uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
     uint32_t sr = (src >> 16) & 0xFFu, sg = (src >> 8) & 0xFFu, sb = src & 0xFFu;
     uint32_t dr = (dst >> 16) & 0xFFu, dg = (dst >> 8) & 0xFFu, db = dst & 0xFFu;
 
-    // Fast approximation using bit shifts instead of division
-    uint32_t out_r = (sr * src_alpha + dr * inv_sa * dst_alpha / 255u) >> 8;
-    uint32_t out_g = (sg * src_alpha + dg * inv_sa * dst_alpha / 255u) >> 8;
-    uint32_t out_b = (sb * src_alpha + db * inv_sa * dst_alpha / 255u) >> 8;
-    uint32_t out_a = src_alpha + ((dst_alpha * inv_sa * 257u) >> 16);
+    // Porter-Duff over: a_out = a_s + a_d * (1 - a_s)
+    uint32_t da_inv = dst_alpha * inv_sa + 128u;
+    uint32_t out_a = src_alpha + ((da_inv + (da_inv >> 8)) >> 8);
+    if (!out_a)
+        return 0;
+
+    if (dst_alpha == 255) {
+        // Fast path: opaque destination (common case for compositing onto backbuffer)
+        uint32_t rb = (src & 0x00FF00FFu) * src_alpha + (dst & 0x00FF00FFu) * inv_sa + 0x00800080u;
+        rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+        uint32_t g_acc = sg * src_alpha + dg * inv_sa + 0x80u;
+        uint32_t g = (g_acc + (g_acc >> 8)) >> 8;
+        return 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
+    }
+
+    // General case: C_out = (C_s * a_s + C_d * a_d * (1 - a_s)) / a_out
+    uint32_t term_dr = dr * dst_alpha * inv_sa + 128u;
+    term_dr = (term_dr + (term_dr >> 8)) >> 8;
+    uint32_t out_r = (sr * src_alpha + term_dr + out_a / 2) / out_a;
+
+    uint32_t term_dg = dg * dst_alpha * inv_sa + 128u;
+    term_dg = (term_dg + (term_dg >> 8)) >> 8;
+    uint32_t out_g = (sg * src_alpha + term_dg + out_a / 2) / out_a;
+
+    uint32_t term_db = db * dst_alpha * inv_sa + 128u;
+    term_db = (term_db + (term_db >> 8)) >> 8;
+    uint32_t out_b = (sb * src_alpha + term_db + out_a / 2) / out_a;
+
+    if (out_r > 255)
+        out_r = 255;
+    if (out_g > 255)
+        out_g = 255;
+    if (out_b > 255)
+        out_b = 255;
 
     return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
@@ -255,7 +286,7 @@ static void compose_desktop_for_blur(Surface *dst, const DirtyRect &clip, int of
     int start_index = -1;
     bool covered = false;
 
-    for (int i = g_window_count - 1; i >= 2; --i) {
+    for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; --i) {
         if (!g_window_visible_cache[i] || g_windows[i].transparent || !g_windows[i].buffer)
             continue;
         DirtyRect outer = window_occlusion_bounds(g_windows[i]);
@@ -271,10 +302,22 @@ static void compose_desktop_for_blur(Surface *dst, const DirtyRect &clip, int of
         gui_blit_rect(dst, &g_wallpaper, shifted_clip.x, shifted_clip.y, clip.x, clip.y, clip.w, clip.h);
     }
 
-    start_index = (start_index < 2) ? 2 : start_index;
+    start_index = (start_index < WM_FIRST_USER_WINDOW) ? 2 : start_index;
 
     for (int i = start_index; i < g_window_count; ++i) {
-        if (!g_window_visible_cache[i] || !g_windows[i].buffer || !dirty_rects_intersect(clip, g_window_outer_cache[i]))
+        if (!g_window_visible_cache[i] || !g_windows[i].buffer || g_windows[i].transparent ||
+            !dirty_rects_intersect(clip, g_window_outer_cache[i]))
+            continue;
+        Window local = g_windows[i];
+        local.x -= offset_x;
+        local.y -= offset_y;
+        draw_window_client_clipped(dst, local, shifted_clip);
+    }
+
+    // Second pass: transparent windows that tint the blur source.
+    for (int i = start_index; i < g_window_count; ++i) {
+        if (!g_window_visible_cache[i] || !g_windows[i].buffer || !g_windows[i].transparent ||
+            !dirty_rects_intersect(clip, g_window_outer_cache[i]))
             continue;
         Window local = g_windows[i];
         local.x -= offset_x;
@@ -305,6 +348,12 @@ static void mark_shell_blur_dirty(Registry *registry, const DirtyRect &screen_re
         }
     }
 }
+
+static int g_cached_top_r = -1;
+static uint8_t g_top_corner_mask_lut[64][64] = {};
+
+static int g_cached_inner_r = -1;
+static uint8_t g_bottom_corner_mask_lut[64][64] = {};
 
 static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color)
 {
@@ -362,8 +411,25 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
         }
 
         if (row != corner_mask_y) {
-            for (int col = 0; col < local_r; ++col) {
-                corner_mask[col] = gui_rounded_rect_coverage_local(col, row, w, h, local_r, GUI_ROUNDED_EDGE_TOP);
+            // Cache rounded corner coverage for performance
+            if (local_r != g_cached_top_r && local_r <= 64) {
+                for (int cy = 0; cy < local_r; ++cy) {
+                    for (int cx = 0; cx < local_r; ++cx) {
+                        g_top_corner_mask_lut[cy][cx] = gui_rounded_rect_coverage_local(
+                            cx, cy, local_r * 2, local_r * 2, local_r, GUI_ROUNDED_EDGE_TOP);
+                    }
+                }
+                g_cached_top_r = local_r;
+            }
+
+            if (local_r <= 64 && row < local_r) {
+                for (int col = 0; col < local_r; ++col) {
+                    corner_mask[col] = g_top_corner_mask_lut[row][col];
+                }
+            } else {
+                for (int col = 0; col < local_r; ++col) {
+                    corner_mask[col] = gui_rounded_rect_coverage_local(col, row, w, h, local_r, GUI_ROUNDED_EDGE_TOP);
+                }
             }
             corner_mask_y = row;
         }
@@ -596,8 +662,20 @@ void flush_shell_blur_updates(Registry *registry)
 
     bool active_drag = g_input.pointer_down && g_input.drag_index >= 2;
     bool hover_resize = g_input.hover_resize_edges != RESIZE_NONE;
-    if (active_drag || hover_resize)
+
+    // Track drag state transitions to force blur refresh after drag ends.
+    static bool s_was_dragging = false;
+    if (active_drag || hover_resize) {
+        s_was_dragging = true;
         return;
+    }
+    if (s_was_dragging) {
+        // Drag just ended — force both blur sources dirty so they re-capture
+        // from the current (post-drag) backbuffer state.
+        s_was_dragging = false;
+        g_menubar_blur_dirty = true;
+        g_dock_blur_dirty = true;
+    }
 
     g_last_blur_vblank = g_display_queue.vblank_count;
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
@@ -920,9 +998,30 @@ static void compute_bottom_corner_row(int local_y, int inner_w, int inner_h, int
 {
     if (inner_r <= 0 || !out_mask)
         return;
-    for (int col = 0; col < inner_r; ++col) {
-        out_mask[col] =
-            gui_rounded_rect_coverage_local(col, local_y, inner_w, inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
+
+    // Cache rounded corner coverage for performance
+    if (inner_r != g_cached_inner_r && inner_r <= 64) {
+        for (int y = 0; y < inner_r; ++y) {
+            for (int x = 0; x < inner_r; ++x) {
+                // Precompute using a generic rect (inner_r*2) to avoid inner_w/inner_h dependencies
+                g_bottom_corner_mask_lut[y][x] = gui_rounded_rect_coverage_local(
+                    x, inner_r + y, inner_r * 2, inner_r * 2, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
+            }
+        }
+        g_cached_inner_r = inner_r;
+    }
+
+    int cy = local_y - (inner_h - inner_r);
+    if (inner_r <= 64 && cy >= 0 && cy < inner_r) {
+        for (int col = 0; col < inner_r; ++col) {
+            out_mask[col] = g_bottom_corner_mask_lut[cy][col];
+        }
+    } else {
+        // Fallback for massive radii
+        for (int col = 0; col < inner_r; ++col) {
+            out_mask[col] =
+                gui_rounded_rect_coverage_local(col, local_y, inner_w, inner_h, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
+        }
     }
 }
 

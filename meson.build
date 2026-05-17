@@ -498,6 +498,7 @@ ovmf_code_candidates = [
   '/usr/share/OVMF/OVMF_CODE_4M.fd',
   '/usr/share/edk2/ovmf/OVMF_CODE.fd',
   '/usr/share/edk2/x64/OVMF_CODE.fd',
+  '/usr/share/edk2/x64/OVMF_CODE.4m.fd',
 ]
 ovmf_code = ''
 foreach candidate : ovmf_code_candidates

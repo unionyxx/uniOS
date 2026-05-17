@@ -77,9 +77,9 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
             const uint32_t *src_row = &src->buffer[(size_t)y * src_stride];
             uint32_t *tmp_row = &g_blur_scratch.buffer[(size_t)y * tmp_stride];
 
-            uint32_t sum_r = 0;
-            uint32_t sum_g = 0;
-            uint32_t sum_b = 0;
+            int32_t sum_r = 0;
+            int32_t sum_g = 0;
+            int32_t sum_b = 0;
 
             // Initialize sliding window with edge replication.
             uint32_t first = src_row[0];
@@ -102,8 +102,8 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
             }
 
             for (uint32_t x = 0; x < w; x++) {
-                tmp_row[x] = 0xFF000000u | (blur_div(sum_r, recip_w) << 16) | (blur_div(sum_g, recip_w) << 8) |
-                             blur_div(sum_b, recip_w);
+                tmp_row[x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_w) << 16) | (blur_div((uint32_t)sum_g, recip_w) << 8) |
+                             blur_div((uint32_t)sum_b, recip_w);
 
                 int remove_index = (int)x - radius_w;
                 int add_index = (int)x + radius_w + 1;
@@ -115,9 +115,9 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
                 uint32_t remove_pixel = src_row[remove_index];
                 uint32_t add_pixel = src_row[add_index];
 
-                sum_r += ((add_pixel >> 16) & 0xFFu) - ((remove_pixel >> 16) & 0xFFu);
-                sum_g += ((add_pixel >> 8) & 0xFFu) - ((remove_pixel >> 8) & 0xFFu);
-                sum_b += (add_pixel & 0xFFu) - (remove_pixel & 0xFFu);
+                sum_r += (int32_t)((add_pixel >> 16) & 0xFFu) - (int32_t)((remove_pixel >> 16) & 0xFFu);
+                sum_g += (int32_t)((add_pixel >> 8) & 0xFFu) - (int32_t)((remove_pixel >> 8) & 0xFFu);
+                sum_b += (int32_t)(add_pixel & 0xFFu) - (int32_t)(remove_pixel & 0xFFu);
             }
         }
     } else {
@@ -136,9 +136,9 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
         for (uint32_t x0 = 0; x0 < w; x0 += BLUR_TILE_W) {
             uint32_t x_end = x0 + BLUR_TILE_W < w ? x0 + BLUR_TILE_W : w;
             for (uint32_t x = x0; x < x_end; x++) {
-                uint32_t sum_r = 0;
-                uint32_t sum_g = 0;
-                uint32_t sum_b = 0;
+                int32_t sum_r = 0;
+                int32_t sum_g = 0;
+                int32_t sum_b = 0;
 
                 uint32_t first = g_blur_scratch.buffer[x];
                 uint32_t fr = (first >> 16) & 0xFFu;
@@ -159,9 +159,9 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
                     sum_b += pixel & 0xFFu;
                 }
                 for (uint32_t y = 0; y < h; y++) {
-                    dst->buffer[(size_t)y * dst_stride + x] = 0xFF000000u | (blur_div(sum_r, recip_h) << 16) |
-                                                              (blur_div(sum_g, recip_h) << 8) |
-                                                              blur_div(sum_b, recip_h);
+                    dst->buffer[(size_t)y * dst_stride + x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_h) << 16) |
+                                                              (blur_div((uint32_t)sum_g, recip_h) << 8) |
+                                                              blur_div((uint32_t)sum_b, recip_h);
 
                     int remove_index = (int)y - radius_h;
                     int add_index = (int)y + radius_h + 1;
@@ -173,9 +173,9 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
                     uint32_t remove_pixel = g_blur_scratch.buffer[(size_t)remove_index * tmp_stride + x];
                     uint32_t add_pixel = g_blur_scratch.buffer[(size_t)add_index * tmp_stride + x];
 
-                    sum_r += ((add_pixel >> 16) & 0xFFu) - ((remove_pixel >> 16) & 0xFFu);
-                    sum_g += ((add_pixel >> 8) & 0xFFu) - ((remove_pixel >> 8) & 0xFFu);
-                    sum_b += (add_pixel & 0xFFu) - (remove_pixel & 0xFFu);
+                    sum_r += (int32_t)((add_pixel >> 16) & 0xFFu) - (int32_t)((remove_pixel >> 16) & 0xFFu);
+                    sum_g += (int32_t)((add_pixel >> 8) & 0xFFu) - (int32_t)((remove_pixel >> 8) & 0xFFu);
+                    sum_b += (int32_t)(add_pixel & 0xFFu) - (int32_t)(remove_pixel & 0xFFu);
                 }
             }
         }
@@ -285,9 +285,9 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
         const uint32_t *src_row = &src->buffer[(size_t)y * src_stride];
         uint32_t *tmp_row = &g_blur_scratch.buffer[(size_t)y * tmp_stride];
         uint32_t first = src_row[0];
-        uint32_t sum_r = ((first >> 16) & 0xFFu) * (uint32_t)(radius_w + 1);
-        uint32_t sum_g = ((first >> 8) & 0xFFu) * (uint32_t)(radius_w + 1);
-        uint32_t sum_b = (first & 0xFFu) * (uint32_t)(radius_w + 1);
+        int32_t sum_r = (int32_t)(((first >> 16) & 0xFFu) * (uint32_t)(radius_w + 1));
+        int32_t sum_g = (int32_t)(((first >> 8) & 0xFFu) * (uint32_t)(radius_w + 1));
+        int32_t sum_b = (int32_t)((first & 0xFFu) * (uint32_t)(radius_w + 1));
         for (int s = 1; s <= radius_w; s++) {
             int idx = s >= (int)w ? (int)w - 1 : s;
             uint32_t pixel = src_row[idx];
@@ -296,17 +296,17 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
             sum_b += pixel & 0xFFu;
         }
         for (uint32_t x = 0; x < w; x++) {
-            tmp_row[x] = 0xFF000000u | (blur_div(sum_r, recip_w) << 16) | (blur_div(sum_g, recip_w) << 8) |
-                         blur_div(sum_b, recip_w);
+            tmp_row[x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_w) << 16) | (blur_div((uint32_t)sum_g, recip_w) << 8) |
+                         blur_div((uint32_t)sum_b, recip_w);
             int ri = (int)x - radius_w, ai = (int)x + radius_w + 1;
             if (ri < 0)
                 ri = 0;
             if (ai >= (int)w)
                 ai = (int)w - 1;
             uint32_t rp = src_row[ri], ap = src_row[ai];
-            sum_r += ((ap >> 16) & 0xFFu) - ((rp >> 16) & 0xFFu);
-            sum_g += ((ap >> 8) & 0xFFu) - ((rp >> 8) & 0xFFu);
-            sum_b += (ap & 0xFFu) - (rp & 0xFFu);
+            sum_r += (int32_t)((ap >> 16) & 0xFFu) - (int32_t)((rp >> 16) & 0xFFu);
+            sum_g += (int32_t)((ap >> 8) & 0xFFu) - (int32_t)((rp >> 8) & 0xFFu);
+            sum_b += (int32_t)(ap & 0xFFu) - (int32_t)(rp & 0xFFu);
         }
     }
 
@@ -315,9 +315,9 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
         uint32_t x_end = x0 + BLUR_TILE_W < w ? x0 + BLUR_TILE_W : w;
         for (uint32_t x = x0; x < x_end; x++) {
             uint32_t first = g_blur_scratch.buffer[x];
-            uint32_t sum_r = ((first >> 16) & 0xFFu) * (uint32_t)(radius_h + 1);
-            uint32_t sum_g = ((first >> 8) & 0xFFu) * (uint32_t)(radius_h + 1);
-            uint32_t sum_b = (first & 0xFFu) * (uint32_t)(radius_h + 1);
+            int32_t sum_r = (int32_t)(((first >> 16) & 0xFFu) * (uint32_t)(radius_h + 1));
+            int32_t sum_g = (int32_t)(((first >> 8) & 0xFFu) * (uint32_t)(radius_h + 1));
+            int32_t sum_b = (int32_t)((first & 0xFFu) * (uint32_t)(radius_h + 1));
             for (int s = 1; s <= radius_h; s++) {
                 int idx = s >= (int)h ? (int)h - 1 : s;
                 uint32_t pixel = g_blur_scratch.buffer[(size_t)idx * tmp_stride + x];
@@ -344,9 +344,9 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
                     ai = (int)h - 1;
                 uint32_t rp = g_blur_scratch.buffer[(size_t)ri * tmp_stride + x];
                 uint32_t ap = g_blur_scratch.buffer[(size_t)ai * tmp_stride + x];
-                sum_r += ((ap >> 16) & 0xFFu) - ((rp >> 16) & 0xFFu);
-                sum_g += ((ap >> 8) & 0xFFu) - ((rp >> 8) & 0xFFu);
-                sum_b += (ap & 0xFFu) - (rp & 0xFFu);
+                sum_r += (int32_t)((ap >> 16) & 0xFFu) - (int32_t)((rp >> 16) & 0xFFu);
+                sum_g += (int32_t)((ap >> 8) & 0xFFu) - (int32_t)((rp >> 8) & 0xFFu);
+                sum_b += (int32_t)(ap & 0xFFu) - (int32_t)(rp & 0xFFu);
             }
         }
     }
@@ -426,7 +426,7 @@ static void upsample_bilinear(const Surface *src, Surface *dst, float factor)
 
     for (uint32_t y = 0; y < dh; y++) {
         uint32_t *drow = &dst->buffer[(size_t)y * ds];
-        uint32_t fy_fp = y * scale_y_fp;
+        uint64_t fy_fp = (uint64_t)y * scale_y_fp;
         uint32_t iy0 = fy_fp >> 16;
         uint32_t ify = (fy_fp >> 8) & 0xFFu;
         uint32_t ify_inv = 256u - ify;
@@ -436,7 +436,7 @@ static void upsample_bilinear(const Surface *src, Surface *dst, float factor)
         const uint32_t *srow1 = &src->buffer[(size_t)iy1 * ss];
 
         for (uint32_t x = 0; x < dw; x++) {
-            uint32_t fx_fp = x * scale_x_fp;
+            uint64_t fx_fp = (uint64_t)x * scale_x_fp;
             uint32_t ix0 = fx_fp >> 16;
             uint32_t ifx = (fx_fp >> 8) & 0xFFu;
             uint32_t ifx_inv = 256u - ifx;
@@ -514,8 +514,7 @@ void blur_surface_material(const Surface *src, Surface *dst, float sigma, int sa
         blur_surface_box_fused(&g_blur_pass_b, &g_blur_small_dst, small_radii[2], saturation_pct, brightness_bias);
 
         upsample_bilinear(&g_blur_small_dst, dst, (float)downsample_factor);
-        (void)small_w;
-        (void)small_h;
+
         return;
     }
 
