@@ -143,6 +143,11 @@ static uint64_t g_random_state = 0x7F4A7C15D39E2B41ULL;
     if (g_cpu_features.has_smap)                                                                                       \
     asm volatile("clac" ::: "memory")
 
+extern "C" {
+    bool safe_copy_from_user(void *dest, const void *src, size_t n);
+    bool safe_copy_to_user(void *dest, const void *src, size_t n);
+}
+
 [[nodiscard]] static bool checked_mul_size(size_t a, size_t b, size_t *out)
 {
     if (!out)
@@ -190,15 +195,21 @@ static uint64_t g_random_state = 0x7F4A7C15D39E2B41ULL;
     if (!p)
         return false;
 
+    spinlock_acquire(&p->vma_lock);
     uint64_t current = addr;
     while (current < end) {
         VMA *vma = vma_find(p->vma_list, current);
-        if (!vma)
+        if (!vma) {
+            spinlock_release(&p->vma_lock);
             return false;
-        if (write && !(vma->flags & PTE_WRITABLE))
+        }
+        if (write && !(vma->flags & PTE_WRITABLE)) {
+            spinlock_release(&p->vma_lock);
             return false;
+        }
         current = vma->end;
     }
+    spinlock_release(&p->vma_lock);
     return true;
 }
 
@@ -303,11 +314,11 @@ static bool validate_display_buffer_access(const DisplayPresentRequest &request,
         return false;
 
     STAC();
-    for (size_t i = 0; i < len; i++) {
-        kernel_buf[i] = user_str[i];
-    }
-    kernel_buf[len] = '\0';
+    bool ok = safe_copy_from_user(kernel_buf, user_str, len);
     CLAC();
+    if (!ok)
+        return false;
+    kernel_buf[len] = '\0';
     return true;
 }
 
@@ -572,7 +583,30 @@ extern "C" void signal_check(SyscallFrame *frame)
 
     // Respect redirected FDs (e.g. pipes) even for stdin
     if (p->fd_table[fd].used && p->fd_table[fd].vnode) {
-        return static_cast<uint64_t>(vfs_read(fd, buf, count));
+        char stack_buf[1024];
+        char *kbuf = stack_buf;
+        if (count > 1024) {
+            kbuf = static_cast<char *>(malloc(count));
+            if (!kbuf)
+                return static_cast<uint64_t>(-1);
+        }
+
+        int64_t res = vfs_read(fd, kbuf, count);
+        if (res > 0) {
+            STAC();
+            bool ok = safe_copy_to_user(buf, kbuf, static_cast<uint64_t>(res));
+            CLAC();
+            if (!ok) {
+                if (kbuf != stack_buf)
+                    free(kbuf);
+                return static_cast<uint64_t>(-1);
+            }
+        }
+
+        if (kbuf != stack_buf)
+            free(kbuf);
+
+        return static_cast<uint64_t>(res);
     }
 
     if (fd == STDIN_FD) {
@@ -587,17 +621,23 @@ extern "C" void signal_check(SyscallFrame *frame)
                 input_poll();
             }
 
-            STAC();
             while (read_count < count) {
+                char temp_char;
                 if (input_keyboard_has_char()) {
-                    buf[read_count++] = input_keyboard_get_char();
+                    temp_char = input_keyboard_get_char();
                 } else if (serial_has_char()) {
-                    buf[read_count++] = serial_getc();
+                    temp_char = serial_getc();
                 } else {
                     break;
                 }
+                STAC();
+                bool ok = safe_copy_to_user(buf + read_count, &temp_char, 1);
+                CLAC();
+                if (!ok) {
+                    return read_count > 0 ? read_count : static_cast<uint64_t>(-1);
+                }
+                read_count++;
             }
-            CLAC();
         }
         return read_count;
     }
@@ -615,7 +655,29 @@ extern "C" void signal_check(SyscallFrame *frame)
 
     // Respect redirected FDs (e.g. pipes) even for stdout/stderr
     if (p->fd_table[fd].used && p->fd_table[fd].vnode) {
-        return static_cast<uint64_t>(vfs_write(fd, buf, count));
+        char stack_buf[1024];
+        char *kbuf = stack_buf;
+        if (count > 1024) {
+            kbuf = static_cast<char *>(malloc(count));
+            if (!kbuf)
+                return static_cast<uint64_t>(-1);
+        }
+
+        STAC();
+        bool ok = safe_copy_from_user(kbuf, buf, count);
+        CLAC();
+        if (!ok) {
+            if (kbuf != stack_buf)
+                free(kbuf);
+            return static_cast<uint64_t>(-1);
+        }
+
+        int64_t res = vfs_write(fd, kbuf, count);
+
+        if (kbuf != stack_buf)
+            free(kbuf);
+
+        return static_cast<uint64_t>(res);
     }
 
     if (fd == STDOUT_FD || fd == STDERR_FD) {
@@ -624,9 +686,10 @@ extern "C" void signal_check(SyscallFrame *frame)
             char k_log_buf[512];
             uint64_t to_copy = (count < 511) ? count : 511;
             STAC();
-            for (uint64_t i = 0; i < to_copy; i++)
-                k_log_buf[i] = buf[i];
+            bool ok = safe_copy_from_user(k_log_buf, buf, to_copy);
             CLAC();
+            if (!ok)
+                return static_cast<uint64_t>(-1);
             k_log_buf[to_copy] = '\0';
 
             if (to_copy > 0 && k_log_buf[0] == '[') {
@@ -646,15 +709,42 @@ extern "C" void signal_check(SyscallFrame *frame)
 
         // GUI mode: only write to serial, never to the framebuffer terminal.
         // The Window Manager owns the framebuffer now.
-        STAC();
         for (uint64_t i = 0; i < count; i++) {
-            serial_putc(buf[i]);
+            char c;
+            STAC();
+            bool ok = safe_copy_from_user(&c, buf + i, 1);
+            CLAC();
+            if (!ok)
+                return i > 0 ? i : static_cast<uint64_t>(-1);
+            serial_putc(c);
         }
-        CLAC();
         return count;
     }
 
-    return static_cast<uint64_t>(vfs_write(fd, buf, count));
+    // Default VFS write
+    char stack_buf[1024];
+    char *kbuf = stack_buf;
+    if (count > 1024) {
+        kbuf = static_cast<char *>(malloc(count));
+        if (!kbuf)
+            return static_cast<uint64_t>(-1);
+    }
+
+    STAC();
+    bool ok = safe_copy_from_user(kbuf, buf, count);
+    CLAC();
+    if (!ok) {
+        if (kbuf != stack_buf)
+            free(kbuf);
+        return static_cast<uint64_t>(-1);
+    }
+
+    int64_t res = vfs_write(fd, kbuf, count);
+
+    if (kbuf != stack_buf)
+        free(kbuf);
+
+    return static_cast<uint64_t>(res);
 }
 
 [[nodiscard]] static uint64_t sys_close(int fd)
@@ -668,21 +758,39 @@ extern "C" void signal_check(SyscallFrame *frame)
     if (!p)
         return static_cast<uint64_t>(-1);
 
-    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !p->fd_table[oldfd].used)
-        return static_cast<uint64_t>(-1);
-    if (newfd < 0 || newfd >= MAX_OPEN_FILES)
+    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || newfd < 0 || newfd >= MAX_OPEN_FILES)
         return static_cast<uint64_t>(-1);
 
-    if (oldfd == newfd)
-        return static_cast<uint64_t>(newfd);
+    if (oldfd == newfd) {
+        spinlock_acquire(&p->fd_lock);
+        bool used = p->fd_table[oldfd].used;
+        spinlock_release(&p->fd_lock);
+        return used ? static_cast<uint64_t>(newfd) : static_cast<uint64_t>(-1);
+    }
+
+    VNode *to_close = nullptr;
+
+    spinlock_acquire(&p->fd_lock);
+    if (!p->fd_table[oldfd].used) {
+        spinlock_release(&p->fd_lock);
+        return static_cast<uint64_t>(-1);
+    }
 
     if (p->fd_table[newfd].used) {
-        vfs_close(newfd);
+        to_close = p->fd_table[newfd].vnode;
+        p->fd_table[newfd].used = false;
+        p->fd_table[newfd].flags = 0;
+        p->fd_table[newfd].vnode = nullptr;
     }
 
     p->fd_table[newfd] = p->fd_table[oldfd];
     if (p->fd_table[newfd].vnode) {
         p->fd_table[newfd].vnode->ref_count++;
+    }
+    spinlock_release(&p->fd_lock);
+
+    if (to_close) {
+        vfs_close_vnode(to_close);
     }
 
     return static_cast<uint64_t>(newfd);

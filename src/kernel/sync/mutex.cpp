@@ -14,9 +14,8 @@ void mutex_lock(Mutex *mtx)
         return;
     }
 
+    spinlock_acquire(&mtx->wait_lock);
     while (true) {
-        spinlock_acquire(&mtx->wait_lock);
-
         if (__sync_lock_test_and_set(&mtx->locked, 1) == 0) {
             mtx->owner_pid = current->pid;
             spinlock_release(&mtx->wait_lock);

@@ -353,7 +353,7 @@ static void scheduler_schedule_internal()
     }
 
     tss_set_rsp0(next_rsp0);
-    g_bsp_cpu_local.kernel_stack = next_rsp0;
+    cpu_get_local()->kernel_stack = next_rsp0;
 
     uint64_t *prev_cr3 =
         prev->page_table
@@ -595,7 +595,7 @@ void scheduler_init()
     g_current_proc->next = g_current_proc;
     g_proc_list = g_proc_tail = g_current_proc;
 
-    g_bsp_cpu_local.kernel_stack = current_rsp;
+    cpu_get_local()->kernel_stack = current_rsp;
 
     DEBUG_INFO("Scheduler Initialized.");
 }
@@ -786,7 +786,9 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     asm volatile("mov %%cr3, %%rax\n\tmov %%rax, %%cr3" ::: "rax", "memory");
 
     spinlock_init(&child->vma_lock);
+    spinlock_acquire(&g_current_proc->vma_lock);
     child->vma_list = vma_clone(g_current_proc->vma_list);
+    spinlock_release(&g_current_proc->vma_lock);
 
     if (g_current_proc->vma_list && !child->vma_list) {
         process_release_private_fds(child);

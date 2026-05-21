@@ -50,7 +50,7 @@ KTEST(wm_policy_skip_on_full_queue_for_copy_path_during_active_manipulation)
     in.copy_path = true;
     in.active_manipulation = true;
 
-    KTEST_EXPECT_EQ(wm::choose_present_policy(in), wm::PresentPolicyDecision::Skip);
+    KTEST_EXPECT_EQ(wm::choose_present_policy(in), wm::PresentPolicyDecision::Wait);
 }
 
 KTEST(wm_policy_wait_on_full_queue_for_copy_path_without_active_manipulation)
@@ -76,7 +76,7 @@ KTEST(wm_policy_skip_on_full_queue_during_active_manipulation)
     in.copy_path = false;
     in.active_manipulation = true;
 
-    KTEST_EXPECT_EQ(wm::choose_present_policy(in), wm::PresentPolicyDecision::Skip);
+    KTEST_EXPECT_EQ(wm::choose_present_policy(in), wm::PresentPolicyDecision::Wait);
 }
 
 KTEST(wm_policy_wait_on_full_queue_without_active_manipulation)

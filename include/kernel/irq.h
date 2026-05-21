@@ -14,3 +14,4 @@ void apic_init();
 bool apic_is_enabled();
 uint32_t apic_get_current_id();
 void apic_send_eoi();
+void apic_send_ipi_all_excluding_self(uint8_t vector);

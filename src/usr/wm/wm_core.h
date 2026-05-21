@@ -88,6 +88,7 @@ struct Window
     int x, y, w, h;
     int target_x, target_y, target_w, target_h;
     int buffer_w, buffer_h;
+    int last_rendered_x, last_rendered_y, last_rendered_w, last_rendered_h;
     int content_w, content_h;
     int scroll_x, scroll_y;
     int min_w, min_h;
@@ -553,20 +554,40 @@ static inline void window_button_center(const Window &w, int button_index, int *
         *cy = button.y + button.h / 2;
 }
 
-static inline DirtyRect window_visible_client_bounds(const Window &w)
+static inline int window_effective_w(const Window &w)
 {
     if (w.transparent)
-        return {w.x, w.y, w.w, w.h};
+        return (w.buffer_w > 0 && w.buffer_w < w.w) ? w.buffer_w : w.w;
+    int border = wm_frame_border();
+    int max_outer_w = w.buffer_w > 0 ? w.buffer_w + border * 2 : w.w;
+    return max_outer_w < w.w ? max_outer_w : w.w;
+}
+
+static inline int window_effective_h(const Window &w)
+{
+    if (w.transparent)
+        return (w.buffer_h > 0 && w.buffer_h < w.h) ? w.buffer_h : w.h;
+    int border = wm_frame_border();
+    int max_outer_h = w.buffer_h > 0 ? w.buffer_h + border : w.h;
+    return max_outer_h < w.h ? max_outer_h : w.h;
+}
+
+static inline DirtyRect window_visible_client_bounds(const Window &w)
+{
+    int eff_w = window_effective_w(w);
+    int eff_h = window_effective_h(w);
+    if (w.transparent)
+        return {w.x, w.y, eff_w, eff_h};
 
     int border = wm_frame_border();
     int left = w.x + border;
     int top = w.y;
-    int right = w.x + w.w - border;
-    int bottom = w.y + w.h - border;
+    int right = w.x + eff_w - border;
+    int bottom = w.y + eff_h - border;
     int width = right - left;
     int height = bottom - top;
     if (width <= 0 || height <= 0)
-        return {w.x, w.y, w.w, w.h};
+        return {w.x, w.y, eff_w, eff_h};
     return {left, top, width, height};
 }
 
@@ -610,6 +631,7 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
                                     int hovered_button);
 void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &clip);
 void draw_storage_prompt_overlay_clipped(const DirtyRect &clip);
+void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects, int *out_count);
 
 void init_wallpaper();
 void reload_wallpaper(Registry *registry, bool prefer_requested);

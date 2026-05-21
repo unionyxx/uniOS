@@ -8,9 +8,9 @@
 
 static Spinlock g_heap_lock = SPINLOCK_INIT;
 
-constexpr size_t MIN_BUCKET_SIZE = 16;
+constexpr size_t MIN_BUCKET_SIZE = 32;
 constexpr size_t MAX_BUCKET_SIZE = 4096;
-constexpr int NUM_BUCKETS = 9;
+constexpr int NUM_BUCKETS = 8;
 constexpr uint64_t HEAP_MAGIC = 0xC0FFEE1234567890ULL;
 constexpr uint64_t ALIGNED_MAGIC = 0x12345678C0FFEE00ULL;
 
@@ -105,17 +105,18 @@ static inline uint32_t hash_page(uint64_t virt)
     return static_cast<uint32_t>(virt & (MAX_TRACKED_PAGES - 1));
 }
 
-static void page_tracker_add(uint64_t page_virt, int bucket_idx, uint16_t total)
+[[nodiscard]] static bool page_tracker_add(uint64_t page_virt, int bucket_idx, uint16_t total)
 {
     uint32_t idx = hash_page(page_virt);
     for (int i = 0; i < MAX_TRACKED_PAGES; i++) {
         uint32_t probe = (idx + i) & (MAX_TRACKED_PAGES - 1);
         if (g_page_slots[probe].page_virt == SLOT_EMPTY || g_page_slots[probe].page_virt == SLOT_TOMBSTONE) {
             g_page_slots[probe] = {page_virt, bucket_idx, total, total};
-            return;
+            return true;
         }
     }
     DEBUG_WARN("heap: page_tracker full, coalescing disabled for page %llx", (unsigned long long)page_virt);
+    return false;
 }
 
 [[nodiscard]] static PageSlot *page_tracker_find(uint64_t page_virt)
@@ -182,16 +183,16 @@ static void bucket_remove_page_blocks(int bucket_idx, uint64_t page_virt)
 
 [[nodiscard]] static inline int get_bucket_index(size_t size)
 {
-    if (size <= 16)
+    if (size <= 32)
         return 0;
     if (size > 4096)
         return -1;
-    return 64 - __builtin_clzll(size - 1) - 4;
+    return 64 - __builtin_clzll(size - 1) - 5;
 }
 
 [[nodiscard]] static constexpr size_t get_bucket_size(int index)
 {
-    return static_cast<size_t>(16) << index;
+    return static_cast<size_t>(32) << index;
 }
 
 void heap_init(void *start, size_t size)
@@ -251,13 +252,17 @@ void heap_init(void *start, size_t size)
     uint64_t page_virt = vmm_phys_to_virt(reinterpret_cast<uint64_t>(page_phys));
     size_t num_blocks = 4096 / bucket_size;
 
+    if (!page_tracker_add(page_virt, bucket_idx, static_cast<uint16_t>(num_blocks))) {
+        pmm_free_frame(page_phys);
+        return nullptr;
+    }
+
     for (size_t i = 0; i < num_blocks; i++) {
         FreeBlock *block = reinterpret_cast<FreeBlock *>(page_virt + i * bucket_size);
         block->next = g_buckets[bucket_idx];
         g_buckets[bucket_idx] = block;
     }
 
-    page_tracker_add(page_virt, bucket_idx, static_cast<uint16_t>(num_blocks));
     return malloc_unlocked(size);
 }
 
@@ -442,7 +447,7 @@ static void print_uint(uint64_t val)
 extern "C" void heap_dump_stats()
 {
     g_terminal.write_line("Kernel Heap Stats:");
-    g_terminal.write_line("  Bucket Sizes: 16, 32, 64, 128, 256, 512, 1024, 2048, 4096");
+    g_terminal.write_line("  Bucket Sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096");
     g_terminal.write("  Free Blocks:  ");
 
     spinlock_acquire(&g_heap_lock);

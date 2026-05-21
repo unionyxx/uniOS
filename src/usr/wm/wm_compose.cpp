@@ -4,22 +4,12 @@
 void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                             const Registry *registry)
 {
-    int start_index = 0;
-    bool covered_by_opaque = false;
-    for (int i = g_window_count - 1; i >= 0; i--) {
-        Window &w = g_windows[i];
-        if (!g_window_visible_cache[i] || w.transparent || !w.buffer)
-            continue;
-        DirtyRect outer = window_occlusion_bounds(w);
-        if (rect_contains(outer, r)) {
-            start_index = i;
-            covered_by_opaque = true;
-            break;
-        }
-    }
-
-    if (!covered_by_opaque)
+    int start_index = find_top_opaque_covering_window(r);
+    bool covered_by_opaque = (start_index >= 0);
+    if (start_index < 0) {
         gui_blit_rect(&g_backbuffer, &g_wallpaper, r.x, r.y, r.x, r.y, r.w, r.h);
+        start_index = 0;
+    }
 
     for (int i = start_index; i < g_window_count; i++) {
         Window &w = g_windows[i];
@@ -52,6 +42,53 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
     draw_toast_overlay_clipped(r);
 }
 
+static void subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect &cut)
+{
+    int initial_count = *count;
+    for (int i = 0; i < initial_count; i++) {
+        DirtyRect current = regions[i];
+        DirtyRect overlap = {};
+        if (!rect_intersection(current, cut, &overlap)) {
+            continue;
+        }
+
+        // Replace current region with its fragments not covered by the cut
+        regions[i] = regions[*count - 1];
+        (*count)--;
+        i--;
+        initial_count--;
+
+        // Top fragment
+        if (overlap.y > current.y) {
+            if (*count < MAX_VISIBLE_REGIONS) {
+                regions[*count] = {current.x, current.y, current.w, overlap.y - current.y};
+                (*count)++;
+            }
+        }
+        // Bottom fragment
+        if (overlap.y + overlap.h < current.y + current.h) {
+            if (*count < MAX_VISIBLE_REGIONS) {
+                regions[*count] = {current.x, overlap.y + overlap.h, current.w, (current.y + current.h) - (overlap.y + overlap.h)};
+                (*count)++;
+            }
+        }
+        // Left fragment
+        if (overlap.x > current.x) {
+            if (*count < MAX_VISIBLE_REGIONS) {
+                regions[*count] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
+                (*count)++;
+            }
+        }
+        // Right fragment
+        if (overlap.x + overlap.w < current.x + current.w) {
+            if (*count < MAX_VISIBLE_REGIONS) {
+                regions[*count] = {overlap.x + overlap.w, overlap.y, (current.x + current.w) - (overlap.x + overlap.w), overlap.h};
+                (*count)++;
+            }
+        }
+    }
+}
+
 bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                           const Registry *registry)
 {
@@ -60,7 +97,28 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
 
     int start_index = find_top_opaque_covering_window(r);
     if (start_index < 0) {
-        gui_blit_rect(&g_backbuffer, &g_wallpaper, r.x, r.y, r.x, r.y, r.w, r.h);
+        DirtyRect wallpaper_regions[MAX_VISIBLE_REGIONS];
+        int count = 0;
+        wallpaper_regions[count++] = r;
+
+        for (int i = 0; i < g_window_count; i++) {
+            Window &w = g_windows[i];
+            if (!g_window_visible_cache[i] || !w.buffer || w.transparent)
+                continue;
+            DirtyRect cover_rects[3];
+            int cover_rect_count = 0;
+            get_window_opaque_cover_rects(w, cover_rects, &cover_rect_count);
+            for (int cr = 0; cr < cover_rect_count; cr++) {
+                subtract_rect_local(wallpaper_regions, &count, cover_rects[cr]);
+            }
+            if (count >= MAX_VISIBLE_REGIONS - 4)
+                break;
+        }
+
+        for (int ri = 0; ri < count; ri++) {
+            DirtyRect sub = wallpaper_regions[ri];
+            gui_blit_rect(&g_backbuffer, &g_wallpaper, sub.x, sub.y, sub.x, sub.y, sub.w, sub.h);
+        }
         start_index = 0;
     }
 

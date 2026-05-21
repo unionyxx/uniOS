@@ -154,6 +154,16 @@ static void terminate_user_exception(InterruptFrame *frame, uint64_t cr2, bool h
     hcf();
 }
 
+extern "C" {
+    extern char __user_copy_start[];
+    extern char __user_copy_end[];
+    extern char __user_copy_fixup[];
+
+    extern char __user_copy_to_start[];
+    extern char __user_copy_to_end[];
+    extern char __user_copy_to_fixup[];
+}
+
 extern "C" void exception_handler(InterruptFrame *frame)
 {
     uint64_t int_no = frame->int_no;
@@ -166,6 +176,16 @@ extern "C" void exception_handler(InterruptFrame *frame)
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
         if (vmm_handle_page_fault(cr2, err_code))
             return;
+
+        // Exception recovery check
+        if (rip >= reinterpret_cast<uint64_t>(__user_copy_start) && rip < reinterpret_cast<uint64_t>(__user_copy_end)) {
+            frame->rip = reinterpret_cast<uint64_t>(__user_copy_fixup);
+            return;
+        }
+        if (rip >= reinterpret_cast<uint64_t>(__user_copy_to_start) && rip < reinterpret_cast<uint64_t>(__user_copy_to_end)) {
+            frame->rip = reinterpret_cast<uint64_t>(__user_copy_to_fixup);
+            return;
+        }
 
         if (exception_from_user_mode(frame))
             terminate_user_exception(frame, cr2, true);

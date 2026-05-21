@@ -14,6 +14,7 @@ uint32_t g_xsave_mask_lo = 0;
 uint32_t g_xsave_mask_hi = 0;
 
 CpuLocal g_bsp_cpu_local;
+volatile int g_cpu_online_count = 1;
 
 extern "C" void syscall_entry();
 

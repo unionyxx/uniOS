@@ -330,3 +330,30 @@ void apic_send_eoi()
     if (g_apic_enabled && g_lapic_base)
         lapic_write(LAPIC_EOI, 0);
 }
+
+void apic_send_ipi_all_excluding_self(uint8_t vector)
+{
+    if (g_apic_enabled && g_lapic_base) {
+        constexpr uint32_t LAPIC_ICR_LO = 0x300;
+        constexpr uint32_t LAPIC_ICR_HI = 0x310;
+
+        // Wait for any previous IPI to clear
+        while (lapic_read(LAPIC_ICR_LO) & (1u << 12)) {
+            asm volatile("pause");
+        }
+
+        // Clear Destination Field in ICR High
+        lapic_write(LAPIC_ICR_HI, 0);
+
+        // Destination Shorthand: All Excluding Self (0xC0000)
+        // Delivery Mode: Fixed (0x000)
+        // Level: Assert (0x4000)
+        // Vector: vector
+        lapic_write(LAPIC_ICR_LO, 0x000C0000 | 0x4000 | vector);
+
+        // Wait for the transmission to complete
+        while (lapic_read(LAPIC_ICR_LO) & (1u << 12)) {
+            asm volatile("pause");
+        }
+    }
+}

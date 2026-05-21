@@ -226,15 +226,6 @@ constexpr PresentPolicyDecision choose_present_policy(const PresentPolicyInput &
     if (input.pending < input.queue_limit)
         return PresentPolicyDecision::Submit;
 
-    if (input.strict_sync || !input.interactive)
-        return PresentPolicyDecision::Wait;
-
-    if (input.active_manipulation)
-        return PresentPolicyDecision::Skip;
-
-    if (input.copy_path)
-        return PresentPolicyDecision::Wait;
-
     return PresentPolicyDecision::Wait;
 }
 

@@ -357,10 +357,12 @@ DirtyRect window_client_bounds(const Window &w)
 }
 DirtyRect window_outer_bounds(const Window &w)
 {
+    int eff_w = window_effective_w(w);
+    int eff_h = window_effective_h(w);
     if (w.transparent)
-        return {w.x, w.y, w.w, w.h};
+        return {w.x, w.y, eff_w, eff_h};
     int t_h = wm_title_bar_h();
-    return {w.x, w.y - t_h, w.w + wm_frame_shadow_offset_x(), w.h + t_h + wm_frame_shadow_offset_y()};
+    return {w.x, w.y - t_h, eff_w + wm_frame_shadow_offset_x(), eff_h + t_h + wm_frame_shadow_offset_y()};
 }
 static inline int window_safe_side_inset()
 {
@@ -368,7 +370,7 @@ static inline int window_safe_side_inset()
     return inset < 2 ? 2 : inset;
 }
 
-static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects, int *out_count)
+void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects, int *out_count)
 {
     if (!out_rects || !out_count)
         return;
@@ -376,6 +378,9 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
     if (w.transparent) {
         return;
     }
+
+    int eff_w = window_effective_w(w);
+    int eff_h = window_effective_h(w);
 
     int side_inset = window_safe_side_inset();
     int title_h = wm_title_bar_h();
@@ -387,22 +392,23 @@ static void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects,
     int count = 0;
 
     int shadow_pad = wm_frame_shadow_offset_y();
-    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, w.w - side_inset * 2,
-                      w.h + title_h - radius - radius - shadow_pad};
+    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, eff_w - side_inset * 2,
+                      eff_h + title_h - radius - radius - shadow_pad};
     if (main.w > 0 && main.h > 0)
         rects[count++] = main;
 
-    DirtyRect top_band = {w.x + radius, w.y - title_h + side_inset, w.w - radius * 2, radius - side_inset};
+    DirtyRect top_band = {w.x + radius, w.y - title_h + side_inset, eff_w - radius * 2, radius - side_inset};
     if (top_band.w > 0 && top_band.h > 0)
         rects[count++] = top_band;
 
-    DirtyRect bottom_band = {w.x + radius, w.y + w.h - radius, w.w - radius * 2, radius - side_inset};
+    DirtyRect bottom_band = {w.x + radius, w.y + eff_h - radius, eff_w - radius * 2, radius - side_inset};
     if (bottom_band.w > 0 && bottom_band.h > 0)
         rects[count++] = bottom_band;
 
     if (count == 0) {
-        DirtyRect fallback = {w.x + side_inset, w.y, w.w - side_inset * 2, w.h};
-        rects[count++] = (fallback.w > 0 && fallback.h > 0) ? fallback : window_client_bounds(w);
+        DirtyRect fallback = {w.x + side_inset, w.y, eff_w - side_inset * 2, eff_h};
+        DirtyRect fallback_client = {w.x, w.y, eff_w, eff_h};
+        rects[count++] = (fallback.w > 0 && fallback.h > 0) ? fallback : fallback_client;
     }
 
     *out_count = count;
@@ -414,18 +420,21 @@ DirtyRect window_opaque_bounds(const Window &w)
 {
     if (w.transparent)
         return {0, 0, 0, 0};
+    int eff_w = window_effective_w(w);
+    int eff_h = window_effective_h(w);
     int side_inset = window_safe_side_inset();
     int title_h = wm_title_bar_h();
     int radius = gui_scaled_metric(12) - wm_frame_border();
     if (radius < side_inset)
         radius = side_inset;
 
-    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, w.w - side_inset * 2, w.h + title_h - radius - radius};
+    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, eff_w - side_inset * 2, eff_h + title_h - radius - radius};
     if (main.w > 0 && main.h > 0)
         return main;
 
-    DirtyRect fallback = {w.x + side_inset, w.y, w.w - side_inset * 2, w.h};
-    return (fallback.w > 0 && fallback.h > 0) ? fallback : window_client_bounds(w);
+    DirtyRect fallback = {w.x + side_inset, w.y, eff_w - side_inset * 2, eff_h};
+    DirtyRect fallback_client = {w.x, w.y, eff_w, eff_h};
+    return (fallback.w > 0 && fallback.h > 0) ? fallback : fallback_client;
 }
 
 DirtyRect window_occlusion_bounds(const Window &w)
@@ -826,7 +835,14 @@ static void mark_exposed_transition_damage(const DirtyRect &old_outer, const Dir
 void mark_window_transition_damage(const Window &old_w, const Window &new_w)
 {
     int pad = wm_window_damage_pad();
-    DirtyRect o = rect_expand(window_outer_bounds(old_w), pad);
+    DirtyRect last_rendered_outer;
+    if (old_w.transparent) {
+        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y, old_w.last_rendered_w, old_w.last_rendered_h};
+    } else {
+        int t_h = wm_title_bar_h();
+        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y - t_h, old_w.last_rendered_w + wm_frame_shadow_offset_x(), old_w.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
+    }
+    DirtyRect o = rect_expand(last_rendered_outer, pad);
     DirtyRect n = rect_expand(window_outer_bounds(new_w), pad);
     enqueue_damage_rect(n.x, n.y, n.w, n.h);
     DirtyRect overlap = {};
@@ -1036,6 +1052,20 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
             int shadow_pad = wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y() ? wm_frame_shadow_offset_x()
                                                                                      : wm_frame_shadow_offset_y();
             enqueue_damage_rect_expanded(window_outer_bounds(old), shadow_pad);
+        } else if (size_changed) {
+            // During resize, mark the full bounding box of old + new outer bounds as damaged.
+            // The strip-based decomposition in mark_window_transition_damage can leave sub-pixel
+            // gaps when shadows are involved, causing stale content on persistent framebuffers.
+            int pad = wm_window_damage_pad();
+            DirtyRect last_rendered_outer;
+            if (old.transparent) {
+                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y, old.last_rendered_w, old.last_rendered_h};
+            } else {
+                int t_h = wm_title_bar_h();
+                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y - t_h, old.last_rendered_w + wm_frame_shadow_offset_x(), old.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
+            }
+            DirtyRect full_bounds = rect_expand(rect_union(last_rendered_outer, window_outer_bounds(w)), pad);
+            enqueue_damage_rect(full_bounds.x, full_bounds.y, full_bounds.w, full_bounds.h);
         } else {
             mark_window_transition_damage(old, w);
         }
@@ -2622,6 +2652,10 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.target_h = h;
     win.buffer_w = bw;
     win.buffer_h = bh;
+    win.last_rendered_x = x;
+    win.last_rendered_y = y;
+    win.last_rendered_w = w;
+    win.last_rendered_h = h;
     win.scroll_x = 0;
     win.scroll_y = 0;
     win.min_w = entry ? entry->min_w : 0;

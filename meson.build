@@ -522,6 +522,9 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     '-m',
     '512M',
   ]
+  if build_machine.system() == 'linux'
+    qemu_base_command += ['-accel', 'kvm', '-cpu', 'host']
+  endif
 
   qemu_disk_boot_command = [
     '-drive',

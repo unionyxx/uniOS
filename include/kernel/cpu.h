@@ -30,6 +30,14 @@ struct CpuLocal
     uint64_t user_stack;
 };
 
+static inline CpuLocal *cpu_get_local()
+{
+    uint32_t lo = 0, hi = 0;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000101));
+    return reinterpret_cast<CpuLocal *>((static_cast<uint64_t>(hi) << 32) | lo);
+}
+
 extern CpuLocal g_bsp_cpu_local;
+extern "C" volatile int g_cpu_online_count;
 
 void cpu_init();

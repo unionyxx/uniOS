@@ -163,6 +163,8 @@ uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
     return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
+#include <emmintrin.h>
+
 static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_stride, const uint32_t *__restrict__ src,
                                   uint32_t src_stride, int w, int h)
 {
@@ -172,7 +174,65 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
     for (int y = 0; y < h; ++y) {
         uint32_t *drow = &dst[static_cast<size_t>(y) * dst_stride];
         const uint32_t *srow = &src[static_cast<size_t>(y) * src_stride];
-        for (int x = 0; x < w; ++x) {
+        
+        int x = 0;
+        for (; x <= w - 4; x += 4) {
+            __m128i s_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srow[x]));
+            
+            __m128i alpha_mask = _mm_set1_epi32(static_cast<int>(0xFF000000u));
+            __m128i s_alpha = _mm_and_si128(s_vec, alpha_mask);
+            if (_mm_movemask_epi8(_mm_cmpeq_epi32(s_alpha, _mm_setzero_si128())) == 0xFFFF) {
+                continue;
+            }
+
+            __m128i d_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&drow[x]));
+
+            __m128i d_alpha = _mm_and_si128(d_vec, alpha_mask);
+            __m128i trans_mask = _mm_cmpeq_epi32(d_alpha, _mm_setzero_si128());
+
+            __m128i zero = _mm_setzero_si128();
+            __m128i s_lo = _mm_unpacklo_epi8(s_vec, zero);
+            __m128i s_hi = _mm_unpackhi_epi8(s_vec, zero);
+            __m128i d_lo = _mm_unpacklo_epi8(d_vec, zero);
+            __m128i d_hi = _mm_unpackhi_epi8(d_vec, zero);
+
+            __m128i alpha_lo = _mm_shufflelo_epi16(s_lo, _MM_SHUFFLE(3, 3, 3, 3));
+            alpha_lo = _mm_shufflehi_epi16(alpha_lo, _MM_SHUFFLE(3, 3, 3, 3));
+            
+            __m128i alpha_hi = _mm_shufflelo_epi16(s_hi, _MM_SHUFFLE(3, 3, 3, 3));
+            alpha_hi = _mm_shufflehi_epi16(alpha_hi, _MM_SHUFFLE(3, 3, 3, 3));
+
+            __m128i v_255 = _mm_set1_epi16(255);
+            __m128i inv_alpha_lo = _mm_sub_epi16(v_255, alpha_lo);
+            __m128i inv_alpha_hi = _mm_sub_epi16(v_255, alpha_hi);
+
+            __m128i src_part_lo = _mm_mullo_epi16(s_lo, alpha_lo);
+            __m128i src_part_hi = _mm_mullo_epi16(s_hi, alpha_hi);
+
+            __m128i dst_part_lo = _mm_mullo_epi16(d_lo, inv_alpha_lo);
+            __m128i dst_part_hi = _mm_mullo_epi16(d_hi, inv_alpha_hi);
+
+            __m128i v_128 = _mm_set1_epi16(128);
+            __m128i sum_lo = _mm_add_epi16(_mm_add_epi16(src_part_lo, dst_part_lo), v_128);
+            __m128i sum_hi = _mm_add_epi16(_mm_add_epi16(src_part_hi, dst_part_hi), v_128);
+
+            __m128i sum_lo_shift = _mm_srli_epi16(sum_lo, 8);
+            __m128i sum_hi_shift = _mm_srli_epi16(sum_hi, 8);
+            
+            __m128i final_lo = _mm_srli_epi16(_mm_add_epi16(sum_lo, sum_lo_shift), 8);
+            __m128i final_hi = _mm_srli_epi16(_mm_add_epi16(sum_hi, sum_hi_shift), 8);
+
+            __m128i blended_vec = _mm_packus_epi16(final_lo, final_hi);
+
+            __m128i opaque_mask = _mm_set1_epi32(static_cast<int>(0xFF000000u));
+            blended_vec = _mm_or_si128(blended_vec, opaque_mask);
+            blended_vec = _mm_or_si128(_mm_and_si128(trans_mask, s_vec),
+                                       _mm_andnot_si128(trans_mask, blended_vec));
+
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(&drow[x]), blended_vec);
+        }
+
+        for (; x < w; ++x) {
             uint32_t s = srow[x];
             uint32_t sa = s >> 24;
             if (!sa)
@@ -489,15 +549,57 @@ void paint_desktop_base(Surface *surface)
     if (height == 0 || width == 0)
         return;
 
-    for (uint32_t y = 0; y < height; ++y) {
-        uint8_t t = height > 1 ? static_cast<uint8_t>((y * 255u) / (height - 1u)) : 0u;
-        uint32_t row_color =
-            t < 132 ? mix_rgb(color_top, color_mid, static_cast<uint8_t>(static_cast<uint32_t>(t) * 255u / 132u))
-                    : mix_rgb(color_mid, color_bottom,
-                              static_cast<uint8_t>((static_cast<uint32_t>(t) - 132u) * 255u / 123u));
-        uint32_t *row = &surface->buffer[static_cast<size_t>(y) * stride];
-        for (uint32_t x = 0; x < width; ++x)
-            row[x] = row_color;
+    uint32_t y_mid = (132u * (height - 1u)) / 255u;
+    if (y_mid > height)
+        y_mid = height;
+
+    // Band 1: color_top to color_mid
+    {
+        int32_t r_fp = static_cast<int32_t>((color_top >> 16) & 0xFFu) << 16;
+        int32_t g_fp = static_cast<int32_t>((color_top >> 8) & 0xFFu) << 16;
+        int32_t b_fp = static_cast<int32_t>(color_top & 0xFFu) << 16;
+
+        int32_t step_r = y_mid > 0 ? (((static_cast<int32_t>((color_mid >> 16) & 0xFFu) - static_cast<int32_t>((color_top >> 16) & 0xFFu))) << 16) / static_cast<int32_t>(y_mid) : 0;
+        int32_t step_g = y_mid > 0 ? (((static_cast<int32_t>((color_mid >> 8) & 0xFFu) - static_cast<int32_t>((color_top >> 8) & 0xFFu))) << 16) / static_cast<int32_t>(y_mid) : 0;
+        int32_t step_b = y_mid > 0 ? (((static_cast<int32_t>(color_mid & 0xFFu) - static_cast<int32_t>(color_top & 0xFFu))) << 16) / static_cast<int32_t>(y_mid) : 0;
+
+        for (uint32_t y = 0; y < y_mid; ++y) {
+            uint32_t row_color = 0xFF000000u |
+                                 ((static_cast<uint32_t>(r_fp >> 16) & 0xFFu) << 16) |
+                                 ((static_cast<uint32_t>(g_fp >> 16) & 0xFFu) << 8) |
+                                 (static_cast<uint32_t>(b_fp >> 16) & 0xFFu);
+            uint32_t *row = &surface->buffer[static_cast<size_t>(y) * stride];
+            for (uint32_t x = 0; x < width; ++x)
+                row[x] = row_color;
+            r_fp += step_r;
+            g_fp += step_g;
+            b_fp += step_b;
+        }
+    }
+
+    // Band 2: color_mid to color_bottom
+    {
+        uint32_t h2 = height - y_mid;
+        int32_t r_fp = static_cast<int32_t>((color_mid >> 16) & 0xFFu) << 16;
+        int32_t g_fp = static_cast<int32_t>((color_mid >> 8) & 0xFFu) << 16;
+        int32_t b_fp = static_cast<int32_t>(color_mid & 0xFFu) << 16;
+
+        int32_t step_r = h2 > 1 ? (((static_cast<int32_t>((color_bottom >> 16) & 0xFFu) - static_cast<int32_t>((color_mid >> 16) & 0xFFu))) << 16) / static_cast<int32_t>(h2 - 1u) : 0;
+        int32_t step_g = h2 > 1 ? (((static_cast<int32_t>((color_bottom >> 8) & 0xFFu) - static_cast<int32_t>((color_mid >> 8) & 0xFFu))) << 16) / static_cast<int32_t>(h2 - 1u) : 0;
+        int32_t step_b = h2 > 1 ? (((static_cast<int32_t>(color_bottom & 0xFFu) - static_cast<int32_t>(color_mid & 0xFFu))) << 16) / static_cast<int32_t>(h2 - 1u) : 0;
+
+        for (uint32_t y = y_mid; y < height; ++y) {
+            uint32_t row_color = 0xFF000000u |
+                                 ((static_cast<uint32_t>(r_fp >> 16) & 0xFFu) << 16) |
+                                 ((static_cast<uint32_t>(g_fp >> 16) & 0xFFu) << 8) |
+                                 (static_cast<uint32_t>(b_fp >> 16) & 0xFFu);
+            uint32_t *row = &surface->buffer[static_cast<size_t>(y) * stride];
+            for (uint32_t x = 0; x < width; ++x)
+                row[x] = row_color;
+            r_fp += step_r;
+            g_fp += step_g;
+            b_fp += step_b;
+        }
     }
 }
 
@@ -1083,21 +1185,74 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         corner_mask_y = local_y;
     };
 
+    int copy_x = 0, copy_y = 0, copy_w = 0, copy_h = 0;
+    int src_x = 0, src_y = 0;
+    bool has_buffer = (w.buffer_w > 0 && w.buffer_h > 0 && w.buffer != nullptr);
+    if (has_buffer) {
+        copy_x = w.transparent ? ix : rx;
+        copy_y = w.transparent ? iy : ry;
+        copy_w = w.transparent ? iw : rw;
+        copy_h = w.transparent ? ih : rh;
+        src_x = copy_x - w.x + w.scroll_x;
+        src_y = copy_y - w.y + w.scroll_y;
+
+        if (src_x < 0) {
+            int delta = -src_x;
+            copy_x += delta;
+            copy_w -= delta;
+            src_x = 0;
+        }
+        if (src_y < 0) {
+            int delta = -src_y;
+            copy_y += delta;
+            copy_h -= delta;
+            src_y = 0;
+        }
+        if (src_x + copy_w > w.buffer_w)
+            copy_w = w.buffer_w - src_x;
+        if (src_y + copy_h > w.buffer_h)
+            copy_h = w.buffer_h - src_y;
+        // Clamp to the window's logical content dimensions to prevent reading stale
+        // over-allocated buffer pixels that extend beyond the current window size.
+        if (src_x + copy_w > w.w)
+            copy_w = w.w - src_x;
+        if (src_y + copy_h > w.h)
+            copy_h = w.h - src_y;
+        if (copy_w < 0) copy_w = 0;
+        if (copy_h < 0) copy_h = 0;
+    }
+
     if (!w.transparent) {
         const uint32_t fill = g_gui_style.app_bg ? g_gui_style.app_bg : 0xFF15171Au;
+        const int rect_right = rx + rw;
         if (inner_r <= 0) {
-            gui_fill_rect(dst, rx, ry, rw, rh, fill);
+            for (int py = 0; py < rh; ++py) {
+                const int dst_y = ry + py;
+                if (dst_y < 0 || dst_y >= dst_height_int)
+                    continue;
+                uint32_t *dst_ptr = &dst->buffer[static_cast<size_t>(dst_y) * dst_stride];
+                bool row_in_blit = (copy_w > 0 && copy_h > 0 && dst_y >= copy_y && dst_y < copy_y + copy_h);
+                for (int x = rx; x < rect_right; ++x) {
+                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
+                        continue;
+                    dst_ptr[x] = fill;
+                }
+            }
         } else {
-            const int rect_right = rx + rw;
             for (int py = 0; py < rh; ++py) {
                 const int dst_y = ry + py;
                 if (dst_y < 0 || dst_y >= dst_height_int)
                     continue;
 
                 uint32_t *dst_ptr = &dst->buffer[static_cast<size_t>(dst_y) * dst_stride];
+                bool row_in_blit = (copy_w > 0 && copy_h > 0 && dst_y >= copy_y && dst_y < copy_y + copy_h);
+
                 if (dst_y < rounded_start_y) {
-                    for (int x = rx; x < rect_right; ++x)
+                    for (int x = rx; x < rect_right; ++x) {
+                        if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
+                            continue;
                         dst_ptr[x] = fill;
+                    }
                     continue;
                 }
 
@@ -1108,6 +1263,8 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                     int local = x - inner_left;
                     if (local < 0 || local >= inner_r)
                         continue;
+                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
+                        continue;
                     uint8_t coverage = corner_mask[local];
                     if (coverage == 255)
                         dst_ptr[x] = fill;
@@ -1117,13 +1274,18 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
 
                 int center_lo = rx > center_start_x ? rx : center_start_x;
                 int center_hi = rect_right < center_end_x ? rect_right : center_end_x;
-                for (int x = center_lo; x < center_hi; ++x)
+                for (int x = center_lo; x < center_hi; ++x) {
+                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
+                        continue;
                     dst_ptr[x] = fill;
+                }
 
                 int right_lo = rx > center_end_x ? rx : center_end_x;
                 for (int x = right_lo; x < rect_right; ++x) {
                     int local = inner_w - 1 - (x - inner_left);
                     if (local < 0 || local >= inner_r)
+                        continue;
+                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
                         continue;
                     uint8_t coverage = corner_mask[local];
                     if (coverage == 255)
@@ -1135,33 +1297,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         }
     }
 
-    if (w.buffer_w <= 0 || w.buffer_h <= 0 || !w.buffer)
-        return;
-
-    int copy_x = w.transparent ? ix : rx;
-    int copy_y = w.transparent ? iy : ry;
-    int copy_w = w.transparent ? iw : rw;
-    int copy_h = w.transparent ? ih : rh;
-    int src_x = copy_x - w.x + w.scroll_x;
-    int src_y = copy_y - w.y + w.scroll_y;
-
-    if (src_x < 0) {
-        int delta = -src_x;
-        copy_x += delta;
-        copy_w -= delta;
-        src_x = 0;
-    }
-    if (src_y < 0) {
-        int delta = -src_y;
-        copy_y += delta;
-        copy_h -= delta;
-        src_y = 0;
-    }
-    if (src_x + copy_w > w.buffer_w)
-        copy_w = w.buffer_w - src_x;
-    if (src_y + copy_h > w.buffer_h)
-        copy_h = w.buffer_h - src_y;
-    if (copy_w <= 0 || copy_h <= 0)
+    if (!has_buffer || copy_w <= 0 || copy_h <= 0)
         return;
 
     if (w.transparent) {

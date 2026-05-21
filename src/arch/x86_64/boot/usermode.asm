@@ -158,3 +158,75 @@ syscall_entry:
     ; 7. Final swap back to user GS and return
     swapgs
     o64 sysret
+
+
+; =============================================================================
+; safe_copy_from_user(void *dest, const void *src, size_t n)
+; =============================================================================
+global safe_copy_from_user
+global __user_copy_start
+global __user_copy_end
+global __user_copy_fixup
+
+safe_copy_from_user:
+    push rbp
+    mov rbp, rsp
+
+    test rdx, rdx
+    jz safe_copy_from_user_success
+
+    xor rcx, rcx
+safe_copy_from_user_loop:
+__user_copy_start:
+    mov al, [rsi + rcx]
+__user_copy_end:
+    mov [rdi + rcx], al
+    inc rcx
+    cmp rcx, rdx
+    jne safe_copy_from_user_loop
+
+safe_copy_from_user_success:
+    mov rax, 1
+    pop rbp
+    ret
+
+__user_copy_fixup:
+    mov rax, 0
+    pop rbp
+    ret
+
+
+; =============================================================================
+; safe_copy_to_user(void *dest, const void *src, size_t n)
+; =============================================================================
+global safe_copy_to_user
+global __user_copy_to_start
+global __user_copy_to_end
+global __user_copy_to_fixup
+
+safe_copy_to_user:
+    push rbp
+    mov rbp, rsp
+
+    test rdx, rdx
+    jz safe_copy_to_user_success
+
+    xor rcx, rcx
+safe_copy_to_user_loop:
+    mov al, [rsi + rcx]
+__user_copy_to_start:
+    mov [rdi + rcx], al
+__user_copy_to_end:
+    inc rcx
+    cmp rcx, rdx
+    jne safe_copy_to_user_loop
+
+safe_copy_to_user_success:
+    mov rax, 1
+    pop rbp
+    ret
+
+__user_copy_to_fixup:
+    mov rax, 0
+    pop rbp
+    ret

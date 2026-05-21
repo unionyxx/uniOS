@@ -698,6 +698,8 @@ static inline uint8_t rounded_hits_to_alpha(int hits)
                             : static_cast<uint8_t>((hits * 255 + k_round_aa_total / 2) / k_round_aa_total));
 }
 
+static constexpr int32_t k_round_aa_offsets_fp[8] = {16, 48, 80, 112, 144, 176, 208, 240};
+
 static uint8_t *build_rounded_corner_fill_mask(int radius)
 {
     if (radius <= 0)
@@ -707,17 +709,20 @@ static uint8_t *build_rounded_corner_fill_mask(int radius)
     if (!mask)
         return nullptr;
 
-    float rr = static_cast<float>(radius) * static_cast<float>(radius);
+    const int64_t rr_fp = static_cast<int64_t>(radius) * radius * 256 * 256;
+    const int64_t center_fp = static_cast<int64_t>(radius) * 256;
+
     for (int row = 0; row < radius; row++) {
+        const int64_t sample_y_base = static_cast<int64_t>(row) * 256;
         for (int col = 0; col < radius; col++) {
+            const int64_t sample_x_base = static_cast<int64_t>(col) * 256;
             int hits = 0;
             for (int sy = 0; sy < k_round_aa_samples; sy++) {
-                float sample_y = static_cast<float>(row) + k_round_aa_offsets[sy];
+                int64_t dy_fp = sample_y_base + k_round_aa_offsets_fp[sy] - center_fp;
+                int64_t dy_sq = dy_fp * dy_fp;
                 for (int sx = 0; sx < k_round_aa_samples; sx++) {
-                    float sample_x = static_cast<float>(col) + k_round_aa_offsets[sx];
-                    float dx = sample_x - static_cast<float>(radius);
-                    float dy = sample_y - static_cast<float>(radius);
-                    if (dx * dx + dy * dy <= rr)
+                    int64_t dx_fp = sample_x_base + k_round_aa_offsets_fp[sx] - center_fp;
+                    if (dx_fp * dx_fp + dy_sq <= rr_fp)
                         hits++;
                 }
             }
@@ -794,17 +799,19 @@ uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int
 
     const RoundedCornerMaskCacheEntry *entry = get_rounded_corner_mask_entry(r);
     if (!entry) {
-        float center_x = (col < r) ? static_cast<float>(r) : static_cast<float>(w - r);
-        float center_y = top_band ? static_cast<float>(r) : static_cast<float>(h - r);
-        float rr = static_cast<float>(r) * static_cast<float>(r);
+        const int64_t center_x_fp = static_cast<int64_t>((col < r) ? r : (w - r)) * 256;
+        const int64_t center_y_fp = static_cast<int64_t>(top_band ? r : (h - r)) * 256;
+        const int64_t rr_fp = static_cast<int64_t>(r) * r * 256 * 256;
         int hits = 0;
+        const int64_t sample_y_base = static_cast<int64_t>(row) * 256;
+        const int64_t sample_x_base = static_cast<int64_t>(col) * 256;
+
         for (int sy = 0; sy < k_round_aa_samples; sy++) {
-            float sample_y = static_cast<float>(row) + k_round_aa_offsets[sy];
+            int64_t dy_fp = sample_y_base + k_round_aa_offsets_fp[sy] - center_y_fp;
+            int64_t dy_sq = dy_fp * dy_fp;
             for (int sx = 0; sx < k_round_aa_samples; sx++) {
-                float sample_x = static_cast<float>(col) + k_round_aa_offsets[sx];
-                float dx = sample_x - center_x;
-                float dy = sample_y - center_y;
-                if (dx * dx + dy * dy <= rr)
+                int64_t dx_fp = sample_x_base + k_round_aa_offsets_fp[sx] - center_x_fp;
+                if (dx_fp * dx_fp + dy_sq <= rr_fp)
                     hits++;
             }
         }

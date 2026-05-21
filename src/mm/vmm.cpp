@@ -20,8 +20,63 @@ STATIC_ASSERT(offsetof(Process, vma_list) == 8464, "Process::vma_list offset mis
 
 using kstring::memcpy;
 
+#include <kernel/cpu.h>
+#include <kernel/irq.h>
+#include <kernel/arch/x86_64/idt.h>
+
 static uint64_t *g_pml4 = nullptr;
 static uint64_t g_hhdm_offset = 0;
+
+struct TlbShootdown
+{
+    Spinlock lock = SPINLOCK_INIT;
+    volatile uint64_t target_addr;
+    volatile int active_cores;
+};
+
+static TlbShootdown g_tlb_shootdown;
+static uint8_t g_tlb_shootdown_vector = 0;
+
+static void tlb_shootdown_handler(uint8_t vector, void *ctx)
+{
+    (void)vector;
+    (void)ctx;
+    uint64_t addr = g_tlb_shootdown.target_addr;
+    if (addr) {
+        asm volatile("invlpg (%0)" ::"r"(addr) : "memory");
+    }
+    __sync_sub_and_fetch(&g_tlb_shootdown.active_cores, 1);
+}
+
+void vmm_invalidate_tlb(uint64_t virt)
+{
+    // 1. Invalidate locally on current core
+    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+
+    // 2. If APIC is enabled and there are other active CPUs, broadcast TLB shootdown IPI
+    if (apic_is_enabled()) {
+        int others = g_cpu_online_count - 1;
+        if (others > 0) {
+            spinlock_acquire(&g_tlb_shootdown.lock);
+
+            g_tlb_shootdown.target_addr = virt;
+            g_tlb_shootdown.active_cores = others;
+
+            // Broadcast shootdown IPI using the registered vector
+            if (g_tlb_shootdown_vector != 0) {
+                apic_send_ipi_all_excluding_self(g_tlb_shootdown_vector);
+            }
+
+            // Spin-wait until all other cores have processed the invalidation
+            while (g_tlb_shootdown.active_cores > 0) {
+                asm volatile("pause");
+            }
+
+            g_tlb_shootdown.target_addr = 0;
+            spinlock_release(&g_tlb_shootdown.lock);
+        }
+    }
+}
 
 [[nodiscard]] static bool split_huge_page(uint64_t *table, uint64_t index, int level)
 {
@@ -115,6 +170,12 @@ void vmm_init()
     uint64_t cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
     g_pml4 = reinterpret_cast<uint64_t *>(cr3 + g_hhdm_offset);
+
+    // Initialize TLB shootdown interrupt handler
+    g_tlb_shootdown_vector = idt_allocate_free_vector();
+    if (g_tlb_shootdown_vector != 0) {
+        irq_register_vector_handler(g_tlb_shootdown_vector, tlb_shootdown_handler, nullptr);
+    }
 }
 
 uint64_t vmm_phys_to_virt(uint64_t phys)
@@ -155,7 +216,7 @@ Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
 
     Result<void> res = vmm_map_page_in(pml4, virt, phys, flags);
     if (res.ok()) {
-        asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+        vmm_invalidate_tlb(virt);
     }
     return res;
 }
@@ -279,7 +340,7 @@ void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
         return;
 
     pt[(virt >> 12) & 0x1FF] = 0;
-    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+    vmm_invalidate_tlb(virt);
 }
 
 uint64_t *vmm_create_address_space()
@@ -481,7 +542,7 @@ void vmm_set_page_flags(uint64_t virt, uint64_t flags)
     uint64_t preserved = old_entry & (PTE_PRESENT | PTE_USER | PTE_SHARED);
 
     pt[index] = phys | flags | preserved;
-    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+    vmm_invalidate_tlb(virt);
 }
 
 void vmm_protect_kernel()
@@ -814,7 +875,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
             spinlock_release(&curr->vma_lock);
             return false;
         }
-        asm volatile("invlpg (%0)" ::"r"(page_vaddr) : "memory");
+        vmm_invalidate_tlb(page_vaddr);
         spinlock_release(&curr->vma_lock);
         return true;
     }
@@ -851,7 +912,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         }
     }
 
-    asm volatile("invlpg (%0)" ::"r"(page_vaddr) : "memory");
+    vmm_invalidate_tlb(page_vaddr);
     spinlock_release(&curr->vma_lock);
     return true;
 }

@@ -454,6 +454,24 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     }
 
     int stale_count = clamp_dirty_rect_count(dst.stale_count);
+
+    // Dynamic Pruning: Discard stale repair rects that will be completely overwritten by the new frame's dirty regions.
+    // Bypass during active window manipulation to prevent aggressive pruning from dropping essential shadow/border repair rects.
+    bool manip = g_input.pointer_down && g_input.drag_index >= 2;
+    if (!manip) {
+        for (int i = 0; i < stale_count; i++) {
+            for (int j = 0; j < g_dirty_count; j++) {
+                if (rect_contains(g_dirty_rects[j], dst.stale_rects[i])) {
+                    dst.stale_rects[i] = dst.stale_rects[stale_count - 1];
+                    stale_count--;
+                    dst.stale_count = stale_count;
+                    i--;
+                    break;
+                }
+            }
+        }
+    }
+
     wm_stats_note_stale_repair(stale_count);
 
     DirtyRect cursor_rect = {};
@@ -562,33 +580,36 @@ static uint32_t present_frame(const Surface *source, const DirtyRect *rects, int
         return 0;
 
     if (g_presentbuffer_handle != 0) {
-        DisplayComposeLayer layer = {};
-        layer.buffer_handle = g_presentbuffer_handle;
-        layer.src_rect = gui_rect_make(0, 0, source->width, source->height);
-        layer.dst_rect = layer.src_rect;
-        layer.alpha = 255u;
-        layer.flags = DISPLAY_COMPOSE_LAYER_OPAQUE;
+        DisplayComposeLayer layer = {
+            .buffer_handle = g_presentbuffer_handle,
+            .src_rect = gui_rect_make(0, 0, source->width, source->height),
+            .dst_rect = gui_rect_make(0, 0, source->width, source->height),
+            .flags = DISPLAY_COMPOSE_LAYER_OPAQUE,
+            .alpha = 255u
+        };
 
-        DisplayComposeRequest req = {};
-        req.layers = &layer;
-        req.layer_count = 1;
-        req.damage_rects = present_rects;
-        req.damage_rect_count = static_cast<uint32_t>(present_count);
-        req.frame_sequence = frame_sequence;
-        req.flags = DISPLAY_PRESENT_VBLANK;
-        req.cursor_buffer_handle = cursor_handle;
-        req.cursor_x = cursor_x;
-        req.cursor_y = cursor_y;
+        DisplayComposeRequest req = {
+            .layers = &layer,
+            .layer_count = 1,
+            .damage_rects = present_rects,
+            .damage_rect_count = static_cast<uint32_t>(present_count),
+            .frame_sequence = frame_sequence,
+            .flags = DISPLAY_PRESENT_VBLANK,
+            .cursor_buffer_handle = cursor_handle,
+            .cursor_x = cursor_x,
+            .cursor_y = cursor_y
+        };
         return display_compose_submit(&req);
     }
 
-    DisplayPresentRequest req = {};
-    req.buffer = source->buffer;
-    req.stride = source->pitch / 4;
-    req.rects = present_rects;
-    req.rect_count = static_cast<uint32_t>(present_count);
-    req.frame_sequence = frame_sequence;
-    req.flags = DISPLAY_PRESENT_VBLANK;
+    DisplayPresentRequest req = {
+        .buffer = source->buffer,
+        .stride = source->pitch / 4,
+        .rects = present_rects,
+        .rect_count = static_cast<uint32_t>(present_count),
+        .frame_sequence = frame_sequence,
+        .flags = DISPLAY_PRESENT_VBLANK
+    };
     return display_present(&req);
 }
 
@@ -620,27 +641,10 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
     if (!w.entry)
         return;
 
-    static constexpr int MAX_SAFE_TEXTURE_DIM = 8192;
-    int desired_buffer_w = entry.buffer_w > 0 ? entry.buffer_w : entry.w;
-    int desired_buffer_h = entry.buffer_h > 0 ? entry.buffer_h : entry.h;
-
-    if (desired_buffer_w > MAX_SAFE_TEXTURE_DIM)
-        desired_buffer_w = MAX_SAFE_TEXTURE_DIM;
-    if (desired_buffer_h > MAX_SAFE_TEXTURE_DIM)
-        desired_buffer_h = MAX_SAFE_TEXTURE_DIM;
-
-    const bool buffer_size_changed = desired_buffer_w > 0 && desired_buffer_h > 0 &&
-                                     (w.buffer_w != desired_buffer_w || w.buffer_h != desired_buffer_h);
     const bool resize_serial_changed = w.entry_resize_serial != entry.resize_serial;
     const bool buffer_resize_serial_changed = w.buffer_resize_serial != entry.buffer_resize_serial;
 
-    if (buffer_size_changed || resize_serial_changed || buffer_resize_serial_changed) {
-        Window old = w;
-
-        if (desired_buffer_w > 0 && desired_buffer_h > 0) {
-            w.buffer_w = desired_buffer_w;
-            w.buffer_h = desired_buffer_h;
-        }
+    if (resize_serial_changed || buffer_resize_serial_changed) {
         w.entry_resize_serial = entry.resize_serial;
         w.buffer_resize_serial = entry.buffer_resize_serial;
 
@@ -661,8 +665,6 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
         invalidate_window_decoration_cache(w);
         DirtyRect client = window_visible_client_bounds(w);
         enqueue_damage_rect(client.x, client.y, client.w, client.h);
-        if (buffer_size_changed)
-            mark_window_transition_damage(old, w);
         invalidate_window_visibility_cache();
     }
 
@@ -754,7 +756,7 @@ extern "C" int main(int argc, char **argv)
         return 1;
 
     if ((g_display_caps.flags & DISPLAY_FLAG_HAS_COMPOSITOR) != 0) {
-        uint32_t requested_present_slots = g_display_copy_path ? 1u : MAX_PRESENT_BUFFER_SLOTS;
+        uint32_t requested_present_slots = g_display_copy_path ? 2u : MAX_PRESENT_BUFFER_SLOTS;
         for (uint32_t i = 0; i < requested_present_slots; i++) {
             DisplayBufferCreate create = {};
             create.width = g_screen.width;
@@ -1451,44 +1453,48 @@ extern "C" int main(int argc, char **argv)
                     w.needs_full_redraw = true;
                     continue;
                 }
-                if (gui_shm_id_is_valid(entry_snapshot.shm_id) && entry_snapshot.shm_id != w.shm_id) {
-                    uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
-                    if (shm_owner != entry_snapshot.owner_pid && shm_owner != 0) {
+                int bw = entry_snapshot.buffer_w > 0 ? entry_snapshot.buffer_w : entry_snapshot.w;
+                int bh = entry_snapshot.buffer_h > 0 ? entry_snapshot.buffer_h : entry_snapshot.h;
+                if (bw > 8192) bw = 8192;
+                if (bh > 8192) bh = 8192;
+
+                if (gui_shm_id_is_valid(entry_snapshot.shm_id)) {
+                    if (entry_snapshot.shm_id != w.shm_id) {
+                        uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
+                        if (shm_owner == entry_snapshot.owner_pid || shm_owner == 0) {
+                            uint64_t req_size = (uint64_t)bw * bh * 4;
+                            uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)entry_snapshot.shm_id);
+                            if (shm_size != (uint64_t)-1 && req_size <= shm_size) {
+                                uint64_t mapped = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
+                                if (mapped != 0 && mapped != static_cast<uint64_t>(-1)) {
+                                    int old_shm_id = w.shm_id;
+                                    w.shm_id = entry_snapshot.shm_id;
+                                    w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
+                                    if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id) {
+                                        syscall1(SYS_SHM_UNMAP, old_shm_id);
+                                    }
+                                    w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
+                                    w.buffer_generation_acked = entry_snapshot.buffer_generation;
+                                    w.buffer_generation_seen = entry_snapshot.buffer_generation;
+                                    smp_wmb();
+                                    w.needs_full_redraw = true;
+                                    invalidate_window_decoration_cache(w);
+                                    mark_window_frame_damage(w);
+                                    invalidate_window_visibility_cache();
+                                }
+                            }
+                        }
+                    }
+
+                    if (w.buffer_w != bw || w.buffer_h != bh) {
+                        Window old = w;
+                        w.buffer_w = bw;
+                        w.buffer_h = bh;
+                        mark_window_transition_damage(old, w);
                         w.needs_full_redraw = true;
-                        continue;
+                        invalidate_window_decoration_cache(w);
+                        invalidate_window_visibility_cache();
                     }
-
-                    uint64_t req_size =
-                        (uint64_t)(entry_snapshot.buffer_w > 0 ? entry_snapshot.buffer_w : entry_snapshot.w) *
-                        (entry_snapshot.buffer_h > 0 ? entry_snapshot.buffer_h : entry_snapshot.h) * 4;
-                    uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)entry_snapshot.shm_id);
-                    if (shm_size == (uint64_t)-1 || req_size > shm_size) {
-                        w.needs_full_redraw = true;
-                        continue;
-                    }
-
-                    uint64_t mapped = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
-                    if (mapped == 0 || mapped == static_cast<uint64_t>(-1)) {
-                        w.needs_full_redraw = true;
-                        continue;
-                    }
-
-                    int old_shm_id = w.shm_id;
-                    w.shm_id = entry_snapshot.shm_id;
-                    w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
-                    if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id) {
-                        syscall1(SYS_SHM_UNMAP, old_shm_id);
-                    }
-
-                    w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
-                    w.buffer_generation_acked = entry_snapshot.buffer_generation;
-                    w.buffer_generation_seen = entry_snapshot.buffer_generation;
-                    smp_wmb();
-
-                    w.needs_full_redraw = true;
-                    invalidate_window_decoration_cache(w);
-                    mark_window_frame_damage(w);
-                    invalidate_window_visibility_cache();
                 }
 
                 sync_window_runtime_metadata(w, entry_snapshot);
@@ -1784,6 +1790,12 @@ extern "C" int main(int argc, char **argv)
                 }
                 mark_other_presentbuffer_slots_stale(g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
                                                      g_presentbuffer_active_slot);
+                for (int i = 0; i < g_window_count; i++) {
+                    g_windows[i].last_rendered_x = g_windows[i].x;
+                    g_windows[i].last_rendered_y = g_windows[i].y;
+                    g_windows[i].last_rendered_w = g_windows[i].w;
+                    g_windows[i].last_rendered_h = g_windows[i].h;
+                }
                 g_frame_stats.frames_submitted++;
                 last_seq = sub;
                 frame_seq = sub + 1;
@@ -1801,19 +1813,19 @@ extern "C" int main(int argc, char **argv)
             uint64_t hw_sync_start = get_ticks();
             while (g_display_queue.completed_sequence < tgt) {
                 DisplayEvent ev_w = {};
-                if (display_wait_event(&ev_w) != 0) {
-                    display_wait();
-                    refresh_display_queue_from_status();
+                if (display_poll_event(&ev_w) == 0) {
+                    apply_display_event(ev_w);
                     drain_display_events();
-                    if (get_ticks() - hw_sync_start > 250) {
-                        LOG_ERROR("wm", "Display driver timeout, forcing sequence");
-                        g_display_queue.completed_sequence = tgt;
-                        break;
-                    }
+                } else {
+                    yield();
+                }
+
+                refresh_display_queue_from_status();
+                if (get_ticks() - hw_sync_start > 250) {
+                    LOG_ERROR("wm", "Display driver timeout, forcing sequence");
+                    g_display_queue.completed_sequence = tgt;
                     break;
                 }
-                apply_display_event(ev_w);
-                drain_display_events();
             }
         }
     }
