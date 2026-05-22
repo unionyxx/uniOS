@@ -1517,3 +1517,147 @@ void cmd_play(const char *filename)
         // For now, let's just leave it allocated to be safe.
     }
 }
+
+void cmd_alias(const char *args)
+{
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+        for (int i = 0; i < 32; i++) {
+            if (g_current_shell->aliases[i].in_use) {
+                printf("alias %s='%s'\n", g_current_shell->aliases[i].name, g_current_shell->aliases[i].value);
+            }
+        }
+        set_status(0);
+        return;
+    }
+
+    const char *eq = strchr(args, '=');
+    if (!eq) {
+        char name[32];
+        size_t len = strlen(args);
+        if (len >= 32) len = 31;
+        strncpy(name, args, len);
+        name[len] = '\0';
+        while (len > 0 && name[len - 1] == ' ') {
+            name[len - 1] = '\0';
+            len--;
+        }
+        
+        bool found = false;
+        for (int i = 0; i < 32; i++) {
+            if (g_current_shell->aliases[i].in_use && strcmp(g_current_shell->aliases[i].name, name) == 0) {
+                printf("alias %s='%s'\n", g_current_shell->aliases[i].name, g_current_shell->aliases[i].value);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            printf("alias: %s: not found\n", name);
+            set_status(1);
+        } else {
+            set_status(0);
+        }
+        return;
+    }
+
+    char name[32];
+    int name_len = (int)(eq - args);
+    while (name_len > 0 && args[name_len - 1] == ' ') {
+        name_len--;
+    }
+    if (name_len <= 0) {
+        printf("alias: invalid alias name\n");
+        set_status(1);
+        return;
+    }
+    if (name_len >= 32) {
+        name_len = 31;
+    }
+    strncpy(name, args, (size_t)name_len);
+    name[name_len] = '\0';
+
+    const char *val_ptr = eq + 1;
+    while (*val_ptr == ' ') {
+        val_ptr++;
+    }
+
+    char val[128];
+    int val_len = 0;
+    if (*val_ptr == '\'' || *val_ptr == '"') {
+        char quote = *val_ptr;
+        val_ptr++;
+        while (*val_ptr && *val_ptr != quote && val_len < 127) {
+            val[val_len++] = *val_ptr++;
+        }
+    } else {
+        while (*val_ptr && val_len < 127) {
+            val[val_len++] = *val_ptr++;
+        }
+        while (val_len > 0 && val[val_len - 1] == ' ') {
+            val_len--;
+        }
+    }
+    val[val_len] = '\0';
+
+    int slot = -1;
+    for (int i = 0; i < 32; i++) {
+        if (g_current_shell->aliases[i].in_use && strcmp(g_current_shell->aliases[i].name, name) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) {
+        for (int i = 0; i < 32; i++) {
+            if (!g_current_shell->aliases[i].in_use) {
+                slot = i;
+                break;
+            }
+        }
+    }
+
+    if (slot == -1) {
+        printf("alias: too many aliases (limit is 32)\n");
+        set_status(1);
+        return;
+    }
+
+    strncpy(g_current_shell->aliases[slot].name, name, 31);
+    g_current_shell->aliases[slot].name[31] = '\0';
+    strncpy(g_current_shell->aliases[slot].value, val, 127);
+    g_current_shell->aliases[slot].value[127] = '\0';
+    g_current_shell->aliases[slot].in_use = true;
+    set_status(0);
+}
+
+void cmd_unalias(const char *name)
+{
+    name = skip_spaces(name);
+    if (!name || name[0] == '\0') {
+        printf("Usage: unalias <name>\n");
+        set_status(1);
+        return;
+    }
+
+    char target[32];
+    size_t len = strlen(name);
+    if (len >= 32) len = 31;
+    strncpy(target, name, len);
+    target[len] = '\0';
+    while (len > 0 && target[len - 1] == ' ') {
+        target[len - 1] = '\0';
+        len--;
+    }
+
+    for (int i = 0; i < 32; i++) {
+        if (g_current_shell->aliases[i].in_use && strcmp(g_current_shell->aliases[i].name, target) == 0) {
+            g_current_shell->aliases[i].in_use = false;
+            g_current_shell->aliases[i].name[0] = '\0';
+            g_current_shell->aliases[i].value[0] = '\0';
+            set_status(0);
+            return;
+        }
+    }
+    printf("unalias: %s: not found\n", target);
+    set_status(1);
+}
+

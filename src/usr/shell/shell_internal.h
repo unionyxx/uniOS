@@ -46,6 +46,13 @@ struct Variable
     bool in_use;
 };
 
+struct Alias
+{
+    char name[32];
+    char value[128];
+    bool in_use;
+};
+
 struct ShellState
 {
     char cwd[256];
@@ -54,6 +61,7 @@ struct ShellState
     int history_index;
     Variable vars[MAX_VARS];
     int last_exit_status;
+    Alias aliases[32];
 };
 
 enum BlockType
@@ -194,6 +202,9 @@ void cmd_cpuinfo();
 void cmd_lspci();
 void cmd_ifconfig();
 void cmd_dhcp_request();
+void cmd_alias(const char *args);
+void cmd_unalias(const char *name);
+void expand_aliases(char *cmd, int max_size);
 
 // Auth & Input
 bool shell_login();

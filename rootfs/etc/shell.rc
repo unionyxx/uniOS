@@ -1,0 +1,20 @@
+# uniOS Shell Configuration
+
+# Aliases
+alias l='ls'
+alias la='ls -lah'
+alias ll='ls -lh'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias c='clear'
+alias cls='clear'
+alias h='help'
+alias sys='sysinfo'
+alias meminfo='mem'
+alias cpu='cpuinfo'
+
+# Variables
+set OS=uniOS
+set USER=root
+set SHELL=/bin/shell.elf
+

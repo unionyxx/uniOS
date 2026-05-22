@@ -100,6 +100,8 @@ static const CommandEntry commands[] = {
     {"source", "source <script>", "run a script in this shell", CMD_ARGS, nullptr, cmd_source, nullptr},
     {"set", "set [name=value]", "show or set shell variables", CMD_ARGS, nullptr, cmd_set, nullptr},
     {"unset", "unset <name>", "unset a shell variable", CMD_ARGS, nullptr, cmd_unset, nullptr},
+    {"alias", "alias [name=value]", "define or list aliases", CMD_ARGS, nullptr, cmd_alias, nullptr},
+    {"unalias", "unalias <name>", "remove an alias definition", CMD_ARGS, nullptr, cmd_unalias, nullptr},
     {"read", "read <name>", "read stdin into a variable", CMD_ARGS, nullptr, cmd_read, nullptr},
     {"test", "test <expr>", "evaluate a shell condition", CMD_ARGS, nullptr, cmd_test, nullptr},
     {"expr", "expr <a> <op> <b>", "evaluate integer expression", CMD_ARGS, nullptr, cmd_expr, nullptr},
@@ -218,6 +220,81 @@ static bool try_exec_external(const char *trimmed_cmd)
     return true;
 }
 
+void expand_aliases(char *cmd, int max_size)
+{
+    int iterations = 0;
+    bool expanded_any = true;
+    while (expanded_any && iterations < 5) {
+        expanded_any = false;
+        
+        char *start = cmd;
+        while (*start == ' ') {
+            start++;
+        }
+        if (*start == '\0')
+            break;
+
+        int word_len = 0;
+        while (start[word_len] && start[word_len] != ' ' && start[word_len] != '\t' && start[word_len] != '=') {
+            word_len++;
+        }
+
+        if (word_len == 0 || word_len >= 32)
+            break;
+
+        char word[32];
+        strncpy(word, start, (size_t)word_len);
+        word[word_len] = '\0';
+
+        int slot = -1;
+        if (g_current_shell) {
+            for (int i = 0; i < 32; i++) {
+                if (g_current_shell->aliases[i].in_use && strcmp(g_current_shell->aliases[i].name, word) == 0) {
+                    slot = i;
+                    break;
+                }
+            }
+        }
+
+        if (slot != -1) {
+            const char *val = g_current_shell->aliases[slot].value;
+            const char *rest = start + word_len;
+            while (*rest == ' ') {
+                rest++;
+            }
+
+            char expanded[256];
+            if (*rest != '\0') {
+                snprintf(expanded, sizeof(expanded), "%s %s", val, rest);
+            } else {
+                snprintf(expanded, sizeof(expanded), "%s", val);
+            }
+
+            strncpy(cmd, expanded, (size_t)max_size - 1);
+            cmd[max_size - 1] = '\0';
+            expanded_any = true;
+            iterations++;
+        }
+    }
+}
+
+static char *extract_redir_filename(char *start)
+{
+    while (*start == ' ') {
+        start++;
+    }
+    char *end = start;
+    while (*end && *end != '<' && *end != '>') {
+        end++;
+    }
+    char *trailing = end;
+    while (trailing > start && (*(trailing - 1) == ' ' || *(trailing - 1) == '\t')) {
+        trailing--;
+    }
+    *trailing = '\0';
+    return start;
+}
+
 bool execute_single_command(const char *cmd, const char *piped_input)
 {
     while (*cmd == ' ')
@@ -233,32 +310,53 @@ bool execute_single_command(const char *cmd, const char *piped_input)
     strncpy(local_cmd, cmd, (size_t)copy_len);
     local_cmd[copy_len] = '\0';
 
+    // Expand aliases
+    expand_aliases(local_cmd, sizeof(local_cmd));
+
     int redirect_fd = -1;
     char *redirect_file = nullptr;
     bool append = false;
 
-    char *ptr = strstr(local_cmd, ">>");
-    if (ptr) {
-        append = true;
-        *ptr = '\0';
-        redirect_file = ptr + 2;
-    } else {
-        ptr = strchr(local_cmd, '>');
-        if (ptr) {
-            *ptr = '\0';
-            redirect_file = ptr + 1;
+    int redirect_in_fd = -1;
+    char *redirect_in_file = nullptr;
+
+    char *ptr_in = strchr(local_cmd, '<');
+    char *ptr_out_double = strstr(local_cmd, ">>");
+    char *ptr_out_single = strchr(local_cmd, '>');
+    if (ptr_out_double) {
+        ptr_out_single = nullptr;
+    }
+
+    char *first_redir = nullptr;
+    if (ptr_in) {
+        first_redir = ptr_in;
+    }
+    if (ptr_out_double) {
+        if (!first_redir || ptr_out_double < first_redir) {
+            first_redir = ptr_out_double;
+        }
+    }
+    if (ptr_out_single) {
+        if (!first_redir || ptr_out_single < first_redir) {
+            first_redir = ptr_out_single;
         }
     }
 
-    if (redirect_file) {
-        while (*redirect_file == ' ')
-            redirect_file++;
-        int flen = (int)strlen(redirect_file);
-        while (flen > 0 && redirect_file[flen - 1] == ' ') {
-            redirect_file[flen - 1] = '\0';
-            flen--;
-        }
+    if (ptr_in) {
+        redirect_in_file = extract_redir_filename(ptr_in + 1);
+    }
+    if (ptr_out_double) {
+        append = true;
+        redirect_file = extract_redir_filename(ptr_out_double + 2);
+    } else if (ptr_out_single) {
+        redirect_file = extract_redir_filename(ptr_out_single + 1);
+    }
 
+    if (first_redir) {
+        *first_redir = '\0';
+    }
+
+    if (redirect_file && redirect_file[0] != '\0') {
         char resolved[256];
         shell_resolve_path(redirect_file, resolved);
         int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
@@ -270,12 +368,34 @@ bool execute_single_command(const char *cmd, const char *piped_input)
         }
     }
 
+    if (redirect_in_file && redirect_in_file[0] != '\0') {
+        char resolved[256];
+        shell_resolve_path(redirect_in_file, resolved);
+        redirect_in_fd = open(resolved, O_RDONLY);
+        if (redirect_in_fd < 0) {
+            printf("shell: failed to open '%s' for input redirection\n", redirect_in_file);
+            if (redirect_fd >= 0) {
+                close(redirect_fd);
+            }
+            shell_set_status(1);
+            return false;
+        }
+    }
+
     int stdout_backup = -1;
     if (redirect_fd >= 0) {
         stdout_backup = 100;
         dup2(1, stdout_backup);
         dup2(redirect_fd, 1);
         close(redirect_fd);
+    }
+
+    int stdin_backup = -1;
+    if (redirect_in_fd >= 0) {
+        stdin_backup = 101;
+        dup2(0, stdin_backup);
+        dup2(redirect_in_fd, 0);
+        close(redirect_in_fd);
     }
 
     char *trimmed_cmd = local_cmd;
@@ -335,10 +455,13 @@ bool execute_single_command(const char *cmd, const char *piped_input)
         }
     }
 
-    // Restore stdout
     if (stdout_backup >= 0) {
         dup2(stdout_backup, 1);
         close(stdout_backup);
+    }
+    if (stdin_backup >= 0) {
+        dup2(stdin_backup, 0);
+        close(stdin_backup);
     }
 
     return cmd_found;
@@ -793,6 +916,13 @@ extern "C" int main(int argc, char **argv)
     (void)argc;
     (void)argv;
     shell_init_state(&g_shell_state);
+
+    bool is_dir = false;
+    if (shell_path_exists("/etc/shell.rc", &is_dir) && !is_dir) {
+        cmd_source("/etc/shell.rc");
+    } else if (shell_path_exists("/data/shell.rc", &is_dir) && !is_dir) {
+        cmd_source("/data/shell.rc");
+    }
 
     while (true) {
         print_prompt();

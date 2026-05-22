@@ -733,766 +733,19 @@ static void term_printf(TerminalEmulator &term, const char *fmt, ...)
     term.write_string(buf);
 }
 
-static void resolve_path(const char *cwd, const char *path, char *out)
+static inline int epoll_create(int size)
 {
-    char temp_path[256];
-
-    if (!path || path[0] == '\0') {
-        strncpy(out, cwd, 255);
-        out[255] = '\0';
-        return;
-    }
-
-    if (path[0] == '/') {
-        strncpy(temp_path, path, sizeof(temp_path) - 1);
-        temp_path[sizeof(temp_path) - 1] = '\0';
-    } else {
-        strncpy(temp_path, cwd, 255);
-        temp_path[255] = '\0';
-        if (temp_path[0] == '\0') {
-            strncpy(temp_path, "/", sizeof(temp_path) - 1);
-            temp_path[sizeof(temp_path) - 1] = '\0';
-        }
-        size_t len = strlen(temp_path);
-        if (len == 0 || temp_path[len - 1] != '/') {
-            strncat(temp_path, "/", sizeof(temp_path) - strlen(temp_path) - 1);
-        }
-        strncat(temp_path, path, sizeof(temp_path) - strlen(temp_path) - 1);
-    }
-
-    char *segments[32];
-    int depth = 0;
-    char copy[256];
-    strncpy(copy, temp_path, 255);
-    copy[255] = '\0';
-
-    char *tok = copy;
-    if (*tok == '/')
-        tok++;
-
-    char *p = tok;
-    while (true) {
-        if (*p == '/' || *p == '\0') {
-            char saved = *p;
-            *p = '\0';
-
-            if (strcmp(tok, "..") == 0) {
-                if (depth > 0)
-                    depth--;
-            } else if (strcmp(tok, ".") != 0 && tok[0] != '\0') {
-                if (depth < 32)
-                    segments[depth++] = tok;
-            }
-
-            if (saved == '\0')
-                break;
-            tok = p + 1;
-            p = tok;
-            continue;
-        }
-        p++;
-    }
-
-    out[0] = '\0';
-    for (int i = 0; i < depth; i++) {
-        strncat(out, "/", 255 - strlen(out));
-        strncat(out, segments[i], 255 - strlen(out));
-    }
-    if (out[0] == '\0') {
-        strncpy(out, "/", 255);
-        out[255] = '\0';
-    }
+    return (int)syscall1(SYS_EPOLL_CREATE, (uint64_t)size);
 }
 
-static int prompt_len_for(const char *cwd)
+static inline int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 {
-    return (int)strlen(cwd) + 14;
+    return (int)syscall6(SYS_EPOLL_CTL, (uint64_t)epfd, (uint64_t)op, (uint64_t)fd, (uint64_t)event, 0, 0);
 }
 
-static void print_prompt(TerminalEmulator &term, const char *cwd)
+static inline int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 {
-    term.write_string("\x1b[90mroot@unios\x1b[0m \x1b[34m");
-    term.write_string(cwd);
-    term.write_string("\x1b[0m $ ");
-}
-
-static void choose_initial_cwd(char *cwd, size_t cwd_size)
-{
-    if (!cwd || cwd_size == 0)
-        return;
-
-    VNodeStat st = {};
-    const char *initial = (stat("/data", &st) == 0 && st.is_dir) ? "/data" : "/";
-    strncpy(cwd, initial, cwd_size - 1);
-    cwd[cwd_size - 1] = '\0';
-}
-
-struct TermCommand
-{
-    const char *name;
-    const char *usage;
-    const char *description;
-};
-
-static const TermCommand k_term_commands[] = {
-    {"help", "help", "show command reference"},
-    {"clear", "clear", "clear the terminal"},
-    {"exit", "exit", "close terminal"},
-    {"echo", "echo <text>", "print text"},
-    {"pwd", "pwd", "print working directory"},
-    {"cd", "cd [dir]", "change directory"},
-    {"ls", "ls [dir]", "list files"},
-    {"cat", "cat <file>", "print file"},
-    {"stat", "stat <file>", "show file metadata"},
-    {"touch", "touch <file>", "create a file"},
-    {"rm", "rm <file>", "remove a file"},
-    {"mkdir", "mkdir <dir>", "create a directory"},
-    {"rmdir", "rmdir <dir>", "remove an empty directory"},
-    {"mv", "mv <src> <dst>", "rename a path"},
-    {"cp", "cp <src> <dst>", "copy a file"},
-    {"mem", "mem", "show memory"},
-    {"ps", "ps", "list processes"},
-    {"date", "date", "show time"},
-    {"uptime", "uptime", "show uptime"},
-    {"version", "version", "show kernel version"},
-    {"uname", "uname", "show system info"},
-    {"wallpaper", "wallpaper [file]", "show or set wallpaper"},
-};
-
-static void cmd_help(TerminalEmulator &term)
-{
-    term_printf(term, "uniOS terminal commands (%d)\n", (int)(sizeof(k_term_commands) / sizeof(k_term_commands[0])));
-    term.write_string("\x1b[90m  command              description\x1b[0m\n");
-    for (uint32_t i = 0; i < sizeof(k_term_commands) / sizeof(k_term_commands[0]); i++)
-        term_printf(term, "  %-20s %s\n", k_term_commands[i].usage, k_term_commands[i].description);
-}
-
-static void cmd_pwd(TerminalEmulator &term, const char *cwd)
-{
-    term.write_string(cwd);
-    term.put_char('\n');
-}
-
-static void cmd_cd(TerminalEmulator &term, char *cwd, const char *arg)
-{
-    char resolved[256];
-    resolve_path(cwd, arg && *arg ? arg : "/", resolved);
-    VNodeStat st = {};
-    if (stat(resolved, &st) < 0 || !st.is_dir) {
-        term_printf(term, "cd: no such directory: %s\n", arg && *arg ? arg : "/");
-        return;
-    }
-    strncpy(cwd, resolved, 255);
-    cwd[255] = '\0';
-}
-
-static void cmd_ls(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    char resolved[256];
-    resolve_path(cwd, (arg && *arg) ? arg : cwd, resolved);
-
-    VNodeStat dir_stat = {};
-    if (stat(resolved, &dir_stat) < 0) {
-        term_printf(term, "ls: cannot access '%s'\n", resolved);
-        return;
-    }
-    if (!dir_stat.is_dir) {
-        term_printf(term, "%s\n", resolved);
-        return;
-    }
-
-    int fd = open(resolved, O_RDONLY);
-    if (fd < 0) {
-        term_printf(term, "ls: cannot access '%s'\n", resolved);
-        return;
-    }
-
-    char name[256];
-    bool first = true;
-    while ((int)syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-            continue;
-
-        char full_path[512];
-        strncpy(full_path, resolved, sizeof(full_path) - 1);
-        full_path[sizeof(full_path) - 1] = '\0';
-        size_t len = strlen(full_path);
-        if (len == 0 || full_path[len - 1] != '/') {
-            strncat(full_path, "/", sizeof(full_path) - strlen(full_path) - 1);
-        }
-        strncat(full_path, name, sizeof(full_path) - strlen(full_path) - 1);
-
-        VNodeStat st = {};
-        if (!first)
-            term.write_string("  ");
-        if (stat(full_path, &st) == 0 && st.is_dir) {
-            term.write_string("\x1b[34m");
-            term.write_string(name);
-            term.write_string("/\x1b[0m");
-        } else {
-            term.write_string(name);
-        }
-        first = false;
-    }
-    term.put_char('\n');
-    close(fd);
-}
-
-static void cmd_cat(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        term.write_string("cat: missing file operand\n");
-        return;
-    }
-
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    int fd = open(resolved, O_RDONLY);
-    if (fd < 0) {
-        term_printf(term, "cat: %s: No such file or directory\n", arg);
-        return;
-    }
-
-    char buffer[512];
-    int bytes_read;
-    bool ended_with_newline = false;
-    while ((bytes_read = read(fd, buffer, sizeof(buffer) - 1)) > 0) {
-        buffer[bytes_read] = '\0';
-        term.write_string(buffer);
-        ended_with_newline = buffer[bytes_read - 1] == '\n';
-    }
-    if (!ended_with_newline)
-        term.put_char('\n');
-    close(fd);
-}
-
-static void cmd_stat(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        term.write_string("stat: missing file operand\n");
-        return;
-    }
-
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    VNodeStat st = {};
-    if (stat(resolved, &st) < 0) {
-        term_printf(term, "stat: cannot stat '%s'\n", arg);
-        return;
-    }
-
-    term_printf(term, "File: %s\n", arg);
-    term_printf(term, "Size: %llu bytes\n", st.size);
-    term_printf(term, "Type: %s\n", st.is_dir ? "Directory" : "Regular File");
-    term_printf(term, "Inode: %llu\n", st.inode);
-}
-
-static void cmd_touch(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        term.write_string("touch: missing file operand\n");
-        return;
-    }
-
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    int fd = open(resolved, O_WRONLY | O_CREAT);
-    if (fd < 0) {
-        term_printf(term, "touch: failed to create '%s'\n", arg);
-        return;
-    }
-    close(fd);
-}
-
-static void cmd_rm(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        term.write_string("rm: missing file operand\n");
-        return;
-    }
-
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    if (unlink(resolved) != 0) {
-        term_printf(term, "rm: failed to delete '%s'\n", arg);
-    }
-}
-
-static void cmd_mkdir(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        term.write_string("mkdir: missing directory operand\n");
-        return;
-    }
-
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    if (mkdir(resolved) != 0) {
-        term_printf(term, "mkdir: failed to create '%s'\n", arg);
-    }
-}
-
-static const char *term_parse_token(const char *s, char *out, size_t out_size)
-{
-    while (s && *s == ' ')
-        s++;
-    if (!s)
-        s = "";
-    size_t i = 0;
-    while (*s && *s != ' ' && i + 1 < out_size)
-        out[i++] = *s++;
-    out[i] = '\0';
-    while (*s == ' ')
-        s++;
-    return s;
-}
-
-static void cmd_rmdir(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        term.write_string("rmdir: missing directory operand\n");
-        return;
-    }
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    if (rmdir(resolved) != 0)
-        term_printf(term, "rmdir: failed to remove '%s'\n", arg);
-}
-
-static void cmd_mv(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    char src[256], dst[256];
-    const char *p = term_parse_token(arg, src, sizeof(src));
-    term_parse_token(p, dst, sizeof(dst));
-    if (!src[0] || !dst[0]) {
-        term.write_string("Usage: mv <src> <dst>\n");
-        return;
-    }
-    char rsrc[256], rdst[256];
-    resolve_path(cwd, src, rsrc);
-    resolve_path(cwd, dst, rdst);
-    if (rename(rsrc, rdst) != 0)
-        term_printf(term, "mv: failed to move '%s'\n", src);
-}
-
-static void cmd_cp(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    char src[256], dst[256];
-    const char *p = term_parse_token(arg, src, sizeof(src));
-    term_parse_token(p, dst, sizeof(dst));
-    if (!src[0] || !dst[0]) {
-        term.write_string("Usage: cp <src> <dst>\n");
-        return;
-    }
-
-    char rsrc[256], rdst[256];
-    resolve_path(cwd, src, rsrc);
-    resolve_path(cwd, dst, rdst);
-    int in = open(rsrc, O_RDONLY);
-    if (in < 0) {
-        term_printf(term, "cp: cannot open '%s'\n", src);
-        return;
-    }
-    int out = open(rdst, O_WRONLY | O_CREAT | O_TRUNC);
-    if (out < 0) {
-        close(in);
-        term_printf(term, "cp: cannot create '%s'\n", dst);
-        return;
-    }
-    char buf[1024];
-    int n;
-    while ((n = read(in, buf, sizeof(buf))) > 0)
-        write(out, buf, (size_t)n);
-    close(in);
-    close(out);
-}
-
-static void cmd_mem(TerminalEmulator &term)
-{
-    MemInfo info = {};
-    if (get_meminfo(&info) != 0) {
-        term.write_string("mem: failed to get memory info\n");
-        return;
-    }
-    term_printf(term, "Total: %llu KB\n", info.total_kb);
-    term_printf(term, "Used:  %llu KB\n", info.used_kb);
-    term_printf(term, "Free:  %llu KB\n", info.free_kb);
-}
-
-static void cmd_ps(TerminalEmulator &term)
-{
-    ProcessInfo procs[32];
-    int count = get_procs(procs, 32);
-    if (count < 0) {
-        term.write_string("ps: failed to get process list\n");
-        return;
-    }
-
-    term.write_string("\x1b[90mPID  PPID  STATE   PRI  UID  NAME\x1b[0m\n");
-    for (int i = 0; i < count; i++) {
-        const char *state_str = "READY";
-        switch ((int)procs[i].state) {
-            case ProcessState_Running:
-                state_str = "RUN";
-                break;
-            case ProcessState_Blocked:
-                state_str = "BLOCK";
-                break;
-            case ProcessState_Sleeping:
-                state_str = "SLEEP";
-                break;
-            case ProcessState_Zombie:
-                state_str = "ZOMBIE";
-                break;
-            case ProcessState_Waiting:
-                state_str = "WAIT";
-                break;
-            default:
-                break;
-        }
-        term_printf(term, "%-4d %-5d %-7s %-4d %-4d %s\n", (int)procs[i].pid, (int)procs[i].parent_pid, state_str,
-                    (int)procs[i].priority, (int)procs[i].uid, procs[i].name);
-    }
-}
-
-static void cmd_date(TerminalEmulator &term)
-{
-    SysTime t = {};
-    if (get_time(&t) != 0) {
-        term.write_string("date: failed to get time\n");
-        return;
-    }
-    term_printf(term, "%04d-%02d-%02d %02d:%02d:%02d\n", t.year, t.month, t.day, t.hour, t.minute, t.second);
-}
-
-static void cmd_uptime(TerminalEmulator &term)
-{
-    uint64_t up = get_uptime();
-    uint64_t s = up % 60;
-    uint64_t m = (up / 60) % 60;
-    uint64_t h = up / 3600;
-    term_printf(term, "up %02llu:%02llu:%02llu\n", h, m, s);
-}
-
-static void publish_wallpaper_request(const char *path)
-{
-    Registry *registry = gui_registry();
-    if (!registry || !path || !*path)
-        return;
-    strncpy(registry->wallpaper_requested, path, sizeof(registry->wallpaper_requested) - 1);
-    registry->wallpaper_requested[sizeof(registry->wallpaper_requested) - 1] = '\0';
-    registry->wallpaper_generation = registry->wallpaper_generation + 1u;
-    registry->wallpaper_reload_requested = true;
-    asm volatile("sfence" ::: "memory");
-}
-
-static uint32_t terminal_theme_mode()
-{
-    Registry *registry = gui_registry();
-    if (registry)
-        return registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK;
-
-    char config[512];
-    char value[64];
-    const char *candidates[] = {SYSTEM_CONFIG_PATH, SYSTEM_BOOTSTRAP_CONFIG_PATH};
-    if (cfg_read_text_from_candidates(candidates, sizeof(candidates) / sizeof(candidates[0]), config, sizeof(config)) &&
-        cfg_line_value(config, "theme", value, sizeof(value)) && strcmp(value, "light") == 0) {
-        return GUI_THEME_LIGHT;
-    }
-    return GUI_THEME_DARK;
-}
-
-static void cmd_wallpaper(TerminalEmulator &term, const char *cwd, const char *arg)
-{
-    if (!arg || !*arg) {
-        Registry *registry = gui_registry();
-        if (registry && registry->wallpaper_active[0]) {
-            const char *status = "solid";
-            if (registry->wallpaper_status == WALLPAPER_STATUS_DEFAULT)
-                status = "default";
-            else if (registry->wallpaper_status == WALLPAPER_STATUS_CUSTOM)
-                status = "custom";
-            term_printf(term, "wallpaper: %s (%s)\n", registry->wallpaper_active, status);
-            return;
-        }
-
-        char configured[256] = {};
-        const char *candidates[] = {WALLPAPER_CONFIG_PATH, WALLPAPER_BOOTSTRAP_CONFIG_PATH};
-        cfg_read_first_line_from_candidates(candidates, sizeof(candidates) / sizeof(candidates[0]), configured,
-                                            sizeof(configured));
-        if (configured[0])
-            term_printf(term, "wallpaper: %s (configured)\n",
-                        wallpaper_resolve_path_for_theme(configured, terminal_theme_mode()));
-        else
-            term_printf(term, "wallpaper: %s (default)\n", wallpaper_default_path_for_theme(terminal_theme_mode()));
-        return;
-    }
-
-    char resolved[256];
-    resolve_path(cwd, arg, resolved);
-    Surface image = {};
-    if (!gui_load_uowp(resolved, wallpaper_uowp_variant_for_theme(terminal_theme_mode()), 0, 0, &image)) {
-        term_printf(term, "wallpaper: unsupported or unreadable UOWP: %s\n", arg);
-        return;
-    }
-    gui_destroy_surface(&image);
-
-    publish_wallpaper_request(resolved);
-
-    char config_buf[320];
-    snprintf(config_buf, sizeof(config_buf), "%s\n", resolved);
-    if (!cfg_write_text_file(WALLPAPER_CONFIG_PATH, config_buf)) {
-        term_printf(term, "wallpaper applied for this session: %s\n", resolved);
-        return;
-    }
-
-    term_printf(term, "wallpaper set to %s\n", resolved);
-}
-
-static void execute_command(TerminalEmulator &term, char *cwd, char *line)
-{
-    while (*line == ' ')
-        line++;
-    if (*line == '\0')
-        return;
-
-    char *space = strchr(line, ' ');
-    char *arg = nullptr;
-    if (space) {
-        *space = '\0';
-        arg = space + 1;
-        while (arg && *arg == ' ')
-            arg++;
-    }
-
-    if (strcmp(line, "help") == 0) {
-        cmd_help(term);
-    } else if (strcmp(line, "clear") == 0) {
-        term.clear_screen();
-    } else if (strcmp(line, "exit") == 0) {
-        exit(0);
-    } else if (strcmp(line, "echo") == 0) {
-        term.write_string(arg ? arg : "");
-        term.put_char('\n');
-    } else if (strcmp(line, "pwd") == 0) {
-        cmd_pwd(term, cwd);
-    } else if (strcmp(line, "cd") == 0) {
-        cmd_cd(term, cwd, arg);
-    } else if (strcmp(line, "ls") == 0) {
-        cmd_ls(term, cwd, arg);
-    } else if (strcmp(line, "cat") == 0) {
-        cmd_cat(term, cwd, arg);
-    } else if (strcmp(line, "stat") == 0) {
-        cmd_stat(term, cwd, arg);
-    } else if (strcmp(line, "touch") == 0) {
-        cmd_touch(term, cwd, arg);
-    } else if (strcmp(line, "rm") == 0) {
-        cmd_rm(term, cwd, arg);
-    } else if (strcmp(line, "mkdir") == 0) {
-        cmd_mkdir(term, cwd, arg);
-    } else if (strcmp(line, "rmdir") == 0) {
-        cmd_rmdir(term, cwd, arg);
-    } else if (strcmp(line, "mv") == 0) {
-        cmd_mv(term, cwd, arg);
-    } else if (strcmp(line, "cp") == 0) {
-        cmd_cp(term, cwd, arg);
-    } else if (strcmp(line, "mem") == 0) {
-        cmd_mem(term);
-    } else if (strcmp(line, "ps") == 0) {
-        cmd_ps(term);
-    } else if (strcmp(line, "date") == 0) {
-        cmd_date(term);
-    } else if (strcmp(line, "uptime") == 0) {
-        cmd_uptime(term);
-    } else if (strcmp(line, "wallpaper") == 0) {
-        cmd_wallpaper(term, cwd, arg);
-    } else if (strcmp(line, "version") == 0) {
-        term_printf(term, "uniOS @ %s\n", GIT_COMMIT);
-    } else if (strcmp(line, "uname") == 0) {
-        term_printf(term, "uniOS %s x86_64\n", GIT_COMMIT);
-    } else {
-        term_printf(term, "Unknown command: %s\n", line);
-    }
-}
-
-static void redraw_terminal_input(TerminalEmulator &term, const char *cwd, const char *line, int line_len,
-                                  int cursor_pos)
-{
-    term.write_string("\r\x1b[K");
-    print_prompt(term, cwd);
-    term.write_string(line);
-    int left = line_len - cursor_pos;
-    if (left > 0)
-        term_printf(term, "\x1b[%dD", left);
-}
-
-static void terminal_insert_text(TerminalEmulator &term, const char *cwd, char *line, int &line_len, int &cursor_pos,
-                                 const char *text)
-{
-    int add = (int)strlen(text);
-    if (add <= 0 || line_len + add >= 255)
-        return;
-    memmove(line + cursor_pos + add, line + cursor_pos, (size_t)(line_len - cursor_pos + 1));
-    memcpy(line + cursor_pos, text, (size_t)add);
-    line_len += add;
-    cursor_pos += add;
-    redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-}
-
-static bool term_starts_with(const char *s, const char *prefix)
-{
-    while (*prefix) {
-        if (*s++ != *prefix++)
-            return false;
-    }
-    return true;
-}
-
-struct TermCompletion
-{
-    char text[256];
-    bool is_dir;
-};
-
-static int collect_term_command_matches(const char *prefix, TermCompletion *matches, int max_matches)
-{
-    int count = 0;
-    for (uint32_t i = 0; i < sizeof(k_term_commands) / sizeof(k_term_commands[0]) && count < max_matches; i++) {
-        if (!term_starts_with(k_term_commands[i].name, prefix))
-            continue;
-        strncpy(matches[count].text, k_term_commands[i].name, sizeof(matches[count].text) - 1);
-        matches[count].text[sizeof(matches[count].text) - 1] = '\0';
-        matches[count].is_dir = false;
-        count++;
-    }
-    return count;
-}
-
-static void split_term_completion_path(const char *token, char *dir_token, size_t dir_size, char *base,
-                                       size_t base_size)
-{
-    const char *slash = strrchr(token, '/');
-    if (!slash) {
-        strncpy(dir_token, ".", dir_size - 1);
-        dir_token[dir_size - 1] = '\0';
-        strncpy(base, token, base_size - 1);
-        base[base_size - 1] = '\0';
-        return;
-    }
-    size_t dir_len = (size_t)(slash - token);
-    if (dir_len == 0)
-        dir_len = 1;
-    if (dir_len >= dir_size)
-        dir_len = dir_size - 1;
-    strncpy(dir_token, token, dir_len);
-    dir_token[dir_len] = '\0';
-    strncpy(base, slash + 1, base_size - 1);
-    base[base_size - 1] = '\0';
-}
-
-static int collect_term_file_matches(const char *cwd, const char *token, TermCompletion *matches, int max_matches)
-{
-    char dir_token[256], base[128], resolved[256];
-    split_term_completion_path(token, dir_token, sizeof(dir_token), base, sizeof(base));
-    resolve_path(cwd, strcmp(dir_token, ".") == 0 ? cwd : dir_token, resolved);
-    int fd = open(resolved, O_RDONLY);
-    if (fd < 0)
-        return 0;
-
-    int count = 0;
-    char name[256];
-    while (count < max_matches && (int)syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-            continue;
-        if (!term_starts_with(name, base))
-            continue;
-        char full[512];
-        strncpy(full, resolved, sizeof(full) - 1);
-        full[sizeof(full) - 1] = '\0';
-        size_t len = strlen(full);
-        if (len == 0 || full[len - 1] != '/')
-            strncat(full, "/", sizeof(full) - strlen(full) - 1);
-        strncat(full, name, sizeof(full) - strlen(full) - 1);
-        VNodeStat st = {};
-        strncpy(matches[count].text, name, sizeof(matches[count].text) - 1);
-        matches[count].text[sizeof(matches[count].text) - 1] = '\0';
-        matches[count].is_dir = stat(full, &st) == 0 && st.is_dir;
-        count++;
-    }
-    close(fd);
-    return count;
-}
-
-static int term_common_prefix_len(const TermCompletion *matches, int count)
-{
-    if (count <= 0)
-        return 0;
-    int prefix_len = (int)strlen(matches[0].text);
-    for (int i = 1; i < count; i++) {
-        int j = 0;
-        while (j < prefix_len && matches[i].text[j] && matches[i].text[j] == matches[0].text[j])
-            j++;
-        prefix_len = j;
-    }
-    return prefix_len;
-}
-
-static void terminal_complete(TerminalEmulator &term, const char *cwd, char *line, int &line_len, int &cursor_pos)
-{
-    int token_start = cursor_pos;
-    while (token_start > 0 && line[token_start - 1] != ' ')
-        token_start--;
-    bool is_command = token_start == 0;
-    char token[128];
-    int token_len = cursor_pos - token_start;
-    if (token_len >= (int)sizeof(token))
-        token_len = (int)sizeof(token) - 1;
-    strncpy(token, line + token_start, (size_t)token_len);
-    token[token_len] = '\0';
-
-    TermCompletion matches[48];
-    int count = is_command ? collect_term_command_matches(token, matches, 48)
-                           : collect_term_file_matches(cwd, token, matches, 48);
-    if (count == 0)
-        return;
-
-    int base_len = token_len;
-    if (!is_command) {
-        const char *slash = strrchr(token, '/');
-        if (slash)
-            base_len = (int)strlen(slash + 1);
-    }
-
-    if (count == 1) {
-        terminal_insert_text(term, cwd, line, line_len, cursor_pos, matches[0].text + base_len);
-        if (matches[0].is_dir)
-            terminal_insert_text(term, cwd, line, line_len, cursor_pos, "/");
-        else if (is_command)
-            terminal_insert_text(term, cwd, line, line_len, cursor_pos, " ");
-        return;
-    }
-
-    int common_len = term_common_prefix_len(matches, count);
-    if (common_len > base_len) {
-        char suffix[128];
-        int suffix_len = common_len - base_len;
-        if (suffix_len >= (int)sizeof(suffix))
-            suffix_len = (int)sizeof(suffix) - 1;
-        strncpy(suffix, matches[0].text + base_len, (size_t)suffix_len);
-        suffix[suffix_len] = '\0';
-        terminal_insert_text(term, cwd, line, line_len, cursor_pos, suffix);
-        return;
-    }
-
-    term.put_char('\n');
-    for (int i = 0; i < count; i++) {
-        if (matches[i].is_dir)
-            term_printf(term, "\x1b[34m%s/\x1b[0m  ", matches[i].text);
-        else
-            term_printf(term, "%s  ", matches[i].text);
-    }
-    term.put_char('\n');
-    redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
+    return (int)syscall6(SYS_EPOLL_WAIT, (uint64_t)epfd, (uint64_t)events, (uint64_t)maxevents, (uint64_t)timeout, 0, 0);
 }
 
 extern "C" int main(int argc, char **argv)
@@ -1505,176 +758,110 @@ extern "C" int main(int argc, char **argv)
     if (!term.ready())
         return 1;
 
-    char cwd[256];
-    choose_initial_cwd(cwd, sizeof(cwd));
-
     gui_request_focus();
-    print_prompt(term, cwd);
     term.render_all();
     Registry *registry = gui_registry();
     uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
 
-    char line[256];
-    int line_len = 0;
-    int cursor_pos = 0;
-    memset(line, 0, sizeof(line));
-    char input_history[32][256];
-    int input_history_count = 0;
-    int input_history_cursor = 0;
-    memset(input_history, 0, sizeof(input_history));
+    int pipe_to_shell[2];
+    int pipe_from_shell[2];
+    if (pipe(pipe_to_shell) < 0 || pipe(pipe_from_shell) < 0) {
+        term.write_string("terminal: failed to create pipes\n");
+        term.render_all();
+        return 1;
+    }
 
+    int shell_pid = fork();
+    if (shell_pid < 0) {
+        term.write_string("terminal: failed to fork child process\n");
+        term.render_all();
+        return 1;
+    }
+
+    if (shell_pid == 0) {
+        // Child: shell process
+        dup2(pipe_to_shell[0], 0);
+        dup2(pipe_from_shell[1], 1);
+        dup2(pipe_from_shell[1], 2);
+
+        close(pipe_to_shell[0]);
+        close(pipe_to_shell[1]);
+        close(pipe_from_shell[0]);
+        close(pipe_from_shell[1]);
+
+        exec("/bin/shell.elf");
+        printf("terminal: failed to execute /bin/shell.elf\n");
+        exit(127);
+    }
+
+    // Parent: terminal GUI emulator
+    close(pipe_to_shell[0]);
+    close(pipe_from_shell[1]);
+
+    int epfd = epoll_create(1);
+    if (epfd < 0) {
+        term.write_string("terminal: failed to create epoll instance\n");
+        term.render_all();
+        return 1;
+    }
+
+    struct epoll_event ev = {};
+    ev.events = EPOLLIN;
+    ev.data.fd = pipe_from_shell[0];
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, pipe_from_shell[0], &ev) < 0) {
+        term.write_string("terminal: failed to configure epoll\n");
+        term.render_all();
+        return 1;
+    }
+
+    bool shell_alive = true;
     while (true) {
         bool saw_event = false;
-        Event ev = {};
+        Event gui_ev = {};
         bool needs_render = false;
-        while (poll_event(&ev) > 0) {
+
+        // 1. Poll GUI events
+        while (poll_event(&gui_ev) > 0) {
             saw_event = true;
-            if (ev.type == EVT_WINDOW_CLOSE)
+            if (gui_ev.type == EVT_WINDOW_CLOSE) {
                 return 0;
-            if (ev.type == EVT_WINDOW_RESIZE) {
+            }
+            if (gui_ev.type == EVT_WINDOW_RESIZE) {
                 if (term.sync_resize()) {
                     needs_render = true;
                 }
                 continue;
             }
-            if (ev.type != EVT_KEY_DOWN || ev.key.c == 0)
-                continue;
-
-            uint8_t c = (uint8_t)ev.key.c;
-            if (c == '\n' || c == '\r') {
-                line[line_len] = '\0';
-                term.put_char('\n');
-                if (line_len > 0) {
-                    int slot = input_history_count % 32;
-                    if (input_history_count == 0 || strcmp(input_history[(input_history_count - 1) % 32], line) != 0) {
-                        strncpy(input_history[slot], line, sizeof(input_history[slot]) - 1);
-                        input_history[slot][sizeof(input_history[slot]) - 1] = '\0';
-                        input_history_count++;
-                    }
-                    input_history_cursor = input_history_count;
-                }
-                execute_command(term, cwd, line);
-                line_len = 0;
-                cursor_pos = 0;
-                line[0] = '\0';
-                print_prompt(term, cwd);
-                needs_render = true;
-                continue;
-            }
-
-            if (c == '\t') {
-                terminal_complete(term, cwd, line, line_len, cursor_pos);
-                needs_render = true;
-                continue;
-            }
-
-            if (c == '\b' || c == 127) {
-                if (cursor_pos > 0) {
-                    memmove(line + cursor_pos - 1, line + cursor_pos, (size_t)(line_len - cursor_pos + 1));
-                    line_len--;
-                    cursor_pos--;
-                    redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                    needs_render = true;
+            if (gui_ev.type == EVT_KEY_DOWN && gui_ev.key.c != 0) {
+                if (shell_alive) {
+                    char c = (char)gui_ev.key.c;
+                    write(pipe_to_shell[1], &c, 1);
                 }
                 continue;
-            }
-
-            if (c == KEY_DELETE) {
-                if (cursor_pos < line_len) {
-                    memmove(line + cursor_pos, line + cursor_pos + 1, (size_t)(line_len - cursor_pos));
-                    line_len--;
-                    redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                    needs_render = true;
-                }
-                continue;
-            }
-
-            if (c == KEY_LEFT_ARROW) {
-                if (cursor_pos > 0) {
-                    cursor_pos--;
-                    term.write_string("\x1b[1D");
-                    needs_render = true;
-                }
-                continue;
-            }
-
-            if (c == KEY_RIGHT_ARROW) {
-                if (cursor_pos < line_len) {
-                    cursor_pos++;
-                    term.write_string("\x1b[1C");
-                    needs_render = true;
-                }
-                continue;
-            }
-
-            if (c == KEY_HOME || c == 1) {
-                cursor_pos = 0;
-                redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                needs_render = true;
-                continue;
-            }
-
-            if (c == KEY_END || c == 5) {
-                cursor_pos = line_len;
-                redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                needs_render = true;
-                continue;
-            }
-
-            if (c == KEY_UP_ARROW) {
-                if (input_history_count > 0) {
-                    int first = input_history_count > 32 ? input_history_count - 32 : 0;
-                    if (input_history_cursor > first)
-                        input_history_cursor--;
-                    strncpy(line, input_history[input_history_cursor % 32], sizeof(line) - 1);
-                    line[sizeof(line) - 1] = '\0';
-                    line_len = (int)strlen(line);
-                    cursor_pos = line_len;
-                    redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                    needs_render = true;
-                }
-                continue;
-            }
-
-            if (c == KEY_DOWN_ARROW) {
-                if (input_history_cursor < input_history_count - 1) {
-                    input_history_cursor++;
-                    strncpy(line, input_history[input_history_cursor % 32], sizeof(line) - 1);
-                    line[sizeof(line) - 1] = '\0';
-                } else {
-                    input_history_cursor = input_history_count;
-                    line[0] = '\0';
-                }
-                line_len = (int)strlen(line);
-                cursor_pos = line_len;
-                redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                needs_render = true;
-                continue;
-            }
-
-            if (c == 12) {
-                term.clear_screen();
-                redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                needs_render = true;
-                continue;
-            }
-
-            if (c == 21) {
-                line[0] = '\0';
-                line_len = 0;
-                cursor_pos = 0;
-                redraw_terminal_input(term, cwd, line, line_len, cursor_pos);
-                needs_render = true;
-                continue;
-            }
-
-            if (c >= 32 && c <= 126 && line_len < (int)sizeof(line) - 1) {
-                char text[2] = {(char)c, '\0'};
-                terminal_insert_text(term, cwd, line, line_len, cursor_pos, text);
-                needs_render = true;
             }
         }
 
+        // 2. Poll shell output if alive
+        if (shell_alive) {
+            struct epoll_event events[1];
+            int n = epoll_wait(epfd, events, 1, 0);
+            if (n > 0) {
+                char read_buf[1024];
+                int bytes_read = read(pipe_from_shell[0], read_buf, sizeof(read_buf));
+                if (bytes_read > 0) {
+                    term.write_bytes(read_buf, (size_t)bytes_read);
+                    needs_render = true;
+                    saw_event = true;
+                } else if (bytes_read == 0) {
+                    shell_alive = false;
+                    term.write_string("\r\n[Process completed]\r\n");
+                    needs_render = true;
+                    saw_event = true;
+                }
+            }
+        }
+
+        // 3. Theme change sync
         registry = gui_registry();
         if (registry && registry->settings_generation != last_settings_generation) {
             last_settings_generation = registry->settings_generation;
