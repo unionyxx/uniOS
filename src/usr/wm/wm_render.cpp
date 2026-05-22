@@ -176,6 +176,33 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
         const uint32_t *srow = &src[static_cast<size_t>(y) * src_stride];
         
         int x = 0;
+        // Preamble: process pixels one-by-one until destination is 16-byte aligned
+        while (x < w && (reinterpret_cast<uintptr_t>(&drow[x]) & 15) != 0) {
+            uint32_t s = srow[x];
+            uint32_t sa = s >> 24;
+            if (sa) {
+                if (sa == 255) {
+                    drow[x] = s;
+                } else {
+                    uint32_t d = drow[x];
+                    uint32_t da = d >> 24;
+                    if (da == 255) {
+                        uint32_t inv_sa = 255u - sa;
+                        uint32_t rb = (s & 0x00FF00FFu) * sa + (d & 0x00FF00FFu) * inv_sa + 0x00800080u;
+                        rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+                        uint32_t g_acc = ((s >> 8) & 0xFFu) * sa + ((d >> 8) & 0xFFu) * inv_sa + 0x80u;
+                        uint32_t g = (g_acc + (g_acc >> 8)) >> 8;
+                        drow[x] = 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
+                    } else if (!da) {
+                        drow[x] = s;
+                    } else {
+                        drow[x] = blend_rgb(d, s, 255);
+                    }
+                }
+            }
+            x++;
+        }
+
         for (; x <= w - 4; x += 4) {
             __m128i s_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srow[x]));
             
@@ -185,7 +212,8 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
                 continue;
             }
 
-            __m128i d_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&drow[x]));
+            // Destination is 16-byte aligned: use fast aligned load and store!
+            __m128i d_vec = _mm_load_si128(reinterpret_cast<const __m128i*>(&drow[x]));
 
             __m128i d_alpha = _mm_and_si128(d_vec, alpha_mask);
             __m128i trans_mask = _mm_cmpeq_epi32(d_alpha, _mm_setzero_si128());
@@ -229,7 +257,7 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
             blended_vec = _mm_or_si128(_mm_and_si128(trans_mask, s_vec),
                                        _mm_andnot_si128(trans_mask, blended_vec));
 
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(&drow[x]), blended_vec);
+            _mm_store_si128(reinterpret_cast<__m128i*>(&drow[x]), blended_vec);
         }
 
         for (; x < w; ++x) {
@@ -748,6 +776,14 @@ void capture_shell_backdrop_for_rect(const DirtyRect &rect, Registry *registry)
     mark_shell_blur_dirty(registry, rect);
 }
 
+static inline bool rect_touch_or_overlap(const DirtyRect &a, const DirtyRect &b)
+{
+    if (a.w <= 0 || a.h <= 0 || b.w <= 0 || b.h <= 0)
+        return false;
+    return a.x <= b.x + b.w && a.x + a.w >= b.x &&
+           a.y <= b.y + b.h && a.y + a.h >= b.y;
+}
+
 void flush_shell_blur_updates(Registry *registry)
 {
     if (!registry)
@@ -772,23 +808,56 @@ void flush_shell_blur_updates(Registry *registry)
         return;
     }
     if (s_was_dragging) {
-        // Drag just ended — force both blur sources dirty so they re-capture
-        // from the current (post-drag) backbuffer state.
         s_was_dragging = false;
-        g_menubar_blur_dirty = true;
-        g_dock_blur_dirty = true;
+
+        // Bounding-box intersection filtering
+        int menubar_h = wm_menubar_h();
+        DirtyRect menubar_rect = {0, 0, static_cast<int>(g_screen.width), menubar_h};
+
+        DirtyRect dock_rect = {};
+        bool has_dock = false;
+        if (g_dock_blur_source.buffer && registry->window_count > 1) {
+            const WindowEntry &we1 = registry->windows[1];
+            dock_rect = {we1.x, we1.y, we1.w, we1.h};
+            has_dock = true;
+        }
+
+        bool intersects_menubar = false;
+        bool intersects_dock = false;
+        for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
+            if (is_window_visible(g_windows[i])) {
+                DirtyRect w_rect = window_outer_bounds(g_windows[i]);
+
+                if (rect_touch_or_overlap(w_rect, menubar_rect)) {
+                    intersects_menubar = true;
+                }
+                if (has_dock && rect_touch_or_overlap(w_rect, dock_rect)) {
+                    intersects_dock = true;
+                }
+            }
+        }
+
+        if (intersects_menubar) {
+            g_menubar_blur_dirty = true;
+        }
+        if (intersects_dock) {
+            g_dock_blur_dirty = true;
+        }
     }
 
     g_last_blur_vblank = g_display_queue.vblank_count;
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
 
-    if (g_menubar_blur_dirty && g_menubar_blur.buffer && g_menubar_blur_source.buffer) {
+    // Staggered blur execution to distribute workload across frames
+    static bool s_blur_stagger_toggle = false;
+    s_blur_stagger_toggle = !s_blur_stagger_toggle;
+
+    if (g_menubar_blur_dirty && g_menubar_blur.buffer && g_menubar_blur_source.buffer &&
+        (!g_dock_blur_dirty || s_blur_stagger_toggle)) {
         blur_surface_material(&g_menubar_blur_source, &g_menubar_blur, 48.0f, is_light ? 85 : 80, is_light ? 8 : 12);
         registry->mb_blur_generation = registry->mb_blur_generation + 1u;
         g_menubar_blur_dirty = false;
-    }
-
-    if (g_dock_blur_dirty && g_dock_blur.buffer && g_dock_blur_source.buffer) {
+    } else if (g_dock_blur_dirty && g_dock_blur.buffer && g_dock_blur_source.buffer) {
         blur_surface_material(&g_dock_blur_source, &g_dock_blur, 36.0f, is_light ? 82 : 78, is_light ? 8 : 10);
         registry->dk_blur_generation = registry->dk_blur_generation + 1u;
         g_dock_blur_dirty = false;
@@ -797,13 +866,38 @@ void flush_shell_blur_updates(Registry *registry)
     asm volatile("sfence" ::: "memory");
 }
 
-static uint32_t window_decoration_theme_signature()
+static uint32_t get_window_app_background(const Window &w)
+{
+    if (w.buffer && w.buffer_w > 0 && w.buffer_h > 0) {
+        // Sample a pixel slightly offset from the top-left edge to avoid borders/scrollbars
+        int sample_y = w.buffer_h > 4 ? 4 : 0;
+        int sample_x = w.buffer_w > 10 ? 10 : 0;
+        uint32_t pixel = w.buffer[(size_t)sample_y * (size_t)w.buffer_w + (size_t)sample_x];
+        // If the pixel is fully transparent (e.g. uninitialized 0x00000000), use theme fallback
+        if ((pixel >> 24) != 0) {
+            return 0xFF000000u | (pixel & 0x00FFFFFFu); // Ensure solid alpha
+        }
+    }
+    return g_gui_style.app_bg ? g_gui_style.app_bg : 0xFF15171Au; // Fallback
+}
+
+static bool is_color_dark(uint32_t color)
+{
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    // Standard human perceived luminance formula: 0.299*R + 0.587*G + 0.114*B
+    return (r * 299 + g * 587 + b * 114) < 128000;
+}
+
+static uint32_t window_decoration_theme_signature(const Window &w)
 {
     uint32_t sig = 2166136261u;
     auto mix = [&](uint32_t value) {
         sig ^= value;
         sig *= 16777619u;
     };
+    mix(get_window_app_background(w));
     mix(g_gui_style.border);
     mix(g_gui_style.border_focus);
     mix(g_gui_style.border_hover);
@@ -851,12 +945,18 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
         body_radius = 0;
 
     uint32_t outline_color = focused ? g_gui_style.border_hover : g_gui_style.border;
-    uint32_t bar_color = focused ? g_gui_chrome.window_bar_active : g_gui_chrome.window_bar_inactive;
-    uint32_t body_color = g_gui_style.app_bg;
-    uint32_t title_color = focused ? g_gui_chrome.window_title_active : g_gui_chrome.window_title_inactive;
+    uint32_t app_bg_color = get_window_app_background(w);
+    uint32_t bar_color = app_bg_color;
+    uint32_t body_color = app_bg_color;
+    uint32_t title_color;
+    if (is_color_dark(app_bg_color)) {
+        title_color = focused ? 0xFFF2F2F0u : 0xFF9A9FA7u;
+    } else {
+        title_color = focused ? 0xFF15181Du : 0xFF6E7580u;
+    }
     uint32_t frame_fill_color = mix_rgb(outline_color, body_color, focused ? 236 : 242);
     uint32_t inner_stroke_color = mix_rgb(body_color, 0xFFFFFFFFu, focused ? 18 : 12);
-    uint32_t separator_color = mix_rgb(outline_color, body_color, focused ? 172 : 190);
+    uint32_t separator_color = bar_color;
 
     int lx = (dst->buffer != g_backbuffer.buffer) ? 0 : w.x;
     int ly = (dst->buffer != g_backbuffer.buffer) ? 0 : w.y - title_bar_h;
@@ -900,7 +1000,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
 
     const GuiFont *title_font = gui_font_title();
     int title_h = gui_font_line_height(title_font);
-    int title_y = gui_align_text_y(title_font, sy, title_bar_h);
+    int title_y = gui_align_text_y(title_font, sy + border, title_bar_h);
     DirtyRect last_button = window_button_bounds(w, 2);
     int buttons_right = last_button.x + last_button.w;
     int title_left = buttons_right + space_1;
@@ -931,7 +1031,7 @@ static void draw_window_decoration_buttons(Surface *dst, const Window &w, bool f
 
     ensure_button_icons();
 
-    uint32_t bar_color = focused ? g_gui_chrome.window_bar_active : g_gui_chrome.window_bar_inactive;
+    uint32_t bar_color = get_window_app_background(w);
     uint32_t button_colors[3] = {g_gui_chrome.button_close, g_gui_chrome.button_minimize, g_gui_chrome.button_maximize};
     uint32_t button_outline = focused ? 0x65000000u : 0x38000000u;
     int button_size = wm_button_size();
@@ -970,7 +1070,7 @@ static void ensure_window_decoration_cache(Window &w, bool focused, bool hovered
         return;
 
     DirtyRect outer = window_outer_bounds(w);
-    uint32_t theme_sig = window_decoration_theme_signature();
+    uint32_t theme_sig = window_decoration_theme_signature(w);
 
     bool frame_needs_rebuild = !w.decoration_cache.buffer || w.decoration_cache_w != outer.w ||
                                w.decoration_cache_h != outer.h || w.decoration_cache_theme_sig != theme_sig ||
@@ -1223,7 +1323,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     }
 
     if (!w.transparent) {
-        const uint32_t fill = g_gui_style.app_bg ? g_gui_style.app_bg : 0xFF15171Au;
+        const uint32_t fill = get_window_app_background(w);
         const int rect_right = rx + rw;
         if (inner_r <= 0) {
             for (int py = 0; py < rh; ++py) {

@@ -470,12 +470,12 @@ extern "C" int main()
         h = (int)win.height;
         int pad = gui_scaled_metric(16);
         
-        face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(60));
+        face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(52));
         if (face_r < gui_scaled_metric(60))
             face_r = gui_scaled_metric(60);
             
         cx = w / 2;
-        cy = h / 2 - gui_scaled_metric(20);
+        cy = h / 2 - gui_scaled_metric(12);
 
         if (needs_full_redraw || resized || theme_changed) {
             rebuild_cache(&cache, &win, cx, cy, face_r);

@@ -33,6 +33,7 @@ bool g_window_visible_region_overflow[MAX_WINDOWS] = {};
 int g_dirty_count = 0;
 bool g_window_visibility_cache_dirty = true;
 bool g_dirty_frame_ready = false;
+static uint64_t g_wait_start_ticks = 0; // Non-blocking wait timer
 
 ContextMenuState g_context_menu = {};
 StoragePromptState g_storage_prompt = {};
@@ -100,7 +101,14 @@ static bool process_is_alive(uint32_t pid)
 static void reap_exited_children()
 {
     int status = 0;
-    while (waitpid_nohang(-1, &status) > 0) {
+    int pid;
+    while ((pid = waitpid_nohang(-1, &status)) > 0) {
+        for (int i = 0; i < g_window_count; i++) {
+            if (g_windows[i].owner_pid == (uint32_t)pid) {
+                close_window(i);
+                i--; // Adjust index as close_window compacts the array by shifting elements down
+            }
+        }
     }
 }
 
@@ -1597,13 +1605,17 @@ extern "C" int main(int argc, char **argv)
 
         // Reap dead processes before compositing to avoid dereferencing stale SHM buffers.
         reap_exited_children();
-        for (int i = 0; i < g_window_count;) {
-            Window &w = g_windows[i];
-            if (w.owner_pid != 0 && !process_is_alive(w.owner_pid)) {
-                close_window(i);
-                continue;
+        static uint32_t s_liveness_check_counter = 0;
+        if (++s_liveness_check_counter >= 30) {
+            s_liveness_check_counter = 0;
+            for (int i = 0; i < g_window_count;) {
+                Window &w = g_windows[i];
+                if (w.owner_pid != 0 && !process_is_alive(w.owner_pid)) {
+                    close_window(i);
+                    continue;
+                }
+                ++i;
             }
-            ++i;
         }
 
         if (!g_dirty_frame_ready && g_dirty_count > 0) {
@@ -1801,6 +1813,7 @@ extern "C" int main(int argc, char **argv)
                 frame_seq = sub + 1;
                 g_dirty_count = 0;
                 g_dirty_frame_ready = false;
+                g_wait_start_ticks = 0; // Reset wait timer
             }
         } else if (!g_dirty_frame_ready || action == wm::PresentPolicyDecision::Skip) {
             if (action == wm::PresentPolicyDecision::Skip)
@@ -1809,23 +1822,18 @@ extern "C" int main(int argc, char **argv)
             flush_pending_settings_persist(registry);
             yield();
         } else {
-            uint32_t tgt = wm::completion_target_for_available_slot(last_seq, limit);
-            uint64_t hw_sync_start = get_ticks();
-            while (g_display_queue.completed_sequence < tgt) {
-                DisplayEvent ev_w = {};
-                if (display_poll_event(&ev_w) == 0) {
-                    apply_display_event(ev_w);
-                    drain_display_events();
-                } else {
-                    yield();
-                }
-
-                refresh_display_queue_from_status();
-                if (get_ticks() - hw_sync_start > 250) {
-                    LOG_ERROR("wm", "Display driver timeout, forcing sequence");
-                    g_display_queue.completed_sequence = tgt;
-                    break;
-                }
+            // Non-blocking Swapchain present-wait implementation
+            if (g_wait_start_ticks == 0) {
+                g_wait_start_ticks = get_ticks();
+            }
+            if (get_ticks() - g_wait_start_ticks > 250) {
+                LOG_ERROR("wm", "Display driver timeout, forcing sequence");
+                uint32_t tgt = wm::completion_target_for_available_slot(last_seq, limit);
+                g_display_queue.completed_sequence = tgt;
+                g_wait_start_ticks = 0;
+            } else {
+                yield();
+                continue; // Yield and immediately process input events
             }
         }
     }

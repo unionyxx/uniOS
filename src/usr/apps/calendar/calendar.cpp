@@ -123,6 +123,7 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     int w = (int)win->width;
     int h = (int)win->height;
     int pad = gui_scaled_metric(16);
+    int top_pad = gui_scaled_metric(8);
     int gap = gui_scaled_metric(6);
 
     const GuiFont *title_font = gui_font_title();
@@ -138,7 +139,7 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     snprintf(header, sizeof(header), "%s %d", month_names[(state->month - 1) % 12], state->year);
     int header_w = gui_measure_text(title_font, header);
     int header_x = (w - header_w) / 2;
-    int header_y = pad;
+    int header_y = top_pad;
     gui_draw_text_clipped(win, title_font, header_x, header_y, w - pad * 2, header, g_gui_style.text, g_gui_style.app_bg);
 
     int arrow_size = gui_scaled_metric(8);

@@ -1129,6 +1129,7 @@ static bool gop_candidate_better(const GopModeCandidate &candidate, const GopMod
     bool have_best = false;
     bool have_exact_hint_mode = false;
     bool have_within_hint_mode = false;
+    bool have_within_cap_mode = false;
 
     for (UINT32 mode = 0; mode < gop->Mode->MaxMode; mode++) {
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = nullptr;
@@ -1139,11 +1140,16 @@ static bool gop_candidate_better(const GopModeCandidate &candidate, const GopMod
 
         const bool usable = info->HorizontalResolution != 0 && info->VerticalResolution != 0 &&
                             gop_pixel_format_supported(info->PixelFormat);
-        if (usable && edid_hint && edid_hint->valid) {
-            if (info->HorizontalResolution == edid_hint->width && info->VerticalResolution == edid_hint->height)
-                have_exact_hint_mode = true;
-            if (info->HorizontalResolution <= edid_hint->width && info->VerticalResolution <= edid_hint->height)
-                have_within_hint_mode = true;
+        if (usable) {
+            if (info->HorizontalResolution <= 1920 && info->VerticalResolution <= 1080) {
+                have_within_cap_mode = true;
+            }
+            if (edid_hint && edid_hint->valid) {
+                if (info->HorizontalResolution == edid_hint->width && info->VerticalResolution == edid_hint->height)
+                    have_exact_hint_mode = true;
+                if (info->HorizontalResolution <= edid_hint->width && info->VerticalResolution <= edid_hint->height)
+                    have_within_hint_mode = true;
+            }
         }
         g_boot_services->FreePool(info);
     }
@@ -1159,6 +1165,16 @@ static bool gop_candidate_better(const GopModeCandidate &candidate, const GopMod
             !gop_pixel_format_supported(info->PixelFormat)) {
             g_boot_services->FreePool(info);
             continue;
+        }
+
+        // Capping workaround: if we don't have an exact EDID hint (e.g. running in QEMU),
+        // and we have usable modes within the 1920x1080 limit, ignore any mode exceeding
+        // 1920x1080 to prevent virtual machine displays from overflowing the host screen.
+        if (!have_exact_hint_mode && have_within_cap_mode) {
+            if (info->HorizontalResolution > 1920 || info->VerticalResolution > 1080) {
+                g_boot_services->FreePool(info);
+                continue;
+            }
         }
 
         GopModeCandidate candidate = {};

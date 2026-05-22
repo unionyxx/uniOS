@@ -542,7 +542,8 @@ static inline DirtyRect window_button_bounds(const Window &w, int button_index)
 {
     int button_size = wm_button_size();
     int title_bar_h = wm_title_bar_h();
-    int button_y = w.y - title_bar_h + (title_bar_h - button_size) / 2 + wm_button_inset_y();
+    int border = wm_frame_border();
+    int button_y = w.y - title_bar_h + border + (title_bar_h - button_size) / 2 + wm_button_inset_y();
     return {w.x + wm_button_inset_x() + button_index * wm_button_spacing(), button_y, button_size, button_size};
 }
 static inline void window_button_center(const Window &w, int button_index, int *cx, int *cy)

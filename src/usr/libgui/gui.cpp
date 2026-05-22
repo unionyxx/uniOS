@@ -1908,14 +1908,15 @@ GuiAppLayout gui_app_begin(Surface *s)
     }
 
     const int outer_padding = gui_app_outer_padding();
+    const int top_padding = gui_scaled_metric(8);
     const int header_h = gui_app_header_h();
     const int section_gap = gui_app_section_gap();
     const int bottom_padding = outer_padding;
     gui_fill_surface(s, g_gui_style.app_bg);
     layout.outer_x = outer_padding;
-    layout.outer_y = outer_padding;
+    layout.outer_y = top_padding;
     layout.outer_w = view_w - outer_padding * 2;
-    layout.outer_h = view_h - outer_padding - bottom_padding;
+    layout.outer_h = view_h - top_padding - bottom_padding;
     if (layout.outer_w < 0)
         layout.outer_w = 0;
     if (layout.outer_h < 0)

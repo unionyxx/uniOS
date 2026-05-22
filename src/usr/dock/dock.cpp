@@ -33,6 +33,8 @@ struct DockIconAsset
 {
     Surface surface;
     bool loaded;
+    int active_left;
+    int active_right;
 };
 
 static constexpr DockItem k_dock_items[] = {
@@ -79,6 +81,32 @@ static inline int dock_item_x(int item_index, uint32_t dock_w)
 static Rect dock_item_damage_rect(int item_index, uint32_t dock_w, uint32_t dock_h);
 static int count_windows_for_item(Registry *registry, const DockItem &item);
 
+static void get_surface_active_bounds(const Surface &s, int *out_left, int *out_right)
+{
+    int left = (int)s.width;
+    int right = 0;
+    uint32_t stride = s.pitch / 4u;
+    for (uint32_t y = 0; y < s.height; y++) {
+        const uint32_t *row = &s.buffer[(size_t)y * stride];
+        for (uint32_t x = 0; x < s.width; x++) {
+            uint8_t alpha = (uint8_t)(row[x] >> 24);
+            if (alpha > 0) {
+                if ((int)x < left)
+                    left = (int)x;
+                if ((int)x > right)
+                    right = (int)x;
+            }
+        }
+    }
+    if (left > right) {
+        *out_left = 0;
+        *out_right = (int)s.width - 1;
+    } else {
+        *out_left = left;
+        *out_right = right;
+    }
+}
+
 static void submit_damage(WindowEntry &entry, const Rect &r)
 {
     Rect clipped = r;
@@ -123,6 +151,9 @@ static void load_dock_icons()
         if (gui_load_uoic(path, SHELL_DOCK_ICON_SIZE / 2, (uint32_t)gui_ui_scale_pct(),
                           &g_calendar_num_assets[i].surface)) {
             g_calendar_num_assets[i].loaded = true;
+            get_surface_active_bounds(g_calendar_num_assets[i].surface,
+                                      &g_calendar_num_assets[i].active_left,
+                                      &g_calendar_num_assets[i].active_right);
         }
     }
 }
@@ -634,26 +665,53 @@ static void draw_calendar_contents(Surface *canvas, int x, int y, int size)
     int date = (int)t.day;
     if (date < 10) {
         if (g_calendar_num_assets[date].loaded) {
-            const Surface &ns = g_calendar_num_assets[date].surface;
+            const DockIconAsset &asset = g_calendar_num_assets[date];
+            const Surface &ns = asset.surface;
             int num_w = date_h * (int)ns.width / (int)ns.height;
-            int num_x = x + (size - num_w) / 2;
+
+            // Centering single digits visually by bounds
+            float scale = (float)date_h / (float)ns.height;
+            float vis_w = (float)(asset.active_right - asset.active_left + 1) * scale;
+            float scaled_left = (float)asset.active_left * scale;
+
+            float active_start_x = (float)x + ((float)size - vis_w) / 2.0f;
+            float draw_x = active_start_x - scaled_left;
             int num_y = start_y + weekday_h + gap;
-            draw_scaled_app_icon(canvas, &ns, num_x, num_y, num_w, date_h);
+
+            draw_scaled_app_icon(canvas, &ns, (int)draw_x, num_y, num_w, date_h);
         }
     } else {
         int d1 = date / 10;
         int d2 = date % 10;
         if (g_calendar_num_assets[d1].loaded && g_calendar_num_assets[d2].loaded) {
-            const Surface &s1 = g_calendar_num_assets[d1].surface;
-            const Surface &s2 = g_calendar_num_assets[d2].surface;
+            const DockIconAsset &asset1 = g_calendar_num_assets[d1];
+            const DockIconAsset &asset2 = g_calendar_num_assets[d2];
+            const Surface &s1 = asset1.surface;
+            const Surface &s2 = asset2.surface;
+
             int w1 = date_h * (int)s1.width / (int)s1.height;
             int w2 = date_h * (int)s2.width / (int)s2.height;
-            int digit_gap = size * 2 / 100;
-            int total_w = w1 + w2 + digit_gap;
-            int num_x = x + (size - total_w) / 2;
+
+            float scale1 = (float)date_h / (float)s1.height;
+            float scale2 = (float)date_h / (float)s2.height;
+
+            float vis_w1 = (float)(asset1.active_right - asset1.active_left + 1) * scale1;
+            float vis_w2 = (float)(asset2.active_right - asset2.active_left + 1) * scale2;
+
+            float scaled_left1 = (float)asset1.active_left * scale1;
+            float scaled_left2 = (float)asset2.active_left * scale2;
+
+            int digit_gap = gui_scaled_metric(1);
+
+            float total_vis_w = vis_w1 + vis_w2 + (float)digit_gap;
+            float active_start_x = (float)x + ((float)size - total_vis_w) / 2.0f;
+
+            float x1 = active_start_x - scaled_left1;
+            float x2 = active_start_x + vis_w1 + (float)digit_gap - scaled_left2;
             int num_y = start_y + weekday_h + gap;
-            draw_scaled_app_icon(canvas, &s1, num_x, num_y, w1, date_h);
-            draw_scaled_app_icon(canvas, &s2, num_x + w1 + digit_gap, num_y, w2, date_h);
+
+            draw_scaled_app_icon(canvas, &s1, (int)x1, num_y, w1, date_h);
+            draw_scaled_app_icon(canvas, &s2, (int)x2, num_y, w2, date_h);
         }
     }
 }

@@ -180,12 +180,13 @@ static inline uint32_t darken_color(uint32_t color, uint8_t factor)
 static void compute_layout(Surface *win, CalcRects *rects)
 {
     int pad = gui_scaled_metric(16);
+    int top_pad = gui_scaled_metric(8);
     int gap = gui_scaled_metric(10);
     int display_h = gui_scaled_metric(72);
     int win_w = (int)win->width;
     int win_h = (int)win->height;
 
-    rects->display = gui_rect_make(pad, pad, win_w - pad * 2, display_h);
+    rects->display = gui_rect_make(pad, top_pad, win_w - pad * 2, display_h);
 
     int grid_y = rects->display.y + rects->display.h + gap;
     int grid_h = win_h - grid_y - pad;
