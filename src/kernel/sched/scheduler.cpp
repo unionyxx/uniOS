@@ -26,6 +26,7 @@ static Process *g_proc_list = nullptr;
 static Process *g_proc_tail = nullptr;
 static uint64_t g_next_pid = 1;
 static volatile uint32_t g_shutdown_action = 0;
+WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
 extern "C" void scheduler_unlock_after_switch();
 
 static void process_free_reaped(Process *target)
@@ -36,10 +37,36 @@ static void process_free_reaped(Process *target)
         for (size_t i = 0; i < KERNEL_STACK_SIZE / 4096; i++)
             pmm_free_frame(reinterpret_cast<void *>(target->stack_phys + i * 4096));
     }
-    if (target->page_table)
+
+    bool share_page_table = false;
+    bool share_vma_list = false;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    Process *curr = g_proc_list;
+    if (curr) {
+        do {
+            if (curr != target) {
+                if (curr->page_table == target->page_table) {
+                    share_page_table = true;
+                }
+                if (curr->vma_list == target->vma_list) {
+                    share_vma_list = true;
+                }
+            }
+            curr = curr->next;
+        } while (curr != g_proc_list);
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    if (target->page_table && !share_page_table)
         vmm_free_address_space(target->page_table);
-    if (target->vma_list)
+    if (target->vma_list && !share_vma_list)
         vma_free_all(target->vma_list);
+
     aligned_free(target);
 }
 
@@ -162,6 +189,39 @@ static Process *ready_queue_pop()
     }
     return nullptr;
 }
+
+void scheduler_remove_from_ready_queue(Process *p)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    for (int i = 0; i < NUM_PRIORITY_LEVELS; i++) {
+        Process *curr = g_ready_queues[i];
+        Process *prev = nullptr;
+        while (curr) {
+            if (curr == p) {
+                if (prev) {
+                    prev->queue_next = curr->queue_next;
+                } else {
+                    g_ready_queues[i] = curr->queue_next;
+                }
+                if (g_ready_tails[i] == curr) {
+                    g_ready_tails[i] = prev;
+                }
+                curr->queue_next = nullptr;
+                break;
+            }
+            prev = curr;
+            curr = curr->queue_next;
+        }
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+}
+
 
 static void sleep_queue_push(Process *p, uint64_t ticks)
 {
@@ -404,6 +464,9 @@ void scheduler_wake_all(WaitQueue *q)
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     wait_queue_wake_all(q);
+    if (q != &g_epoll_wait_queue) {
+        wait_queue_wake_all(&g_epoll_wait_queue);
+    }
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
 }
@@ -1056,13 +1119,13 @@ void scheduler_sleep_ms(uint64_t ms)
     if (ms == 0)
         return;
 
+    // Ceil(ms * freq / 1000) without overflowing for very large values.
     const uint32_t freq = timer_get_frequency();
     if (freq == 0) {
         timer_poll_wait_ms(static_cast<uint32_t>(ms > UINT32_MAX ? UINT32_MAX : ms));
         return;
     }
 
-    // Ceil(ms * freq / 1000) without overflowing for very large values.
     uint64_t whole = ms / 1000u;
     uint64_t rem = ms % 1000u;
     uint64_t ticks = whole * static_cast<uint64_t>(freq);
@@ -1076,3 +1139,117 @@ void scheduler_sleep_ms(uint64_t ms)
 
     scheduler_sleep(ticks);
 }
+
+extern "C" void thread_ret();
+
+[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame)
+{
+    if (!entry || !stack_top || !frame) {
+        return -22; // -EINVAL
+    }
+
+    Process *parent = process_get_current();
+    if (!parent) {
+        return -1;
+    }
+
+    Process *thread = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
+    if (!thread) {
+        return -1;
+    }
+    kstring::zero_memory(thread, sizeof(Process));
+    event_init(thread->event_queue);
+
+    uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    thread->pid = g_next_pid++;
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    thread->parent_pid = parent->pid;
+    thread->uid = parent->uid;
+    thread->state = ProcessState_Ready;
+    thread->priority = parent->priority;
+    thread->time_slice = 0;
+    thread->last_run_time = timer_get_ticks();
+
+    save_fpu_state(parent->fpu_state);
+    kstring::memcpy(thread->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
+    thread->fpu_initialized = true;
+
+    // copy fd table, bump vnode refcounts
+    spinlock_init(&thread->fd_lock);
+    spinlock_acquire(&parent->fd_lock);
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        thread->fd_table[i] = parent->fd_table[i];
+        if (thread->fd_table[i].used && thread->fd_table[i].vnode) {
+            __sync_fetch_and_add(&thread->fd_table[i].vnode->ref_count, 1);
+        }
+    }
+    spinlock_release(&parent->fd_lock);
+
+    thread->cursor_x = parent->cursor_x;
+    thread->cursor_y = parent->cursor_y;
+    kstring::strncpy(thread->cwd, parent->cwd, sizeof(thread->cwd));
+
+
+    thread->page_table = parent->page_table;
+    thread->vma_list = parent->vma_list;
+    spinlock_init(&thread->vma_lock);
+
+
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    void *kstack_phys = pmm_alloc_frames(stack_pages);
+    if (!kstack_phys) {
+        process_release_private_fds(thread);
+        aligned_free(thread);
+        return -1;
+    }
+    thread->stack_phys = reinterpret_cast<uint64_t>(kstack_phys);
+    uint64_t virt_base = vmm_phys_to_virt(thread->stack_phys);
+    thread->stack_base = reinterpret_cast<uint64_t *>(virt_base);
+
+    uint64_t *hhdm_stack_base = reinterpret_cast<uint64_t *>(virt_base);
+    for (size_t i = 0; i < 8; i++)
+        hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+
+    uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
+    const size_t total_frame_size = sizeof(SyscallFrame) + sizeof(Context);
+    stack_top_hhdm -= total_frame_size;
+    stack_top_hhdm &= ~0xFULL;
+
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm + sizeof(Context));
+    Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
+
+    kstring::zero_memory(child_frame, sizeof(SyscallFrame));
+    child_frame->rip = reinterpret_cast<uint64_t>(entry);
+    child_frame->rsp = reinterpret_cast<uint64_t>(stack_top);
+    child_frame->cs = frame->cs;
+    child_frame->ss = frame->ss;
+    child_frame->rflags = frame->rflags;
+    child_frame->arg6 = reinterpret_cast<uint64_t>(arg); // r9 -> rdi via thread_ret
+
+    kstring::zero_memory(child_context, sizeof(Context));
+    child_context->rip = reinterpret_cast<uint64_t>(thread_ret);
+    thread->sp = stack_top_hhdm;
+
+    kstring::strncpy(thread->name, parent->name, 24);
+    kstring::strncat(thread->name, "/thr", 7);
+
+    flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    g_proc_tail->next = thread;
+    g_proc_tail = thread;
+    thread->next = g_proc_list;
+
+    thread->children_list = nullptr;
+    thread->sibling_next = parent->children_list;
+    parent->children_list = thread;
+
+    ready_queue_push(thread);
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    return static_cast<int64_t>(thread->pid);
+}
+

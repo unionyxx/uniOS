@@ -315,18 +315,18 @@ const char *log_module_name(LogModule mod)
 
 void kprintf(const char *fmt, ...)
 {
-    spinlock_acquire(&g_debug_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_debug_lock);
     va_list args;
     va_start(args, fmt);
     g_current_color = g_theme->text_primary;
     emit_formatted(debug_sink_char, nullptr, fmt, args);
     va_end(args);
-    spinlock_release(&g_debug_lock);
+    spinlock_release_irqrestore(&g_debug_lock, flags);
 }
 
 void kprintf_color(uint32_t color, const char *fmt, ...)
 {
-    spinlock_acquire(&g_debug_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_debug_lock);
     va_list args;
     va_start(args, fmt);
     uint32_t old = g_current_color;
@@ -334,7 +334,7 @@ void kprintf_color(uint32_t color, const char *fmt, ...)
     emit_formatted(debug_sink_char, nullptr, fmt, args);
     g_current_color = old;
     va_end(args);
-    spinlock_release(&g_debug_lock);
+    spinlock_release_irqrestore(&g_debug_lock, flags);
 }
 
 void klog(LogModule mod, LogLevel level, const char *, const char *fmt, ...)
@@ -344,7 +344,7 @@ void klog(LogModule mod, LogLevel level, const char *, const char *fmt, ...)
     if (level < g_log_min_level || !(static_cast<uint32_t>(mod) & g_log_module_mask))
         return;
 
-    spinlock_acquire(&g_debug_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_debug_lock);
 
     uint64_t ticks = timer_get_ticks();
     uint64_t s = ticks / 1000;
@@ -451,17 +451,17 @@ void klog(LogModule mod, LogLevel level, const char *, const char *fmt, ...)
         g_current_color = old_color;
     }
 
-    spinlock_release(&g_debug_lock);
+    spinlock_release_irqrestore(&g_debug_lock, flags);
 }
 
 extern "C" void klog_dump_buffer()
 {
-    spinlock_acquire(&g_debug_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_debug_lock);
     size_t length = (g_klog_total_written > KLOG_BUFFER_SIZE) ? KLOG_BUFFER_SIZE : g_klog_total_written;
     size_t start = (g_klog_total_written > KLOG_BUFFER_SIZE) ? g_klog_head : 0;
     for (size_t i = 0; i < length; i++)
         g_terminal.put_char(g_klog_buffer[(start + i) % KLOG_BUFFER_SIZE]);
-    spinlock_release(&g_debug_lock);
+    spinlock_release_irqrestore(&g_debug_lock, flags);
 }
 
 #include <kernel/mm/vmm.h>

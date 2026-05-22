@@ -154,6 +154,9 @@ void net_poll()
     while (budget-- > 0 && (len = nic_receive(rx_buffer, sizeof(rx_buffer))) > 0) {
         ethernet_receive(rx_buffer, (uint16_t)len);
     }
+
+    // Process TCP retransmissions
+    tcp_poll();
 }
 
 // Configuration getters

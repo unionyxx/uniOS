@@ -37,7 +37,7 @@ static uint8_t chk_buffer[1600];
 static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *udp_data, uint16_t length)
 {
     // Allocate buffer on heap to avoid stack overflow
-    spinlock_acquire(&chk_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&chk_lock);
     uint8_t *buffer = chk_buffer;
 
     UdpPseudoHeader *pseudo = (UdpPseudoHeader *)buffer;
@@ -55,7 +55,7 @@ static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *udp_d
     }
 
     uint16_t result = ipv4_checksum(buffer, sizeof(UdpPseudoHeader) + length);
-    spinlock_release(&chk_lock);
+    spinlock_release_irqrestore(&chk_lock, flags);
     return result;
 }
 
@@ -116,7 +116,7 @@ bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void 
     }
 
     // Allocate packet buffer on heap to avoid stack overflow
-    spinlock_acquire(&tx_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&tx_lock);
     uint8_t *packet = tx_buffer;
 
     UdpHeader *hdr = (UdpHeader *)packet;
@@ -140,7 +140,7 @@ bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void 
     }
 
     bool result = ipv4_send(dst_ip, IP_PROTO_UDP, packet, UDP_HEADER_SIZE + length);
-    spinlock_release(&tx_lock);
+    spinlock_release_irqrestore(&tx_lock, flags);
     return result;
 }
 

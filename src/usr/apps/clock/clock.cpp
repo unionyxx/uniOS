@@ -396,7 +396,8 @@ extern "C" int main()
     gui_sync_theme_from_registry();
     gui_request_focus();
 
-    uint32_t *backbuffer_data = (uint32_t *)malloc(win.width * win.height * sizeof(uint32_t));
+    uint32_t backbuffer_stride = win.pitch / 4;
+    uint32_t *backbuffer_data = (uint32_t *)malloc(backbuffer_stride * win.height * sizeof(uint32_t));
     Surface backbuffer = win;
     backbuffer.buffer = backbuffer_data;
     backbuffer.owns_buffer = false;
@@ -428,7 +429,8 @@ extern "C" int main()
             if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
                 resized = true;
                 free(backbuffer_data);
-                backbuffer_data = (uint32_t *)malloc(win.width * win.height * sizeof(uint32_t));
+                backbuffer_stride = win.pitch / 4;
+                backbuffer_data = (uint32_t *)malloc(backbuffer_stride * win.height * sizeof(uint32_t));
                 backbuffer = win;
                 backbuffer.buffer = backbuffer_data;
                 continue;
@@ -486,7 +488,7 @@ extern "C" int main()
         draw_clock_face_hands(&backbuffer, cx, cy, face_r, continuous_seconds);
         draw_clock_text(&backbuffer, cx, cy, face_r, &current_os_time);
         
-        memcpy(win.buffer, backbuffer.buffer, win.height * win.pitch);
+        memcpy(win.buffer, backbuffer.buffer, (size_t)backbuffer_stride * win.height * sizeof(uint32_t));
         gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
 
         sleep_ms(16);

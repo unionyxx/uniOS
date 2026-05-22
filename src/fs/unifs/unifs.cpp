@@ -157,10 +157,10 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     if (find_ram_file(name))
         return UnifsError::Exists;
 
-    spinlock_acquire(&g_ram_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
     RAMFile *slot = find_free_slot();
     if (!slot) {
-        spinlock_release(&g_ram_lock);
+        spinlock_release_irqrestore(&g_ram_lock, flags);
         return UnifsError::Full;
     }
 
@@ -171,7 +171,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     slot->capacity = 0;
     slot->used = true;
     g_ram_file_count++;
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return UnifsError::Ok;
 }
@@ -190,14 +190,14 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         return UnifsError::InUse;
     }
 
-    spinlock_acquire(&g_ram_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
     if (size > file->capacity) {
         free(file->data);
         file->data = static_cast<uint8_t *>(malloc(size));
         if (!file->data) {
             file->size = 0;
             file->capacity = 0;
-            spinlock_release(&g_ram_lock);
+            spinlock_release_irqrestore(&g_ram_lock, flags);
             return UnifsError::NoMemory;
         }
         file->capacity = size;
@@ -206,7 +206,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     if (data && size > 0)
         kstring::memcpy(file->data, data, size);
     file->size = size;
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return UnifsError::Ok;
 }
@@ -217,6 +217,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         return UnifsError::Ok;
 
     RAMFile *file = find_ram_file(name);
+    uint64_t flags = 0;
     if (!file) {
         auto *boot_entry = find_boot_entry(name);
         if (boot_entry) {
@@ -227,7 +228,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
             uint64_t boot_size = boot_entry->size;
             uint8_t *boot_data = g_fs_start + boot_entry->offset;
 
-            spinlock_acquire(&g_ram_lock);
+            flags = spinlock_acquire_irqsave(&g_ram_lock);
             uint64_t initial_cap = (boot_size * 2 > MAX_FILE_SIZE) ? MAX_FILE_SIZE : boot_size * 2;
             if (initial_cap == 0)
                 initial_cap = 4096;
@@ -237,7 +238,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
                 file->capacity = initial_cap;
                 file->size = boot_size;
             }
-            spinlock_release(&g_ram_lock);
+            spinlock_release_irqrestore(&g_ram_lock, flags);
         } else {
             if (auto err = unifs_create(name); err != UnifsError::Ok)
                 return err;
@@ -247,10 +248,10 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         return UnifsError::InUse;
     }
 
-    spinlock_acquire(&g_ram_lock);
+    flags = spinlock_acquire_irqsave(&g_ram_lock);
     uint64_t new_size = file->size + size;
     if (new_size > MAX_FILE_SIZE) {
-        spinlock_release(&g_ram_lock);
+        spinlock_release_irqrestore(&g_ram_lock, flags);
         return UnifsError::NoMemory;
     }
 
@@ -258,7 +259,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         uint64_t new_capacity = (new_size * 2 > MAX_FILE_SIZE) ? MAX_FILE_SIZE : new_size * 2;
         uint8_t *new_data = static_cast<uint8_t *>(malloc(new_capacity));
         if (!new_data) {
-            spinlock_release(&g_ram_lock);
+            spinlock_release_irqrestore(&g_ram_lock, flags);
             return UnifsError::NoMemory;
         }
 
@@ -272,7 +273,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
 
     kstring::memcpy(file->data + file->size, data, size);
     file->size = new_size;
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return UnifsError::Ok;
 }
@@ -289,7 +290,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     if (is_file_open(file->name))
         return UnifsError::InUse;
 
-    spinlock_acquire(&g_ram_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
     free(file->data);
     file->data = nullptr;
     file->size = 0;
@@ -297,7 +298,7 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     file->used = false;
     file->name[0] = '\0';
     g_ram_file_count--;
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return UnifsError::Ok;
 }
@@ -334,6 +335,7 @@ static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         return -1;
 
     RAMFile *file = find_ram_file(name);
+    uint64_t flags = 0;
     if (!file) {
         auto *boot = find_boot_entry(name);
         if (boot) {
@@ -350,11 +352,11 @@ static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint
                 kstring::memcpy(boot_data_copy, g_fs_start + boot->offset, boot->size);
             }
 
-            spinlock_acquire(&g_ram_lock);
+            flags = spinlock_acquire_irqsave(&g_ram_lock);
             file->data = boot_data_copy;
             file->size = boot->size;
             file->capacity = boot->size;
-            spinlock_release(&g_ram_lock);
+            spinlock_release_irqrestore(&g_ram_lock, flags);
         } else {
             if (unifs_append(name, buf, size) == UnifsError::Ok)
                 return static_cast<int64_t>(size);
@@ -362,10 +364,10 @@ static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         }
     }
 
-    spinlock_acquire(&g_ram_lock);
+    flags = spinlock_acquire_irqsave(&g_ram_lock);
     uint64_t new_end = offset + size;
     if (new_end > MAX_FILE_SIZE) {
-        spinlock_release(&g_ram_lock);
+        spinlock_release_irqrestore(&g_ram_lock, flags);
         return -1;
     }
 
@@ -373,7 +375,7 @@ static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         uint64_t new_cap = (new_end * 2 > MAX_FILE_SIZE) ? MAX_FILE_SIZE : new_end * 2;
         uint8_t *new_data = static_cast<uint8_t *>(malloc(new_cap));
         if (!new_data) {
-            spinlock_release(&g_ram_lock);
+            spinlock_release_irqrestore(&g_ram_lock, flags);
             return -1;
         }
 
@@ -388,7 +390,7 @@ static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint
     kstring::memcpy(file->data + offset, buf, size);
     if (new_end > file->size)
         file->size = new_end;
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return static_cast<int64_t>(size);
 }
@@ -400,6 +402,7 @@ static int unifs_vfs_truncate(VNode *node, uint64_t size)
     string_view name(static_cast<const char *>(node->fs_data));
 
     RAMFile *file = find_ram_file(name);
+    uint64_t flags = 0;
     if (!file) {
         auto *boot_entry = find_boot_entry(name);
         if (boot_entry) {
@@ -408,14 +411,14 @@ static int unifs_vfs_truncate(VNode *node, uint64_t size)
                 return -1;
             file = find_ram_file(name);
             if (size > 0) {
-                spinlock_acquire(&g_ram_lock);
+                flags = spinlock_acquire_irqsave(&g_ram_lock);
                 file->data = static_cast<uint8_t *>(malloc(boot_entry->size));
                 if (file->data) {
                     kstring::memcpy(file->data, g_fs_start + boot_entry->offset, boot_entry->size);
                     file->size = boot_entry->size;
                     file->capacity = boot_entry->size;
                 }
-                spinlock_release(&g_ram_lock);
+                spinlock_release_irqrestore(&g_ram_lock, flags);
                 if (!file->data)
                     return -1;
             }
@@ -427,7 +430,7 @@ static int unifs_vfs_truncate(VNode *node, uint64_t size)
     if (is_file_open(name.data()))
         return -1;
 
-    spinlock_acquire(&g_ram_lock);
+    flags = spinlock_acquire_irqsave(&g_ram_lock);
     if (size == 0) {
         file->size = 0;
     } else if (size <= file->capacity) {
@@ -436,7 +439,7 @@ static int unifs_vfs_truncate(VNode *node, uint64_t size)
         // Grow
         uint8_t *new_data = static_cast<uint8_t *>(malloc(size));
         if (!new_data) {
-            spinlock_release(&g_ram_lock);
+            spinlock_release_irqrestore(&g_ram_lock, flags);
             return -1;
         }
         if (file->data) {
@@ -447,7 +450,7 @@ static int unifs_vfs_truncate(VNode *node, uint64_t size)
         file->size = size;
         file->capacity = size;
     }
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
     node->size = size;
     return 0;
 }
@@ -483,7 +486,7 @@ static int unifs_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
 
     if (old_file && new_file) {
         // Copy data from old to new
-        spinlock_acquire(&g_ram_lock);
+        uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
         new_file->data = old_file->data;
         new_file->size = old_file->size;
         new_file->capacity = old_file->capacity;
@@ -491,7 +494,7 @@ static int unifs_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
         // Clear old file entry so it doesn't free the data we just stole
         old_file->data = nullptr;
         old_file->used = false;
-        spinlock_release(&g_ram_lock);
+        spinlock_release_irqrestore(&g_ram_lock, flags);
 
         static_cast<void>(unifs_delete(old_path));
         return 0;
@@ -831,7 +834,7 @@ bool unifs_is_mounted()
 
 uint64_t unifs_get_total_size()
 {
-    spinlock_acquire(&g_ram_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
     uint64_t total = 0;
     if (g_mounted) {
         for (uint64_t i = 0; i < g_boot_header->file_count; i++)
@@ -841,7 +844,7 @@ uint64_t unifs_get_total_size()
         if (file.used)
             total += file.size;
     }
-    spinlock_release(&g_ram_lock);
+    spinlock_release_irqrestore(&g_ram_lock, flags);
     return total;
 }
 

@@ -400,11 +400,6 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
         pic_set_mask(i);
     boot_splash_set_progress(48);
 
-#ifdef DEBUG
-    BOOT_LOG("Kernel tests enabled");
-    ktest_run_all();
-#endif
-
     extern EventQueue g_event_queue;
     event_init(g_event_queue);
 
@@ -420,6 +415,11 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
         idle->priority = 2; // IDLE priority
         idle->state = ProcessState_Ready;
     }
+
+#ifdef DEBUG
+    BOOT_LOG("Kernel tests enabled");
+    ktest_run_all();
+#endif
 
     BOOT_LOG("Driver initialization");
     ps2_keyboard_init();

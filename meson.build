@@ -54,6 +54,12 @@ endif
 if not kernel_source_paths.contains('src/drivers/storage/usb_msc.cpp')
   kernel_source_paths += ['src/drivers/storage/usb_msc.cpp']
 endif
+if not kernel_source_paths.contains('src/kernel/sync/epoll.cpp')
+  kernel_source_paths += ['src/kernel/sync/epoll.cpp']
+endif
+if not kernel_source_paths.contains('src/kernel/tests/extended_syscall_tests.cpp')
+  kernel_source_paths += ['src/kernel/tests/extended_syscall_tests.cpp']
+endif
 kernel_sources = files(kernel_source_paths)
 
 kernel_inc = include_directories('include', 'src')

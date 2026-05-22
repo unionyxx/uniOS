@@ -116,8 +116,7 @@ static bool dhcp_send(DhcpPacket *pkt, uint16_t length)
     // Build UDP + IP packet manually since we don't have an IP yet
     // Actually, we need to send with src_ip=0 and dst_ip=broadcast
 
-    // Allocate frame on heap to prevent stack overflow
-    spinlock_acquire(&tx_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&tx_lock);
     uint8_t *frame = tx_buffer;
 
     // Build UDP header
@@ -176,7 +175,7 @@ static bool dhcp_send(DhcpPacket *pkt, uint16_t length)
 
     // Send via Ethernet broadcast
     bool result = ethernet_send(ETH_BROADCAST_MAC, ETH_TYPE_IPV4, frame, 20 + 8 + length);
-    spinlock_release(&tx_lock);
+    spinlock_release_irqrestore(&tx_lock, flags);
     return result;
 }
 

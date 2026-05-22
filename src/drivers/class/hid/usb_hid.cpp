@@ -220,13 +220,13 @@ static bool key_was_pressed(uint8_t keycode)
 
 static void kb_push(char c)
 {
-    spinlock_acquire(&g_kb_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_kb_lock);
     const uint8_t next = static_cast<uint8_t>((kb_tail + 1) % KB_BUFFER_SIZE);
     if (next != kb_head) {
         kb_buffer[kb_tail] = c;
         kb_tail = next;
     }
-    spinlock_release(&g_kb_lock);
+    spinlock_release_irqrestore(&g_kb_lock, sl_flags);
 }
 
 static void clear_repeat_state()
@@ -239,10 +239,10 @@ static void clear_repeat_state()
 
 static void reset_keyboard_decoder_state()
 {
-    spinlock_acquire(&g_kb_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_kb_lock);
     kb_head = 0;
     kb_tail = 0;
-    spinlock_release(&g_kb_lock);
+    spinlock_release_irqrestore(&g_kb_lock, sl_flags);
 
     last_kbd_report = {0, 0, {0}};
     hid_reset_keyboard_report_layout(&keyboard_report_layout);
@@ -517,7 +517,7 @@ static void process_mouse_report(uint8_t *data, uint16_t length)
             wheel = static_cast<int8_t>(data[3]);
     }
 
-    spinlock_acquire(&g_mouse_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_mouse_lock);
     mouse_left = (btn & HID_MOUSE_LEFT) != 0;
     mouse_right = (btn & HID_MOUSE_RIGHT) != 0;
     mouse_middle = (btn & HID_MOUSE_MIDDLE) != 0;
@@ -536,7 +536,7 @@ static void process_mouse_report(uint8_t *data, uint16_t length)
 
     mouse_available = true;
     mouse_data_received = true;
-    spinlock_release(&g_mouse_lock);
+    spinlock_release_irqrestore(&g_mouse_lock, sl_flags);
 }
 
 static void mouse_interrupt_cb(uint8_t slot_id, uint8_t ep_num, void *data, uint16_t length)
@@ -699,14 +699,14 @@ bool usb_hid_keyboard_has_char()
 
 char usb_hid_keyboard_get_char()
 {
-    spinlock_acquire(&g_kb_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_kb_lock);
     if (kb_head == kb_tail) {
-        spinlock_release(&g_kb_lock);
+        spinlock_release_irqrestore(&g_kb_lock, sl_flags);
         return 0;
     }
     const char c = kb_buffer[kb_head];
     kb_head = static_cast<uint8_t>((kb_head + 1) % KB_BUFFER_SIZE);
-    spinlock_release(&g_kb_lock);
+    spinlock_release_irqrestore(&g_kb_lock, sl_flags);
     return c;
 }
 
@@ -717,7 +717,7 @@ bool usb_hid_mouse_available()
 
 void usb_hid_mouse_get_state(int32_t *x, int32_t *y, bool *left, bool *right, bool *middle)
 {
-    spinlock_acquire(&g_mouse_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_mouse_lock);
     if (x)
         *x = mouse_x;
     if (y)
@@ -728,7 +728,7 @@ void usb_hid_mouse_get_state(int32_t *x, int32_t *y, bool *left, bool *right, bo
         *right = mouse_right;
     if (middle)
         *middle = mouse_middle;
-    spinlock_release(&g_mouse_lock);
+    spinlock_release_irqrestore(&g_mouse_lock, sl_flags);
 }
 
 int8_t usb_hid_mouse_get_scroll()

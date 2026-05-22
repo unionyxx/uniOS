@@ -25,3 +25,7 @@ int64_t pipe_read(int pipe_id, char *buf, uint64_t count);
 int64_t pipe_write(int pipe_id, const char *buf, uint64_t count);
 void pipe_close_read(int pipe_id);
 void pipe_close_write(int pipe_id);
+
+bool pipe_is_pipe(VNode *node);
+bool pipe_is_ready(VNode *node, uint32_t events, uint32_t *out_occurred);
+

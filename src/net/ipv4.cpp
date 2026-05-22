@@ -169,7 +169,7 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len
     }
 
     // Static TX buffer avoids large stack frames in deep network call chains.
-    spinlock_acquire(&tx_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&tx_lock);
     uint8_t *packet = tx_buffer;
 
     IPv4Header *hdr = (IPv4Header *)packet;
@@ -194,6 +194,6 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len
     }
 
     bool result = ethernet_send(dst_mac, ETH_TYPE_IPV4, packet, IPV4_HEADER_SIZE + length);
-    spinlock_release(&tx_lock);
+    spinlock_release_irqrestore(&tx_lock, flags);
     return result;
 }

@@ -19,6 +19,19 @@
     if (start >= end || !list_ptr)
         return nullptr;
 
+    if (!*list_ptr) {
+        VMA *sentinel = static_cast<VMA *>(malloc(sizeof(VMA)));
+        if (!sentinel)
+            return nullptr;
+        sentinel->start = 0;
+        sentinel->end = 0;
+        sentinel->flags = 0;
+        sentinel->type = VMAType::Generic;
+        sentinel->is_cow = false;
+        sentinel->next = nullptr;
+        *list_ptr = sentinel;
+    }
+
     VMA **link = list_ptr;
 
     while (*link && (*link)->start < start) {

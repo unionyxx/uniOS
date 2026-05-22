@@ -91,7 +91,7 @@ bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype, const void *data,
     uint16_t payload_length = length < ETH_MIN_PAYLOAD_LEN ? ETH_MIN_PAYLOAD_LEN : length;
 
     // Static TX buffer avoids large stack frames in deep network call chains.
-    spinlock_acquire(&tx_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&tx_lock);
     uint8_t *frame = tx_buffer;
 
     EthernetHeader *hdr = (EthernetHeader *)frame;
@@ -117,7 +117,7 @@ bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype, const void *data,
 
     // Send via unified NIC layer
     bool result = net_send_raw(frame, ETH_HLEN + payload_length);
-    spinlock_release(&tx_lock);
+    spinlock_release_irqrestore(&tx_lock, flags);
     return result;
 }
 

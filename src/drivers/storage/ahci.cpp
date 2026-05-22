@@ -481,7 +481,7 @@ static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, 
     if (lba + count > state->sector_count)
         return -1;
 
-    spinlock_acquire(&state->lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&state->lock);
     uint8_t *cursor = static_cast<uint8_t *>(buffer);
     uint32_t done = 0;
 
@@ -501,7 +501,7 @@ static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, 
                                                        lba + done, chunk, write, bytes);
         }
         if (!ok) {
-            spinlock_release(&state->lock);
+            spinlock_release_irqrestore(&state->lock, sl_flags);
             return -1;
         }
 
@@ -510,7 +510,7 @@ static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, 
         done += chunk;
     }
 
-    spinlock_release(&state->lock);
+    spinlock_release_irqrestore(&state->lock, sl_flags);
     return count;
 }
 

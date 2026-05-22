@@ -197,7 +197,7 @@ void pmm_init()
 
 void *pmm_alloc_frame()
 {
-    spinlock_acquire(&g_pmm_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
     size_t frame_idx = g_pmm_bitmap.find_first_free();
     if (frame_idx == 0) {
@@ -209,7 +209,7 @@ void *pmm_alloc_frame()
         g_pmm_bitmap.set(frame_idx, true);
         g_pmm_refcounts[frame_idx] = 1;
         g_free_memory -= k_frame_size;
-        spinlock_release(&g_pmm_lock);
+        spinlock_release_irqrestore(&g_pmm_lock, flags);
 
         void *phys_ptr = reinterpret_cast<void *>(frame_idx * k_frame_size);
         void *virt_ptr = reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(phys_ptr)));
@@ -217,7 +217,7 @@ void *pmm_alloc_frame()
         return phys_ptr;
     }
 
-    spinlock_release(&g_pmm_lock);
+    spinlock_release_irqrestore(&g_pmm_lock, flags);
     return nullptr;
 }
 
@@ -228,7 +228,7 @@ void *pmm_alloc_frames(size_t count)
     if (count == 1)
         return pmm_alloc_frame();
 
-    spinlock_acquire(&g_pmm_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
     size_t frame_idx = g_pmm_bitmap.find_last_free_sequence(count);
 
@@ -244,11 +244,11 @@ void *pmm_alloc_frames(size_t count)
             g_pmm_bitmap.update_hint(frame_idx + count);
         }
 
-        spinlock_release(&g_pmm_lock);
+        spinlock_release_irqrestore(&g_pmm_lock, flags);
         return reinterpret_cast<void *>(frame_idx * k_frame_size);
     }
 
-    spinlock_release(&g_pmm_lock);
+    spinlock_release_irqrestore(&g_pmm_lock, flags);
     return nullptr;
 }
 
@@ -258,17 +258,17 @@ void pmm_refcount_inc(const void *frame)
         return;
 
     uint64_t frame_idx = reinterpret_cast<uint64_t>(frame) / k_frame_size;
-    spinlock_acquire(&g_pmm_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
     if (frame_idx < g_bitmap_bits) {
         if (g_pmm_refcounts[frame_idx] == UINT16_MAX) {
-            spinlock_release(&g_pmm_lock);
+            spinlock_release_irqrestore(&g_pmm_lock, flags);
             panic("pmm: refcount overflow");
         }
         g_pmm_refcounts[frame_idx]++;
     }
 
-    spinlock_release(&g_pmm_lock);
+    spinlock_release_irqrestore(&g_pmm_lock, flags);
 }
 
 void pmm_refcount_dec(void *frame)
@@ -277,10 +277,10 @@ void pmm_refcount_dec(void *frame)
         return;
 
     uint64_t frame_idx = reinterpret_cast<uint64_t>(frame) / k_frame_size;
-    spinlock_acquire(&g_pmm_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
     if (frame_idx >= g_bitmap_bits || g_pmm_refcounts[frame_idx] == 0) {
-        spinlock_release(&g_pmm_lock);
+        spinlock_release_irqrestore(&g_pmm_lock, flags);
         return;
     }
 
@@ -290,7 +290,7 @@ void pmm_refcount_dec(void *frame)
         g_free_memory += k_frame_size;
     }
 
-    spinlock_release(&g_pmm_lock);
+    spinlock_release_irqrestore(&g_pmm_lock, flags);
 }
 
 uint16_t pmm_get_refcount(const void *frame)
@@ -299,9 +299,9 @@ uint16_t pmm_get_refcount(const void *frame)
         return 0;
 
     uint64_t frame_idx = reinterpret_cast<uint64_t>(frame) / k_frame_size;
-    spinlock_acquire(&g_pmm_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
     uint16_t count = (frame_idx < g_bitmap_bits) ? g_pmm_refcounts[frame_idx] : 0;
-    spinlock_release(&g_pmm_lock);
+    spinlock_release_irqrestore(&g_pmm_lock, flags);
 
     return count;
 }

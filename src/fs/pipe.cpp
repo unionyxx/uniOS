@@ -91,9 +91,8 @@ int64_t pipe_read(int pipe_id, char *buf, uint64_t count)
 
     PipeInternal *p = &pipes[pipe_id];
 
+    uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     while (true) {
-        spinlock_acquire(&p->lock);
-
         if (p->count > 0) {
             uint64_t to_read = (count < p->count) ? count : p->count;
             for (uint64_t i = 0; i < to_read; i++) {
@@ -109,12 +108,12 @@ int64_t pipe_read(int pipe_id, char *buf, uint64_t count)
             }
 
             scheduler_wake_all(&p->space_wait);
-            spinlock_release(&p->lock);
+            spinlock_release_irqrestore(&p->lock, flags);
             return (int64_t)to_read;
         }
 
         if (p->write_closed) {
-            spinlock_release(&p->lock);
+            spinlock_release_irqrestore(&p->lock, flags);
             return 0; // EOF
         }
 
@@ -130,11 +129,10 @@ int64_t pipe_write(int pipe_id, const char *buf, uint64_t count)
 
     PipeInternal *p = &pipes[pipe_id];
 
+    uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     while (true) {
-        spinlock_acquire(&p->lock);
-
         if (p->read_closed) {
-            spinlock_release(&p->lock);
+            spinlock_release_irqrestore(&p->lock, flags);
             return -1; // Broken pipe
         }
 
@@ -154,7 +152,7 @@ int64_t pipe_write(int pipe_id, const char *buf, uint64_t count)
             }
 
             scheduler_wake_all(&p->data_wait);
-            spinlock_release(&p->lock);
+            spinlock_release_irqrestore(&p->lock, flags);
             return (int64_t)to_write;
         }
 
@@ -168,14 +166,14 @@ void pipe_close_read(int pipe_id)
         return;
     PipeInternal *p = &pipes[pipe_id];
 
-    spinlock_acquire(&p->lock);
+    uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     p->read_closed = true;
     scheduler_wake_all(&p->space_wait);
 
     if (p->write_closed) {
         p->in_use = false;
     }
-    spinlock_release(&p->lock);
+    spinlock_release_irqrestore(&p->lock, flags);
 }
 
 void pipe_close_write(int pipe_id)
@@ -184,12 +182,53 @@ void pipe_close_write(int pipe_id)
         return;
     PipeInternal *p = &pipes[pipe_id];
 
-    spinlock_acquire(&p->lock);
+    uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     p->write_closed = true;
     scheduler_wake_all(&p->data_wait);
 
     if (p->read_closed) {
         p->in_use = false;
     }
-    spinlock_release(&p->lock);
+    spinlock_release_irqrestore(&p->lock, flags);
 }
+
+bool pipe_is_pipe(VNode *node)
+{
+    return node && node->ops == &pipe_ops;
+}
+
+bool pipe_is_ready(VNode *node, uint32_t events, uint32_t *out_occurred)
+{
+    if (!node || node->ops != &pipe_ops)
+        return false;
+    int pipe_id = (int)(uintptr_t)node->fs_data;
+    if (pipe_id < 0 || pipe_id >= MAX_PIPES || !pipes[pipe_id].in_use)
+        return false;
+
+    PipeInternal *p = &pipes[pipe_id];
+    uint64_t flags = spinlock_acquire_irqsave(&p->lock);
+
+    uint32_t occurred = 0;
+    if (node->inode_id == 0) {
+        if (p->count > 0)
+            occurred |= EPOLLIN;
+        if (p->write_closed)
+            occurred |= EPOLLIN | EPOLLHUP;
+    } else {
+        if (PIPE_BUFFER_SIZE - p->count > 0 && !p->read_closed)
+            occurred |= EPOLLOUT;
+        if (p->read_closed)
+            occurred |= EPOLLERR | EPOLLHUP;
+    }
+
+    spinlock_release_irqrestore(&p->lock, flags);
+
+    uint32_t active = occurred & events;
+    if (active) {
+        if (out_occurred)
+            *out_occurred = active;
+        return true;
+    }
+    return false;
+}
+

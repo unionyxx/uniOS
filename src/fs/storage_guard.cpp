@@ -7,19 +7,19 @@ static uint32_t g_storage_mode = STORAGE_MODE_WRITABLE;
 
 uint32_t storage_get_mode()
 {
-    spinlock_acquire(&g_storage_guard_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_storage_guard_lock);
     uint32_t mode = g_storage_mode;
-    spinlock_release(&g_storage_guard_lock);
+    spinlock_release_irqrestore(&g_storage_guard_lock, flags);
     return mode;
 }
 
 void storage_set_mode(uint32_t mode)
 {
-    spinlock_acquire(&g_storage_guard_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_storage_guard_lock);
     if (mode > STORAGE_MODE_WRITABLE)
         mode = STORAGE_MODE_READ_ONLY;
     g_storage_mode = mode;
-    spinlock_release(&g_storage_guard_lock);
+    spinlock_release_irqrestore(&g_storage_guard_lock, flags);
 }
 
 bool storage_reads_allowed()

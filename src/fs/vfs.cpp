@@ -44,10 +44,10 @@ static bool vfs_path_is_storage_guarded(const char *path)
     if (!path || path[0] != '/')
         return false;
 
-    spinlock_acquire(&g_mount_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_mount_lock);
     const Mount *mount = vfs_find_best_mount_locked(string_view(path));
     bool guarded = mount && (mount->flags & VFS_MOUNT_FLAG_STORAGE_GUARDED) != 0;
-    spinlock_release(&g_mount_lock);
+    spinlock_release_irqrestore(&g_mount_lock, flags);
     return guarded;
 }
 
@@ -147,10 +147,10 @@ int vfs_mount_ex(const char *path, VNode *root, uint32_t flags)
         root->mode = VFS_USER_STORAGE_DIR_MODE;
     }
 
-    spinlock_acquire(&g_mount_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_mount_lock);
     m->next = g_mount_list;
     g_mount_list = m;
-    spinlock_release(&g_mount_lock);
+    spinlock_release_irqrestore(&g_mount_lock, sl_flags);
 
     DEBUG_INFO("vfs: mounted filesystem at %s", path);
     return 0;
@@ -166,9 +166,9 @@ int vfs_mount(const char *path, VNode *root)
     if (path.empty() || path[0] != '/')
         return nullptr;
 
-    spinlock_acquire(&g_mount_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_mount_lock);
     const Mount *best_mount = vfs_find_best_mount_locked(path);
-    spinlock_release(&g_mount_lock);
+    spinlock_release_irqrestore(&g_mount_lock, flags);
 
     if (!best_mount)
         return nullptr;
@@ -298,13 +298,13 @@ void vfs_resolve_relative_path(const char *cwd, const char *path, char *out)
 
 void vfs_sync()
 {
-    spinlock_acquire(&g_mount_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_mount_lock);
     for (const Mount *m = g_mount_list; m; m = m->next) {
         if (m->root && m->root->ops->sync) {
             m->root->ops->sync(m->root);
         }
     }
-    spinlock_release(&g_mount_lock);
+    spinlock_release_irqrestore(&g_mount_lock, flags);
 }
 
 void vfs_close_vnode(VNode *node)
@@ -314,14 +314,14 @@ void vfs_close_vnode(VNode *node)
 
     if (__sync_sub_and_fetch(&node->ref_count, 1) == 0) {
         bool is_mount_root = false;
-        spinlock_acquire(&g_mount_lock);
+        uint64_t flags = spinlock_acquire_irqsave(&g_mount_lock);
         for (const Mount *m = g_mount_list; m; m = m->next) {
             if (m->root == node) {
                 is_mount_root = true;
                 break;
             }
         }
-        spinlock_release(&g_mount_lock);
+        spinlock_release_irqrestore(&g_mount_lock, flags);
 
         if (!is_mount_root) {
             if (node->ops->close)
@@ -414,7 +414,7 @@ int vfs_open(const char *path, int flags, uint16_t mode)
         return -1;
     }
 
-    spinlock_acquire(&p->fd_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (!p->fd_table[i].used) {
             p->fd_table[i].used = true;
@@ -425,11 +425,11 @@ int vfs_open(const char *path, int flags, uint16_t mode)
             p->fd_table[i].vnode = node;
             p->fd_table[i].offset = (flags & O_APPEND) ? node->size : 0;
             p->fd_table[i].dir_pos = 0;
-            spinlock_release(&p->fd_lock);
+            spinlock_release_irqrestore(&p->fd_lock, sl_flags);
             return i;
         }
     }
-    spinlock_release(&p->fd_lock);
+    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
 
     vfs_close_vnode(node);
     return -1;
@@ -441,9 +441,9 @@ int vfs_close(int fd)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    spinlock_acquire(&p->fd_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&p->fd_lock);
     if (!p->fd_table[fd].used) {
-        spinlock_release(&p->fd_lock);
+        spinlock_release_irqrestore(&p->fd_lock, flags);
         return -1;
     }
 
@@ -451,7 +451,7 @@ int vfs_close(int fd)
     p->fd_table[fd].used = false;
     p->fd_table[fd].flags = 0;
     p->fd_table[fd].vnode = nullptr;
-    spinlock_release(&p->fd_lock);
+    spinlock_release_irqrestore(&p->fd_lock, flags);
 
     vfs_close_vnode(node);
     return 0;

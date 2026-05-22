@@ -11,7 +11,7 @@ void block_dev_register(BlockDevice *dev)
     if (!dev)
         return;
 
-    spinlock_acquire(&dev_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&dev_lock);
     dev->registration_index = g_next_registration_index++;
     dev->next = nullptr;
     if (!dev_list) {
@@ -22,7 +22,7 @@ void block_dev_register(BlockDevice *dev)
             tail = tail->next;
         tail->next = dev;
     }
-    spinlock_release(&dev_lock);
+    spinlock_release_irqrestore(&dev_lock, flags);
 }
 
 BlockDevice *block_dev_get(const char *name)
@@ -30,23 +30,23 @@ BlockDevice *block_dev_get(const char *name)
     if (!name)
         return nullptr;
 
-    spinlock_acquire(&dev_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&dev_lock);
     BlockDevice *current = dev_list;
     while (current) {
         if (kstring::strcmp(current->name, name) == 0) {
-            spinlock_release(&dev_lock);
+            spinlock_release_irqrestore(&dev_lock, flags);
             return current;
         }
         current = current->next;
     }
-    spinlock_release(&dev_lock);
+    spinlock_release_irqrestore(&dev_lock, flags);
     return nullptr;
 }
 
 BlockDevice *block_dev_first(void)
 {
-    spinlock_acquire(&dev_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&dev_lock);
     BlockDevice *first = dev_list;
-    spinlock_release(&dev_lock);
+    spinlock_release_irqrestore(&dev_lock, flags);
     return first;
 }

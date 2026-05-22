@@ -86,3 +86,46 @@
 #define SYS_SIGACTION 13
 #define SYS_SIGRETURN 15
 #define SYS_KILL 37
+
+/* Extended System Calls */
+#define SYS_FUTEX          270
+#define SYS_THREAD_CREATE  271
+#define SYS_EPOLL_CREATE   272
+#define SYS_EPOLL_CTL      273
+#define SYS_EPOLL_WAIT     274
+#define SYS_MPROTECT       275
+#define SYS_MEMFD_CREATE   276
+
+/* Futex Opcodes */
+#define FUTEX_WAIT         0
+#define FUTEX_WAKE         1
+#define FUTEX_REQUEUE      2
+
+/* Epoll Operations & Event Flags */
+#define EPOLL_CTL_ADD      1
+#define EPOLL_CTL_MOD      2
+#define EPOLL_CTL_DEL      3
+
+#define EPOLLIN      (1u << 0)
+#define EPOLLOUT     (1u << 1)
+#define EPOLLERR     (1u << 2)
+#define EPOLLHUP     (1u << 3)
+#define EPOLLET      (1u << 31)
+
+typedef union epoll_data {
+    void *ptr;
+    int fd;
+    uint32_t u32;
+    uint64_t u64;
+} epoll_data_t;
+
+struct epoll_event {
+    uint32_t events;
+    epoll_data_t data;
+};
+
+/* Memory Protection Flags */
+#define PROT_NONE  0x0
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4

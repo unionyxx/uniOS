@@ -16,17 +16,17 @@ static Spinlock g_volume_lock = SPINLOCK_INIT;
 
 void volume_reset()
 {
-    spinlock_acquire(&g_volume_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_volume_lock);
     for (int i = 0; i < MAX_VOLUMES; i++) {
         g_volumes[i].used = false;
         g_volumes[i].info = {};
     }
-    spinlock_release(&g_volume_lock);
+    spinlock_release_irqrestore(&g_volume_lock, flags);
 }
 
 bool volume_register(const char *display_name, const char *mount_path, const char *source_device, uint32_t flags)
 {
-    spinlock_acquire(&g_volume_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_volume_lock);
     for (int i = 0; i < MAX_VOLUMES; i++) {
         if (!g_volumes[i].used) {
             g_volumes[i].used = true;
@@ -38,11 +38,11 @@ bool volume_register(const char *display_name, const char *mount_path, const cha
             kstring::strncpy(g_volumes[i].info.source_device, source_device ? source_device : "",
                              sizeof(g_volumes[i].info.source_device) - 1);
             g_volumes[i].info.flags = flags;
-            spinlock_release(&g_volume_lock);
+            spinlock_release_irqrestore(&g_volume_lock, sl_flags);
             return true;
         }
     }
-    spinlock_release(&g_volume_lock);
+    spinlock_release_irqrestore(&g_volume_lock, sl_flags);
     return false;
 }
 
@@ -52,7 +52,7 @@ int volume_list(VolumeInfo *out, int max_count)
         return 0;
 
     uint32_t storage_mode = storage_get_mode();
-    spinlock_acquire(&g_volume_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_volume_lock);
     int count = 0;
     for (int i = 0; i < MAX_VOLUMES && count < max_count; i++) {
         if (!g_volumes[i].used)
@@ -66,6 +66,6 @@ int volume_list(VolumeInfo *out, int max_count)
         }
         out[count++] = info;
     }
-    spinlock_release(&g_volume_lock);
+    spinlock_release_irqrestore(&g_volume_lock, flags);
     return count;
 }

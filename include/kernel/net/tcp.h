@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <kernel/sync/spinlock.h>
 
 // TCP Header flags
 #define TCP_FLAG_FIN 0x01
@@ -45,8 +46,21 @@ struct TcpHeader
 #define TCP_RX_BUFFER_SIZE 65536
 
 // TCP Control Block (connection state)
+struct RetransmitPacket
+{
+    bool in_use;
+    uint32_t seq_num;
+    uint16_t length;
+    uint8_t flags;
+    uint64_t sent_time;
+    uint32_t retries;
+    uint32_t rto_ms;
+    uint8_t data[1460];
+};
+
 struct TcpSocket
 {
+    Spinlock lock;
     bool in_use;
     TcpState state;
 
@@ -68,11 +82,14 @@ struct TcpSocket
     // Connection tracking
     bool pending_ack;
     uint64_t last_activity;
+
+    struct RetransmitPacket retransmit;
 };
 
 // TCP functions
 void tcp_init();
 void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t dst_ip);
+void tcp_poll();
 
 // Socket-like API
 int tcp_socket();

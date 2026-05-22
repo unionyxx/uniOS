@@ -16,7 +16,7 @@ STATIC_ASSERT(offsetof(Process, fpu_state) == 64, "Process::fpu_state offset mis
 STATIC_ASSERT(offsetof(Process, pid) == 4160, "Process::pid offset mismatch");
 STATIC_ASSERT(offsetof(Process, sp) == 4216, "Process::sp offset mismatch");
 STATIC_ASSERT(offsetof(Process, page_table) == 4240, "Process::page_table offset mismatch");
-STATIC_ASSERT(offsetof(Process, vma_list) == 8464, "Process::vma_list offset mismatch");
+STATIC_ASSERT(offsetof(Process, vma_list) == 8456, "Process::vma_list offset mismatch");
 
 using kstring::memcpy;
 
@@ -57,7 +57,7 @@ void vmm_invalidate_tlb(uint64_t virt)
     if (apic_is_enabled()) {
         int others = g_cpu_online_count - 1;
         if (others > 0) {
-            spinlock_acquire(&g_tlb_shootdown.lock);
+            uint64_t sl_flags = spinlock_acquire_irqsave(&g_tlb_shootdown.lock);
 
             g_tlb_shootdown.target_addr = virt;
             g_tlb_shootdown.active_cores = others;
@@ -73,7 +73,7 @@ void vmm_invalidate_tlb(uint64_t virt)
             }
 
             g_tlb_shootdown.target_addr = 0;
-            spinlock_release(&g_tlb_shootdown.lock);
+            spinlock_release_irqrestore(&g_tlb_shootdown.lock, sl_flags);
         }
     }
 }
@@ -591,7 +591,7 @@ static DMAVirtRange g_dma_free_ranges[MAX_DMA_FREE_RANGES] = {};
 
 static uint64_t dma_alloc_virt_range(uint64_t size)
 {
-    spinlock_acquire(&g_dma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_dma_lock);
     for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
         if (g_dma_free_ranges[i].size < size)
             continue;
@@ -601,23 +601,23 @@ static uint64_t dma_alloc_virt_range(uint64_t size)
         g_dma_free_ranges[i].size -= size;
         if (g_dma_free_ranges[i].size == 0)
             g_dma_free_ranges[i] = {};
-        spinlock_release(&g_dma_lock);
+        spinlock_release_irqrestore(&g_dma_lock, sl_flags);
         return virt;
     }
 
     if (size == 0 || size > MASSIVE_MAPPING_THRESHOLD) {
-        spinlock_release(&g_dma_lock);
+        spinlock_release_irqrestore(&g_dma_lock, sl_flags);
         panic("vmm: sanity check failed: massive/invalid dma allocation requested");
     }
 
     if (g_mmio_next_virt > g_mmio_limit_virt || (g_mmio_limit_virt - g_mmio_next_virt) < size) {
-        spinlock_release(&g_dma_lock);
+        spinlock_release_irqrestore(&g_dma_lock, sl_flags);
         panic("vmm: mmio/dma virtual address space exhausted");
     }
 
     uint64_t virt = g_mmio_next_virt;
     g_mmio_next_virt += size;
-    spinlock_release(&g_dma_lock);
+    spinlock_release_irqrestore(&g_dma_lock, sl_flags);
     return virt;
 }
 
@@ -626,7 +626,7 @@ static void dma_free_virt_range(uint64_t virt, uint64_t size)
     if (virt == 0 || size == 0)
         return;
 
-    spinlock_acquire(&g_dma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_dma_lock);
     bool inserted = false;
 
     for (size_t i = 0; i < MAX_DMA_FREE_RANGES; i++) {
@@ -680,7 +680,7 @@ static void dma_free_virt_range(uint64_t virt, uint64_t size)
             }
         }
     }
-    spinlock_release(&g_dma_lock);
+    spinlock_release_irqrestore(&g_dma_lock, sl_flags);
 }
 
 uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
@@ -830,20 +830,20 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     if (!curr || !curr->vma_list || !curr->page_table)
         return false;
 
-    spinlock_acquire(&curr->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&curr->vma_lock);
 
     if (present_fault && !write_fault) {
-        spinlock_release(&curr->vma_lock);
+        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
         return false;
     }
     if (fault_addr >= 0x0000800000000000ULL) {
-        spinlock_release(&curr->vma_lock);
+        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
         return false;
     }
 
     VMA *vma = vma_find(curr->vma_list, fault_addr);
     if (!vma) {
-        spinlock_release(&curr->vma_lock);
+        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
         return false;
     }
 
@@ -855,7 +855,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         map_flags |= PTE_USER;
 
     if (write_fault && !(vma_flags & PTE_WRITABLE)) {
-        spinlock_release(&curr->vma_lock);
+        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
         return false;
     }
 
@@ -864,7 +864,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     if (phys == 0) {
         void *new_frame = pmm_alloc_frame();
         if (!new_frame) {
-            spinlock_release(&curr->vma_lock);
+            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
             return false;
         }
 
@@ -872,17 +872,17 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 
         if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
             pmm_free_frame(new_frame);
-            spinlock_release(&curr->vma_lock);
+            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
             return false;
         }
         vmm_invalidate_tlb(page_vaddr);
-        spinlock_release(&curr->vma_lock);
+        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
         return true;
     }
 
     if (vma_type == VMAType::Shared) {
         vmm_set_page_flags(page_vaddr, map_flags);
-        spinlock_release(&curr->vma_lock);
+        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
         return true;
     }
 
@@ -891,7 +891,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     if (refcount > 1) {
         void *new_frame = pmm_alloc_frame();
         if (!new_frame) {
-            spinlock_release(&curr->vma_lock);
+            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
             return false;
         }
 
@@ -901,18 +901,18 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 
         if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
             pmm_free_frame(new_frame);
-            spinlock_release(&curr->vma_lock);
+            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
             return false;
         }
         pmm_refcount_dec(reinterpret_cast<void *>(phys));
     } else {
         if (!vmm_map_page_in(curr->page_table, page_vaddr, phys, map_flags).ok()) {
-            spinlock_release(&curr->vma_lock);
+            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
             return false;
         }
     }
 
     vmm_invalidate_tlb(page_vaddr);
-    spinlock_release(&curr->vma_lock);
+    spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
     return true;
 }

@@ -19,3 +19,11 @@ struct WaitQueue;
 struct Spinlock;
 void scheduler_wait(WaitQueue *q, Spinlock *lock);
 void scheduler_wake_all(WaitQueue *q);
+
+struct SyscallFrame;
+[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, struct SyscallFrame *frame);
+void scheduler_remove_from_ready_queue(Process *p);
+
+extern WaitQueue g_epoll_wait_queue;
+
+

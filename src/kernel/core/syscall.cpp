@@ -24,6 +24,8 @@
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
 #include <kernel/sync/spinlock.h>
+#include <kernel/sync/futex.h>
+#include <kernel/sync/epoll.h>
 #include <kernel/syscall.h>
 #include <kernel/time/timer.h>
 #include <libk/kstd.h>
@@ -195,21 +197,21 @@ extern "C" {
     if (!p)
         return false;
 
-    spinlock_acquire(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
     uint64_t current = addr;
     while (current < end) {
         VMA *vma = vma_find(p->vma_list, current);
         if (!vma) {
-            spinlock_release(&p->vma_lock);
+            spinlock_release_irqrestore(&p->vma_lock, sl_flags);
             return false;
         }
         if (write && !(vma->flags & PTE_WRITABLE)) {
-            spinlock_release(&p->vma_lock);
+            spinlock_release_irqrestore(&p->vma_lock, sl_flags);
             return false;
         }
         current = vma->end;
     }
-    spinlock_release(&p->vma_lock);
+    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
     return true;
 }
 
@@ -329,17 +331,17 @@ static bool shm_unmap_from_process(Process *p, int id)
 
     const uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
-    spinlock_acquire(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
     VMA *mapping = vma_find(p->vma_list, virt_start);
     if (!mapping || mapping->start != virt_start || mapping->type != VMAType::Shared) {
-        spinlock_release(&p->vma_lock);
+        spinlock_release_irqrestore(&p->vma_lock, sl_flags);
         return false;
     }
 
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
     vma_remove(&p->vma_list, mapping_start, mapping_end);
-    spinlock_release(&p->vma_lock);
+    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
 
     for (uint64_t virt = mapping_start; virt < mapping_end; virt += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
@@ -364,18 +366,18 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     if (length == 0 || addr > UINT64_MAX - length)
         return false;
 
-    spinlock_acquire(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
     VMA *mapping = vma_find(p->vma_list, addr);
     if (!mapping || mapping->start != addr || mapping->end != addr + length || mapping->type == VMAType::Text ||
         mapping->type == VMAType::Stack || mapping->type == VMAType::Shared) {
-        spinlock_release(&p->vma_lock);
+        spinlock_release_irqrestore(&p->vma_lock, sl_flags);
         return false;
     }
 
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
     vma_remove(&p->vma_list, mapping_start, mapping_end);
-    spinlock_release(&p->vma_lock);
+    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
 
     for (uint64_t virt = mapping_start; virt < mapping_end; virt += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
@@ -394,17 +396,17 @@ static bool shm_release_owner_reference(Process *p, int id)
     if (id < 0 || id >= 64)
         return false;
 
-    spinlock_acquire(&g_shm_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_shm_lock);
     ShmBlock *block = &g_shm_blocks[id];
     if (!block->used) {
-        spinlock_release(&g_shm_lock);
+        spinlock_release_irqrestore(&g_shm_lock, sl_flags);
         return false;
     }
 
     const uint64_t caller_pid = p ? p->pid : 0;
     const uint32_t caller_uid = p ? p->uid : 0;
     if (caller_uid != 0 && block->owner_pid != caller_pid) {
-        spinlock_release(&g_shm_lock);
+        spinlock_release_irqrestore(&g_shm_lock, sl_flags);
         return false;
     }
 
@@ -414,7 +416,7 @@ static bool shm_release_owner_reference(Process *p, int id)
     block->phys_addr = 0;
     block->size = 0;
     block->owner_pid = 0;
-    spinlock_release(&g_shm_lock);
+    spinlock_release_irqrestore(&g_shm_lock, sl_flags);
 
     for (uint64_t i = 0; i < size; i += 4096) {
         pmm_refcount_dec(reinterpret_cast<void *>(phys_start + i));
@@ -432,9 +434,9 @@ void shm_cleanup_process(Process *proc)
     }
 
     for (int id = 0; id < 64; id++) {
-        spinlock_acquire(&g_shm_lock);
+        uint64_t sl_flags = spinlock_acquire_irqsave(&g_shm_lock);
         bool owned = g_shm_blocks[id].used && g_shm_blocks[id].owner_pid == proc->pid;
-        spinlock_release(&g_shm_lock);
+        spinlock_release_irqrestore(&g_shm_lock, sl_flags);
         if (owned) {
             shm_release_owner_reference(proc, id);
         }
@@ -762,17 +764,17 @@ extern "C" void signal_check(SyscallFrame *frame)
         return static_cast<uint64_t>(-1);
 
     if (oldfd == newfd) {
-        spinlock_acquire(&p->fd_lock);
+        uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
         bool used = p->fd_table[oldfd].used;
-        spinlock_release(&p->fd_lock);
+        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
         return used ? static_cast<uint64_t>(newfd) : static_cast<uint64_t>(-1);
     }
 
     VNode *to_close = nullptr;
 
-    spinlock_acquire(&p->fd_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
     if (!p->fd_table[oldfd].used) {
-        spinlock_release(&p->fd_lock);
+        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
         return static_cast<uint64_t>(-1);
     }
 
@@ -787,7 +789,7 @@ extern "C" void signal_check(SyscallFrame *frame)
     if (p->fd_table[newfd].vnode) {
         p->fd_table[newfd].vnode->ref_count++;
     }
-    spinlock_release(&p->fd_lock);
+    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
 
     if (to_close) {
         vfs_close_vnode(to_close);
@@ -884,11 +886,11 @@ static void user_task_wrapper()
     uint64_t *old_pml4 = p->page_table;
     VMA *old_vma_list = p->vma_list;
 
-    spinlock_acquire(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
     p->page_table = new_pml4;
     p->vma_list = loader_proc->vma_list;
     p->exec_entry = entry;
-    spinlock_release(&p->vma_lock);
+    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
 
     loader_proc->vma_list = nullptr;
     aligned_free(loader_proc);
@@ -1076,6 +1078,54 @@ static uint64_t sys_getsysinfo(SystemProfile *out)
 #endif
     g_boot_framebuffer_logging = enable_framebuffer_output;
     g_boot_user_stdout_to_framebuffer = enable_framebuffer_output;
+    return 0;
+}
+
+extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
+{
+    Process *current = process_get_current();
+    if (!current)
+        return -1;
+
+    uint64_t start_addr = reinterpret_cast<uint64_t>(addr);
+    if ((start_addr & 0xFFF) != 0)
+        return -22; // EINVAL
+
+    if (len == 0)
+        return 0;
+
+    uint64_t rounded_len = (len + 4095) & ~4095ULL;
+    uint64_t end_addr = 0;
+    if (!checked_add_u64(start_addr, rounded_len, &end_addr) || end_addr >= USER_SPACE_MAX)
+        return -22; // EINVAL
+
+    for (uint64_t page_vaddr = start_addr; page_vaddr < end_addr; page_vaddr += 4096) {
+        if (vmm_virt_to_phys_in(current->page_table, page_vaddr) == 0)
+            return -12; // ENOMEM
+    }
+
+    uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+    if (prot & PROT_WRITE)
+        pte_flags |= PTE_WRITABLE;
+    if (!(prot & PROT_EXEC))
+        pte_flags |= PTE_NX;
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&current->vma_lock);
+    for (VMA *curr = current->vma_list; curr; curr = curr->next) {
+        if (curr->start < end_addr && curr->end > start_addr) {
+            curr->flags = pte_flags;
+        }
+    }
+    spinlock_release_irqrestore(&current->vma_lock, sl_flags);
+
+    for (uint64_t page_vaddr = start_addr; page_vaddr < end_addr; page_vaddr += 4096) {
+        uint64_t phys = vmm_virt_to_phys_in(current->page_table, page_vaddr);
+        if (phys != 0) {
+            vmm_map_page_in(current->page_table, page_vaddr, phys & ~0xFFFULL, pte_flags);
+            vmm_invalidate_tlb(page_vaddr);
+        }
+    }
+
     return 0;
 }
 
@@ -1553,12 +1603,12 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 }
             }
 
-            spinlock_acquire(&p->vma_lock);
+            uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
             if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
-                spinlock_release(&p->vma_lock);
+                spinlock_release_irqrestore(&p->vma_lock, sl_flags);
                 return static_cast<uint64_t>(-1);
             }
-            spinlock_release(&p->vma_lock);
+            spinlock_release_irqrestore(&p->vma_lock, sl_flags);
 
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
             return virt_start;
@@ -2116,7 +2166,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (size == 0 || size > 0x1000000)
                 return static_cast<uint64_t>(-1);
 
-            spinlock_acquire(&g_shm_lock);
+            uint64_t sl_flags = spinlock_acquire_irqsave(&g_shm_lock);
             int id = -1;
             for (int i = 0; i < 64; i++) {
                 if (!g_shm_blocks[i].used) {
@@ -2125,14 +2175,14 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 }
             }
             if (id == -1) {
-                spinlock_release(&g_shm_lock);
+                spinlock_release_irqrestore(&g_shm_lock, sl_flags);
                 return static_cast<uint64_t>(-1);
             }
 
             size_t num_pages = size / 4096;
             void *phys_ptr = pmm_alloc_frames(num_pages);
             if (!phys_ptr) {
-                spinlock_release(&g_shm_lock);
+                spinlock_release_irqrestore(&g_shm_lock, sl_flags);
                 return static_cast<uint64_t>(-1);
             }
 
@@ -2143,7 +2193,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             g_shm_blocks[id].size = size;
             g_shm_blocks[id].owner_pid = process_get_current() ? process_get_current()->pid : 0;
             g_shm_blocks[id].used = true;
-            spinlock_release(&g_shm_lock);
+            spinlock_release_irqrestore(&g_shm_lock, sl_flags);
             return static_cast<uint64_t>(id);
         }
         case SYS_SHM_MAP: {
@@ -2155,28 +2205,28 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!p)
                 return static_cast<uint64_t>(-1);
 
-            spinlock_acquire(&g_shm_lock);
+            uint64_t sl_flags = spinlock_acquire_irqsave(&g_shm_lock);
             if (!g_shm_blocks[id].used) {
-                spinlock_release(&g_shm_lock);
+                spinlock_release_irqrestore(&g_shm_lock, sl_flags);
                 return static_cast<uint64_t>(-1);
             }
 
             uint64_t phys_start = g_shm_blocks[id].phys_addr;
             size_t size = g_shm_blocks[id].size;
-            spinlock_release(&g_shm_lock);
+            spinlock_release_irqrestore(&g_shm_lock, sl_flags);
 
             // Fixed-offset mapping for SHM to avoid VMA list walking races
             uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
-            spinlock_acquire(&p->vma_lock);
+            uint64_t vma_flags = spinlock_acquire_irqsave(&p->vma_lock);
             VMA *existing = vma_find(p->vma_list, virt_start);
             if (existing) {
                 bool same_mapping = existing->start == virt_start && existing->end >= virt_start + size &&
                                     (existing->flags & PTE_SHARED);
-                spinlock_release(&p->vma_lock);
+                spinlock_release_irqrestore(&p->vma_lock, vma_flags);
                 return same_mapping ? virt_start : static_cast<uint64_t>(-1);
             }
-            spinlock_release(&p->vma_lock);
+            spinlock_release_irqrestore(&p->vma_lock, vma_flags);
 
             uint64_t flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_SHARED;
             uint64_t mapped = 0;
@@ -2194,9 +2244,9 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             }
 
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-            spinlock_acquire(&p->vma_lock);
+            uint64_t vma_flags2 = spinlock_acquire_irqsave(&p->vma_lock);
             bool vma_ok = vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared) != nullptr;
-            spinlock_release(&p->vma_lock);
+            spinlock_release_irqrestore(&p->vma_lock, vma_flags2);
             if (!vma_ok) {
                 // Rollback: Unmap and Dec Refcounts
                 for (uint64_t i = 0; i < size; i += 4096) {
@@ -2218,22 +2268,34 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             int id = (int)arg1;
             if (id < 0 || id >= 64)
                 return static_cast<uint64_t>(-1);
-            spinlock_acquire(&g_shm_lock);
+            uint64_t sl_flags = spinlock_acquire_irqsave(&g_shm_lock);
             uint64_t size = g_shm_blocks[id].used ? g_shm_blocks[id].size : (uint64_t)-1;
-            spinlock_release(&g_shm_lock);
+            spinlock_release_irqrestore(&g_shm_lock, sl_flags);
             return size;
         }
         case SYS_SHM_GET_OWNER: {
             int id = (int)arg1;
             if (id < 0 || id >= 64)
                 return static_cast<uint64_t>(-1);
-            spinlock_acquire(&g_shm_lock);
+            uint64_t sl_flags = spinlock_acquire_irqsave(&g_shm_lock);
             uint32_t owner = g_shm_blocks[id].used ? g_shm_blocks[id].owner_pid : 0;
-            spinlock_release(&g_shm_lock);
+            spinlock_release_irqrestore(&g_shm_lock, sl_flags);
             return (uint64_t)owner;
         }
         case SYS_SHM_UNMAP:
             return shm_unmap_from_process(process_get_current(), (int)arg1) ? 0 : static_cast<uint64_t>(-1);
+        case SYS_FUTEX:
+            return sys_futex(reinterpret_cast<volatile uint32_t *>(arg1), static_cast<int>(arg2), static_cast<uint32_t>(arg3));
+        case SYS_THREAD_CREATE:
+            return sys_thread_create(reinterpret_cast<void (*)()>(arg1), reinterpret_cast<void *>(arg2), reinterpret_cast<void *>(arg3), frame);
+        case SYS_MPROTECT:
+            return sys_mprotect(reinterpret_cast<void *>(arg1), static_cast<size_t>(arg2), static_cast<int>(arg3));
+        case SYS_EPOLL_CREATE:
+            return sys_epoll_create(static_cast<int>(arg1));
+        case SYS_EPOLL_CTL:
+            return sys_epoll_ctl(static_cast<int>(arg1), static_cast<int>(arg2), static_cast<int>(arg3), reinterpret_cast<struct epoll_event *>(frame->arg4));
+        case SYS_EPOLL_WAIT:
+            return sys_epoll_wait(static_cast<int>(arg1), reinterpret_cast<struct epoll_event *>(arg2), static_cast<int>(arg3), static_cast<int>(frame->arg4));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

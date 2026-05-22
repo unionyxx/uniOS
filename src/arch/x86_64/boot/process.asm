@@ -122,3 +122,32 @@ save_fpu_state:
 .sfpu_fxsave:
     fxsave64 [rdi]
     ret
+
+global thread_ret
+extern scheduler_unlock_after_switch
+thread_ret:
+    sub rsp, 8 ; Align for call
+    call scheduler_unlock_after_switch
+    add rsp, 8
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+
+    pop rdi     ; Pop arg6 into rdi (which contains our arg parameter)
+    add rsp, 16 ; Skip arg5, arg4
+
+    ; Clear other volatile registers to prevent kernel state leakage
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+
+    swapgs          ; Switch to user GS
+    iretq

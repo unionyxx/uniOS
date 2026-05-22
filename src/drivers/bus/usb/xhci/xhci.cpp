@@ -698,12 +698,12 @@ static bool xhci_send_command(Trb *trb, Trb *result)
     const uint8_t type = TRB_GET_TYPE(trb->control);
     KLOG(LogModule::Usb, LogLevel::Trace, "xHCI: Sending %s (%d)...", xhci_command_type_str(type), type);
 
-    spinlock_acquire(&g_xhci_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_xhci_lock);
     g_xhci.command_event_ready = false;
     xhci_enqueue_command(trb);
     asm volatile("mfence" ::: "memory");
     xhci_ring_doorbell(0, 0);
-    spinlock_release(&g_xhci_lock);
+    spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
 
     bool ok = xhci_wait_command(result, 1000);
     if (!ok && result) {
@@ -1122,7 +1122,7 @@ bool xhci_control_transfer(uint8_t slot_id, uint8_t request_type, uint8_t reques
          "xHCI: Control Transfer: Slot %d, ReqType 0x%x, Req 0x%x, Val 0x%x, Idx 0x%x, Len %d", slot_id, request_type,
          request, value, index, length);
 
-    spinlock_acquire(&g_xhci_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_xhci_lock);
     g_xhci.control_event_ready[slot_id] = false;
 
     Trb setup = {(static_cast<uint64_t>(request_type) | (static_cast<uint64_t>(request) << 8) |
@@ -1147,7 +1147,7 @@ bool xhci_control_transfer(uint8_t slot_id, uint8_t request_type, uint8_t reques
 
     asm volatile("mfence" ::: "memory");
     xhci_ring_doorbell(slot_id, DB_EP0_IN);
-    spinlock_release(&g_xhci_lock);
+    spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
 
     Trb result = {0, 0, 0};
     const bool success = xhci_wait_transfer(slot_id, &result, 2500);
@@ -1190,7 +1190,7 @@ bool xhci_bulk_transfer(uint8_t slot_id, uint8_t ep_num, bool in, void *data, ui
             kstring::memcpy(reinterpret_cast<void *>(dma.virt), data, length);
     }
 
-    spinlock_acquire(&g_xhci_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_xhci_lock);
     g_xhci.sync_pending[slot_id][ep_num] = true;
     g_xhci.sync_complete[slot_id][ep_num] = false;
 
@@ -1198,7 +1198,7 @@ bool xhci_bulk_transfer(uint8_t slot_id, uint8_t ep_num, bool in, void *data, ui
     xhci_enqueue_transfer(slot_id, ep_num, &trb);
     asm volatile("mfence" ::: "memory");
     xhci_ring_doorbell(slot_id, ep_num);
-    spinlock_release(&g_xhci_lock);
+    spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
 
     Trb result = {0, 0, 0};
     const bool success = xhci_wait_endpoint_transfer(slot_id, ep_num, &result, timeout_ms);
@@ -1240,18 +1240,18 @@ bool xhci_submit_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, uint16_t le
         return false;
     if (!g_xhci.transfer_rings[slot_id][ep_num])
         return false;
-    spinlock_acquire(&g_xhci_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_xhci_lock);
 
     if (g_intr_buffer_dma[slot_id][ep_num].phys == 0) {
         g_intr_buffer_dma[slot_id][ep_num] = vmm_alloc_dma(1);
         if (!g_intr_buffer_dma[slot_id][ep_num].phys) {
-            spinlock_release(&g_xhci_lock);
+            spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
             return false;
         }
     }
 
     if (g_xhci.intr_pending[slot_id][ep_num]) {
-        spinlock_release(&g_xhci_lock);
+        spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
         return false;
     }
 
@@ -1265,7 +1265,7 @@ bool xhci_submit_interrupt_transfer(uint8_t slot_id, uint8_t ep_num, uint16_t le
     g_xhci.intr_start_time[slot_id][ep_num] = timer_get_ticks();
     g_intr_recovery_needed[slot_id][ep_num] = false;
 
-    spinlock_release(&g_xhci_lock);
+    spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
     return true;
 }
 
@@ -1294,7 +1294,7 @@ void xhci_poll_events()
     PendingAction actions[32];
     int action_count = 0;
 
-    spinlock_acquire(&g_xhci_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_xhci_lock);
     auto *ir = reinterpret_cast<volatile XhciInterrupterRegs *>(reinterpret_cast<uintptr_t>(g_xhci.runtime) + 0x20);
     const uint32_t iman = mmio_read32(const_cast<uint32_t *>(&ir->iman));
     // RW1C: Only write back IP to acknowledge, preserve IE
@@ -1396,7 +1396,7 @@ void xhci_poll_events()
     mmio_write64(const_cast<uint64_t *>(&ir->erdp),
                  (g_xhci.event_ring_phys + g_xhci.event_dequeue * sizeof(Trb)) | ERDP_EHB);
 
-    spinlock_release(&g_xhci_lock);
+    spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
 
     for (int i = 0; i < action_count; i++) {
         if (actions[i].invoke_cb && actions[i].cb) {

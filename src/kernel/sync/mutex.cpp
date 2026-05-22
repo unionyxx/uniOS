@@ -14,11 +14,11 @@ void mutex_lock(Mutex *mtx)
         return;
     }
 
-    spinlock_acquire(&mtx->wait_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&mtx->wait_lock);
     while (true) {
         if (__sync_lock_test_and_set(&mtx->locked, 1) == 0) {
             mtx->owner_pid = current->pid;
-            spinlock_release(&mtx->wait_lock);
+            spinlock_release_irqrestore(&mtx->wait_lock, flags);
             return;
         }
 
@@ -41,7 +41,7 @@ bool mutex_try_lock(Mutex *mtx)
 
 void mutex_unlock(Mutex *mtx)
 {
-    spinlock_acquire(&mtx->wait_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&mtx->wait_lock);
     mtx->owner_pid = 0;
     __sync_lock_release(&mtx->locked);
 
@@ -50,5 +50,5 @@ void mutex_unlock(Mutex *mtx)
     // Given the current MLFQ, wake_all is simpler and prevents starvation.
     scheduler_wake_all(&mtx->wait_queue);
 
-    spinlock_release(&mtx->wait_lock);
+    spinlock_release_irqrestore(&mtx->wait_lock, flags);
 }

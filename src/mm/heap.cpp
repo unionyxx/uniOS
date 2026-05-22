@@ -268,9 +268,9 @@ void heap_init(void *start, size_t size)
 
 [[nodiscard]] void *malloc(size_t size)
 {
-    spinlock_acquire(&g_heap_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_heap_lock);
     void *result = malloc_unlocked(size);
-    spinlock_release(&g_heap_lock);
+    spinlock_release_irqrestore(&g_heap_lock, flags);
     return result;
 }
 
@@ -309,12 +309,12 @@ void free(void *ptr)
     if (!ptr) [[unlikely]]
         return;
 
-    spinlock_acquire(&g_heap_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_heap_lock);
 
     void *base_user_ptr = ptr;
     AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr);
     if (!header || header->magic != HEAP_MAGIC) [[unlikely]] {
-        spinlock_release(&g_heap_lock);
+        spinlock_release_irqrestore(&g_heap_lock, flags);
         DEBUG_ERROR("Heap corruption detected at %p", ptr);
         return;
     }
@@ -325,7 +325,7 @@ void free(void *ptr)
     if (size > MAX_BUCKET_SIZE) {
         size_t pages = size / 4096;
         uint64_t phys = vmm_virt_to_phys(reinterpret_cast<uint64_t>(header));
-        spinlock_release(&g_heap_lock);
+        spinlock_release_irqrestore(&g_heap_lock, flags);
         for (size_t i = 0; i < pages; i++) {
             pmm_free_frame(reinterpret_cast<void *>(phys + i * 4096));
         }
@@ -338,7 +338,7 @@ void free(void *ptr)
 
     if (page_tracker_free_block(reinterpret_cast<uint64_t>(header), page_virt_out, page_bucket)) {
         bucket_remove_page_blocks(page_bucket, page_virt_out);
-        spinlock_release(&g_heap_lock);
+        spinlock_release_irqrestore(&g_heap_lock, flags);
         pmm_free_frame(reinterpret_cast<void *>(vmm_virt_to_phys(page_virt_out)));
         return;
     }
@@ -347,7 +347,7 @@ void free(void *ptr)
     block->next = g_buckets[bucket_idx];
     g_buckets[bucket_idx] = block;
 
-    spinlock_release(&g_heap_lock);
+    spinlock_release_irqrestore(&g_heap_lock, flags);
 }
 
 [[nodiscard]] void *calloc(size_t nmemb, size_t size)
@@ -450,7 +450,7 @@ extern "C" void heap_dump_stats()
     g_terminal.write_line("  Bucket Sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096");
     g_terminal.write("  Free Blocks:  ");
 
-    spinlock_acquire(&g_heap_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&g_heap_lock);
     for (int i = 0; i < NUM_BUCKETS; i++) {
         int count = 0;
         for (const FreeBlock *cur = g_buckets[i]; cur; cur = cur->next)
@@ -473,5 +473,5 @@ extern "C" void heap_dump_stats()
     print_uint(static_cast<uint64_t>(MAX_TRACKED_PAGES));
     g_terminal.write("\n");
 
-    spinlock_release(&g_heap_lock);
+    spinlock_release_irqrestore(&g_heap_lock, flags);
 }

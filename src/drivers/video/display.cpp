@@ -209,15 +209,15 @@ static bool display_buffer_lookup_snapshot(DisplayBufferHandle handle, uint64_t 
     if (!out_buffer)
         return false;
 
-    spinlock_acquire(&s_display_buffer_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     const DisplayBufferObject *buffer = display_find_buffer_locked(handle);
     if (!buffer || !display_buffer_owner_permits_access(*buffer, owner_pid)) {
-        spinlock_release(&s_display_buffer_lock);
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return false;
     }
 
     *out_buffer = display_buffer_view_from_object(*buffer);
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
     return true;
 }
 
@@ -272,7 +272,7 @@ static DisplayBufferObject *display_find_buffer_locked(DisplayBufferHandle handl
 
 static void display_push_event(uint32_t type, uint32_t sequence)
 {
-    spinlock_acquire(&s_display_event_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_event_lock);
     uint32_t next_tail = (s_display_event_tail + 1u) % MAX_DISPLAY_EVENTS;
     if (next_tail == s_display_event_head)
         s_display_event_head = (s_display_event_head + 1u) % MAX_DISPLAY_EVENTS;
@@ -285,7 +285,7 @@ static void display_push_event(uint32_t type, uint32_t sequence)
     event.timestamp_ticks = timer_get_ticks();
     event.vblank_count = s_device.primary_head.status.vblank_count;
     s_display_event_tail = next_tail;
-    spinlock_release(&s_display_event_lock);
+    spinlock_release_irqrestore(&s_display_event_lock, flags);
     scheduler_wake_all(&s_display_event_wait_queue);
 }
 
@@ -306,9 +306,9 @@ static bool display_pop_event(DisplayEvent *out_event)
     if (!out_event)
         return false;
 
-    spinlock_acquire(&s_display_event_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_event_lock);
     bool ok = display_pop_event_locked(out_event);
-    spinlock_release(&s_display_event_lock);
+    spinlock_release_irqrestore(&s_display_event_lock, flags);
     return ok;
 }
 
@@ -1894,13 +1894,13 @@ static ComposeBufferSlot *acquire_compose_buffer(DisplayDevice *device)
 
 static DisplayBufferObject *display_buffer_lookup(DisplayBufferHandle handle, uint64_t owner_pid)
 {
-    spinlock_acquire(&s_display_buffer_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     DisplayBufferObject *buffer = display_find_buffer_locked(handle);
     if (!buffer || (owner_pid != 0 && buffer->owner_pid != owner_pid)) {
-        spinlock_release(&s_display_buffer_lock);
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return nullptr;
     }
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
     return buffer;
 }
 
@@ -2081,12 +2081,12 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
     if (buffer->mapped_pid != 0 && buffer->mapped_pid != process->pid)
         return false;
 
-    spinlock_acquire(&process->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&process->vma_lock);
     const VMA *existing = vma_find(process->vma_list, virt_start);
     if (existing) {
         bool same_mapping =
             existing->start == virt_start && existing->end >= virt_start + size && (existing->flags & PTE_SHARED);
-        spinlock_release(&process->vma_lock);
+        spinlock_release_irqrestore(&process->vma_lock, sl_flags);
         if (!same_mapping)
             return false;
         buffer->mapped_pid = process->pid;
@@ -2099,7 +2099,7 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
         request->height = buffer->height;
         return true;
     }
-    spinlock_release(&process->vma_lock);
+    spinlock_release_irqrestore(&process->vma_lock, sl_flags);
 
     uint64_t flags = display_buffer_user_page_flags(*buffer);
     for (uint64_t mapped = 0; mapped < size; mapped += 4096u) {
@@ -2117,9 +2117,9 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
     }
 
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-    spinlock_acquire(&process->vma_lock);
+    sl_flags = spinlock_acquire_irqsave(&process->vma_lock);
     bool vma_ok = vma_add(&process->vma_list, virt_start, virt_start + size, flags, VMAType::Shared) != nullptr;
-    spinlock_release(&process->vma_lock);
+    spinlock_release_irqrestore(&process->vma_lock, sl_flags);
     if (!vma_ok) {
         for (uint64_t rollback = 0; rollback < size; rollback += 4096u) {
             vmm_unmap_page_in(process->page_table, virt_start + rollback);
@@ -2151,9 +2151,9 @@ static void display_unmap_buffer_from_current_process(DisplayBufferObject *buffe
 
     uint64_t size = buffer->mapped_user_size;
     uint64_t virt_start = buffer->mapped_user_addr;
-    spinlock_acquire(&process->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&process->vma_lock);
     vma_remove(&process->vma_list, virt_start, virt_start + size);
-    spinlock_release(&process->vma_lock);
+    spinlock_release_irqrestore(&process->vma_lock, sl_flags);
 
     for (uint64_t i = 0; i < size; i += 4096u) {
         vmm_unmap_page_in(process->page_table, virt_start + i);
@@ -2721,7 +2721,7 @@ int display_buffer_create(DisplayBufferCreate *request)
     if (size_bytes == 0 || size_bytes > DISPLAY_BUFFER_MAP_SLOT_SIZE)
         return -1;
 
-    spinlock_acquire(&s_display_buffer_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     DisplayBufferObject *slot = nullptr;
     DisplayBufferHandle next_handle = 1;
     for (DisplayBufferObject &buffer : s_display_buffers) {
@@ -2731,10 +2731,10 @@ int display_buffer_create(DisplayBufferCreate *request)
             next_handle = buffer.handle + 1u;
     }
     if (!slot) {
-        spinlock_release(&s_display_buffer_lock);
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return -1;
     }
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
 
     DMAAllocation dma = vmm_alloc_dma_with_flags((size_t)((size_bytes + 4095u) / 4096u),
                                                  display_buffer_kernel_page_flags(request->flags));
@@ -2742,7 +2742,7 @@ int display_buffer_create(DisplayBufferCreate *request)
         return -1;
     kstring::zero_memory(reinterpret_cast<void *>(dma.virt), dma.size);
 
-    spinlock_acquire(&s_display_buffer_lock);
+    flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     slot->used = true;
     slot->handle = next_handle;
     slot->owner_pid = process->pid;
@@ -2756,7 +2756,7 @@ int display_buffer_create(DisplayBufferCreate *request)
     slot->mapped_user_addr = 0;
     slot->mapped_user_size = 0;
     slot->wm_access = false;
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
 
     return display_buffer_copy_out(slot, request);
 }
@@ -2770,13 +2770,13 @@ int display_buffer_map(DisplayBufferMap *request)
     if (!process)
         return -1;
 
-    spinlock_acquire(&s_display_buffer_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     DisplayBufferObject *buffer = display_find_buffer_locked(request->handle);
     if (!buffer || buffer->owner_pid != process->pid) {
-        spinlock_release(&s_display_buffer_lock);
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return -1;
     }
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
 
     return display_map_buffer_into_process(buffer, request) ? 0 : -1;
 }
@@ -2787,14 +2787,14 @@ bool display_buffer_set_wm_access(DisplayBufferHandle handle, bool allow)
     if (!process || handle == 0)
         return false;
 
-    spinlock_acquire(&s_display_buffer_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     DisplayBufferObject *buffer = display_find_buffer_locked(handle);
     if (!buffer || buffer->owner_pid != process->pid) {
-        spinlock_release(&s_display_buffer_lock);
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return false;
     }
     buffer->wm_access = allow;
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
     return true;
 }
 
@@ -2804,10 +2804,10 @@ bool display_buffer_destroy(DisplayBufferHandle handle)
     if (!process || handle == 0)
         return false;
 
-    spinlock_acquire(&s_display_buffer_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
     DisplayBufferObject *buffer = display_find_buffer_locked(handle);
     if (!buffer || buffer->owner_pid != process->pid) {
-        spinlock_release(&s_display_buffer_lock);
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return false;
     }
 
@@ -2819,14 +2819,14 @@ bool display_buffer_destroy(DisplayBufferHandle handle)
         if (i == head->front_buffer_index || (head->pending_flip && i == head->pending_buffer_index) ||
             (head->buffer_in_flight_sequence[i] != 0 &&
              head->buffer_in_flight_sequence[i] > head->status.completed_sequence)) {
-            spinlock_release(&s_display_buffer_lock);
+            spinlock_release_irqrestore(&s_display_buffer_lock, flags);
             return false;
         }
     }
 
     DisplayBufferObject local = *buffer;
     *buffer = {};
-    spinlock_release(&s_display_buffer_lock);
+    spinlock_release_irqrestore(&s_display_buffer_lock, flags);
 
     display_unmap_buffer_from_current_process(&local);
     vmm_free_dma(local.dma);
@@ -2915,14 +2915,14 @@ bool display_event_wait(DisplayEvent *out_event, bool block)
     if (!out_event)
         return false;
 
-    spinlock_acquire(&s_display_event_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&s_display_event_lock);
     for (;;) {
         if (display_pop_event_locked(out_event)) {
-            spinlock_release(&s_display_event_lock);
+            spinlock_release_irqrestore(&s_display_event_lock, flags);
             return true;
         }
         if (!block) {
-            spinlock_release(&s_display_event_lock);
+            spinlock_release_irqrestore(&s_display_event_lock, flags);
             return false;
         }
 
