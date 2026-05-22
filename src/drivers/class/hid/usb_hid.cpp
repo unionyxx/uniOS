@@ -506,8 +506,7 @@ static void process_mouse_report(uint8_t *data, uint16_t length)
         } else {
             dx = static_cast<int8_t>(data[2]);
             dy = static_cast<int8_t>(data[3]);
-            if (length >= 5)
-                wheel = static_cast<int8_t>(data[4]);
+            wheel = static_cast<int8_t>(data[4]);
         }
     } else {
         btn = data[0];

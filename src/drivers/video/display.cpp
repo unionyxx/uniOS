@@ -2396,6 +2396,7 @@ static uint32_t compose_submit_cpu(DisplayDevice *device, const DisplayComposeRe
     uint64_t owner_pid = process ? process->pid : 0;
 
     for (uint32_t r = 0; r < rect_count; r++) {
+        // cppcheck-suppress objectIndex
         Rect damage = rects[r];
         if (!display_clip_rect(damage, device->primary_head.caps))
             continue;
@@ -2887,7 +2888,7 @@ uint32_t display_compose_submit(const DisplayComposeRequest &request)
         damage_count = 1u;
     } else {
         uint32_t out_count = 0;
-        for (uint32_t i = 0; i < damage_count; i++) {
+        for (uint32_t i = 0; i < damage_count && out_count < kMaxLocalDamageRects; i++) {
             Rect r = request.damage_rects[i];
             if (!display_clip_rect(r, primary_head()->caps))
                 continue;

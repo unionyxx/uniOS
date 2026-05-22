@@ -138,7 +138,7 @@ static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *tcp_d
         return 0;
 
     uint8_t buffer[1600];
-    TcpPseudoHeader *pseudo = (TcpPseudoHeader *)buffer;
+    TcpPseudoHeader *pseudo = reinterpret_cast<TcpPseudoHeader *>(buffer);
 
     pseudo->src_ip = src_ip;
     pseudo->dst_ip = dst_ip;
@@ -163,7 +163,7 @@ static bool tcp_send_segment(TcpSocket *sock, uint8_t flags, const void *data, u
     if (!packet)
         return false;
 
-    TcpHeader *hdr = (TcpHeader *)packet;
+    TcpHeader *hdr = reinterpret_cast<TcpHeader *>(packet);
 
     hdr->src_port = htons(sock->local_port);
     hdr->dst_port = htons(sock->remote_port);
@@ -748,7 +748,7 @@ void tcp_poll()
 
                     uint8_t *packet = static_cast<uint8_t *>(malloc(TCP_HEADER_SIZE + payload_len));
                     if (packet) {
-                        TcpHeader *hdr = (TcpHeader *)packet;
+                        TcpHeader *hdr = reinterpret_cast<TcpHeader *>(packet);
                         hdr->src_port = htons(local_port);
                         hdr->dst_port = htons(remote_port);
                         hdr->seq_num = htonl(seq_num);

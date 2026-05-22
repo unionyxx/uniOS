@@ -24,6 +24,8 @@ static constexpr int32_t CURSOR_H = 19;
 static constexpr int32_t MAX_WINDOWS = 16;
 static constexpr int32_t MAX_TITLE_CHARS = 32;
 
+namespace Kernel
+{
 struct Theme
 {
     uint32_t desktop_top;
@@ -70,25 +72,26 @@ inline constexpr Theme THEME_DEFAULT = {
 };
 
 inline const Theme *g_theme = &THEME_DEFAULT;
+}
 
-#define COLOR_ACCENT g_theme->accent
-#define COLOR_TEXT_PRIMARY g_theme->text_primary
-#define COLOR_TEXT_DIM g_theme->text_dim
-#define COLOR_TEXT_APP_NAME g_theme->text_app_name
-#define COLOR_WINDOW_BG g_theme->window_bg
-#define COLOR_SURFACE_ELEV g_theme->surface_elevated
-#define COLOR_TITLE_ACTIVE g_theme->title_active
-#define COLOR_TITLE_INACTIVE g_theme->title_inactive
-#define COLOR_BORDER g_theme->border
-#define COLOR_SHADOW g_theme->shadow
-#define COLOR_MENUBAR_BG g_theme->menubar_bg
-#define COLOR_DOCK_BG g_theme->dock_bg
-#define COLOR_CLOSE_BTN g_theme->btn_close
+#define COLOR_ACCENT Kernel::g_theme->accent
+#define COLOR_TEXT_PRIMARY Kernel::g_theme->text_primary
+#define COLOR_TEXT_DIM Kernel::g_theme->text_dim
+#define COLOR_TEXT_APP_NAME Kernel::g_theme->text_app_name
+#define COLOR_WINDOW_BG Kernel::g_theme->window_bg
+#define COLOR_SURFACE_ELEV Kernel::g_theme->surface_elevated
+#define COLOR_TITLE_ACTIVE Kernel::g_theme->title_active
+#define COLOR_TITLE_INACTIVE Kernel::g_theme->title_inactive
+#define COLOR_BORDER Kernel::g_theme->border
+#define COLOR_SHADOW Kernel::g_theme->shadow
+#define COLOR_MENUBAR_BG Kernel::g_theme->menubar_bg
+#define COLOR_DOCK_BG Kernel::g_theme->dock_bg
+#define COLOR_CLOSE_BTN Kernel::g_theme->btn_close
 #define COLOR_RED 0xFFFF5F57
-#define COLOR_MIN_BTN g_theme->btn_minimize
-#define COLOR_MAX_BTN g_theme->btn_maximize
-#define COLOR_DESKTOP_TOP g_theme->desktop_top
-#define COLOR_DESKTOP_BOTTOM g_theme->desktop_bottom
+#define COLOR_MIN_BTN Kernel::g_theme->btn_minimize
+#define COLOR_MAX_BTN Kernel::g_theme->btn_maximize
+#define COLOR_DESKTOP_TOP Kernel::g_theme->desktop_top
+#define COLOR_DESKTOP_BOTTOM Kernel::g_theme->desktop_bottom
 #define COLOR_BLACK 0xFF000000
 #define COLOR_WHITE 0xFFFFFFFF
 #define COLOR_SUCCESS 0xFFA6E3A1
@@ -98,13 +101,15 @@ inline const Theme *g_theme = &THEME_DEFAULT;
 #define COLOR_GRAY 0xFF585B70
 #define COLOR_GREEN COLOR_SUCCESS
 #define COLOR_DIM_GRAY COLOR_GRAY
-#define COLOR_TIMESTAMP g_theme->text_dim
-#define COLOR_TEXT g_theme->text_primary
-#define COLOR_MUTED g_theme->text_dim
+#define COLOR_TIMESTAMP Kernel::g_theme->text_dim
+#define COLOR_TEXT Kernel::g_theme->text_primary
+#define COLOR_MUTED Kernel::g_theme->text_dim
 #define COLOR_WARNING COLOR_YELLOW
 #define COLOR_ERROR COLOR_RED
 #define COLOR_BG COLOR_BLACK
 #define COLOR_HELP_HEADER COLOR_PURPLE
-#define COLOR_FIELD g_theme->surface_elevated
-#define COLOR_FIELD_ACTIVE g_theme->title_active
+#define COLOR_FIELD Kernel::g_theme->surface_elevated
+#define COLOR_FIELD_ACTIVE Kernel::g_theme->title_active
 #define COLOR_ERR 0xFFEBA0AC
+
+using Kernel::g_theme;

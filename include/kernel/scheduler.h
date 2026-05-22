@@ -26,4 +26,7 @@ void scheduler_remove_from_ready_queue(Process *p);
 
 extern WaitQueue g_epoll_wait_queue;
 
+void preempt_disable();
+void preempt_enable();
+
 

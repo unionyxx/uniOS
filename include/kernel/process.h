@@ -96,6 +96,9 @@ struct Process
     WaitQueue wait_queue;       // Child/other waiters blocked on this process
     WaitQueue event_wait_queue; // Waiters blocked in SYS_GET_EVENT for this process
     EventQueue event_queue;
+
+    uint32_t preempt_count;
+    uint32_t preempt_pending;
 };
 
 extern "C" void switch_to_task(Process *current, Process *next);

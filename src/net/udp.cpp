@@ -40,7 +40,7 @@ static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip, const void *udp_d
     uint64_t flags = spinlock_acquire_irqsave(&chk_lock);
     uint8_t *buffer = chk_buffer;
 
-    UdpPseudoHeader *pseudo = (UdpPseudoHeader *)buffer;
+    UdpPseudoHeader *pseudo = reinterpret_cast<UdpPseudoHeader *>(buffer);
 
     pseudo->src_ip = src_ip;
     pseudo->dst_ip = dst_ip;
@@ -119,7 +119,7 @@ bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void 
     uint64_t flags = spinlock_acquire_irqsave(&tx_lock);
     uint8_t *packet = tx_buffer;
 
-    UdpHeader *hdr = (UdpHeader *)packet;
+    UdpHeader *hdr = reinterpret_cast<UdpHeader *>(packet);
 
     hdr->src_port = htons(src_port);
     hdr->dst_port = htons(dst_port);

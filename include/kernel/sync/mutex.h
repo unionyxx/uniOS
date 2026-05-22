@@ -3,19 +3,8 @@
 #include <kernel/sync/spinlock.h>
 #include <stdint.h>
 
-/**
- * @file mutex.h
- * @brief Sleeping mutex for kernel synchronization
- *
- * Unlike spinlocks which busy-wait, mutexes block the calling thread
- * and yield the CPU to other tasks. Use mutexes for longer critical sections.
- *
- * Usage:
- *   Mutex mtx = MUTEX_INIT;
- *   mutex_lock(&mtx);
- *   // critical section
- *   mutex_unlock(&mtx);
- */
+/* Sleeping mutex for kernel synchronization */
+
 
 struct Mutex
 {

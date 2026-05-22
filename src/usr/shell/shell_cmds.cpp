@@ -83,11 +83,11 @@ static void join_path(const char *dir, const char *name, char *out, int out_size
 static void print_size(uint64_t bytes)
 {
     if (bytes >= 1024ull * 1024ull)
-        printf("%lluM", bytes / (1024ull * 1024ull));
+        printf("%lluM", (unsigned long long)(bytes / (1024ull * 1024ull)));
     else if (bytes >= 1024ull)
-        printf("%lluK", bytes / 1024ull);
+        printf("%lluK", (unsigned long long)(bytes / 1024ull));
     else
-        printf("%lluB", bytes);
+        printf("%lluB", (unsigned long long)bytes);
 }
 
 void cmd_ls(const char *path)
@@ -133,7 +133,7 @@ void cmd_ls(const char *path)
             if (human)
                 print_size(target_stat.size);
             else
-                printf("%llu", target_stat.size);
+                printf("%llu", (unsigned long long)target_stat.size);
             printf(" %s\n", target[0] ? target : resolved);
         } else {
             printf("%s\n", target[0] ? target : resolved);
@@ -163,7 +163,7 @@ void cmd_ls(const char *path)
                 if (human)
                     print_size(st.size);
                 else
-                    printf("%llu", st.size);
+                    printf("%llu", (unsigned long long)st.size);
                 printf(" %s%s\n", name, st.is_dir ? "/" : "");
             } else if (st.is_dir) {
                 printf("\x1b[34m%s/\x1b[0m  ", name);
@@ -261,9 +261,9 @@ void cmd_stat(const char *filename)
         return;
     }
     printf("  File: %s\n", filename);
-    printf("  Size: %llu bytes\n", st.size);
+    printf("  Size: %llu bytes\n", (unsigned long long)st.size);
     printf("  Type: %s\n", st.is_dir ? "Directory" : "Regular File");
-    printf(" Inode: %llu\n", st.inode);
+    printf(" Inode: %llu\n", (unsigned long long)st.inode);
 }
 
 void cmd_touch(const char *filename)
@@ -499,7 +499,7 @@ static uint64_t du_path(const char *path, int depth, bool print_each)
         return 0;
     if (!st.is_dir) {
         if (print_each) {
-            printf("%llu\t%s\n", st.size, path);
+            printf("%llu\t%s\n", (unsigned long long)st.size, path);
         }
         return st.size;
     }
@@ -518,7 +518,7 @@ static uint64_t du_path(const char *path, int depth, bool print_each)
     }
     close(fd);
     if (print_each)
-        printf("%llu\t%s\n", total, path);
+        printf("%llu\t%s\n", (unsigned long long)total, path);
     return total;
 }
 
@@ -601,7 +601,7 @@ void cmd_du(const char *path)
     char resolved[256];
     shell_resolve_path((target && target[0]) ? target : ".", resolved);
     uint64_t total = du_path(resolved, 0, false);
-    printf("%llu\t%s\n", total, resolved);
+    printf("%llu\t%s\n", (unsigned long long)total, resolved);
 }
 
 void cmd_which(const char *name)
@@ -696,7 +696,7 @@ void cmd_hexdump(const char *filename)
     uint64_t offset = 0;
     int n;
     while ((n = read(fd, bytes, sizeof(bytes))) > 0) {
-        printf("%08llx  ", offset);
+        printf("%08llx  ", (unsigned long long)offset);
         for (int i = 0; i < 16; i++) {
             if (i < n)
                 printf("%02x ", bytes[i]);
@@ -719,9 +719,9 @@ void cmd_mem()
     struct MemInfo info;
     if (get_meminfo(&info) == 0) {
         printf("Memory Status:\n");
-        printf("  Total: %llu KB\n", info.total_kb);
-        printf("  Used:  %llu KB\n", info.used_kb);
-        printf("  Free:  %llu KB\n", info.free_kb);
+        printf("  Total: %llu KB\n", (unsigned long long)info.total_kb);
+        printf("  Used:  %llu KB\n", (unsigned long long)info.used_kb);
+        printf("  Free:  %llu KB\n", (unsigned long long)info.free_kb);
     } else {
         printf("mem: failed to get memory info\n");
     }
@@ -780,7 +780,7 @@ void cmd_uptime()
     uint64_t s = up % 60;
     uint64_t m = (up / 60) % 60;
     uint64_t h = (up / 3600);
-    printf("up %02llu:%02llu:%02llu\n", h, m, s);
+    printf("up %02llu:%02llu:%02llu\n", (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
 }
 
 char *get_file_data(const char *filename, const char *piped_input, uint64_t *out_len)
@@ -860,7 +860,7 @@ void cmd_wc(const char *filename, const char *piped_input)
     }
     if (data_len > 0 && data[data_len - 1] != '\n')
         lines++;
-    printf("  Lines: %llu\n  Words: %llu\n  Chars: %llu\n", lines, words, chars);
+    printf("  Lines: %llu\n  Words: %llu\n  Chars: %llu\n", (unsigned long long)lines, (unsigned long long)words, (unsigned long long)chars);
     free(data);
 }
 
@@ -1175,9 +1175,9 @@ void cmd_cpuinfo()
     uint32_t eax, ebx, ecx, edx;
     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
     char vendor[13];
-    *(uint32_t *)&vendor[0] = ebx;
-    *(uint32_t *)&vendor[4] = edx;
-    *(uint32_t *)&vendor[8] = ecx;
+    *reinterpret_cast<uint32_t *>(&vendor[0]) = ebx;
+    *reinterpret_cast<uint32_t *>(&vendor[4]) = edx;
+    *reinterpret_cast<uint32_t *>(&vendor[8]) = ecx;
     vendor[12] = 0;
     printf("Vendor: %s\n", vendor);
 }
@@ -1317,7 +1317,7 @@ void cmd_time(const char *cmd)
     copy[sizeof(copy) - 1] = '\0';
     execute_single_command(copy, nullptr);
     uint64_t elapsed = get_ticks() - start;
-    printf("time: %llu ms\n", elapsed);
+    printf("time: %llu ms\n", (unsigned long long)elapsed);
 }
 
 void cmd_sleep(const char *args)
@@ -1354,7 +1354,7 @@ void cmd_kheap()
         set_status(1);
         return;
     }
-    printf("Kernel heap: %llu KB used / %llu KB total\n", info.heap_used_kb, info.heap_total_kb);
+    printf("Kernel heap: %llu KB used / %llu KB total\n", (unsigned long long)info.heap_used_kb, (unsigned long long)info.heap_total_kb);
 }
 
 void cmd_sysinfo()
@@ -1509,7 +1509,7 @@ void cmd_play(const char *filename)
     uint8_t *buffer = NULL;
 
     if (wav_open(resolved, &data, &data_size, &sample_rate, &channels, &buffer)) {
-        printf("Playing %s: %u Hz, %d channels, %u bytes\n", resolved, sample_rate, channels, data_size);
+        printf("Playing %s: %u Hz, %u channels, %u bytes\n", resolved, sample_rate, channels, data_size);
         sound_config(sample_rate, (uint8_t)channels, 16);
         sound_write(data, data_size);
         // We can't free buffer yet if sound_write is async, but currently it's sync in the kernel call.

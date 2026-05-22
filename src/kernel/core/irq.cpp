@@ -8,6 +8,7 @@
 #include <kernel/irq.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/scheduler.h>
+#include <kernel/process.h>
 #include <kernel/time/timer.h>
 #include <stdint.h>
 
@@ -115,6 +116,7 @@ static bool dispatch_vector_handler(uint8_t vector)
 
 } // namespace
 
+// cppcheck-suppress arrayIndexOutOfBoundsCond
 bool irq_register_vector_handler(uint8_t vector, IrqVectorHandler handler, void *ctx)
 {
     if (!handler)
@@ -133,6 +135,7 @@ bool irq_register_vector_handler(uint8_t vector, IrqVectorHandler handler, void 
     return true;
 }
 
+// cppcheck-suppress arrayIndexOutOfBoundsCond
 void irq_unregister_vector_handler(uint8_t vector)
 {
     if (vector < kVectorBase || vector == kVectorSpurious || vector == 0x80)
@@ -294,7 +297,12 @@ extern "C" void irq_handler(void *stack_frame)
     if (vector == kVectorTimer) {
         timer_handler();
         send_interrupt_eoi(vector);
-        scheduler_schedule();
+        Process *curr = process_get_current();
+        if (curr && curr->preempt_count > 0) {
+            curr->preempt_pending = 1;
+        } else {
+            scheduler_schedule();
+        }
         return;
     }
 

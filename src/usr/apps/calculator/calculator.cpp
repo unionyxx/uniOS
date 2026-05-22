@@ -86,7 +86,7 @@ static void calc_update_display(CalcState *state)
 
 static void calc_init(CalcState *state)
 {
-    memset(state, 0, sizeof(*state));
+    *state = {};
     state->fresh = true;
     calc_update_display(state);
 }

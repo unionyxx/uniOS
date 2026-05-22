@@ -558,7 +558,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
     const GuiFont *menu_font = gui_font_default();
     bool blur_ready = ensure_blur_surface(reg, canvas->width);
 
-    bool is_light = reg->theme_mode == GUI_THEME_LIGHT;
+    bool is_light = reg ? (reg->theme_mode == GUI_THEME_LIGHT) : false;
 
     uint32_t tint_color = is_light ? 0x70F7F9FCu : 0x60141820u;
     uint32_t divider_color = is_light ? 0x16000000u : 0x14FFFFFFu;

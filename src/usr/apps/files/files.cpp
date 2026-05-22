@@ -66,6 +66,7 @@ enum MenuCommand
     CMD_MOVE,
 };
 
+namespace {
 struct AppState
 {
     VolumeInfo volumes[MAX_VOLUMES];
@@ -94,6 +95,7 @@ struct AppState
     int menu_hovered;
     bool needs_redraw;
 };
+}
 
 struct LayoutCache
 {
@@ -922,7 +924,7 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
             if (state->rows[i].is_dir)
                 strncpy(detail, "Directory", sizeof(detail) - 1);
             else
-                snprintf(detail, sizeof(detail), "%llu bytes", state->rows[i].size);
+                snprintf(detail, sizeof(detail), "%llu bytes", (unsigned long long)state->rows[i].size);
             gui_app_draw_list_row(win, cache->row_rects[i].x, cache->row_rects[i].y, cache->row_rects[i].w,
                                   cache->row_rects[i].h, state->rows[i].is_dir ? "DIR" : "FILE", state->rows[i].name,
                                   detail, i == state->selected_row, false, false);

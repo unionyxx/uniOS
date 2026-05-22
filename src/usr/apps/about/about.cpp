@@ -88,9 +88,9 @@ static void cpu_vendor(char *out)
 {
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
-    *(uint32_t *)&out[0] = ebx;
-    *(uint32_t *)&out[4] = edx;
-    *(uint32_t *)&out[8] = ecx;
+    *reinterpret_cast<uint32_t *>(&out[0]) = ebx;
+    *reinterpret_cast<uint32_t *>(&out[4]) = edx;
+    *reinterpret_cast<uint32_t *>(&out[8]) = ecx;
     out[12] = '\0';
 }
 

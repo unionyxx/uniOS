@@ -127,6 +127,7 @@ struct LatitudeRects
     Rect editor_panel;
 };
 
+namespace {
 struct AppState
 {
     TextBuffer *buffer;
@@ -166,6 +167,7 @@ struct AppState
     uint32_t last_settings_generation;
     bool needs_redraw;
 };
+}
 
 static int clamp_int(int value, int lo, int hi)
 {

@@ -197,6 +197,7 @@ inline void *memset(void *dst, int c, size_t n)
 
     // Write 64-bit chunks
     while (n >= 8) {
+        // cppcheck-suppress dangerousTypeCast
         *(uint64_t *)d = val64;
         d += 8;
         n -= 8;
@@ -226,6 +227,7 @@ inline void *memcpy(void *dst, const void *src, size_t n)
             n--;
         }
         while (n >= 8) {
+            // cppcheck-suppress dangerousTypeCast
             *(uint64_t *)d = *(const uint64_t *)s;
             d += 8;
             s += 8;
@@ -347,6 +349,7 @@ inline void *memmove(void *dst, const void *src, size_t n)
                 n--;
             }
             while (n >= 8) {
+                // cppcheck-suppress dangerousTypeCast
                 *(uint64_t *)d = *(const uint64_t *)s;
                 d += 8;
                 s += 8;
@@ -374,6 +377,7 @@ inline void *memmove(void *dst, const void *src, size_t n)
                 n -= 8;
                 d -= 8;
                 s -= 8;
+                // cppcheck-suppress dangerousTypeCast
                 *(uint64_t *)d = *(const uint64_t *)s;
             }
         }

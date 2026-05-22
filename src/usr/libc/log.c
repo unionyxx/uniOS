@@ -36,7 +36,8 @@ void log_vmessage(LogLevel level, const char *scope, const char *fmt, va_list ap
     uint64_t millis = ticks % 1000;
 
     char line[896];
-    int line_len = snprintf(line, sizeof(line), "[%llu.%03llu] %-4s %s %s", seconds, millis, resolved_scope,
+    int line_len = snprintf(line, sizeof(line), "[%llu.%03llu] %-4s %s %s",
+                            (unsigned long long)seconds, (unsigned long long)millis, resolved_scope,
                             level_mark(level), message);
     if (line_len <= 0)
         return;

@@ -1253,3 +1253,34 @@ extern "C" void thread_ret();
     return static_cast<int64_t>(thread->pid);
 }
 
+void preempt_disable()
+{
+    const uint64_t flags = interrupts_save_disable();
+    Process *curr = process_get_current();
+    if (curr) {
+        curr->preempt_count++;
+    }
+    interrupts_restore(flags);
+}
+
+void preempt_enable()
+{
+    const uint64_t flags = interrupts_save_disable();
+    Process *curr = process_get_current();
+    bool should_yield = false;
+    if (curr) {
+        if (curr->preempt_count > 0) {
+            curr->preempt_count--;
+        }
+        if (curr->preempt_count == 0 && curr->preempt_pending) {
+            curr->preempt_pending = 0;
+            should_yield = true;
+        }
+    }
+    interrupts_restore(flags);
+
+    if (should_yield) {
+        scheduler_yield();
+    }
+}
+

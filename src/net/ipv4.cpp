@@ -75,7 +75,7 @@ void ipv4_receive(const void *data, uint16_t length)
         return;
     }
 
-    const IPv4Header *hdr = (const IPv4Header *)data;
+    const IPv4Header *hdr = reinterpret_cast<const IPv4Header *>(data);
 
     uint8_t version = (hdr->ihl_version >> 4) & 0x0F;
     if (version != 4) {
@@ -94,7 +94,7 @@ void ipv4_receive(const void *data, uint16_t length)
         for (int i = 0; i < ihl; i++) {
             header_copy[i] = ((const uint8_t *)data)[i];
         }
-        ((IPv4Header *)header_copy)->checksum = 0;
+        reinterpret_cast<IPv4Header *>(header_copy)->checksum = 0;
 
         if (ipv4_checksum(header_copy, ihl) != orig_checksum) {
             DEBUG_WARN("ipv4: bad checksum");
@@ -172,7 +172,7 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len
     uint64_t flags = spinlock_acquire_irqsave(&tx_lock);
     uint8_t *packet = tx_buffer;
 
-    IPv4Header *hdr = (IPv4Header *)packet;
+    IPv4Header *hdr = reinterpret_cast<IPv4Header *>(packet);
 
     hdr->ihl_version = 0x45; // Version 4, IHL 5 (20 bytes)
     hdr->tos = 0;
