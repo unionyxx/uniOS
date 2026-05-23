@@ -9,7 +9,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-static Spinlock g_debug_lock;
+Spinlock g_debug_lock;
 
 LogLevel g_log_min_level = LogLevel::Info;
 uint32_t g_log_module_mask = static_cast<uint32_t>(LogModule::All);

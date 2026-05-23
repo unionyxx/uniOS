@@ -85,3 +85,7 @@ void debug_hexdump(const void *addr, uint64_t size);
 #endif
 
 void debug_print_stack_trace();
+
+struct Spinlock;
+extern Spinlock g_debug_lock;
+

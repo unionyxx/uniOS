@@ -711,15 +711,32 @@ extern "C" void signal_check(SyscallFrame *frame)
 
         // GUI mode: only write to serial, never to the framebuffer terminal.
         // The Window Manager owns the framebuffer now.
-        for (uint64_t i = 0; i < count; i++) {
-            char c;
-            STAC();
-            bool ok = safe_copy_from_user(&c, buf + i, 1);
-            CLAC();
-            if (!ok)
-                return i > 0 ? i : static_cast<uint64_t>(-1);
-            serial_putc(c);
+        char stack_buf[512];
+        char *kbuf = stack_buf;
+        if (count > 512) {
+            kbuf = static_cast<char *>(malloc(count));
+            if (!kbuf)
+                return static_cast<uint64_t>(-1);
         }
+
+        STAC();
+        bool ok = safe_copy_from_user(kbuf, buf, count);
+        CLAC();
+        if (!ok) {
+            if (kbuf != stack_buf)
+                free(kbuf);
+            return static_cast<uint64_t>(-1);
+        }
+
+        uint64_t flags = spinlock_acquire_irqsave(&g_debug_lock);
+        for (uint64_t i = 0; i < count; i++) {
+            serial_putc(kbuf[i]);
+        }
+        spinlock_release_irqrestore(&g_debug_lock, flags);
+
+        if (kbuf != stack_buf)
+            free(kbuf);
+
         return count;
     }
 

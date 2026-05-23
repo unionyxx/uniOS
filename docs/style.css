@@ -18,7 +18,6 @@
     --bg: #000000;
     --text: #f5f5f7;
     --muted: #a1a1a6;
-    --link: #2997ff;
     --border: #333336;
     --nav-bg: rgba(0, 0, 0, 0.72);
     --surface: #111111;
@@ -183,7 +182,7 @@ nav {
 }
 
 .showcase {
-    max-width: 1040px;
+    max-width: 1200px;
     margin: 0 auto 6rem;
     padding: 0 2rem;
 }
@@ -191,30 +190,19 @@ nav {
 .screenshot-container {
     position: relative;
     width: 100%;
-    aspect-ratio: 16 / 9;
-    background-color: var(--surface);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
-    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
-}
-
-[data-theme="dark"] .screenshot-container {
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
 
 .desktop-shot {
-    position: absolute;
-    top: 0;
-    left: 0;
+    display: block;
     width: 100%;
-    height: 100%;
-    object-fit: contain;
+    height: auto;
     transition: opacity var(--dur) var(--ease);
 }
 
 .desktop-shot.light {
+    position: absolute;
+    top: 0;
+    left: 0;
     opacity: 0;
     z-index: 2;
 }

@@ -29,6 +29,8 @@ static uint8_t extended_scancode = 0; // For 0xE0 prefixed scancodes
 #define KEY_HOME 0x84
 #define KEY_END 0x85
 #define KEY_DELETE 0x86
+#define KEY_PAGEUP 0x87
+#define KEY_PAGEDOWN 0x88
 // Shift+Arrow for text selection
 #define KEY_SHIFT_LEFT 0x90
 #define KEY_SHIFT_RIGHT 0x91
@@ -131,6 +133,12 @@ void ps2_keyboard_handler()
             case 0x47:
                 push_char(KEY_HOME);
                 return; // Home
+            case 0x49:
+                push_char(KEY_PAGEUP);
+                return; // Page Up
+            case 0x51:
+                push_char(KEY_PAGEDOWN);
+                return; // Page Down
             case 0x4F:
                 push_char(KEY_END);
                 return; // End

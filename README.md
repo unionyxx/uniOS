@@ -2,7 +2,11 @@
 
 `uniOS` is a custom x86-64 operating system written in freestanding C++20. It boots through the in-tree Meridian UEFI bootloader and starts a native desktop userspace session.
 
-![uniOS](docs/assets/site/screenshot_dark.jpg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/site/screenshot_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/site/screenshot_light.png">
+  <img alt="uniOS" src="docs/assets/site/screenshot_dark.png" width="100%">
+</picture>
 
 ## Current System
 

@@ -52,6 +52,9 @@ static constexpr uint8_t KEY_RIGHT_ARROW = 0x83;
 static constexpr uint8_t KEY_HOME = 0x84;
 static constexpr uint8_t KEY_END = 0x85;
 static constexpr uint8_t KEY_DELETE = 0x86;
+static constexpr uint8_t KEY_PAGEUP = 0x87;
+static constexpr uint8_t KEY_PAGEDOWN = 0x88;
+static constexpr uint32_t TERM_SCROLLBAR_RESERVE = 12;
 
 static inline const GuiFont *term_font()
 {
@@ -174,9 +177,52 @@ class TerminalEmulator
 {
 public:
     TerminalEmulator()
-        : m_grid(nullptr), m_presented_grid(nullptr), m_history_len(nullptr), m_history_text(nullptr),
+        : m_scroll_offset(0), m_grid(nullptr), m_presented_grid(nullptr), m_history_len(nullptr), m_history_text(nullptr),
           m_history_fg(nullptr), m_ready(false), m_cursor_visible(false)
     {
+    }
+
+    uint32_t get_scroll_offset() const { return m_scroll_offset; }
+    uint32_t height() const { return m_height; }
+
+    void reset_scroll()
+    {
+        if (m_scroll_offset != 0) {
+            m_scroll_offset = 0;
+            m_needs_full_redraw = true;
+        }
+    }
+
+    void scroll_history(int delta)
+    {
+        uint32_t max_s = max_scroll();
+        int new_offset = (int)m_scroll_offset + delta;
+        if (new_offset < 0) {
+            new_offset = 0;
+        } else if (new_offset > (int)max_s) {
+            new_offset = (int)max_s;
+        }
+        if (m_scroll_offset != (uint32_t)new_offset) {
+            m_scroll_offset = (uint32_t)new_offset;
+            m_needs_full_redraw = true;
+        }
+    }
+
+    uint32_t max_scroll() const
+    {
+        uint32_t total = get_total_history_slices();
+        return (total > m_height) ? (total - m_height) : 0;
+    }
+
+    uint32_t get_total_history_slices() const
+    {
+        uint32_t total = 0;
+        for (uint32_t i = 0; i < m_history_count; i++) {
+            uint32_t len = m_history_len[i];
+            uint32_t wraps = (len == 0) ? 1 : ((len + m_width - 1) / m_width);
+            total += wraps;
+        }
+        return total;
     }
 
     ~TerminalEmulator()
@@ -199,6 +245,7 @@ public:
         gui_sync_theme_from_registry();
         m_cursor_x = 0;
         m_cursor_y = 0;
+        m_scroll_offset = 0;
         m_fg = term_fg();
         m_bg = term_bg();
         m_ansi_state = 0;
@@ -216,11 +263,11 @@ public:
         memset(m_history_fg, 0, (size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
         reset_history();
 
-        m_window = gui_register_window_ex("Terminal", width * term_cell_w() + term_pad_x() * 2,
+        m_window = gui_register_window_ex("Terminal", width * term_cell_w() + term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE,
                                           height * term_cell_h() + term_pad_y() * 2, WIN_FLAG_RESIZABLE);
         if (!m_window.buffer)
             return;
-        gui_window_set_min_size((int)(term_cell_w() * 48u + (uint32_t)term_pad_x() * 2u),
+        gui_window_set_min_size((int)(term_cell_w() * 48u + (uint32_t)term_pad_x() * 2u + TERM_SCROLLBAR_RESERVE),
                                 (int)(term_cell_h() * 14u + (uint32_t)term_pad_y() * 2u));
 
         if (!resize_grid(width, height))
@@ -386,6 +433,33 @@ public:
                           term_cell_w(), TERM_CURSOR_H, term_cursor());
             mark_dirty_cell(m_cursor_x, m_cursor_y);
         }
+
+        uint32_t total_slices = get_total_history_slices();
+        uint32_t max_s = max_scroll();
+        if (total_slices > m_height && max_s > 0) {
+            int sb_x = (int)m_window.width - term_pad_x() / 2 - 10;
+            int sb_y = term_content_y();
+            int sb_w = 6;
+            int sb_h = (int)(m_height * term_cell_h());
+
+            gui_fill_rect(&m_window, sb_x - 1, sb_y, sb_w + 2, sb_h, term_bg());
+            gui_fill_rounded_rect(&m_window, sb_x, sb_y, sb_w, sb_h, sb_w / 2, g_gui_style.app_surface_alt);
+
+            int thumb_h = (sb_h * (int)m_height) / (int)total_slices;
+            if (thumb_h < 16)
+                thumb_h = 16;
+
+            int scrollable_dist = sb_h - thumb_h;
+            int thumb_y = sb_y + scrollable_dist - (int)((scrollable_dist * m_scroll_offset) / max_s);
+            gui_fill_rounded_rect(&m_window, sb_x, thumb_y, sb_w, thumb_h, sb_w / 2, g_gui_style.text_dim);
+
+            if (has_dirty) {
+                if (dirty_x2 < (int32_t)m_window.width) {
+                    dirty_x2 = (int32_t)m_window.width;
+                }
+            }
+        }
+
         asm volatile("sfence" ::: "memory");
         if (has_dirty) {
             gui_blit_to_screen_rect(&m_window, dirty_x1, dirty_y1, dirty_x2 - dirty_x1, dirty_y2 - dirty_y1);
@@ -405,7 +479,7 @@ public:
             return false;
 
         uint32_t content_w =
-            (m_window.width > (uint32_t)(term_pad_x() * 2)) ? (m_window.width - (uint32_t)(term_pad_x() * 2)) : 0;
+            (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE)) ? (m_window.width - (uint32_t)(term_pad_x() * 2) - TERM_SCROLLBAR_RESERVE) : 0;
         uint32_t content_h =
             (m_window.height > (uint32_t)(term_pad_y() * 2)) ? (m_window.height - (uint32_t)(term_pad_y() * 2)) : 0;
         uint32_t new_width = content_w / term_cell_w();
@@ -457,6 +531,7 @@ private:
         memset(m_history_fg, 0, (size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
         m_history_count = 1;
         m_history_cursor_col = 0;
+        m_scroll_offset = 0;
         m_cursor_x = 0;
         m_cursor_y = 0;
         m_cursor_visible = true;
@@ -482,6 +557,8 @@ private:
         m_history_len[m_history_count] = 0;
         m_history_count++;
         m_history_cursor_col = 0;
+        m_scroll_offset = 0;
+        m_needs_full_redraw = true;
     }
 
     void append_history_char(char c)
@@ -552,10 +629,15 @@ private:
         uint32_t cursor_start_col = (m_width > 0) ? ((m_history_cursor_col / m_width) * m_width) : 0;
         int cursor_slice = -1;
 
+        uint32_t skipped = 0;
         for (int line = (int)m_history_count - 1; line >= 0 && visible_count < visible_limit; line--) {
             uint32_t len = m_history_len[line];
             uint32_t wraps = (len == 0) ? 1 : ((len + m_width - 1) / m_width);
             for (int seg = (int)wraps - 1; seg >= 0 && visible_count < visible_limit; seg--) {
+                if (skipped < m_scroll_offset) {
+                    skipped++;
+                    continue;
+                }
                 uint32_t start_col = (uint32_t)seg * m_width;
                 uint32_t seg_len = 0;
                 if (len > start_col) {
@@ -698,6 +780,7 @@ private:
         }
     }
 
+    uint32_t m_scroll_offset = 0;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     uint32_t m_cursor_x = 0;
@@ -832,9 +915,31 @@ extern "C" int main(int argc, char **argv)
                 }
                 continue;
             }
+            if (gui_ev.type == EVT_MOUSE_SCROLL) {
+                int delta = gui_ev.mouse.scroll_y * 3;
+                term.scroll_history(delta);
+                needs_render = true;
+                continue;
+            }
             if (gui_ev.type == EVT_KEY_DOWN && gui_ev.key.c != 0) {
+                char c = (char)gui_ev.key.c;
+                if ((uint8_t)c == KEY_PAGEUP) {
+                    term.scroll_history((int)term.height() / 2);
+                    needs_render = true;
+                    continue;
+                }
+                if ((uint8_t)c == KEY_PAGEDOWN) {
+                    term.scroll_history(-(int)term.height() / 2);
+                    needs_render = true;
+                    continue;
+                }
+
+                if (term.get_scroll_offset() > 0) {
+                    term.reset_scroll();
+                    needs_render = true;
+                }
+
                 if (shell_alive) {
-                    char c = (char)gui_ev.key.c;
                     write(pipe_to_shell[1], &c, 1);
                 }
                 continue;
