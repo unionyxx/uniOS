@@ -5,6 +5,7 @@
 #include <string.h>
 #include <uapi/syscalls.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #include "../libc/log.h"
 #include "../libc/syscall.h"
@@ -214,9 +215,16 @@ static void gui_release_retired_window_buffer()
         if (!gui_generation_reached(acked, retired.generation))
             continue;
 
-        syscall1(SYS_SHM_FREE, static_cast<uint64_t>(retired.shm_id));
-        retired.shm_id = WIN_SHM_INVALID;
-        retired.generation = 0;
+        bool is_memfd = (retired.shm_id & 0x40000000) != 0;
+        if (is_memfd) {
+            // Memory is kept alive by Window Manager; locally it is already closed
+            retired.shm_id = WIN_SHM_INVALID;
+            retired.generation = 0;
+        } else {
+            syscall1(SYS_SHM_FREE, static_cast<uint64_t>(retired.shm_id));
+            retired.shm_id = WIN_SHM_INVALID;
+            retired.generation = 0;
+        }
     }
 }
 
@@ -255,15 +263,30 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
             return false;
     }
 
-    int new_shm_id = static_cast<int>(syscall1(SYS_SHM_GET, shm_bytes));
-    if (new_shm_id < 0)
+    int new_memfd = memfd_create("window_buffer_resize", 0);
+    if (new_memfd < 0)
         return false;
 
-    uint64_t mapped = syscall1(SYS_SHM_MAP, static_cast<uint64_t>(new_shm_id));
-    if (mapped == 0 || mapped == static_cast<uint64_t>(-1)) {
-        syscall1(SYS_SHM_FREE, static_cast<uint64_t>(new_shm_id));
+    if (ftruncate(new_memfd, shm_bytes) < 0) {
+        close(new_memfd);
         return false;
     }
+
+    void *mapped = mmap(NULL, (size_t)shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, new_memfd, 0);
+    if (mapped == MAP_FAILED) {
+        close(new_memfd);
+        return false;
+    }
+
+    int new_wm_fd = fd_transfer(0, new_memfd);
+    if (new_wm_fd < 0) {
+        munmap(mapped, (size_t)shm_bytes);
+        close(new_memfd);
+        return false;
+    }
+
+    close(new_memfd);
+    int new_shm_id = new_wm_fd | 0x40000000;
 
     uint32_t *new_buffer = reinterpret_cast<uint32_t *>(mapped);
     const bool transparent = (g_my_window->flags & WIN_FLAG_TRANSPARENT) != 0;
@@ -285,6 +308,10 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     }
 
     int old_shm_id = g_window_shm_id;
+    uint32_t *old_buffer_addr = s->buffer;
+    uint32_t old_buffer_w = g_window_buffer_w;
+    uint32_t old_buffer_h = g_window_buffer_h;
+
     uint32_t generation = next_window_buffer_generation();
     s->buffer = new_buffer;
     s->pitch = alloc_w * 4u;
@@ -305,7 +332,14 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     // the current resize_serial.
     asm volatile("sfence" ::: "memory");
 
-    syscall1(SYS_SHM_UNMAP, static_cast<uint64_t>(old_shm_id));
+    bool old_is_memfd = (old_shm_id & 0x40000000) != 0;
+    if (old_is_memfd) {
+        size_t old_size = (size_t)old_buffer_w * old_buffer_h * 4;
+        munmap(old_buffer_addr, old_size);
+    } else {
+        syscall1(SYS_SHM_UNMAP, static_cast<uint64_t>(old_shm_id));
+    }
+    
     g_retired_window_buffers[retired_slot].shm_id = old_shm_id;
     g_retired_window_buffers[retired_slot].generation = generation;
     return true;
@@ -1573,18 +1607,36 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
     uint32_t buffer_w = w;
     uint32_t buffer_h = h;
 
-    int shm_id = static_cast<int>(syscall1(SYS_SHM_GET, static_cast<uint64_t>(buffer_bytes)));
-    if (shm_id < 0) {
-        LOG_ERROR("gui", "register_window SHM_GET failed: %s (%ux%u)", window_title, w, h);
+    int memfd = memfd_create("window_buffer", 0);
+    if (memfd < 0) {
+        LOG_ERROR("gui", "register_window memfd_create failed: %s (%ux%u)", window_title, w, h);
         return {NULL, 0, 0, 0, false};
     }
 
-    uint64_t win_ptr = syscall1(SYS_SHM_MAP, static_cast<uint64_t>(shm_id));
-    if (win_ptr == 0 || win_ptr == static_cast<uint64_t>(-1)) {
-        LOG_ERROR("gui", "register_window SHM_MAP failed: %s shm=%d", window_title, shm_id);
-        gui_window_register_cleanup(shm_id, false);
+    if (ftruncate(memfd, buffer_bytes) < 0) {
+        LOG_ERROR("gui", "register_window ftruncate failed: %s size=%zu", window_title, buffer_bytes);
+        close(memfd);
         return {NULL, 0, 0, 0, false};
     }
+
+    void *mapped_ptr = mmap(NULL, buffer_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
+    if (mapped_ptr == MAP_FAILED) {
+        LOG_ERROR("gui", "register_window mmap failed: %s fd=%d", window_title, memfd);
+        close(memfd);
+        return {NULL, 0, 0, 0, false};
+    }
+
+    int wm_fd = fd_transfer(0, memfd);
+    if (wm_fd < 0) {
+        LOG_ERROR("gui", "register_window fd_transfer failed: %s fd=%d", window_title, memfd);
+        munmap(mapped_ptr, buffer_bytes);
+        close(memfd);
+        return {NULL, 0, 0, 0, false};
+    }
+
+    close(memfd);
+    int shm_id = wm_fd | 0x40000000;
+    uint64_t win_ptr = reinterpret_cast<uint64_t>(mapped_ptr);
     memset(reinterpret_cast<void *>(win_ptr), 0, buffer_bytes);
 
     int win_idx = -1;
@@ -1605,7 +1657,7 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
 
     if (win_idx < 0 || win_idx >= MAX_WINDOWS) {
         LOG_ERROR("gui", "register_window table full or slot busy: %s", window_title);
-        gui_window_register_cleanup(shm_id, true);
+        munmap(reinterpret_cast<void *>(win_ptr), buffer_bytes);
         return {NULL, 0, 0, 0, false};
     }
 

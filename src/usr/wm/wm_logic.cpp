@@ -1237,8 +1237,17 @@ void close_window(int index)
     capture_shell_backdrop_for_rect(covered, gui_registry());
 
     close_context_menu();
-    if (gui_shm_id_is_valid(doomed.shm_id))
-        syscall1(SYS_SHM_UNMAP, (uint64_t)doomed.shm_id);
+    if (gui_shm_id_is_valid(doomed.shm_id)) {
+        bool is_memfd = (doomed.shm_id & 0x40000000) != 0;
+        if (is_memfd) {
+            int fd = doomed.shm_id & ~0x40000000;
+            size_t size = (size_t)doomed.buffer_w * doomed.buffer_h * 4;
+            munmap(doomed.buffer, size);
+            close(fd);
+        } else {
+            syscall1(SYS_SHM_UNMAP, (uint64_t)doomed.shm_id);
+        }
+    }
     gui_destroy_surface(&doomed.decoration_cache);
     gui_destroy_surface(&doomed.button_cache);
     if (doomed.entry) {
@@ -2607,30 +2616,48 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     int bw = (entry && entry->buffer_w > 0) ? entry->buffer_w : w;
     int bh = (entry && entry->buffer_h > 0) ? entry->buffer_h : h;
     uint64_t req_size = (uint64_t)bw * bh * 4;
-    uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)shm_id);
 
-    // Bounds check shm to prevent out-of-bounds access
-    if (w <= 0 || h <= 0 || !gui_shm_id_is_valid(shm_id) || shm_size == (uint64_t)-1 || req_size > shm_size) {
+    bool is_memfd = (shm_id & 0x40000000) != 0;
+    bool map_ok = false;
+    uint64_t ptr = 0;
+
+    if (is_memfd) {
+        int fd = shm_id & ~0x40000000;
+        void *mapped_ptr = mmap(NULL, req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (mapped_ptr != MAP_FAILED) {
+            ptr = reinterpret_cast<uint64_t>(mapped_ptr);
+            map_ok = true;
+        }
+    } else {
+        uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)shm_id);
+        if (w > 0 && h > 0 && gui_shm_id_is_valid(shm_id) && shm_size != (uint64_t)-1 && req_size <= shm_size) {
+            uint64_t legacy_ptr = syscall1(SYS_SHM_MAP, (uint64_t)shm_id);
+            if (legacy_ptr != 0 && legacy_ptr != (uint64_t)-1) {
+                ptr = legacy_ptr;
+                map_ok = true;
+            }
+        }
+    }
+
+    if (!map_ok) {
         if (g_add_fail_logs < 8) {
-            LOG_WARN("wm", "add skipped: shm=%d (invalid bounds/size)", shm_id);
+            LOG_WARN("wm", "add skipped/failed: shm=%d (invalid bounds/size/mapping)", shm_id);
             g_add_fail_logs++;
         }
         return;
     }
-    uint64_t ptr = syscall1(SYS_SHM_MAP, (uint64_t)shm_id);
-    if (ptr == 0 || ptr == (uint64_t)-1) {
-        if (g_add_fail_logs < 8) {
-            LOG_ERROR("wm", "add MAP failed: shm=%d", shm_id);
-            g_add_fail_logs++;
-        }
-        return;
-    }
+
     if (g_window_count >= MAX_WINDOWS) {
         if (g_add_fail_logs < 8) {
             LOG_WARN("wm", "table full");
             g_add_fail_logs++;
         }
-        syscall1(SYS_SHM_UNMAP, (uint64_t)shm_id);
+        if (is_memfd) {
+            munmap(reinterpret_cast<void *>(ptr), req_size);
+            close(shm_id & ~0x40000000);
+        } else {
+            syscall1(SYS_SHM_UNMAP, (uint64_t)shm_id);
+        }
         return;
     }
 

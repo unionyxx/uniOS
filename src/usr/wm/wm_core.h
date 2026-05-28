@@ -10,6 +10,7 @@
 #include <uapi/signal.h>
 #include <uapi/syscalls.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <wm/interaction_policy.h>
 
 #include "../libc/config_utils.h"

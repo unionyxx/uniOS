@@ -1468,29 +1468,59 @@ extern "C" int main(int argc, char **argv)
 
                 if (gui_shm_id_is_valid(entry_snapshot.shm_id)) {
                     if (entry_snapshot.shm_id != w.shm_id) {
-                        uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
-                        if (shm_owner == entry_snapshot.owner_pid || shm_owner == 0) {
-                            uint64_t req_size = (uint64_t)bw * bh * 4;
-                            uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)entry_snapshot.shm_id);
-                            if (shm_size != (uint64_t)-1 && req_size <= shm_size) {
-                                uint64_t mapped = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
-                                if (mapped != 0 && mapped != static_cast<uint64_t>(-1)) {
-                                    int old_shm_id = w.shm_id;
-                                    w.shm_id = entry_snapshot.shm_id;
-                                    w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
-                                    if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id) {
-                                        syscall1(SYS_SHM_UNMAP, old_shm_id);
+                        bool is_memfd = (entry_snapshot.shm_id & 0x40000000) != 0;
+                        bool map_ok = false;
+                        uint64_t mapped = 0;
+                        uint64_t req_size = (uint64_t)bw * bh * 4;
+
+                        if (is_memfd) {
+                            int fd = entry_snapshot.shm_id & ~0x40000000;
+                            void *mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                            if (mapped_ptr != MAP_FAILED) {
+                                mapped = reinterpret_cast<uint64_t>(mapped_ptr);
+                                map_ok = true;
+                            }
+                        } else {
+                            uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
+                            if (shm_owner == entry_snapshot.owner_pid || shm_owner == 0) {
+                                uint64_t shm_size = syscall1(SYS_SHM_INFO, (uint64_t)entry_snapshot.shm_id);
+                                if (shm_size != (uint64_t)-1 && req_size <= shm_size) {
+                                    uint64_t legacy_ptr = syscall1(SYS_SHM_MAP, entry_snapshot.shm_id);
+                                    if (legacy_ptr != 0 && legacy_ptr != static_cast<uint64_t>(-1)) {
+                                        mapped = legacy_ptr;
+                                        map_ok = true;
                                     }
-                                    w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
-                                    w.buffer_generation_acked = entry_snapshot.buffer_generation;
-                                    w.buffer_generation_seen = entry_snapshot.buffer_generation;
-                                    smp_wmb();
-                                    w.needs_full_redraw = true;
-                                    invalidate_window_decoration_cache(w);
-                                    mark_window_frame_damage(w);
-                                    invalidate_window_visibility_cache();
                                 }
                             }
+                        }
+
+                        if (map_ok) {
+                            int old_shm_id = w.shm_id;
+                            void *old_buffer = w.buffer;
+                            int old_buffer_w = w.buffer_w;
+                            int old_buffer_h = w.buffer_h;
+
+                            w.shm_id = entry_snapshot.shm_id;
+                            w.buffer = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(mapped));
+                            if (gui_shm_id_is_valid(old_shm_id) && old_shm_id != entry_snapshot.shm_id) {
+                                bool old_is_memfd = (old_shm_id & 0x40000000) != 0;
+                                if (old_is_memfd) {
+                                    int old_fd = old_shm_id & ~0x40000000;
+                                    size_t old_size = (size_t)old_buffer_w * old_buffer_h * 4;
+                                    munmap(old_buffer, old_size);
+                                    close(old_fd);
+                                } else {
+                                    syscall1(SYS_SHM_UNMAP, old_shm_id);
+                                }
+                            }
+                            w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
+                            w.buffer_generation_acked = entry_snapshot.buffer_generation;
+                            w.buffer_generation_seen = entry_snapshot.buffer_generation;
+                            smp_wmb();
+                            w.needs_full_redraw = true;
+                            invalidate_window_decoration_cache(w);
+                            mark_window_frame_damage(w);
+                            invalidate_window_visibility_cache();
                         }
                     }
 
