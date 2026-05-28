@@ -701,6 +701,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     proc->cwd[1] = '\0';
     spinlock_init(&proc->fd_lock);
     spinlock_init(&proc->vma_lock);
+    proc->vma_lock_ptr = &proc->vma_lock;
 
     for (auto &fd : proc->fd_table)
         fd.used = false;
@@ -849,6 +850,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     asm volatile("mov %%cr3, %%rax\n\tmov %%rax, %%cr3" ::: "rax", "memory");
 
     spinlock_init(&child->vma_lock);
+    child->vma_lock_ptr = &child->vma_lock;
     spinlock_acquire(&g_current_proc->vma_lock);
     child->vma_list = vma_clone(g_current_proc->vma_list);
     spinlock_release(&g_current_proc->vma_lock);
@@ -1196,6 +1198,7 @@ extern "C" void thread_ret();
     thread->page_table = parent->page_table;
     thread->vma_list = parent->vma_list;
     spinlock_init(&thread->vma_lock);
+    thread->vma_lock_ptr = parent->vma_lock_ptr; // Share parent's VMA lock
 
 
     const size_t stack_pages = KERNEL_STACK_SIZE / 4096;

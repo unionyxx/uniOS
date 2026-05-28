@@ -75,7 +75,8 @@ struct Process
     alignas(64) Spinlock vma_lock;
     VMA *vma_list;
     uint32_t vma_count;
-    uint32_t _pad_vma[7]; // Maintain 64-byte alignment or at least clear padding
+    Spinlock *vma_lock_ptr;
+    uint32_t _pad_vma[5]; // Maintain 64-byte alignment or at least clear padding
 
     uint64_t cursor_x;
     uint64_t cursor_y;

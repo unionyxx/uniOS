@@ -367,18 +367,18 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     if (length == 0 || addr > UINT64_MAX - length)
         return false;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     VMA *mapping = vma_find(p->vma_list, addr);
     if (!mapping || mapping->start != addr || mapping->end != addr + length || mapping->type == VMAType::Text ||
         mapping->type == VMAType::Stack) {
-        spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+        spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
     }
 
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
     vma_remove(&p->vma_list, mapping_start, mapping_end);
-    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
     for (uint64_t virt = mapping_start; virt < mapping_end; virt += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
@@ -1419,22 +1419,28 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 
             // FIX: Restart loop if overlap is found to handle unsorted VMA linked list
             bool overlap_found;
+            uint64_t vma_flags_lock = spinlock_acquire_irqsave(p->vma_lock_ptr);
             do {
                 overlap_found = false;
                 for (VMA *curr = p->vma_list; curr; curr = curr->next) {
                     uint64_t probe_end = 0;
-                    if (!checked_add_u64(virt_start, length, &probe_end))
+                    if (!checked_add_u64(virt_start, length, &probe_end)) {
+                        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                         return static_cast<uint64_t>(-1);
+                    }
                     // Check if [virt_start, virt_start + length) overlaps with curr
                     if (virt_start < curr->end && probe_end > curr->start) {
-                        if (curr->end > UINT64_MAX - 0xFFFULL)
+                        if (curr->end > UINT64_MAX - 0xFFFULL) {
+                            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             return static_cast<uint64_t>(-1);
+                        }
                         virt_start = (curr->end + 0xFFFULL) & ~0xFFFULL;
                         overlap_found = true;
                         break; // Break and restart check from the new virt_start
                     }
                 }
             } while (overlap_found);
+            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
 
             uint64_t virt_end = 0;
             if (!checked_add_u64(virt_start, length, &virt_end) || virt_end >= USER_STACK_TOP)
@@ -1529,7 +1535,10 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 }
 
                 VMAType vma_type = is_shared ? VMAType::Shared : VMAType::Data;
-                if (!vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type)) {
+                uint64_t vma_flags_lock2 = spinlock_acquire_irqsave(p->vma_lock_ptr);
+                bool add_ok = vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type);
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock2);
+                if (!add_ok) {
                     for (size_t i = 0; i < num_pages; i++) {
                         uint64_t vaddr = virt_start + (i * 4096);
                         uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
@@ -1580,7 +1589,10 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                      4096);
             }
 
-            if (!vma_add(&p->vma_list, virt_start, virt_end, flags, VMAType::Data)) {
+            uint64_t vma_flags_lock3 = spinlock_acquire_irqsave(p->vma_lock_ptr);
+            bool add_ok2 = vma_add(&p->vma_list, virt_start, virt_end, flags, VMAType::Data);
+            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock3);
+            if (!add_ok2) {
                 for (size_t i = 0; i < num_pages; i++) {
                     uint64_t vaddr = virt_start + (i * 4096);
                     uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);

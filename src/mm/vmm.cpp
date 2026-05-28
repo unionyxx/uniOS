@@ -830,20 +830,20 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     if (!curr || !curr->vma_list || !curr->page_table)
         return false;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&curr->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(curr->vma_lock_ptr);
 
     if (present_fault && !write_fault) {
-        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+        spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         return false;
     }
     if (fault_addr >= 0x0000800000000000ULL) {
-        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+        spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         return false;
     }
 
     VMA *vma = vma_find(curr->vma_list, fault_addr);
     if (!vma) {
-        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+        spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         return false;
     }
 
@@ -855,7 +855,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         map_flags |= PTE_USER;
 
     if (write_fault && !(vma_flags & PTE_WRITABLE)) {
-        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+        spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         return false;
     }
 
@@ -864,7 +864,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     if (phys == 0) {
         void *new_frame = pmm_alloc_frame();
         if (!new_frame) {
-            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+            spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
             return false;
         }
 
@@ -872,17 +872,17 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 
         if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
             pmm_free_frame(new_frame);
-            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+            spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
             return false;
         }
         vmm_invalidate_tlb(page_vaddr);
-        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+        spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         return true;
     }
 
     if (vma_type == VMAType::Shared) {
         vmm_set_page_flags(page_vaddr, map_flags);
-        spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+        spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         return true;
     }
 
@@ -891,7 +891,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     if (refcount > 1) {
         void *new_frame = pmm_alloc_frame();
         if (!new_frame) {
-            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+            spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
             return false;
         }
 
@@ -901,18 +901,18 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 
         if (!vmm_map_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
             pmm_free_frame(new_frame);
-            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+            spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
             return false;
         }
         pmm_refcount_dec(reinterpret_cast<void *>(phys));
     } else {
         if (!vmm_map_page_in(curr->page_table, page_vaddr, phys, map_flags).ok()) {
-            spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+            spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
             return false;
         }
     }
 
     vmm_invalidate_tlb(page_vaddr);
-    spinlock_release_irqrestore(&curr->vma_lock, sl_flags);
+    spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
     return true;
 }
