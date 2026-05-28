@@ -345,3 +345,69 @@ KTEST(extended_syscalls_fd_transfer)
     KTEST_EXPECT_EQ(close_res2, 0);
 }
 
+KTEST(extended_syscalls_vma_split_unmap)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+
+    uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vma_list;
+    uint32_t orig_vma_count = p->vma_count;
+
+    if (!p->page_table) {
+        p->page_table = vmm_get_kernel_pml4();
+    }
+
+    int64_t fd = sys_memfd_create(nullptr, 0);
+    KTEST_EXPECT(fd >= 3);
+
+    int64_t trunc_res = sys_ftruncate(static_cast<int>(fd), 12288);
+    KTEST_EXPECT_EQ(trunc_res, 0);
+
+    SyscallFrame frame = {};
+    frame.arg4 = MAP_SHARED;
+    frame.arg5 = static_cast<uint64_t>(fd);
+
+    // Map 3 pages
+    uint64_t mmap_res = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &frame);
+    KTEST_EXPECT(mmap_res != static_cast<uint64_t>(-1));
+
+    // Write to all 3 pages
+    volatile char *ptr = reinterpret_cast<volatile char *>(mmap_res);
+    ptr[0] = 'a';
+    ptr[4096] = 'b';
+    ptr[8192] = 'c';
+
+    // Unmap the middle page (offset 4096, length 4096)
+    int64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res + 4096, 4096, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    // First page should still be present
+    uint64_t phys0 = vmm_virt_to_phys_in(p->page_table, mmap_res);
+    KTEST_EXPECT(phys0 != 0);
+    KTEST_EXPECT_EQ(ptr[0], 'a');
+
+    // Middle page should be unmapped
+    uint64_t phys1 = vmm_virt_to_phys_in(p->page_table, mmap_res + 4096);
+    KTEST_EXPECT_EQ(phys1, 0);
+
+    // Third page should still be present
+    uint64_t phys2 = vmm_virt_to_phys_in(p->page_table, mmap_res + 8192);
+    KTEST_EXPECT(phys2 != 0);
+    KTEST_EXPECT_EQ(ptr[8192], 'c');
+
+    // Clean up: unmap first and third pages
+    munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 4096, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    munmap_res = syscall_handler(SYS_MUNMAP, mmap_res + 8192, 4096, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    int close_res = vfs_close(static_cast<int>(fd));
+    KTEST_EXPECT_EQ(close_res, 0);
+
+    p->page_table = orig_page_table;
+    p->vma_list = orig_vma_list;
+    p->vma_count = orig_vma_count;
+}
+

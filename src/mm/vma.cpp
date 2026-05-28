@@ -73,6 +73,52 @@ void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end)
     }
 }
 
+[[nodiscard]] bool vma_unmap(VMA **list_ptr, uint64_t start, uint64_t end)
+{
+    if (!list_ptr || start >= end)
+        return false;
+
+    VMA **link = list_ptr;
+    while (*link) {
+        VMA *curr = *link;
+        if (end <= curr->start || start >= curr->end) {
+            // Case 1: No overlap
+            link = &curr->next;
+        } else if (start <= curr->start && end >= curr->end) {
+            // Case 2: Complete overlap -> delete
+            *link = curr->next;
+            free(curr);
+        } else if (start <= curr->start && end < curr->end) {
+            // Case 3: Trim left
+            curr->start = end;
+            link = &curr->next;
+        } else if (start > curr->start && end >= curr->end) {
+            // Case 4: Trim right
+            curr->end = start;
+            link = &curr->next;
+        } else {
+            // Case 5: Split inside
+            VMA *new_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+            if (!new_vma) {
+                // Out of memory during VMA split
+                return false;
+            }
+            new_vma->start = end;
+            new_vma->end = curr->end;
+            new_vma->flags = curr->flags;
+            new_vma->type = curr->type;
+            new_vma->is_cow = curr->is_cow;
+            new_vma->next = curr->next;
+
+            curr->end = start;
+            curr->next = new_vma;
+
+            link = &new_vma->next;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] VMA *vma_clone(const VMA *src_list)
 {
     VMA *new_list = nullptr;

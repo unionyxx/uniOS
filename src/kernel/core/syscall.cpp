@@ -368,19 +368,27 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
         return false;
 
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-    VMA *mapping = vma_find(p->vma_list, addr);
-    if (!mapping || mapping->start != addr || mapping->end != addr + length || mapping->type == VMAType::Text ||
-        mapping->type == VMAType::Stack) {
+    uint64_t end_addr = addr + length;
+
+    // Check for overlap with protected Text or Stack VMAs
+    for (VMA *curr = p->vma_list; curr; curr = curr->next) {
+        if (curr->start < end_addr && curr->end > addr) {
+            if (curr->type == VMAType::Text || curr->type == VMAType::Stack) {
+                spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
+                return false;
+            }
+        }
+    }
+
+    // Apply the unmap logic to the VMA list
+    if (!vma_unmap(&p->vma_list, addr, end_addr)) {
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
     }
-
-    const uint64_t mapping_start = mapping->start;
-    const uint64_t mapping_end = mapping->end;
-    vma_remove(&p->vma_list, mapping_start, mapping_end);
     spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
-    for (uint64_t virt = mapping_start; virt < mapping_end; virt += 4096) {
+    // Unmap matching physical pages from page tables
+    for (uint64_t virt = addr; virt < end_addr; virt += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
         if (!phys)
             continue;
