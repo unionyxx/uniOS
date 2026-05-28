@@ -60,6 +60,9 @@ endif
 if not kernel_source_paths.contains('src/kernel/tests/extended_syscall_tests.cpp')
   kernel_source_paths += ['src/kernel/tests/extended_syscall_tests.cpp']
 endif
+if not kernel_source_paths.contains('src/kernel/fs/memfd.cpp')
+  kernel_source_paths += ['src/kernel/fs/memfd.cpp']
+endif
 kernel_sources = files(kernel_source_paths)
 
 kernel_inc = include_directories('include', 'src')
@@ -556,15 +559,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     '-device',
     'usb-mouse,bus=xhci.0',
   ]
-  if build_machine.system() == 'windows'
-    qemu_usb_devices = [
-      '-usb',
-      '-device',
-      'usb-kbd',
-      '-device',
-      'usb-mouse',
-    ]
-  endif
+
 
   qemu_net_devices = [
     '-netdev',

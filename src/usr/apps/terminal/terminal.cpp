@@ -8,6 +8,7 @@
 #include <uapi/syscalls.h>
 #include <uapi/sysinfo.h>
 #include <unistd.h>
+#include <sys/epoll.h>
 
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
@@ -814,21 +815,6 @@ static void term_printf(TerminalEmulator &term, const char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     term.write_string(buf);
-}
-
-static inline int epoll_create(int size)
-{
-    return (int)syscall1(SYS_EPOLL_CREATE, (uint64_t)size);
-}
-
-static inline int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
-{
-    return (int)syscall6(SYS_EPOLL_CTL, (uint64_t)epfd, (uint64_t)op, (uint64_t)fd, (uint64_t)event, 0, 0);
-}
-
-static inline int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
-{
-    return (int)syscall6(SYS_EPOLL_WAIT, (uint64_t)epfd, (uint64_t)events, (uint64_t)maxevents, (uint64_t)timeout, 0, 0);
 }
 
 extern "C" int main(int argc, char **argv)

@@ -56,6 +56,20 @@ static inline uint64_t syscall3(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a
     return rax;
 }
 
+static inline uint64_t syscall4(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    register uint64_t rax SYSCALL_REG("rax") = n;
+    register uint64_t rdi SYSCALL_REG("rdi") = a1;
+    register uint64_t rsi SYSCALL_REG("rsi") = a2;
+    register uint64_t rdx SYSCALL_REG("rdx") = a3;
+    register uint64_t r10 SYSCALL_REG("r10") = a4;
+    __asm__ __volatile__("syscall"
+                         : "+a"(rax), "+D"(rdi), "+S"(rsi), "+d"(rdx), "+r"(r10)
+                         :
+                         : "rcx", "r11", "r8", "r9", "memory");
+    return rax;
+}
+
 static inline uint64_t syscall6(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
                                 uint64_t a6)
 {

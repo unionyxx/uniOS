@@ -10,6 +10,7 @@
 #include <kernel/elf.h>
 #include <kernel/event.h>
 #include <kernel/fs/pipe.h>
+#include <kernel/fs/memfd.h>
 #include <kernel/fs/storage_guard.h>
 #include <kernel/fs/unifs.h>
 #include <kernel/fs/vfs.h>
@@ -369,7 +370,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
     VMA *mapping = vma_find(p->vma_list, addr);
     if (!mapping || mapping->start != addr || mapping->end != addr + length || mapping->type == VMAType::Text ||
-        mapping->type == VMAType::Stack || mapping->type == VMAType::Shared) {
+        mapping->type == VMAType::Stack) {
         spinlock_release_irqrestore(&p->vma_lock, sl_flags);
         return false;
     }
@@ -1146,6 +1147,52 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     return 0;
 }
 
+extern "C" int64_t sys_memfd_create(const char *name, unsigned int flags)
+{
+    (void)flags;
+    char k_name[64];
+    if (name) {
+        if (!copy_string_from_user(name, k_name, sizeof(k_name) - 1))
+            return -14; // EFAULT
+    } else {
+        kstring::strncpy(k_name, "anon", sizeof(k_name) - 1);
+    }
+    k_name[sizeof(k_name) - 1] = '\0';
+
+    VNode *node = memfd_create_vnode(k_name);
+    if (!node)
+        return -12; // ENOMEM
+
+    Process *p = process_get_current();
+    if (!p) {
+        vfs_close_vnode(node);
+        return -1;
+    }
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    int fd = -1;
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (!p->fd_table[i].used) {
+            fd = i;
+            p->fd_table[i].used = true;
+            p->fd_table[i].flags = 0;
+            kstring::zero_memory(p->fd_table[i].reserved, sizeof(p->fd_table[i].reserved));
+            p->fd_table[i].vnode = node;
+            p->fd_table[i].offset = 0;
+            p->fd_table[i].dir_pos = 0;
+            break;
+        }
+    }
+    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+
+    if (fd == -1) {
+        vfs_close_vnode(node);
+        return -24; // EMFILE
+    }
+
+    return fd;
+}
+
 extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2, uint64_t arg3,
                                     SyscallFrame *frame)
 {
@@ -1290,11 +1337,117 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (arg3 & 2)
                 flags |= PTE_WRITABLE;
 
+            int fd = static_cast<int>(frame->arg5);
+            uint64_t mmap_flags = frame->arg4;
+
+            VNode *memfd_node = nullptr;
+            if (fd >= 0 && fd < MAX_OPEN_FILES) {
+                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+                if (p->fd_table[fd].used && p->fd_table[fd].vnode && is_memfd_vnode(p->fd_table[fd].vnode)) {
+                    memfd_node = p->fd_table[fd].vnode;
+                    __sync_fetch_and_add(&memfd_node->ref_count, 1);
+                }
+                spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+            }
+
             uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
+
+            if (memfd_node) {
+                bool is_shared = (mmap_flags & MAP_SHARED) != 0;
+                if (is_shared) {
+                    flags |= PTE_SHARED;
+                }
+
+                for (size_t i = 0; i < num_pages; i++) {
+                    void *frame_ptr = nullptr;
+                    if (is_shared) {
+                        frame_ptr = memfd_get_page(memfd_node, i);
+                        if (!frame_ptr) {
+                            for (size_t j = 0; j < i; j++) {
+                                uint64_t vaddr = virt_start + (j * 4096);
+                                uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
+                                vmm_unmap_page_in(target_pml4, vaddr);
+                                if (phys)
+                                    pmm_refcount_dec(reinterpret_cast<void *>(phys));
+                            }
+                            vfs_close_vnode(memfd_node);
+                            return static_cast<uint64_t>(-1);
+                        }
+                        pmm_refcount_inc(frame_ptr);
+                    } else {
+                        frame_ptr = pmm_alloc_frame();
+                        if (!frame_ptr) {
+                            for (size_t j = 0; j < i; j++) {
+                                uint64_t vaddr = virt_start + (j * 4096);
+                                uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
+                                vmm_unmap_page_in(target_pml4, vaddr);
+                                if (phys)
+                                    pmm_free_frame(reinterpret_cast<void *>(phys));
+                            }
+                            vfs_close_vnode(memfd_node);
+                            return static_cast<uint64_t>(-1);
+                        }
+                        void *src_page = memfd_get_page(memfd_node, i);
+                        if (src_page) {
+                            kstring::memcpy(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
+                                            reinterpret_cast<const void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(src_page))),
+                                            4096);
+                        } else {
+                            kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
+                                                 4096);
+                        }
+                    }
+
+                    if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(frame_ptr), flags).ok()) {
+                        if (is_shared) {
+                            pmm_refcount_dec(frame_ptr);
+                        } else {
+                            pmm_free_frame(frame_ptr);
+                        }
+                        for (size_t j = 0; j < i; j++) {
+                            uint64_t vaddr = virt_start + (j * 4096);
+                            uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
+                            vmm_unmap_page_in(target_pml4, vaddr);
+                            if (phys) {
+                                if (is_shared) {
+                                    pmm_refcount_dec(reinterpret_cast<void *>(phys));
+                                } else {
+                                    pmm_free_frame(reinterpret_cast<void *>(phys));
+                                }
+                            }
+                        }
+                        vfs_close_vnode(memfd_node);
+                        return static_cast<uint64_t>(-1);
+                    }
+                }
+
+                VMAType vma_type = is_shared ? VMAType::Shared : VMAType::Data;
+                if (!vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type)) {
+                    for (size_t i = 0; i < num_pages; i++) {
+                        uint64_t vaddr = virt_start + (i * 4096);
+                        uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
+                        vmm_unmap_page_in(target_pml4, vaddr);
+                        if (phys) {
+                            if (is_shared) {
+                                pmm_refcount_dec(reinterpret_cast<void *>(phys));
+                            } else {
+                                pmm_free_frame(reinterpret_cast<void *>(phys));
+                            }
+                        }
+                    }
+                    vfs_close_vnode(memfd_node);
+                    return static_cast<uint64_t>(-1);
+                }
+
+                vfs_close_vnode(memfd_node);
+
+                asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+                return virt_start;
+            }
+
             for (size_t i = 0; i < num_pages; i++) {
                 void *new_frame = pmm_alloc_frame();
                 if (!new_frame) {
-                    // Fail-forward: cleanup previously allocated pages in this call
                     for (size_t j = 0; j < i; j++) {
                         uint64_t vaddr = virt_start + (j * 4096);
                         uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
@@ -1307,7 +1460,6 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(new_frame), flags)
                          .ok()) {
                     pmm_free_frame(new_frame);
-                    // Rollback as before
                     for (size_t j = 0; j < i; j++) {
                         uint64_t vaddr = virt_start + (j * 4096);
                         uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
@@ -1322,7 +1474,6 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             }
 
             if (!vma_add(&p->vma_list, virt_start, virt_end, flags, VMAType::Data)) {
-                // Cleanup on VMA failure
                 for (size_t i = 0; i < num_pages; i++) {
                     uint64_t vaddr = virt_start + (i * 4096);
                     uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
@@ -2313,6 +2464,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_epoll_ctl(static_cast<int>(arg1), static_cast<int>(arg2), static_cast<int>(arg3), reinterpret_cast<struct epoll_event *>(frame->arg4));
         case SYS_EPOLL_WAIT:
             return sys_epoll_wait(static_cast<int>(arg1), reinterpret_cast<struct epoll_event *>(arg2), static_cast<int>(arg3), static_cast<int>(frame->arg4));
+        case SYS_MEMFD_CREATE:
+            return sys_memfd_create(reinterpret_cast<const char *>(arg1), static_cast<unsigned int>(arg2));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

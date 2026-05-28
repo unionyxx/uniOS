@@ -69,6 +69,10 @@ void sound_play(const char *path);
 void sound_write(const void *data, uint32_t size);
 void sound_config(uint32_t sample_rate, uint8_t channels, uint8_t bits_per_sample);
 
+int futex(volatile uint32_t *uaddr, int op, uint32_t val);
+int thread_create(void (*fn)(void), void *arg, void *stack_addr, void *frame);
+
 #ifdef __cplusplus
 }
 #endif
+

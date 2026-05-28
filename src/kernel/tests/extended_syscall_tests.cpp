@@ -11,6 +11,7 @@
 #include <kernel/fs/vfs.h>
 #include <kernel/syscall.h>
 #include <uapi/syscalls.h>
+#include <uapi/syscalls_ext.h>
 #include <libk/kstd.h>
 #include <libk/kstring.h>
 
@@ -217,4 +218,95 @@ KTEST(extended_syscalls_epoll)
     vfs_close(read_fd);
     vfs_close(write_fd);
     vfs_close(static_cast<int>(epfd));
+}
+
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#endif
+
+extern "C" int64_t sys_memfd_create(const char *name, unsigned int flags);
+
+KTEST(extended_syscalls_memfd)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+
+    uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vma_list;
+    uint32_t orig_vma_count = p->vma_count;
+
+    if (!p->page_table) {
+        p->page_table = vmm_get_kernel_pml4();
+    }
+
+    int64_t fd = sys_memfd_create(nullptr, 0);
+    KTEST_EXPECT(fd >= 3);
+
+    const char *test_str = "Hello Memfd!";
+    uint64_t test_len = 12;
+    int64_t written = vfs_write(static_cast<int>(fd), test_str, test_len);
+    KTEST_EXPECT_EQ(written, static_cast<int64_t>(test_len));
+
+    int64_t seek_res = vfs_seek(static_cast<int>(fd), 0, SEEK_SET);
+    KTEST_EXPECT_EQ(seek_res, 0);
+
+    char read_buf[32] = {};
+    int64_t bytes_read = vfs_read(static_cast<int>(fd), read_buf, test_len);
+    KTEST_EXPECT_EQ(bytes_read, static_cast<int64_t>(test_len));
+    KTEST_EXPECT(kstring::strcmp(read_buf, test_str) == 0);
+
+    SyscallFrame frame = {};
+    frame.arg4 = MAP_SHARED;
+    frame.arg5 = static_cast<uint64_t>(fd);
+
+    uint64_t mmap_res = syscall_handler(SYS_MMAP, 0, 4096, PROT_READ | PROT_WRITE, &frame);
+    KTEST_EXPECT(mmap_res != static_cast<uint64_t>(-1));
+
+    volatile char *shared_ptr = reinterpret_cast<volatile char *>(mmap_res);
+    KTEST_EXPECT(kstring::strcmp(const_cast<char *>(shared_ptr), test_str) == 0);
+
+    shared_ptr[0] = 'y';
+    shared_ptr[1] = 'o';
+    shared_ptr[2] = 'u';
+
+    seek_res = vfs_seek(static_cast<int>(fd), 0, SEEK_SET);
+    KTEST_EXPECT_EQ(seek_res, 0);
+
+    kstring::zero_memory(read_buf, sizeof(read_buf));
+    bytes_read = vfs_read(static_cast<int>(fd), read_buf, test_len);
+    KTEST_EXPECT_EQ(bytes_read, static_cast<int64_t>(test_len));
+    KTEST_EXPECT(kstring::strcmp(read_buf, "youlo Memfd!") == 0);
+
+    frame.arg4 = MAP_PRIVATE;
+    uint64_t p_mmap_res = syscall_handler(SYS_MMAP, 0, 4096, PROT_READ | PROT_WRITE, &frame);
+    KTEST_EXPECT(p_mmap_res != static_cast<uint64_t>(-1));
+    KTEST_EXPECT(p_mmap_res != mmap_res);
+
+    volatile char *private_ptr = reinterpret_cast<volatile char *>(p_mmap_res);
+    KTEST_EXPECT(kstring::strcmp(const_cast<char *>(private_ptr), "youlo Memfd!") == 0);
+
+    private_ptr[0] = 'H';
+    private_ptr[1] = 'e';
+    private_ptr[2] = 'l';
+
+    KTEST_EXPECT(kstring::strcmp(const_cast<char *>(shared_ptr), "youlo Memfd!") == 0);
+
+    seek_res = vfs_seek(static_cast<int>(fd), 0, SEEK_SET);
+    KTEST_EXPECT_EQ(seek_res, 0);
+    kstring::zero_memory(read_buf, sizeof(read_buf));
+    bytes_read = vfs_read(static_cast<int>(fd), read_buf, test_len);
+    KTEST_EXPECT(kstring::strcmp(read_buf, "youlo Memfd!") == 0);
+
+    int64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 4096, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    munmap_res = syscall_handler(SYS_MUNMAP, p_mmap_res, 4096, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    int close_res = vfs_close(static_cast<int>(fd));
+    KTEST_EXPECT_EQ(close_res, 0);
+
+    p->page_table = orig_page_table;
+    p->vma_list = orig_vma_list;
+    p->vma_count = orig_vma_count;
 }

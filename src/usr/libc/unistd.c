@@ -4,8 +4,11 @@
 #include <stdint.h>
 #include <uapi/fs.h>
 #include <uapi/syscalls.h>
+#include <sys/epoll.h>
+#include <sys/mman.h>
 
 #include "syscall.h"
+
 
 void exit(int status)
 {
@@ -293,3 +296,49 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     }
     return (int)syscall3(SYS_SIGACTION, (uint64_t)signum, 0, (uint64_t)oldact);
 }
+
+int epoll_create(int size)
+{
+    return (int)syscall1(SYS_EPOLL_CREATE, (uint64_t)size);
+}
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+{
+    return (int)syscall6(SYS_EPOLL_CTL, (uint64_t)epfd, (uint64_t)op, (uint64_t)fd, (uint64_t)event, 0, 0);
+}
+
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
+{
+    return (int)syscall6(SYS_EPOLL_WAIT, (uint64_t)epfd, (uint64_t)events, (uint64_t)maxevents, (uint64_t)timeout, 0, 0);
+}
+
+int mprotect(void *addr, size_t len, int prot)
+{
+    return (int)syscall3(SYS_MPROTECT, (uint64_t)addr, (uint64_t)len, (uint64_t)prot);
+}
+
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, int64_t offset)
+{
+    return (void *)syscall6(SYS_MMAP, (uint64_t)addr, (uint64_t)length, (uint64_t)prot, (uint64_t)flags, (uint64_t)fd, (uint64_t)offset);
+}
+
+int munmap(void *addr, size_t length)
+{
+    return (int)syscall2(SYS_MUNMAP, (uint64_t)addr, (uint64_t)length);
+}
+
+int memfd_create(const char *name, unsigned int flags)
+{
+    return (int)syscall2(SYS_MEMFD_CREATE, (uint64_t)name, (uint64_t)flags);
+}
+
+int futex(volatile uint32_t *uaddr, int op, uint32_t val)
+{
+    return (int)syscall3(SYS_FUTEX, (uint64_t)uaddr, (uint64_t)op, (uint64_t)val);
+}
+
+int thread_create(void (*fn)(void), void *arg, void *stack_addr, void *frame)
+{
+    return (int)syscall4(SYS_THREAD_CREATE, (uint64_t)fn, (uint64_t)arg, (uint64_t)stack_addr, (uint64_t)frame);
+}
+

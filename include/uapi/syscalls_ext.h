@@ -21,6 +21,10 @@ typedef struct thread_attr {
 #define MFD_CLOEXEC       0x0001u
 #define MFD_ALLOW_SEALING 0x0002u
 
+#define MAP_SHARED    0x01u
+#define MAP_PRIVATE   0x02u
+#define MAP_ANONYMOUS 0x20u
+
 #ifdef __cplusplus
 }
 #endif
