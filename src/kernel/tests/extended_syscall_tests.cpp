@@ -411,3 +411,67 @@ KTEST(extended_syscalls_vma_split_unmap)
     p->vma_count = orig_vma_count;
 }
 
+KTEST(extended_syscalls_mmap_offset)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+
+    uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vma_list;
+    uint32_t orig_vma_count = p->vma_count;
+
+    if (!p->page_table) {
+        p->page_table = vmm_get_kernel_pml4();
+    }
+
+    int64_t fd = sys_memfd_create(nullptr, 0);
+    KTEST_EXPECT(fd >= 3);
+
+    // Truncate memfd to 3 pages
+    int64_t trunc_res = sys_ftruncate(static_cast<int>(fd), 12288);
+    KTEST_EXPECT_EQ(trunc_res, 0);
+
+    // Eagerly write to the 3 pages via virtual space
+    SyscallFrame frame = {};
+    frame.arg4 = MAP_SHARED;
+    frame.arg5 = static_cast<uint64_t>(fd);
+    frame.arg6 = 0; // offset 0
+
+    uint64_t mmap_full = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &frame);
+    KTEST_EXPECT(mmap_full != static_cast<uint64_t>(-1));
+
+    volatile char *full_ptr = reinterpret_cast<volatile char *>(mmap_full);
+    full_ptr[0] = 'X';
+    full_ptr[4096] = 'Y';
+    full_ptr[8192] = 'Z';
+
+    // Unmap the initial full mapping
+    int64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_full, 12288, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    // Test unaligned offset (should fail with -1)
+    frame.arg6 = 1000; // unaligned
+    uint64_t mmap_failed = syscall_handler(SYS_MMAP, 0, 4096, PROT_READ | PROT_WRITE, &frame);
+    KTEST_EXPECT_EQ(mmap_failed, static_cast<uint64_t>(-1));
+
+    // Map offset-based: starts at offset 4096 (page 1), length 8192 (2 pages)
+    frame.arg6 = 4096; // page-aligned offset
+    uint64_t mmap_offset = syscall_handler(SYS_MMAP, 0, 8192, PROT_READ | PROT_WRITE, &frame);
+    KTEST_EXPECT(mmap_offset != static_cast<uint64_t>(-1));
+
+    volatile char *offset_ptr = reinterpret_cast<volatile char *>(mmap_offset);
+    KTEST_EXPECT_EQ(offset_ptr[0], 'Y');    // page 1 content
+    KTEST_EXPECT_EQ(offset_ptr[4096], 'Z'); // page 2 content
+
+    // Clean up
+    munmap_res = syscall_handler(SYS_MUNMAP, mmap_offset, 8192, 0, &frame);
+    KTEST_EXPECT_EQ(munmap_res, 0);
+
+    int close_res = vfs_close(static_cast<int>(fd));
+    KTEST_EXPECT_EQ(close_res, 0);
+
+    p->page_table = orig_page_table;
+    p->vma_list = orig_vma_list;
+    p->vma_count = orig_vma_count;
+}
+

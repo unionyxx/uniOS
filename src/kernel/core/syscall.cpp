@@ -1423,6 +1423,11 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 return static_cast<uint64_t>(-1);
             size_t num_pages = length / 4096;
 
+            uint64_t offset = frame->arg6;
+            if ((offset & 0xFFFULL) != 0)
+                return static_cast<uint64_t>(-1);
+            size_t page_offset = offset / 4096;
+
             uint64_t virt_start = 0x100000000ULL;
 
             // FIX: Restart loop if overlap is found to handle unsorted VMA linked list
@@ -1482,7 +1487,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 for (size_t i = 0; i < num_pages; i++) {
                     void *frame_ptr = nullptr;
                     if (is_shared) {
-                        frame_ptr = memfd_get_page(memfd_node, i);
+                        frame_ptr = memfd_get_page(memfd_node, page_offset + i);
                         if (!frame_ptr) {
                             for (size_t j = 0; j < i; j++) {
                                 uint64_t vaddr = virt_start + (j * 4096);
@@ -1508,7 +1513,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
                         }
-                        void *src_page = memfd_get_page(memfd_node, i);
+                        void *src_page = memfd_get_page(memfd_node, page_offset + i);
                         if (src_page) {
                             kstring::memcpy(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
                                             reinterpret_cast<const void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(src_page))),
