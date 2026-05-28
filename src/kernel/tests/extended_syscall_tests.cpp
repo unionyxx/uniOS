@@ -310,3 +310,38 @@ KTEST(extended_syscalls_memfd)
     p->vma_list = orig_vma_list;
     p->vma_count = orig_vma_count;
 }
+
+extern "C" int64_t sys_ftruncate(int fd, uint64_t size);
+extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd);
+
+KTEST(extended_syscalls_fd_transfer)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+
+    int64_t fd = sys_memfd_create(nullptr, 0);
+    KTEST_EXPECT(fd >= 3);
+
+    // Test ftruncate
+    int64_t trunc_res = sys_ftruncate(static_cast<int>(fd), 8192);
+    KTEST_EXPECT_EQ(trunc_res, 0);
+
+    VNode *node = p->fd_table[fd].vnode;
+    KTEST_EXPECT(node != nullptr);
+    KTEST_EXPECT_EQ(node->size, 8192ULL);
+
+    // Test fd_transfer (transfer to self as target_pid)
+    int64_t transferred_fd = sys_fd_transfer(p->pid, static_cast<int>(fd));
+    KTEST_EXPECT(transferred_fd >= 3);
+    KTEST_EXPECT(transferred_fd != fd);
+    KTEST_EXPECT(p->fd_table[transferred_fd].used);
+    KTEST_EXPECT_EQ(p->fd_table[transferred_fd].vnode, node);
+
+    // Clean up both FDs
+    int close_res1 = vfs_close(static_cast<int>(fd));
+    KTEST_EXPECT_EQ(close_res1, 0);
+
+    int close_res2 = vfs_close(static_cast<int>(transferred_fd));
+    KTEST_EXPECT_EQ(close_res2, 0);
+}
+

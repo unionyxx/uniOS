@@ -1193,6 +1193,113 @@ extern "C" int64_t sys_memfd_create(const char *name, unsigned int flags)
     return fd;
 }
 
+extern "C" int64_t sys_ftruncate(int fd, uint64_t size)
+{
+    Process *p = process_get_current();
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
+        return -9; // -EBADF
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
+        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+        return -9; // -EBADF
+    }
+
+    VNode *node = p->fd_table[fd].vnode;
+    __sync_fetch_and_add(&node->ref_count, 1);
+    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+
+    int64_t res = -22; // -EINVAL
+    if (node->ops->truncate) {
+        res = node->ops->truncate(node, size);
+    }
+
+    vfs_close_vnode(node);
+    return res;
+}
+
+extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
+{
+    if (fd < 0 || fd >= MAX_OPEN_FILES)
+        return -9; // -EBADF
+
+    Process *current = process_get_current();
+    if (!current)
+        return -1;
+
+    if (target_pid == 0) {
+        target_pid = gui_get_wm_pid();
+    }
+
+    Process *target = process_find_by_pid(target_pid);
+    if (!target)
+        return -3; // -ESRCH
+
+    uint64_t sl_flags = 0;
+    if (current == target) {
+        sl_flags = spinlock_acquire_irqsave(&current->fd_lock);
+    } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
+        sl_flags = spinlock_acquire_irqsave(&current->fd_lock);
+        spinlock_acquire(&target->fd_lock);
+    } else {
+        sl_flags = spinlock_acquire_irqsave(&target->fd_lock);
+        spinlock_acquire(&current->fd_lock);
+    }
+
+    if (!current->fd_table[fd].used || !current->fd_table[fd].vnode) {
+        if (current == target) {
+            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
+            spinlock_release(&target->fd_lock);
+            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        } else {
+            spinlock_release(&current->fd_lock);
+            spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+        }
+        return -9; // -EBADF
+    }
+
+    VNode *node = current->fd_table[fd].vnode;
+
+    int target_fd = -1;
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (!target->fd_table[i].used) {
+            target_fd = i;
+            break;
+        }
+    }
+
+    if (target_fd == -1) {
+        if (current == target) {
+            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
+            spinlock_release(&target->fd_lock);
+            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        } else {
+            spinlock_release(&current->fd_lock);
+            spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+        }
+        return -24; // -EMFILE
+    }
+
+    target->fd_table[target_fd] = current->fd_table[fd];
+    target->fd_table[target_fd].used = true;
+    __sync_fetch_and_add(&node->ref_count, 1);
+
+    if (current == target) {
+        spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+    } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
+        spinlock_release(&target->fd_lock);
+        spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+    } else {
+        spinlock_release(&current->fd_lock);
+        spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+    }
+
+    return target_fd;
+}
+
+
 extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2, uint64_t arg3,
                                     SyscallFrame *frame)
 {
@@ -2466,6 +2573,10 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_epoll_wait(static_cast<int>(arg1), reinterpret_cast<struct epoll_event *>(arg2), static_cast<int>(arg3), static_cast<int>(frame->arg4));
         case SYS_MEMFD_CREATE:
             return sys_memfd_create(reinterpret_cast<const char *>(arg1), static_cast<unsigned int>(arg2));
+        case SYS_FTRUNCATE:
+            return sys_ftruncate(static_cast<int>(arg1), arg2);
+        case SYS_FD_TRANSFER:
+            return sys_fd_transfer(arg1, static_cast<int>(arg2));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

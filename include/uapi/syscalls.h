@@ -95,6 +95,8 @@
 #define SYS_EPOLL_WAIT     274
 #define SYS_MPROTECT       275
 #define SYS_MEMFD_CREATE   276
+#define SYS_FTRUNCATE      277
+#define SYS_FD_TRANSFER    278
 
 /* Futex Opcodes */
 #define FUTEX_WAIT         0

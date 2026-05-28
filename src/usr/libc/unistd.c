@@ -342,3 +342,13 @@ int thread_create(void (*fn)(void), void *arg, void *stack_addr, void *frame)
     return (int)syscall4(SYS_THREAD_CREATE, (uint64_t)fn, (uint64_t)arg, (uint64_t)stack_addr, (uint64_t)frame);
 }
 
+int ftruncate(int fd, uint64_t size)
+{
+    return (int)syscall2(SYS_FTRUNCATE, (uint64_t)fd, size);
+}
+
+int fd_transfer(uint64_t target_pid, int fd)
+{
+    return (int)syscall2(SYS_FD_TRANSFER, target_pid, (uint64_t)fd);
+}
+

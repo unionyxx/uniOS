@@ -71,6 +71,8 @@ void sound_config(uint32_t sample_rate, uint8_t channels, uint8_t bits_per_sampl
 
 int futex(volatile uint32_t *uaddr, int op, uint32_t val);
 int thread_create(void (*fn)(void), void *arg, void *stack_addr, void *frame);
+int ftruncate(int fd, uint64_t size);
+int fd_transfer(uint64_t target_pid, int fd);
 
 #ifdef __cplusplus
 }
