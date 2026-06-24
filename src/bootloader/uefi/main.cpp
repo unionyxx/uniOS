@@ -149,11 +149,10 @@ struct TableEstimator
         const uint64_t end = align_up(virt_base + size, k_large_page_size);
         if (end == UINT64_MAX)
             return false;
-        for (uint64_t cursor = start; cursor < end; cursor += k_gib) {
+        // Align the tracking cursor down to k_gib to guarantee full tracking across boundaries
+        for (uint64_t cursor = align_down(start, k_gib); cursor < end; cursor += k_gib) {
             if (!pml4_entries.add(cursor >> 39) || !pd_entries.add(cursor >> 30))
                 return false;
-            const uint64_t next = cursor + k_gib;
-            (void)next; // Overflow check removed as k_gib is constant and address range is checked
         }
         return true;
     }
@@ -168,17 +167,14 @@ struct TableEstimator
         const uint64_t end = align_up(virt_base + size, k_page_size);
         if (end == UINT64_MAX)
             return false;
-        for (uint64_t cursor = start; cursor < end; cursor += k_gib) {
+        // Align the tracking cursor down to k_gib to guarantee full tracking across boundaries
+        for (uint64_t cursor = align_down(start, k_gib); cursor < end; cursor += k_gib) {
             if (!pml4_entries.add(cursor >> 39) || !pd_entries.add(cursor >> 30))
                 return false;
-            const uint64_t next = cursor + k_gib;
-            (void)next;
         }
         for (uint64_t cursor = align_down(start, k_large_page_size); cursor < end; cursor += k_large_page_size) {
             if (!pt_entries.add(cursor >> 21))
                 return false;
-            const uint64_t next = cursor + k_large_page_size;
-            (void)next;
         }
         return true;
     }
@@ -488,7 +484,8 @@ static EFI_STATUS fail_status(const char *message, EFI_STATUS status)
     if (efi_error(status))
         return fail_status("failed to open boot file", status);
 
-    uint8_t stack_info_buffer[sizeof(EFI_FILE_INFO) + 256];
+    // Enforce 8-byte structure alignment constraints directly on the stack buffer allocation
+    alignas(EFI_FILE_INFO) uint8_t stack_info_buffer[sizeof(EFI_FILE_INFO) + 256];
     void *info_buffer = stack_info_buffer;
     UINTN info_size = sizeof(stack_info_buffer);
     status = file->GetInfo(file, const_cast<EFI_GUID *>(&EFI_FILE_INFO_GUID), &info_size, info_buffer);
@@ -1194,15 +1191,8 @@ static bool gop_candidate_better(const GopModeCandidate &candidate, const GopMod
             continue;
         }
 
-        // Capping workaround: if we don't have an exact EDID hint (e.g. running in QEMU),
-        // and we have usable modes within the 1920x1080 limit, ignore any mode exceeding
-        // 1920x1080 to prevent virtual machine displays from overflowing the host screen.
-        if (!have_exact_hint_mode && have_within_cap_mode) {
-            if (info->HorizontalResolution > 1920 || info->VerticalResolution > 1080) {
-                g_boot_services->FreePool(info);
-                continue;
-            }
-        }
+        // Capping workaround removed to allow bare-metal real hardware execution paths
+        // to naturally scale up to native ultra-wide, 1440p, and 4K resolution envelopes.
 
         GopModeCandidate candidate = {};
         candidate.mode = mode;
