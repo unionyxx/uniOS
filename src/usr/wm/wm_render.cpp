@@ -360,12 +360,22 @@ bool ensure_surface_capacity(Surface *surface, uint32_t width, uint32_t height)
 {
     if (!surface)
         return false;
-    if (surface->buffer && surface->width == width && surface->height == height)
+    if (surface->buffer && surface->width >= width && surface->height >= height) {
+        surface->width = width;
+        surface->height = height;
         return true;
+    }
 
     gui_destroy_surface(surface);
-    *surface = gui_create_surface(width, height);
-    return surface->buffer != nullptr;
+    uint32_t padded_w = (width + 255u) & ~255u;
+    uint32_t padded_h = (height + 255u) & ~255u;
+    *surface = gui_create_surface(padded_w, padded_h);
+    if (surface->buffer) {
+        surface->width = width;
+        surface->height = height;
+        return true;
+    }
+    return false;
 }
 
 static void compose_desktop_for_blur(Surface *dst, const DirtyRect &clip, int offset_x, int offset_y)

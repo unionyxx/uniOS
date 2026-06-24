@@ -1525,13 +1525,50 @@ extern "C" int main(int argc, char **argv)
                     }
 
                     if (w.buffer_w != bw || w.buffer_h != bh) {
-                        Window old = w;
-                        w.buffer_w = bw;
-                        w.buffer_h = bh;
-                        mark_window_transition_damage(old, w);
-                        w.needs_full_redraw = true;
-                        invalidate_window_decoration_cache(w);
-                        invalidate_window_visibility_cache();
+                        bool is_memfd = (w.shm_id & 0x40000000) != 0;
+                        bool size_change_valid = false;
+
+                        if (!is_memfd) {
+                            // Legacy System V Shared Memory Path
+                            uint64_t actual_shm_size = syscall1(SYS_SHM_INFO, static_cast<uint64_t>(w.shm_id));
+                            uint64_t required_bytes = static_cast<uint64_t>(bw) * static_cast<uint64_t>(bh) * sizeof(uint32_t);
+                            if (actual_shm_size != static_cast<uint64_t>(-1) && required_bytes <= actual_shm_size) {
+                                size_change_valid = true;
+                            } else {
+                                LOG_WARN("wm", "Sanitizer blocked out-of-bounds SystemV size adjustment.");
+                            }
+                        } else {
+                            // Modern memfd Backed Graphics Pipeline
+                            uint64_t req_size = (uint64_t)bw * bh * 4;
+                            int fd = w.shm_id & ~0x40000000;
+                            
+                            // Safely establish an expanded virtual memory map for the existing file handle
+                            void *mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                            if (mapped_ptr != MAP_FAILED) {
+                                if (w.buffer) {
+                                    size_t old_size = (size_t)w.buffer_w * w.buffer_h * 4;
+                                    munmap(w.buffer, old_size);
+                                }
+                                w.buffer = reinterpret_cast<uint32_t *>(mapped_ptr);
+                                size_change_valid = true;
+                            } else {
+                                LOG_WARN("wm", "Sanitizer blocked invalid memfd mmap dimension growth.");
+                            }
+                        }
+
+                        if (size_change_valid) {
+                            Window old = w;
+                            w.buffer_w = bw;
+                            w.buffer_h = bh;
+                            mark_window_transition_damage(old, w);
+                            w.needs_full_redraw = true;
+                            invalidate_window_decoration_cache(w);
+                            invalidate_window_visibility_cache();
+                        } else {
+                            // Force-clamp geometry parameters back to the current safe buffer metrics
+                            bw = w.buffer_w;
+                            bh = w.buffer_h;
+                        }
                     }
                 }
 
