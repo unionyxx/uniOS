@@ -179,7 +179,7 @@ class TerminalEmulator
 public:
     TerminalEmulator()
         : m_scroll_offset(0), m_grid(nullptr), m_presented_grid(nullptr), m_history_len(nullptr), m_history_text(nullptr),
-          m_history_fg(nullptr), m_ready(false), m_cursor_visible(false)
+          m_history_fg(nullptr), m_history_start(0), m_ready(false), m_cursor_visible(false)
     {
     }
 
@@ -219,7 +219,7 @@ public:
     {
         uint32_t total = 0;
         for (uint32_t i = 0; i < m_history_count; i++) {
-            uint32_t len = m_history_len[i];
+            uint32_t len = history_line_len(i);
             uint32_t wraps = (len == 0) ? 1 : ((len + m_width - 1) / m_width);
             total += wraps;
         }
@@ -510,17 +510,32 @@ private:
 
     char *history_line(uint32_t index)
     {
-        return m_history_text + ((size_t)index * TERM_HISTORY_LINE_LEN);
+        uint32_t phys_idx = (m_history_start + index) % TERM_HISTORY_LINES;
+        return m_history_text + ((size_t)phys_idx * TERM_HISTORY_LINE_LEN);
     }
 
     const char *history_line(uint32_t index) const
     {
-        return m_history_text + ((size_t)index * TERM_HISTORY_LINE_LEN);
+        uint32_t phys_idx = (m_history_start + index) % TERM_HISTORY_LINES;
+        return m_history_text + ((size_t)phys_idx * TERM_HISTORY_LINE_LEN);
     }
 
     uint32_t *history_line_fg(uint32_t index)
     {
-        return m_history_fg + ((size_t)index * TERM_HISTORY_LINE_LEN);
+        uint32_t phys_idx = (m_history_start + index) % TERM_HISTORY_LINES;
+        return m_history_fg + ((size_t)phys_idx * TERM_HISTORY_LINE_LEN);
+    }
+
+    uint16_t &history_line_len(uint32_t index)
+    {
+        uint32_t phys_idx = (m_history_start + index) % TERM_HISTORY_LINES;
+        return m_history_len[phys_idx];
+    }
+
+    const uint16_t &history_line_len(uint32_t index) const
+    {
+        uint32_t phys_idx = (m_history_start + index) % TERM_HISTORY_LINES;
+        return m_history_len[phys_idx];
     }
 
     void reset_history()
@@ -531,6 +546,7 @@ private:
         memset(m_history_text, 0, (size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN);
         memset(m_history_fg, 0, (size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
         m_history_count = 1;
+        m_history_start = 0;
         m_history_cursor_col = 0;
         m_scroll_offset = 0;
         m_cursor_x = 0;
@@ -544,18 +560,18 @@ private:
     void push_history_line()
     {
         if (m_history_count >= TERM_HISTORY_LINES) {
-            memmove(m_history_len, m_history_len + 1, sizeof(uint16_t) * (TERM_HISTORY_LINES - 1));
-            memmove(m_history_text, m_history_text + TERM_HISTORY_LINE_LEN,
-                    (size_t)(TERM_HISTORY_LINES - 1) * TERM_HISTORY_LINE_LEN);
-            memmove(m_history_fg, m_history_fg + TERM_HISTORY_LINE_LEN,
-                    (size_t)(TERM_HISTORY_LINES - 1) * TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
+            m_history_start = (m_history_start + 1) % TERM_HISTORY_LINES;
             m_history_count = TERM_HISTORY_LINES - 1;
         }
 
-        char *next_line = history_line(m_history_count);
+        uint32_t new_logical_idx = m_history_count;
+        uint32_t phys_idx = (m_history_start + new_logical_idx) % TERM_HISTORY_LINES;
+
+        char *next_line = m_history_text + ((size_t)phys_idx * TERM_HISTORY_LINE_LEN);
         memset(next_line, 0, TERM_HISTORY_LINE_LEN);
-        memset(history_line_fg(m_history_count), 0, TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
-        m_history_len[m_history_count] = 0;
+        memset(m_history_fg + ((size_t)phys_idx * TERM_HISTORY_LINE_LEN), 0, TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
+        m_history_len[phys_idx] = 0;
+
         m_history_count++;
         m_history_cursor_col = 0;
         m_scroll_offset = 0;
@@ -567,7 +583,7 @@ private:
         if (m_history_count == 0)
             reset_history();
         uint32_t line_index = m_history_count - 1;
-        uint16_t len = m_history_len[line_index];
+        uint16_t len = history_line_len(line_index);
         uint32_t cursor_col = m_history_cursor_col;
         if (cursor_col >= TERM_HISTORY_LINE_LEN - 1) {
             push_history_line();
@@ -585,7 +601,7 @@ private:
             new_len = (uint16_t)(cursor_col + 1);
             line[new_len] = '\0';
         }
-        m_history_len[line_index] = new_len;
+        history_line_len(line_index) = new_len;
         m_history_cursor_col = cursor_col + 1;
     }
 
@@ -594,7 +610,7 @@ private:
         if (m_history_count == 0 || m_history_cursor_col == 0)
             return;
         uint32_t line_index = m_history_count - 1;
-        uint16_t len = m_history_len[line_index];
+        uint16_t len = history_line_len(line_index);
         uint32_t cursor_col = m_history_cursor_col - 1;
         char *line = history_line(line_index);
         uint32_t *fg = history_line_fg(line_index);
@@ -603,7 +619,7 @@ private:
             memmove(fg + cursor_col, fg + cursor_col + 1, (size_t)(len - cursor_col) * sizeof(uint32_t));
             len--;
             line[len] = '\0';
-            m_history_len[line_index] = len;
+            history_line_len(line_index) = len;
         }
         m_history_cursor_col = cursor_col;
     }
@@ -632,7 +648,7 @@ private:
 
         uint32_t skipped = 0;
         for (int line = (int)m_history_count - 1; line >= 0 && visible_count < visible_limit; line--) {
-            uint32_t len = m_history_len[line];
+            uint32_t len = history_line_len((uint32_t)line);
             uint32_t wraps = (len == 0) ? 1 : ((len + m_width - 1) / m_width);
             for (int seg = (int)wraps - 1; seg >= 0 && visible_count < visible_limit; seg--) {
                 if (skipped < m_scroll_offset) {
@@ -740,13 +756,13 @@ private:
             uint32_t line_index = m_history_count - 1;
             char *line = history_line(line_index);
             uint32_t *fg = history_line_fg(line_index);
-            uint16_t len = m_history_len[line_index];
+            uint16_t len = history_line_len(line_index);
             int mode = term_ansi_param_at(m_ansi_buf, 0, 0);
             uint32_t start = mode == 2 ? 0 : m_history_cursor_col;
             if (start < len) {
                 memset(line + start, 0, (size_t)(len - start));
                 memset(fg + start, 0, (size_t)(len - start) * sizeof(uint32_t));
-                m_history_len[line_index] = (uint16_t)start;
+                history_line_len(line_index) = (uint16_t)start;
                 if (m_history_cursor_col > start)
                     m_history_cursor_col = start;
                 m_needs_full_redraw = true;
@@ -754,7 +770,7 @@ private:
         } else if (final_char == 'C') {
             int n = term_ansi_param_at(m_ansi_buf, 0, 1);
             uint32_t line_index = m_history_count > 0 ? m_history_count - 1 : 0;
-            uint32_t len = m_history_count > 0 ? m_history_len[line_index] : 0;
+            uint32_t len = m_history_count > 0 ? history_line_len(line_index) : 0;
             m_history_cursor_col = (m_history_cursor_col + (uint32_t)n > len) ? len : m_history_cursor_col + n;
         } else if (final_char == 'D') {
             int n = term_ansi_param_at(m_ansi_buf, 0, 1);
@@ -795,6 +811,7 @@ private:
     uint32_t *m_history_fg;
     uint32_t m_history_count = 0;
     uint32_t m_history_cursor_col = 0;
+    uint32_t m_history_start = 0;
     Surface m_window;
     bool m_ready;
     bool m_cursor_visible;
@@ -932,12 +949,13 @@ extern "C" int main(int argc, char **argv)
             }
         }
 
-        // 2. Poll shell output if alive
+        // 2. Poll/Read shell output if alive
         if (shell_alive) {
+            int timeout = (needs_render || saw_event) ? 0 : 50;
             struct epoll_event events[1];
-            int n = epoll_wait(epfd, events, 1, 0);
+            int n = epoll_wait(epfd, events, 1, timeout);
             if (n > 0) {
-                char read_buf[1024];
+                char read_buf[2048];
                 int bytes_read = read(pipe_from_shell[0], read_buf, sizeof(read_buf));
                 if (bytes_read > 0) {
                     term.write_bytes(read_buf, (size_t)bytes_read);
@@ -964,8 +982,8 @@ extern "C" int main(int argc, char **argv)
 
         if (needs_render) {
             term.render_all();
-        } else if (!saw_event) {
-            sleep_ms(35);
+        } else if (!shell_alive && !saw_event) {
+            sleep_ms(50);
         }
     }
 

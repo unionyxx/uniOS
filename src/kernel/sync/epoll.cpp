@@ -3,6 +3,7 @@
 #include <kernel/fs/pipe.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
+#include <kernel/event.h>
 #include <kernel/sync/spinlock.h>
 #include <kernel/mm/heap.h>
 #include <kernel/debug.h>
@@ -260,7 +261,7 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         }
         spinlock_release_irqrestore(&inst->lock, inst_flags);
 
-        if (num_ready > 0 || timeout == 0) {
+        if (num_ready > 0 || timeout == 0 || !event_empty(current->event_queue)) {
             break;
         }
 
