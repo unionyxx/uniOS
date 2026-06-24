@@ -321,20 +321,47 @@ TableEstimator g_table_estimator = {};
     return base + length;
 }
 
+// Explicit type definition for unaligned 64-bit word operations with strict-aliasing overrides
+typedef uint64_t __attribute__((aligned(1), may_alias)) unaligned_u64;
+
 static void *copy_memory(void *dst, const void *src, size_t size)
 {
-    auto *out = static_cast<uint8_t *>(dst);
-    const auto *in = static_cast<const uint8_t *>(src);
-    for (size_t i = 0; i < size; i++)
-        out[i] = in[i];
+    auto *d64 = reinterpret_cast<unaligned_u64 *>(dst);
+    const auto *s64 = reinterpret_cast<const unaligned_u64 *>(src);
+    
+    // Perform bulk 8-byte transfers safely without alignment requirements
+    size_t words = size / 8;
+    for (size_t i = 0; i < words; ++i) {
+        d64[i] = s64[i];
+    }
+    
+    // Handle remaining bytes sequentially
+    auto *d8 = reinterpret_cast<uint8_t *>(d64 + words);
+    const auto *s8 = reinterpret_cast<const uint8_t *>(s64 + words);
+    size_t rem = size % 8;
+    for (size_t i = 0; i < rem; ++i) {
+        d8[i] = s8[i];
+    }
     return dst;
 }
 
 static void *set_memory(void *dst, int value, size_t size)
 {
-    auto *out = static_cast<uint8_t *>(dst);
-    for (size_t i = 0; i < size; i++)
-        out[i] = static_cast<uint8_t>(value);
+    uint64_t byte_val = static_cast<uint8_t>(value);
+    uint64_t word_val = (byte_val << 56) | (byte_val << 48) | (byte_val << 40) | (byte_val << 32) |
+                        (byte_val << 24) | (byte_val << 16) | (byte_val << 8)  | byte_val;
+                        
+    auto *d64 = reinterpret_cast<unaligned_u64 *>(dst);
+    size_t words = size / 8;
+    for (size_t i = 0; i < words; ++i) {
+        d64[i] = word_val;
+    }
+    
+    auto *d8 = reinterpret_cast<uint8_t *>(d64 + words);
+    size_t rem = size % 8;
+    for (size_t i = 0; i < rem; ++i) {
+        d8[i] = static_cast<uint8_t>(value);
+    }
     return dst;
 }
 
@@ -1484,14 +1511,33 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
 
     estimator->reset();
 
+    // The estimation logic must perfectly mirror map_direct_range to accurately track level-1 page tables
     auto add_direct_range = [estimator](uint64_t phys_base, uint64_t phys_length) -> bool {
         if (phys_length == 0)
             return true;
         const uint64_t phys_limit = range_end(phys_base, phys_length);
         if (phys_limit > k_direct_map_limit)
             return false;
-        return estimator->add_2m_range(phys_base, phys_length) &&
-               estimator->add_2m_range(k_hhdm_base + phys_base, phys_length);
+
+        uint64_t cursor = phys_base;
+        while (cursor < phys_limit) {
+            uint64_t remaining = phys_limit - cursor;
+            
+            if ((cursor & k_large_page_mask_inv) == 0 && remaining >= k_large_page_size) {
+                if (!estimator->add_2m_range(cursor, k_large_page_size) ||
+                    !estimator->add_2m_range(k_hhdm_base + cursor, k_large_page_size)) {
+                    return false;
+                }
+                cursor += k_large_page_size;
+            } else {
+                if (!estimator->add_4k_range(cursor, k_page_size) ||
+                    !estimator->add_4k_range(k_hhdm_base + cursor, k_page_size)) {
+                    return false;
+                }
+                cursor += k_page_size;
+            }
+        }
+        return true;
     };
 
     for (UINTN offset = 0; offset < memory_map_size; offset += descriptor_size) {
@@ -1518,17 +1564,25 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     if (phys_limit > k_direct_map_limit)
         return false;
 
-    const uint64_t start = align_down(phys_base, k_large_page_size);
-    const uint64_t end = align_up(phys_limit, k_large_page_size);
-    if (end == UINT64_MAX)
-        return false;
-    for (uint64_t phys = start; phys < end; phys += k_large_page_size) {
-        if (!tables->map_2m(phys, phys, k_pte_writable))
-            return false;
-        if (!tables->map_2m(k_hhdm_base + phys, phys, k_pte_writable))
-            return false;
-        const uint64_t next = phys + k_large_page_size;
-        (void)next;
+    uint64_t cursor = phys_base;
+    while (cursor < phys_limit) {
+        uint64_t remaining = phys_limit - cursor;
+        
+        // Use 2MB huge pages only if both the address and length align perfectly
+        if ((cursor & k_large_page_mask_inv) == 0 && remaining >= k_large_page_size) {
+            if (!tables->map_2m(cursor, cursor, k_pte_writable) ||
+                !tables->map_2m(k_hhdm_base + cursor, cursor, k_pte_writable)) {
+                return false;
+            }
+            cursor += k_large_page_size;
+        } else {
+            // Fall back to precise 4KB pages to protect adjacent unmapped regions
+            if (!tables->map_4k(cursor, cursor, k_pte_writable) ||
+                !tables->map_4k(k_hhdm_base + cursor, cursor, k_pte_writable)) {
+                return false;
+            }
+            cursor += k_page_size;
+        }
     }
     return true;
 }
@@ -1541,6 +1595,10 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
 {
     if (!tables || !memory_map || descriptor_size == 0)
         return false;
+
+    // Clear the entire memory allocation pool to wipe out stale sub-nodes from previous attempts
+    zero_memory(reinterpret_cast<void *>(pool_phys), pool_pages * k_page_size);
+
     if (!tables->init(pool_phys, pool_pages))
         return false;
 
