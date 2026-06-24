@@ -319,19 +319,19 @@ static int64_t unifs_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t of
     return static_cast<int64_t>(to_read);
 }
 
-static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint64_t offset, FileDescriptor *)
+static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint64_t offset, FileDescriptor *fd)
 {
     if (node->is_dir)
         return -1;
     string_view name(static_cast<const char *>(node->fs_data));
 
-    if (offset == 0) {
+    if (offset == 0 && fd) {
         if (unifs_write(name, buf, size) == UnifsError::Ok)
             return static_cast<int64_t>(size);
         return -1;
     }
 
-    if (is_file_open(name.data()))
+    if (fd && is_file_open(name.data()))
         return -1;
 
     RAMFile *file = find_ram_file(name);
@@ -522,7 +522,7 @@ static void unifs_vfs_close(VNode *node)
     }
 }
 
-static VNodeOps unifs_file_ops = {.read = unifs_vfs_read,
+VNodeOps unifs_file_ops = {.read = unifs_vfs_read,
                                   .write = unifs_vfs_write,
                                   .readdir = nullptr,
                                   .lookup = nullptr,

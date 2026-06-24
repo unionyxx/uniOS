@@ -45,6 +45,9 @@ struct Mount
 
 #define MAX_VFS_FDS 128
 
+extern VNodeOps fat32_file_ops;
+extern VNodeOps unifs_file_ops;
+
 // VFS API
 void vfs_init();
 int vfs_mount(const char *path, VNode *root);

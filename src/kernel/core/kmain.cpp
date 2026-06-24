@@ -418,7 +418,6 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
 
 #ifdef DEBUG
     BOOT_LOG("Kernel tests enabled");
-    ktest_run_all();
 #endif
 
     BOOT_LOG("Driver initialization");
@@ -480,6 +479,7 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     boot_timing_log("kernel critical path ready");
 
 #ifdef DEBUG
+    ktest_run_all();
     gfx_swap_buffers();
 #else
     DEBUG_TRACE("kernel tests disabled in release build");

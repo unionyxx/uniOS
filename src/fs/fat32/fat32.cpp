@@ -1019,7 +1019,9 @@ static int fat32_vfs_mkdir(VNode *dir, const char *name);
 static int fat32_vfs_unlink(VNode *dir, const char *name);
 static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir, const char *new_name);
 
-static VNodeOps fat32_file_ops = {.read = fat32_vfs_read,
+} // namespace
+
+VNodeOps fat32_file_ops = {.read = fat32_vfs_read,
                                   .write = fat32_vfs_write,
                                   .readdir = nullptr,
                                   .lookup = nullptr,
@@ -1030,6 +1032,8 @@ static VNodeOps fat32_file_ops = {.read = fat32_vfs_read,
                                   .truncate = fat32_vfs_truncate,
                                   .sync = nullptr,
                                   .close = fat32_vfs_close};
+
+namespace {
 
 static VNodeOps fat32_dir_ops = {.read = nullptr,
                                  .write = nullptr,

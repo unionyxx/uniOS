@@ -671,4 +671,77 @@ KTEST(extended_syscalls_signal_context)
     p->vma_count = orig_vma_count;
 }
 
+KTEST(extended_vfs_page_cache)
+{
+    // Create three files of size 200 * 4096 = 819,200 bytes on UniFS
+    int fd1 = vfs_open("/file1.txt", O_CREAT | O_RDWR);
+    int fd2 = vfs_open("/file2.txt", O_CREAT | O_RDWR);
+    int fd3 = vfs_open("/file3.txt", O_CREAT | O_RDWR);
+    
+    KTEST_EXPECT(fd1 >= 3);
+    KTEST_EXPECT(fd2 >= 3);
+    KTEST_EXPECT(fd3 >= 3);
+    
+    // Allocate buffer
+    uint8_t *buf = static_cast<uint8_t *>(malloc(4096));
+    KTEST_EXPECT(buf != nullptr);
+    
+    // Fill buffer with some recognizable pattern
+    for (int i = 0; i < 4096; i++) {
+        buf[i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    // Write 200 pages to file1.txt
+    for (int i = 0; i < 200; i++) {
+        int64_t written = vfs_write(fd1, buf, 4096);
+        KTEST_EXPECT_EQ(written, 4096);
+    }
+    
+    // Write 200 pages to file2.txt
+    for (int i = 0; i < 200; i++) {
+        int64_t written = vfs_write(fd2, buf, 4096);
+        KTEST_EXPECT_EQ(written, 4096);
+    }
+    
+    // Write 200 pages to file3.txt
+    // This will exceed the 512 max pages, triggering eviction/flushing of file1.txt pages!
+    for (int i = 0; i < 200; i++) {
+        int64_t written = vfs_write(fd3, buf, 4096);
+        KTEST_EXPECT_EQ(written, 4096);
+    }
+    
+    // Now seek back and read from file1.txt to verify data is intact (read from disk since it was evicted)
+    int64_t seek_res = vfs_seek(fd1, 0, SEEK_SET);
+    KTEST_EXPECT_EQ(seek_res, 0);
+    
+    uint8_t *read_buf = static_cast<uint8_t *>(malloc(4096));
+    KTEST_EXPECT(read_buf != nullptr);
+    
+    for (int i = 0; i < 200; i++) {
+        int64_t bytes_read = vfs_read(fd1, read_buf, 4096);
+        KTEST_EXPECT_EQ(bytes_read, 4096);
+        // Verify contents
+        for (int j = 0; j < 4096; j++) {
+            if (read_buf[j] != buf[j]) {
+                KTEST_EXPECT_EQ(read_buf[j], buf[j]);
+                break;
+            }
+        }
+    }
+    
+    // Close all files
+    KTEST_EXPECT_EQ(vfs_close(fd1), 0);
+    KTEST_EXPECT_EQ(vfs_close(fd2), 0);
+    KTEST_EXPECT_EQ(vfs_close(fd3), 0);
+    
+    // Cleanup files from unifs
+    vfs_unlink("/file1.txt");
+    vfs_unlink("/file2.txt");
+    vfs_unlink("/file3.txt");
+    
+    free(buf);
+    free(read_buf);
+}
+
+
 

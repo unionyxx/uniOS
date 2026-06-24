@@ -13,6 +13,270 @@ using kstd::KBuffer;
 using kstd::unique_ptr;
 using kstring::string_view;
 
+constexpr size_t MAX_CACHE_PAGES = 512;
+
+struct PageCacheEntry {
+    VNode *vnode;      // Associated VNode (keeps it pinned if dirty/valid, unless closed)
+    VNodeOps *ops;     // Checked against fat32_file_ops/unifs_file_ops
+    uint64_t inode_id; // Starting cluster for FAT32, 0 for UniFS
+    void *fs;          // FAT32 filesystem pointer
+    char path[256];    // UniFS path
+    
+    uint64_t page_index; // Offset / 4096
+    uint8_t data[4096];
+    bool dirty;
+    uint64_t last_access;
+    bool valid;
+};
+
+static PageCacheEntry g_page_cache[MAX_CACHE_PAGES];
+static uint64_t g_page_cache_tick = 0;
+static Spinlock g_pc_lock = SPINLOCK_INIT;
+
+static bool vfs_is_same_file(const VNode *a, const VNode *b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    if (a->ops != b->ops) return false;
+    if (a->ops == &fat32_file_ops) {
+        if (a->inode_id != b->inode_id) return false;
+        if (!a->fs_data || !b->fs_data) return false;
+        void* fs_a = *static_cast<void**>(a->fs_data);
+        void* fs_b = *static_cast<void**>(b->fs_data);
+        return fs_a == fs_b;
+    }
+    if (a->ops == &unifs_file_ops) {
+        if (!a->fs_data || !b->fs_data) return false;
+        return kstring::strcmp(static_cast<const char*>(a->fs_data), static_cast<const char*>(b->fs_data)) == 0;
+    }
+    return false;
+}
+
+static VNode *vfs_find_open_vnode_for(const VNode *like_node) {
+    Process *start = scheduler_get_process_list();
+    if (!start)
+        return nullptr;
+    Process *curr = start;
+    do {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
+                VNode *other = curr->fd_table[i].vnode;
+                if (other != like_node && other->ref_count > 0 && vfs_is_same_file(other, like_node)) {
+                    return other;
+                }
+            }
+        }
+        curr = curr->next;
+    } while (curr != start);
+    return nullptr;
+}
+
+static bool pc_match(const PageCacheEntry &entry, const VNode *node) {
+    if (!entry.valid || !node)
+        return false;
+    if (entry.ops != node->ops)
+        return false;
+    if (node->ops == &fat32_file_ops) {
+        if (entry.inode_id != node->inode_id)
+            return false;
+        if (!node->fs_data)
+            return false;
+        void* fs = *static_cast<void**>(node->fs_data);
+        return entry.fs == fs;
+    }
+    if (node->ops == &unifs_file_ops) {
+        if (!node->fs_data)
+            return false;
+        return kstring::strcmp(entry.path, static_cast<const char*>(node->fs_data)) == 0;
+    }
+    return false;
+}
+
+static PageCacheEntry *pc_find_locked(const VNode *node, uint64_t page_index) {
+    for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+        if (g_page_cache[i].valid && g_page_cache[i].page_index == page_index && pc_match(g_page_cache[i], node)) {
+            return &g_page_cache[i];
+        }
+    }
+    return nullptr;
+}
+
+static void pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags) {
+    if (!entry->valid || !entry->dirty)
+        return;
+        
+    VNode *node = entry->vnode;
+    uint64_t offset = entry->page_index * 4096;
+    if (offset >= node->size) {
+        entry->dirty = false;
+        return;
+    }
+    
+    uint64_t to_write = 4096;
+    if (offset + to_write > node->size) {
+        to_write = node->size - offset;
+    }
+    
+    uint8_t *write_buf = static_cast<uint8_t *>(malloc(4096));
+    if (!write_buf)
+        return;
+    kstring::memcpy(write_buf, entry->data, 4096);
+    
+    entry->dirty = false;
+    
+    // Pin the node
+    __sync_fetch_and_add(&node->ref_count, 1);
+    
+    spinlock_release_irqrestore(&g_pc_lock, flags);
+    
+    node->ops->write(node, write_buf, to_write, offset, nullptr);
+    free(write_buf);
+    
+    // Unpin node (use vfs_close_vnode to safely free if ref_count hits 0)
+    vfs_close_vnode(node);
+    
+    flags = spinlock_acquire_irqsave(&g_pc_lock);
+}
+
+static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_index, uint64_t &flags) {
+    while (true) {
+        PageCacheEntry *best_victim = nullptr;
+        for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+            if (!g_page_cache[i].valid) {
+                best_victim = &g_page_cache[i];
+                break;
+            }
+        }
+        
+        if (!best_victim) {
+            uint64_t oldest_access = -1ULL;
+            for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+                if (g_page_cache[i].valid && g_page_cache[i].last_access < oldest_access) {
+                    oldest_access = g_page_cache[i].last_access;
+                    best_victim = &g_page_cache[i];
+                }
+            }
+        }
+        
+        if (!best_victim) {
+            return nullptr;
+        }
+        
+        if (best_victim->valid && best_victim->dirty) {
+            pc_flush_entry_unlocked(best_victim, flags);
+            continue;
+        }
+        
+        best_victim->valid = false;
+        best_victim->vnode = node;
+        best_victim->ops = node->ops;
+        best_victim->inode_id = node->inode_id;
+        if (node->ops == &fat32_file_ops) {
+            best_victim->fs = node->fs_data ? *static_cast<void**>(node->fs_data) : nullptr;
+            best_victim->path[0] = '\0';
+        } else if (node->ops == &unifs_file_ops) {
+            best_victim->fs = nullptr;
+            if (node->fs_data) {
+                kstring::strncpy(best_victim->path, static_cast<const char*>(node->fs_data), 255);
+                best_victim->path[255] = '\0';
+            } else {
+                best_victim->path[0] = '\0';
+            }
+        }
+        best_victim->page_index = page_index;
+        best_victim->dirty = false;
+        best_victim->last_access = ++g_page_cache_tick;
+        
+        return best_victim;
+    }
+}
+
+static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
+    uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
+    PageCacheEntry *entry = pc_find_locked(node, page_index);
+    if (entry) {
+        entry->last_access = ++g_page_cache_tick;
+        spinlock_release_irqrestore(&g_pc_lock, flags);
+        return entry;
+    }
+    spinlock_release_irqrestore(&g_pc_lock, flags);
+    
+    uint8_t *temp_buf = static_cast<uint8_t *>(malloc(4096));
+    if (!temp_buf)
+        return nullptr;
+    kstring::zero_memory(temp_buf, 4096);
+    
+    uint64_t offset = page_index * 4096;
+    if (offset < node->size) {
+        uint64_t to_read = 4096;
+        if (offset + to_read > node->size) {
+            to_read = node->size - offset;
+        }
+        int64_t bytes_read = node->ops->read(node, temp_buf, to_read, offset, nullptr);
+        if (bytes_read < 0) {
+            free(temp_buf);
+            return nullptr;
+        }
+        if (static_cast<uint64_t>(bytes_read) < to_read) {
+            kstring::zero_memory(temp_buf + bytes_read, 4096 - bytes_read);
+        }
+    }
+    
+    flags = spinlock_acquire_irqsave(&g_pc_lock);
+    entry = pc_find_locked(node, page_index);
+    if (entry) {
+        entry->last_access = ++g_page_cache_tick;
+        spinlock_release_irqrestore(&g_pc_lock, flags);
+        free(temp_buf);
+        return entry;
+    }
+    
+    entry = pc_evict_and_allocate_locked(node, page_index, flags);
+    if (!entry) {
+        spinlock_release_irqrestore(&g_pc_lock, flags);
+        free(temp_buf);
+        return nullptr;
+    }
+    
+    kstring::memcpy(entry->data, temp_buf, 4096);
+    entry->valid = true;
+    spinlock_release_irqrestore(&g_pc_lock, flags);
+    
+    free(temp_buf);
+    return entry;
+}
+
+void pc_purge_vnode(VNode *node) {
+    if (node->ops != &fat32_file_ops && node->ops != &unifs_file_ops)
+        return;
+
+    uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
+    
+    VNode *alternate = vfs_find_open_vnode_for(node);
+    if (alternate) {
+        __sync_fetch_and_add(&alternate->ref_count, 1);
+    }
+    
+    for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+        if (g_page_cache[i].valid && pc_match(g_page_cache[i], node)) {
+            if (g_page_cache[i].dirty) {
+                pc_flush_entry_unlocked(&g_page_cache[i], flags);
+            }
+            if (g_page_cache[i].valid && pc_match(g_page_cache[i], node)) {
+                if (alternate) {
+                    g_page_cache[i].vnode = alternate;
+                } else {
+                    g_page_cache[i].valid = false;
+                }
+            }
+        }
+    }
+    spinlock_release_irqrestore(&g_pc_lock, flags);
+    
+    if (alternate) {
+        vfs_close_vnode(alternate);
+    }
+}
+
 static Mount *g_mount_list = nullptr;
 static Spinlock g_mount_lock = SPINLOCK_INIT;
 
@@ -305,12 +569,24 @@ void vfs_sync()
         }
     }
     spinlock_release_irqrestore(&g_mount_lock, flags);
+
+    uint64_t pc_flags = spinlock_acquire_irqsave(&g_pc_lock);
+    for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+        if (g_page_cache[i].valid && g_page_cache[i].dirty) {
+            pc_flush_entry_unlocked(&g_page_cache[i], pc_flags);
+        }
+    }
+    spinlock_release_irqrestore(&g_pc_lock, pc_flags);
 }
 
 void vfs_close_vnode(VNode *node)
 {
     if (!node)
         return;
+
+    if (node->ref_count == 1) {
+        pc_purge_vnode(node);
+    }
 
     if (__sync_sub_and_fetch(&node->ref_count, 1) == 0) {
         bool is_mount_root = false;
@@ -468,6 +744,44 @@ int64_t vfs_read(int fd, void *buf, uint64_t size)
     if ((f->flags & FD_FLAG_STORAGE_GUARDED) != 0 && !storage_reads_allowed())
         return -1;
 
+    if ((f->vnode->ops == &fat32_file_ops || f->vnode->ops == &unifs_file_ops) && !f->vnode->is_dir) {
+        uint64_t offset = f->offset;
+        uint64_t bytes_to_read = size;
+        if (offset >= f->vnode->size) {
+            return 0; // EOF
+        }
+        if (offset + bytes_to_read > f->vnode->size) {
+            bytes_to_read = f->vnode->size - offset;
+        }
+        
+        uint8_t *dest = static_cast<uint8_t *>(buf);
+        uint64_t total_read = 0;
+        
+        while (total_read < bytes_to_read) {
+            uint64_t curr_offset = offset + total_read;
+            uint64_t page_index = curr_offset / 4096;
+            uint64_t page_offset = curr_offset % 4096;
+            uint64_t page_bytes = 4096 - page_offset;
+            if (page_bytes > (bytes_to_read - total_read)) {
+                page_bytes = bytes_to_read - total_read;
+            }
+            
+            PageCacheEntry *entry = pc_get_page(f->vnode, page_index);
+            if (!entry) {
+                if (total_read > 0) break;
+                return -1;
+            }
+            
+            kstring::memcpy(dest + total_read, entry->data + page_offset, page_bytes);
+            total_read += page_bytes;
+        }
+        
+        if (total_read > 0) {
+            f->offset += total_read;
+        }
+        return total_read;
+    }
+
     int64_t res = f->vnode->ops->read(f->vnode, buf, size, f->offset, f);
     if (res > 0)
         f->offset += static_cast<uint64_t>(res);
@@ -484,6 +798,67 @@ int64_t vfs_write(int fd, const void *buf, uint64_t size)
         return -1;
     if ((f->flags & FD_FLAG_STORAGE_GUARDED_WRITE) != 0 && !storage_writes_allowed())
         return -1;
+
+    if ((f->vnode->ops == &fat32_file_ops || f->vnode->ops == &unifs_file_ops) && !f->vnode->is_dir) {
+        uint64_t offset = f->offset;
+        uint64_t bytes_to_write = size;
+        if (bytes_to_write == 0)
+            return 0;
+            
+        const uint8_t *src = static_cast<const uint8_t *>(buf);
+        uint64_t total_written = 0;
+        
+        while (total_written < bytes_to_write) {
+            uint64_t curr_offset = offset + total_written;
+            uint64_t page_index = curr_offset / 4096;
+            uint64_t page_offset = curr_offset % 4096;
+            uint64_t page_bytes = 4096 - page_offset;
+            if (page_bytes > (bytes_to_write - total_written)) {
+                page_bytes = bytes_to_write - total_written;
+            }
+            
+            PageCacheEntry *entry = pc_get_page(f->vnode, page_index);
+            if (!entry) {
+                if (total_written > 0) break;
+                return -1;
+            }
+            
+            kstring::memcpy(entry->data + page_offset, src + total_written, page_bytes);
+            
+            uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
+            entry->dirty = true;
+            entry->last_access = ++g_page_cache_tick;
+            spinlock_release_irqrestore(&g_pc_lock, flags);
+            
+            total_written += page_bytes;
+        }
+        
+        if (total_written > 0) {
+            f->offset += total_written;
+            if (f->offset > f->vnode->size) {
+                uint64_t new_size = f->offset;
+                f->vnode->size = new_size;
+                
+                // Synchronize size across other open vnodes representing this file
+                Process *start = scheduler_get_process_list();
+                if (start) {
+                    Process *curr = start;
+                    do {
+                        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                            if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
+                                VNode *other = curr->fd_table[i].vnode;
+                                if (other != f->vnode && other->ref_count > 0 && vfs_is_same_file(other, f->vnode)) {
+                                    other->size = new_size;
+                                }
+                            }
+                        }
+                        curr = curr->next;
+                    } while (curr != start);
+                }
+            }
+        }
+        return total_written;
+    }
 
     int64_t res = f->vnode->ops->write(f->vnode, buf, size, f->offset, f);
     if (res > 0)
