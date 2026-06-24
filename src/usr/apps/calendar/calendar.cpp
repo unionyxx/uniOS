@@ -95,27 +95,26 @@ static bool point_in_rect(const Rect &rect, int x, int y)
     return rect.w > 0 && rect.h > 0 && x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
 }
 
-static void draw_arrow(Surface *win, int cx, int cy, int size, bool left, uint32_t color)
+static void draw_chevron(Surface *win, int cx, int cy, int size, bool left, uint32_t color)
 {
     int half = size / 2;
-    for (int i = 0; i < half; i++) {
-        int x = left ? (cx - i) : (cx + i);
+    for (int i = 0; i <= half; i++) {
+        int x = left ? (cx + i - half / 2) : (cx - i + half / 2);
         int y1 = cy - i;
         int y2 = cy + i;
-        if (x >= 0 && y1 >= 0 && x < (int)win->width && y1 < (int)win->height)
-            gui_draw_pixel(win, x, y1, color);
-        if (x >= 0 && y2 >= 0 && x < (int)win->width && y2 < (int)win->height)
-            gui_draw_pixel(win, x, y2, color);
+        if (x >= 0 && x < (int)win->width) {
+            if (y1 >= 0 && y1 < (int)win->height)
+                gui_draw_pixel(win, x, y1, color);
+            if (y2 >= 0 && y2 < (int)win->height)
+                gui_draw_pixel(win, x, y2, color);
+        }
     }
-    int x = left ? (cx - half) : (cx + half);
-    if (x >= 0 && cy >= 0 && x < (int)win->width && cy < (int)win->height)
-        gui_draw_pixel(win, x, cy, color);
 }
 
 static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rects, int hover_day_row,
                           int hover_day_col, int hover_arrow)
 {
-    if (!win || !state || !rects)
+    if (!win || !win->buffer || !state || !rects)
         return;
 
     gui_fill_surface(win, g_gui_style.app_bg);
@@ -148,9 +147,9 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     rects->next_btn = gui_rect_make(w - pad - gui_scaled_metric(28), header_y, gui_scaled_metric(28), line_h);
 
     uint32_t arrow_color = hover_arrow == -1 ? g_gui_style.text : g_gui_style.text_dim;
-    draw_arrow(win, rects->prev_btn.x + rects->prev_btn.w / 2, arrow_y, arrow_size, true, arrow_color);
+    draw_chevron(win, rects->prev_btn.x + rects->prev_btn.w / 2, arrow_y, arrow_size, true, arrow_color);
     arrow_color = hover_arrow == 1 ? g_gui_style.text : g_gui_style.text_dim;
-    draw_arrow(win, rects->next_btn.x + rects->next_btn.w / 2, arrow_y, arrow_size, false, arrow_color);
+    draw_chevron(win, rects->next_btn.x + rects->next_btn.w / 2, arrow_y, arrow_size, false, arrow_color);
 
     int grid_y = header_y + line_h + gui_space_2();
     int day_label_h = line_h + gui_space_1();
@@ -177,8 +176,19 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     if (prev_m < 1) { prev_m = 12; prev_y--; }
     int prev_dim = days_in_month(prev_y, prev_m);
 
-    int day = 1;
-    int next_day = 1;
+    int current_month_day = 1;
+    int next_month_day = 1;
+
+    auto format_day_string = [](int val, char *buf) {
+        if (val >= 10) {
+            buf[0] = '0' + (val / 10);
+            buf[1] = '0' + (val % 10);
+            buf[2] = '\0';
+        } else {
+            buf[0] = '0' + val;
+            buf[1] = '\0';
+        }
+    };
 
     for (int row = 0; row < 6; row++) {
         for (int col = 0; col < 7; col++) {
@@ -191,25 +201,30 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
             uint32_t bg = g_gui_style.app_surface;
             uint32_t fg = g_gui_style.text_muted;
             uint32_t border = g_gui_style.border;
+            bool is_hovered = (hover_day_row == row && hover_day_col == col);
+
+            rects->day_cells[row][col] = gui_rect_make(cx, cy, cw, cell_h);
 
             if (row == 0 && col < start_wd) {
-                snprintf(day_str, sizeof(day_str), "%d", prev_dim - start_wd + col + 1);
-                rects->day_cells[row][col] = gui_rect_make(0, 0, 0, 0);
-            } else if (day > dim) {
-                snprintf(day_str, sizeof(day_str), "%d", next_day++);
-                rects->day_cells[row][col] = gui_rect_make(0, 0, 0, 0);
+                int d_num = prev_dim - start_wd + col + 1;
+                format_day_string(d_num, day_str);
+                bg = is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_bg;
+                fg = g_gui_style.text_muted;
+            } else if (current_month_day > dim) {
+                format_day_string(next_month_day, day_str);
+                bg = is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_bg;
+                fg = g_gui_style.text_muted;
+                next_month_day++;
             } else {
-                rects->day_cells[row][col] = gui_rect_make(cx, cy, cw, cell_h);
-                
-                bool is_today = state->year == state->today_year && state->month == state->today_month && day == state->today_day;
-                bool is_selected = day == state->selected_day;
-                bool is_hovered = (hover_day_row == row && hover_day_col == col);
+                bool is_today = state->year == state->today_year && state->month == state->today_month && current_month_day == state->today_day;
+                bool is_selected = current_month_day == state->selected_day;
 
                 bg = is_selected ? g_gui_style.accent : (is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_surface);
                 fg = is_selected ? 0xFFFFFFFFu : (is_today ? g_gui_style.accent : g_gui_style.text);
                 border = is_today ? g_gui_style.accent : g_gui_style.border;
 
-                snprintf(day_str, sizeof(day_str), "%d", day++);
+                format_day_string(current_month_day, day_str);
+                current_month_day++;
             }
 
             gui_fill_rounded_rect(win, cx, cy, cw, cell_h, r_corner, bg);
@@ -253,8 +268,11 @@ extern "C" int main()
     gui_sync_theme_from_registry();
     gui_request_focus();
 
-    // Use win.height * win.pitch to properly account for OS padding bytes
-    uint32_t *backbuffer_data = (uint32_t *)malloc(win.height * win.pitch);
+    size_t backbuffer_capacity = (size_t)win.height * win.pitch;
+    uint32_t *backbuffer_data = (uint32_t *)malloc(backbuffer_capacity);
+    if (!backbuffer_data)
+        return 1;
+
     Surface backbuffer = win;
     backbuffer.buffer = backbuffer_data;
     backbuffer.owns_buffer = false;
@@ -274,14 +292,19 @@ extern "C" int main()
         Event ev = {};
         while (poll_event(&ev) > 0) {
             if (ev.type == EVT_WINDOW_CLOSE) {
-                if (backbuffer_data) free(backbuffer_data);
+                free(backbuffer_data);
                 return 0;
             }
             if (ev.type == EVT_WINDOW_RESIZE) {
                 if (gui_sync_window_size(&win) > 0) {
-                    if (backbuffer_data) free(backbuffer_data);
-                    // Crucial: Allocate using pitch, NOT width
-                    backbuffer_data = (uint32_t *)malloc(win.height * win.pitch);
+                    size_t needed_capacity = (size_t)win.height * win.pitch;
+                    if (needed_capacity > backbuffer_capacity) {
+                        uint32_t *new_ptr = (uint32_t *)realloc(backbuffer_data, needed_capacity);
+                        if (new_ptr) {
+                            backbuffer_data = new_ptr;
+                            backbuffer_capacity = needed_capacity;
+                        }
+                    }
                     if (backbuffer_data) {
                         backbuffer = win;
                         backbuffer.buffer = backbuffer_data;
@@ -322,12 +345,19 @@ extern "C" int main()
                 find_day_at(&rects, ev.mouse.x, ev.mouse.y, &row, &col);
                 if (row >= 0 && col >= 0) {
                     int start_wd = weekday(state.year, state.month, 1);
-                    int day = row * 7 + col - start_wd + 1;
+                    int clicked_day = row * 7 + col - start_wd + 1;
                     int dim = days_in_month(state.year, state.month);
-                    if (day >= 1 && day <= dim) {
-                        state.selected_day = day;
-                        needs_redraw = true;
+                    
+                    if (clicked_day < 1) {
+                        calendar_prev_month(&state);
+                        state.selected_day = days_in_month(state.year, state.month) + clicked_day;
+                    } else if (clicked_day > dim) {
+                        calendar_next_month(&state);
+                        state.selected_day = clicked_day - dim;
+                    } else {
+                        state.selected_day = clicked_day;
                     }
+                    needs_redraw = true;
                 }
                 continue;
             }
