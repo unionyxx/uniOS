@@ -33,7 +33,7 @@ static constexpr int WINDOW_DAMAGE_PAD_BASE = 3;
 static constexpr int FRAME_BORDER = 1;
 static constexpr int FRAME_OCCLUSION_INSET = 4;
 static constexpr int RESIZE_GRIP = 9;
-static constexpr int BTN_SIZE = 12;
+static constexpr int BTN_SIZE = 13;
 static constexpr int BTN_INSET_X = 10;
 static constexpr int BTN_INSET_Y = 0;
 static constexpr int BTN_SPACING = 20;
@@ -544,7 +544,7 @@ static inline DirtyRect window_button_bounds(const Window &w, int button_index)
     int button_size = wm_button_size();
     int title_bar_h = wm_title_bar_h();
     int border = wm_frame_border();
-    int button_y = w.y - title_bar_h + border + (title_bar_h - button_size) / 2 + wm_button_inset_y();
+    int button_y = w.y - title_bar_h + border + (title_bar_h - border - button_size) / 2 + wm_button_inset_y();
     return {w.x + wm_button_inset_x() + button_index * wm_button_spacing(), button_y, button_size, button_size};
 }
 static inline void window_button_center(const Window &w, int button_index, int *cx, int *cy)

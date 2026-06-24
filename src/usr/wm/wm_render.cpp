@@ -983,7 +983,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
 
     const GuiFont *title_font = gui_font_title();
     int title_h = gui_font_line_height(title_font);
-    int title_y = gui_align_text_y(title_font, sy + border, title_bar_h);
+    int title_y = gui_align_text_y(title_font, sy + border, title_bar_h - border);
     DirtyRect last_button = window_button_bounds(w, 2);
     int buttons_right = last_button.x + last_button.w;
     int title_left = buttons_right + space_1;

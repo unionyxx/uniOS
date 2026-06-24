@@ -1974,7 +1974,7 @@ int gui_app_control_h(void)
 }
 int gui_title_bar_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_scaled_metric(12), scaled_metric_floor(30),
+    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_scaled_metric(12), scaled_metric_floor(32),
                         scaled_metric_floor(36));
 }
 int gui_menubar_h(void)
