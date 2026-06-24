@@ -490,6 +490,55 @@ extern "C" void signal_send_current(int sig)
     signal_send(process_get_current(), sig);
 }
 
+extern "C" void save_fpu_state(uint8_t *fpu_buffer);
+extern "C" uint8_t g_use_xsave;
+extern "C" uint32_t g_xsave_mask_lo;
+extern "C" uint32_t g_xsave_mask_hi;
+
+struct alignas(64) SignalContext {
+    SyscallFrame frame;
+    uint64_t original_rax;
+    alignas(64) uint8_t fpu_state[1024];
+    uint64_t old_mask;
+    uint32_t magic;
+};
+
+constexpr uint32_t SIG_CONTEXT_MAGIC = 0x51644374; // 'SigC'
+
+static void restore_fpu_state(const uint8_t *fpu_buffer) {
+    alignas(64) uint8_t sanitized_buf[1024];
+    kstring::memcpy(sanitized_buf, fpu_buffer, 1024);
+
+    // Sanitize MXCSR to prevent GPF from reserved bits (bits 16-31 are reserved)
+    uint32_t *mxcsr = reinterpret_cast<uint32_t *>(&sanitized_buf[24]);
+    *mxcsr &= 0xFFBF;
+
+    if (g_use_xsave) {
+        uint64_t *xstate_bv = reinterpret_cast<uint64_t *>(&sanitized_buf[512]);
+        uint64_t mask = (static_cast<uint64_t>(g_xsave_mask_hi) << 32) | g_xsave_mask_lo;
+        *xstate_bv &= mask;
+        for (size_t i = 520; i < 576; i++) {
+            sanitized_buf[i] = 0;
+        }
+    }
+
+    if (g_use_xsave) {
+        uint32_t lo = g_xsave_mask_lo;
+        uint32_t hi = g_xsave_mask_hi;
+        asm volatile(
+            "xrstor %0"
+            :: "m"(*sanitized_buf), "a"(lo), "d"(hi)
+            : "memory"
+        );
+    } else {
+        asm volatile(
+            "fxrstor64 %0"
+            :: "m"(*sanitized_buf)
+            : "memory"
+        );
+    }
+}
+
 extern "C" void signal_check(SyscallFrame *frame)
 {
     Process *p = process_get_current();
@@ -508,29 +557,61 @@ extern "C" void signal_check(SyscallFrame *frame)
             } else if (p->signals.handlers[i] == SIG_IGN) {
                 continue;
             } else {
-                // Basic signal delivery: Hijack RIP to the handler
-                // PUSH a return trampoline address onto the user stack
-                uint64_t *user_stack = reinterpret_cast<uint64_t *>(p->sp); // Default or current?
-                // We need to use valid_user_ptr and copy_to_user logic
-                uint64_t trampoline = p->signals.restorer;
-                if (trampoline == 0) {
-                    // Fallback to a known location or just fail?
-                    // For now, assume it's set via a new syscall or fixed in crt0
-                    // Let's use a hardcoded address if we can't find it
-                }
+                uint64_t user_rsp = frame->rsp;
 
-                frame->rsp -= 8;
-                uint64_t phys_stack = vmm_virt_to_phys(frame->rsp);
-                if (phys_stack == 0) {
-                    // Stack is not mapped or invalid? Segfault!
-                    CLAC();
+                // Leave space for the Red Zone (128 bytes on x86-64)
+                user_rsp -= 128;
+                
+                // Allocate space for the SignalContext
+                user_rsp -= sizeof(SignalContext);
+                
+                // Align user stack to 64 bytes for FPU state requirements
+                user_rsp &= ~63ULL;
+
+                // Validate that the user stack is writable
+                if (!validate_user_ptr(reinterpret_cast<void *>(user_rsp), sizeof(SignalContext), true)) {
                     process_exit(-SIGSEGV);
                     return;
                 }
-                uint64_t *stack_ptr = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(phys_stack));
-                *stack_ptr = trampoline;
 
-                frame->rip = (uint64_t)p->signals.handlers[i];
+                // Retrieve the original RAX register value (syscall return value)
+                // placed at RSP on the kernel stack (just below the SyscallFrame pointer)
+                uint64_t original_rax = *(reinterpret_cast<uint64_t *>(frame) - 1);
+
+                // Prepare the SignalContext in kernel space
+                alignas(64) SignalContext k_ctx;
+                kstring::memcpy(&k_ctx.frame, frame, sizeof(SyscallFrame));
+                k_ctx.original_rax = original_rax;
+                save_fpu_state(k_ctx.fpu_state);
+                k_ctx.old_mask = p->signals.blocked;
+                k_ctx.magic = SIG_CONTEXT_MAGIC;
+
+                // Safely copy the SignalContext to user space
+                STAC();
+                bool copy_ok = safe_copy_to_user(reinterpret_cast<void *>(user_rsp), &k_ctx, sizeof(SignalContext));
+                CLAC();
+
+                if (!copy_ok) {
+                    process_exit(-SIGSEGV);
+                    return;
+                }
+
+                // Push the return trampoline (sa_restorer) onto the user stack
+                user_rsp -= 8;
+                uint64_t trampoline = p->signals.restorer;
+
+                STAC();
+                copy_ok = safe_copy_to_user(reinterpret_cast<void *>(user_rsp), &trampoline, sizeof(uint64_t));
+                CLAC();
+
+                if (!copy_ok) {
+                    process_exit(-SIGSEGV);
+                    return;
+                }
+
+                // Redirect RIP to handler and RSP to the new stack pointer
+                frame->rip = reinterpret_cast<uint64_t>(p->signals.handlers[i]);
+                frame->rsp = user_rsp;
                 return;
             }
         }
@@ -560,6 +641,55 @@ extern "C" void signal_check(SyscallFrame *frame)
     }
 
     return 0;
+}
+
+[[nodiscard]] static uint64_t sys_sigreturn(SyscallFrame *frame)
+{
+    Process *p = process_get_current();
+    if (!p)
+        return static_cast<uint64_t>(-1);
+
+    // The user stack pointer currently points to the start of SignalContext
+    uint64_t user_ctx_addr = frame->rsp;
+
+    if (!validate_user_ptr(reinterpret_cast<const void *>(user_ctx_addr), sizeof(SignalContext), false)) {
+        process_exit(-SIGSEGV);
+        return static_cast<uint64_t>(-1);
+    }
+
+    alignas(64) SignalContext k_ctx;
+    STAC();
+    bool copy_ok = safe_copy_from_user(&k_ctx, reinterpret_cast<const void *>(user_ctx_addr), sizeof(SignalContext));
+    CLAC();
+
+    if (!copy_ok) {
+        process_exit(-SIGSEGV);
+        return static_cast<uint64_t>(-1);
+    }
+
+    if (k_ctx.magic != SIG_CONTEXT_MAGIC) {
+        process_exit(-SIGSEGV);
+        return static_cast<uint64_t>(-1);
+    }
+
+    // Sanitize segment registers to prevent privilege escalation
+    uint64_t target_cs = k_ctx.frame.cs | 3;
+    uint64_t target_ss = k_ctx.frame.ss | 3;
+    if (target_cs != 0x23) target_cs = 0x23;
+    if (target_ss != 0x1B) target_ss = 0x1B;
+
+    // Restore registers
+    kstring::memcpy(frame, &k_ctx.frame, sizeof(SyscallFrame));
+    frame->cs = target_cs;
+    frame->ss = target_ss;
+
+    // Sanitize RFLAGS (IF=1, clear NT, VM, and standard clean bits)
+    frame->rflags = (k_ctx.frame.rflags & 0x00000000003D0DFFULL) | 0x202ULL;
+
+    restore_fpu_state(k_ctx.fpu_state);
+    p->signals.blocked = k_ctx.old_mask;
+
+    return k_ctx.original_rax;
 }
 
 [[nodiscard]] static uint64_t sys_kill(uint64_t pid, int sig)
@@ -1326,9 +1456,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_sigaction((int)arg1, reinterpret_cast<const struct sigaction *>(arg2),
                                  reinterpret_cast<struct sigaction *>(arg3));
         case SYS_SIGRETURN:
-            // Minimal sigreturn: just yield and let the next signal or normal execution continue
-            // In a real OS, this would restore the registers from the stack
-            return 0;
+            return sys_sigreturn(frame);
 
         case SYS_CLOSE:
             return sys_close(static_cast<int>(arg1));
