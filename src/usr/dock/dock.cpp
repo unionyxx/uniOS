@@ -648,37 +648,37 @@ static void draw_calendar_contents(Surface *canvas, int x, int y, int size)
     if (get_time(&t) != 0)
         return;
 
-    int weekday_h = size * 40 / 100;
-    int date_h = size * 50 / 100;
-    int gap = size * 1 / 100;
+    int weekday_h = (size * 40) / 100;
+    int date_h = (size * 50) / 100;
+    int gap = (size * 1) / 100;
     int total_h = weekday_h + gap + date_h;
-    int start_y = y + (size - total_h) / 2 - size * 2 / 100;
+    int start_y = y + (size - total_h) / 2 - (size * 2) / 100;
 
     int wday = day_of_week((int)t.year, (int)t.month, (int)t.day);
     if (g_calendar_day_assets[wday].loaded) {
         const Surface &ws = g_calendar_day_assets[wday].surface;
-        int day_w = weekday_h * (int)ws.width / (int)ws.height; // maintain aspect ratio
+        int day_w = (int)(((float)weekday_h * (float)ws.width / (float)ws.height) + 0.5f);
         int day_x = x + (size - day_w) / 2;
         draw_scaled_app_icon(canvas, &ws, day_x, start_y, day_w, weekday_h);
     }
 
     int date = (int)t.day;
+    int num_y = start_y + weekday_h + gap;
+
     if (date < 10) {
         if (g_calendar_num_assets[date].loaded) {
             const DockIconAsset &asset = g_calendar_num_assets[date];
             const Surface &ns = asset.surface;
-            int num_w = date_h * (int)ns.width / (int)ns.height;
+            int num_w = (int)(((float)date_h * (float)ns.width / (float)ns.height) + 0.5f);
 
-            // Centering single digits visually by bounds
             float scale = (float)date_h / (float)ns.height;
             float vis_w = (float)(asset.active_right - asset.active_left + 1) * scale;
             float scaled_left = (float)asset.active_left * scale;
 
             float active_start_x = (float)x + ((float)size - vis_w) / 2.0f;
             float draw_x = active_start_x - scaled_left;
-            int num_y = start_y + weekday_h + gap;
 
-            draw_scaled_app_icon(canvas, &ns, (int)draw_x, num_y, num_w, date_h);
+            draw_scaled_app_icon(canvas, &ns, (int)(draw_x + 0.5f), num_y, num_w, date_h);
         }
     } else {
         int d1 = date / 10;
@@ -689,8 +689,8 @@ static void draw_calendar_contents(Surface *canvas, int x, int y, int size)
             const Surface &s1 = asset1.surface;
             const Surface &s2 = asset2.surface;
 
-            int w1 = date_h * (int)s1.width / (int)s1.height;
-            int w2 = date_h * (int)s2.width / (int)s2.height;
+            int w1 = (int)(((float)date_h * (float)s1.width / (float)s1.height) + 0.5f);
+            int w2 = (int)(((float)date_h * (float)s2.width / (float)s2.height) + 0.5f);
 
             float scale1 = (float)date_h / (float)s1.height;
             float scale2 = (float)date_h / (float)s2.height;
@@ -708,10 +708,9 @@ static void draw_calendar_contents(Surface *canvas, int x, int y, int size)
 
             float x1 = active_start_x - scaled_left1;
             float x2 = active_start_x + vis_w1 + (float)digit_gap - scaled_left2;
-            int num_y = start_y + weekday_h + gap;
 
-            draw_scaled_app_icon(canvas, &s1, (int)x1, num_y, w1, date_h);
-            draw_scaled_app_icon(canvas, &s2, (int)x2, num_y, w2, date_h);
+            draw_scaled_app_icon(canvas, &s1, (int)(x1 + 0.5f), num_y, w1, date_h);
+            draw_scaled_app_icon(canvas, &s2, (int)(x2 + 0.5f), num_y, w2, date_h);
         }
     }
 }
