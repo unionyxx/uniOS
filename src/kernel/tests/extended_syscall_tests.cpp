@@ -2,6 +2,7 @@
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
 #include <kernel/sync/futex.h>
+#include <kernel/sync/mutex.h>
 #include <kernel/sync/epoll.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/vma.h>
@@ -741,6 +742,58 @@ KTEST(extended_vfs_page_cache)
     
     free(buf);
     free(read_buf);
+}
+
+static Mutex g_test_mutex = MUTEX_INIT;
+static volatile int g_pi_thread_step = 0;
+static Process *g_low_priority_proc = nullptr;
+
+static void pi_low_priority_thread()
+{
+    g_low_priority_proc = process_get_current();
+    g_low_priority_proc->priority = 2;
+
+    mutex_lock(&g_test_mutex);
+    g_pi_thread_step = 1;
+    
+    while (g_pi_thread_step == 1) {
+        scheduler_yield();
+    }
+    
+    mutex_unlock(&g_test_mutex);
+    while (true) {
+        scheduler_yield();
+    }
+}
+
+KTEST(extended_priority_inheritance)
+{
+    g_pi_thread_step = 0;
+    g_low_priority_proc = nullptr;
+    mutex_init(&g_test_mutex);
+    
+    Process *thread = scheduler_create_task(pi_low_priority_thread, "pi_test_thread");
+    KTEST_EXPECT(thread != nullptr);
+    
+    while (g_pi_thread_step == 0) {
+        scheduler_yield();
+    }
+    
+    KTEST_EXPECT(g_low_priority_proc != nullptr);
+    KTEST_EXPECT_EQ(g_low_priority_proc->priority, 2);
+    
+    Process *current = process_get_current();
+    uint8_t orig_priority = current->priority;
+    current->priority = 0;
+    
+    g_pi_thread_step = 2;
+    
+    mutex_lock(&g_test_mutex);
+    
+    KTEST_EXPECT_EQ(g_low_priority_proc->priority, 0);
+    
+    mutex_unlock(&g_test_mutex);
+    current->priority = orig_priority;
 }
 
 

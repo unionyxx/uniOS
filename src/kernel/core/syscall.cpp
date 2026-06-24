@@ -2405,6 +2405,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!p)
                 return static_cast<uint64_t>(-1);
             gui_set_wm_pid(p->pid);
+            scheduler_boost_process_priority(p, 0);
             return 0;
         }
         case SYS_GUI_SET_FOCUS: {
@@ -2422,6 +2423,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!target)
                 return static_cast<uint64_t>(-1);
             gui_set_focus_pid(target->pid);
+            scheduler_boost_process_priority(target, 0);
             return 0;
         }
         case SYS_GETMEMINFO: {

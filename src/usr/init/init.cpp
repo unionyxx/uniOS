@@ -58,7 +58,9 @@ static Registry *wait_for_desktop_registry()
                 registry = (Registry *)reg_ptr;
         }
 
-        if (registry && registry->magic == 0x52454749 && registry->mb_shm_id > 0 && registry->dk_shm_id > 0)
+        if (registry && registry->magic == REGISTRY_MAGIC &&
+            gui_shm_id_is_valid(registry->mb_shm_id) &&
+            gui_shm_id_is_valid(registry->dk_shm_id))
             return registry;
 
         sleep_ms(10);

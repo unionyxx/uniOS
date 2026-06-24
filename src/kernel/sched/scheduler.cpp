@@ -19,6 +19,8 @@
 extern "C" void load_idt(void *);
 extern "C" void init_fpu_state(uint8_t *fpu_buffer);
 extern "C" void fork_ret();
+extern uint64_t gui_get_wm_pid();
+extern uint64_t gui_get_focus_pid();
 
 static Spinlock g_sched_lock = SPINLOCK_INIT;
 static Process *g_current_proc = nullptr;
@@ -169,6 +171,18 @@ static Process *g_ready_tails[NUM_PRIORITY_LEVELS] = {nullptr};
 static Process *g_sleep_queue = nullptr;
 static uint64_t g_last_sleep_tick = 0;
 
+static void interactive_boost_if_needed(Process *p)
+{
+    if (p && p->pid != 0) {
+        uint64_t wm = gui_get_wm_pid();
+        uint64_t focus = gui_get_focus_pid();
+        if ((wm != 0 && (p->pid == wm || p->parent_pid == wm)) ||
+            (focus != 0 && (p->pid == focus || p->parent_pid == focus))) {
+            p->priority = 0;
+        }
+    }
+}
+
 static void ready_queue_push(Process *p)
 {
     uint8_t prio = p->priority;
@@ -198,13 +212,8 @@ static Process *ready_queue_pop()
     return nullptr;
 }
 
-void scheduler_remove_from_ready_queue(Process *p)
+static void scheduler_remove_from_ready_queue_locked(Process *p)
 {
-    if (!p)
-        return;
-    const uint64_t flags = interrupts_save_disable();
-    spinlock_acquire(&g_sched_lock);
-
     for (int i = 0; i < NUM_PRIORITY_LEVELS; i++) {
         Process *curr = g_ready_queues[i];
         Process *prev = nullptr;
@@ -214,12 +223,37 @@ void scheduler_remove_from_ready_queue(Process *p)
                 else g_ready_queues[i] = curr->queue_next;
                 if (g_ready_tails[i] == curr) g_ready_tails[i] = prev;
                 curr->queue_next = nullptr;
-                spinlock_release(&g_sched_lock);
-                interrupts_restore(flags);
                 return;
             }
             prev = curr;
             curr = curr->queue_next;
+        }
+    }
+}
+
+void scheduler_remove_from_ready_queue(Process *p)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    scheduler_remove_from_ready_queue_locked(p);
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+}
+
+void scheduler_boost_process_priority(Process *p, uint8_t new_priority)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    if (p->priority > new_priority) {
+        scheduler_remove_from_ready_queue_locked(p);
+        p->priority = new_priority;
+        if (p->state == ProcessState_Ready) {
+            ready_queue_push(p);
         }
     }
 
@@ -284,6 +318,8 @@ static void wake_sleeping_processes()
             if (p->priority > 0 && p->pid != 0)
                 p->priority--;
 
+            interactive_boost_if_needed(p);
+
             ready_queue_push(p);
         } else {
             g_sleep_queue->wake_time -= diff;
@@ -339,6 +375,7 @@ void wait_queue_wake_all(WaitQueue *q)
         p->queue_next = nullptr;
         if (p->state == ProcessState_Waiting || p->state == ProcessState_Blocked) {
             p->state = ProcessState_Ready;
+            interactive_boost_if_needed(p);
             ready_queue_push(p);
         }
         p = next;
@@ -356,6 +393,7 @@ static void scheduler_wake_process_locked(Process *p)
 
     if (p->state == ProcessState_Waiting || p->state == ProcessState_Blocked) {
         p->state = ProcessState_Ready;
+        interactive_boost_if_needed(p);
         ready_queue_push(p);
     }
 }

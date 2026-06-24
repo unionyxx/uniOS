@@ -22,6 +22,14 @@ void mutex_lock(Mutex *mtx)
             return;
         }
 
+        // Priority inheritance: boost the lock owner's priority to match our priority if ours is higher.
+        if (mtx->owner_pid != 0) {
+            Process *owner = process_find_by_pid(mtx->owner_pid);
+            if (owner) {
+                scheduler_boost_process_priority(owner, current->priority);
+            }
+        }
+
         // Use unified scheduler waiting mechanism
         scheduler_wait(&mtx->wait_queue, &mtx->wait_lock);
     }
