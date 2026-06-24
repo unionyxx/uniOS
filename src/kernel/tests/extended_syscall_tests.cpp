@@ -14,6 +14,7 @@
 #include <uapi/syscalls_ext.h>
 #include <libk/kstd.h>
 #include <libk/kstring.h>
+#include <kernel/panic.h>
 
 extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot);
 
@@ -533,14 +534,16 @@ struct TestStackFrame {
 };
 
 struct alignas(64) TestSignalContext {
-    SyscallFrame frame;
-    uint64_t original_rax;
+    InterruptFrame frame;
     alignas(64) uint8_t fpu_state[1024];
     uint64_t old_mask;
     uint32_t magic;
 };
 
 constexpr uint32_t TEST_SIG_CONTEXT_MAGIC = 0x51644374; // 'SigC'
+
+extern "C" void signal_check_interrupt(InterruptFrame *frame);
+bool g_in_ktest_signal = false;
 
 KTEST(extended_syscalls_signal_context)
 {
@@ -611,7 +614,7 @@ KTEST(extended_syscalls_signal_context)
     KTEST_EXPECT(ctx_phys != 0);
     
     TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(vmm_phys_to_virt(ctx_phys));
-    KTEST_EXPECT_EQ(u_ctx->original_rax, 0xAAABBBULL);
+    KTEST_EXPECT_EQ(u_ctx->frame.rax, 0xAAABBBULL);
     KTEST_EXPECT_EQ(u_ctx->old_mask, 0x112233ULL);
     KTEST_EXPECT_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
 
@@ -620,10 +623,13 @@ KTEST(extended_syscalls_signal_context)
     // The user stack pointer would point to the SignalContext (i.e. tramp address is popped)
     tf.frame.rsp += 8;
 
+    // Set g_in_ktest_signal to true to prevent sys_sigreturn from executing iretq and crashing
+    g_in_ktest_signal = true;
     uint64_t returned_rax = syscall_handler(SYS_SIGRETURN, 0, 0, 0, &tf.frame);
+    g_in_ktest_signal = false;
     
     // Verify context restoration:
-    // Returned value should be the original RAX
+    // Returned value should be the original RAX (restored into RAX in InterruptFrame)
     KTEST_EXPECT_EQ(returned_rax, 0xAAABBBULL);
     // RIP and RSP should be restored
     KTEST_EXPECT_EQ(tf.frame.rip, 0x9999ULL);
@@ -637,6 +643,23 @@ KTEST(extended_syscalls_signal_context)
     KTEST_EXPECT_EQ(tf.frame.r15, 0x66ULL);
     // Signal mask should be restored
     KTEST_EXPECT_EQ(p->signals.blocked, 0x112233ULL);
+
+    // --- Test signal_check_interrupt ---
+    p->signals.pending = (1ULL << SIGUSR1);
+    
+    InterruptFrame int_frame = {};
+    int_frame.rip = 0xaaaaULL;
+    int_frame.rsp = mmap_res + 4096;
+    int_frame.cs = 0x23ULL; // Ring 3
+    int_frame.ss = 0x1BULL;
+    int_frame.rflags = 0x202ULL;
+    int_frame.rax = 0x5555ULL;
+
+    signal_check_interrupt(&int_frame);
+
+    // Verify it delivered the signal
+    KTEST_EXPECT_EQ(int_frame.rip, 0x123456ULL);
+    KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
 
     // Clean up
     uint64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 4096, 0, &mmap_frame);

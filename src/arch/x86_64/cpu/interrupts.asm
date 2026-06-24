@@ -58,6 +58,15 @@ isr_common_stub:
     add rdi, 8   ; Adjust RDI to point to the saved registers (skip the flag)
     call exception_handler
 
+    ; Check if returning to userspace
+    test qword [rsp + 152], 3
+    jz .skip_signals_isr
+    mov rdi, rsp
+    add rdi, 8
+    extern signal_check_interrupt
+    call signal_check_interrupt
+.skip_signals_isr:
+
     ; Restore GS if we swapped it
     pop rax
     cmp rax, 1
@@ -166,6 +175,15 @@ irq_common_stub:
     mov rdi, rsp
     add rdi, 8
     call irq_handler
+
+    ; Check if returning to userspace
+    test qword [rsp + 152], 3
+    jz .skip_signals_irq
+    mov rdi, rsp
+    add rdi, 8
+    extern signal_check_interrupt
+    call signal_check_interrupt
+.skip_signals_irq:
 
     ; Restore GS if we swapped it
     pop rax

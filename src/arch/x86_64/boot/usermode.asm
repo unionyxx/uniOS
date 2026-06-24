@@ -230,3 +230,61 @@ __user_copy_to_fixup:
     mov rax, 0
     pop rbp
     ret
+
+
+; =============================================================================
+; asm_iret_to_user(const InterruptFrame *frame)
+; =============================================================================
+; Bypasses syscall return clearing and returns to user space using iretq
+; Parameters:
+;   RDI = pointer to InterruptFrame (in kernel space)
+; =============================================================================
+global asm_iret_to_user
+asm_iret_to_user:
+    ; Disable interrupts during manual context restoration
+    cli
+
+    ; Copy the iretq stack frame fields:
+    ;   SS      at [RDI + 168]
+    ;   RSP     at [RDI + 160]
+    ;   RFLAGS  at [RDI + 152]
+    ;   CS      at [RDI + 144]
+    ;   RIP     at [RDI + 136]
+    mov rax, [rdi + 168] ; SS
+    mov rbx, [rdi + 160] ; RSP
+    mov rcx, [rdi + 152] ; RFLAGS
+    mov rdx, [rdi + 144] ; CS
+    mov rsi, [rdi + 136] ; RIP
+
+    ; Push them to form the iretq frame on the kernel stack
+    push rax ; SS
+    push rbx ; RSP
+    push rcx ; RFLAGS
+    push rdx ; CS
+    push rsi ; RIP
+
+    ; Restore general purpose registers from the frame
+    mov r15, [rdi + 0]
+    mov r14, [rdi + 8]
+    mov r13, [rdi + 16]
+    mov r12, [rdi + 24]
+    mov r11, [rdi + 32]
+    mov r10, [rdi + 40]
+    mov r9,  [rdi + 48]
+    mov r8,  [rdi + 56]
+    mov rbp, [rdi + 64]
+    mov rsi, [rdi + 80]
+    mov rdx, [rdi + 88]
+    mov rcx, [rdi + 96]
+    mov rbx, [rdi + 104]
+
+    ; Switch to user GS base
+    swapgs
+
+    ; Load RAX and RDI last to avoid clobbering the frame pointer register RDI too early
+    mov rax, [rdi + 112]
+    mov rdi, [rdi + 72]
+
+    ; Return to user space
+    iretq
+
