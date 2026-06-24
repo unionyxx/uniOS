@@ -27,10 +27,16 @@ using kstring::memcpy;
 static uint64_t *g_pml4 = nullptr;
 static uint64_t g_hhdm_offset = 0;
 
+static inline void vmm_flush_tlb_all()
+{
+    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+}
+
 struct TlbShootdown
 {
     Spinlock lock = SPINLOCK_INIT;
     volatile uint64_t target_addr;
+    volatile uint64_t num_pages;
     volatile int active_cores;
 };
 
@@ -42,16 +48,36 @@ static void tlb_shootdown_handler(uint8_t vector, void *ctx)
     (void)vector;
     (void)ctx;
     uint64_t addr = g_tlb_shootdown.target_addr;
+    uint64_t pages = g_tlb_shootdown.num_pages;
     if (addr) {
-        asm volatile("invlpg (%0)" ::"r"(addr) : "memory");
+        if (pages == 1) {
+            asm volatile("invlpg (%0)" ::"r"(addr) : "memory");
+        } else if (pages > 32) {
+            asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+        } else {
+            for (uint64_t i = 0; i < pages; ++i) {
+                asm volatile("invlpg (%0)" ::"r"(addr + i * 0x1000) : "memory");
+            }
+        }
     }
     __sync_sub_and_fetch(&g_tlb_shootdown.active_cores, 1);
 }
 
-void vmm_invalidate_tlb(uint64_t virt)
+void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages)
 {
-    // 1. Invalidate locally on current core
-    asm volatile("invlpg (%0)" ::"r"(virt) : "memory");
+    if (pages == 0)
+        return;
+
+    // 1. Invalidate locally
+    if (pages == 1) {
+        asm volatile("invlpg (%0)" ::"r"(virt_start) : "memory");
+    } else if (pages > 32) {
+        vmm_flush_tlb_all();
+    } else {
+        for (size_t i = 0; i < pages; ++i) {
+            asm volatile("invlpg (%0)" ::"r"(virt_start + i * 0x1000) : "memory");
+        }
+    }
 
     // 2. If APIC is enabled and there are other active CPUs, broadcast TLB shootdown IPI
     if (apic_is_enabled()) {
@@ -59,10 +85,10 @@ void vmm_invalidate_tlb(uint64_t virt)
         if (others > 0) {
             uint64_t sl_flags = spinlock_acquire_irqsave(&g_tlb_shootdown.lock);
 
-            g_tlb_shootdown.target_addr = virt;
+            g_tlb_shootdown.target_addr = virt_start;
+            g_tlb_shootdown.num_pages = pages;
             g_tlb_shootdown.active_cores = others;
 
-            // Broadcast shootdown IPI using the registered vector
             if (g_tlb_shootdown_vector != 0) {
                 apic_send_ipi_all_excluding_self(g_tlb_shootdown_vector);
             }
@@ -73,9 +99,15 @@ void vmm_invalidate_tlb(uint64_t virt)
             }
 
             g_tlb_shootdown.target_addr = 0;
+            g_tlb_shootdown.num_pages = 0;
             spinlock_release_irqrestore(&g_tlb_shootdown.lock, sl_flags);
         }
     }
+}
+
+void vmm_invalidate_tlb(uint64_t virt)
+{
+    vmm_invalidate_tlb_range(virt, 1);
 }
 
 [[nodiscard]] static bool split_huge_page(uint64_t *table, uint64_t index, int level)
@@ -244,10 +276,7 @@ Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
     return true;
 }
 
-static inline void vmm_flush_tlb_all()
-{
-    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-}
+
 
 uint64_t vmm_virt_to_phys_in(const uint64_t *pml4, uint64_t virt)
 {
@@ -325,7 +354,7 @@ uint64_t *vmm_get_kernel_pml4()
     return g_pml4;
 }
 
-void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
+static void vmm_unmap_page_no_flush_in(uint64_t *target_pml4, uint64_t virt)
 {
     uint64_t *pdpt = get_next_level(target_pml4, (virt >> 39) & 0x1FF, 4, false, virt);
     if (!pdpt)
@@ -340,6 +369,11 @@ void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
         return;
 
     pt[(virt >> 12) & 0x1FF] = 0;
+}
+
+void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
+{
+    vmm_unmap_page_no_flush_in(target_pml4, virt);
     vmm_invalidate_tlb(virt);
 }
 
@@ -716,15 +750,15 @@ uint64_t vmm_map_mmio(uint64_t phys_addr, uint64_t size)
         }
         if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys_page + i * 0x1000, PTE_MMIO)) {
             for (uint64_t j = 0; j < i; j++) {
-                vmm_unmap_page_in(g_pml4, virt_base + j * 0x1000);
+                vmm_unmap_page_no_flush_in(g_pml4, virt_base + j * 0x1000);
             }
             dma_free_virt_range(virt_base, map_size);
-            vmm_flush_tlb_all();
+            vmm_invalidate_tlb_range(virt_base, i);
             return 0;
         }
     }
 
-    vmm_flush_tlb_all();
+    vmm_invalidate_tlb_range(virt_base, pages);
     return virt_base + offset;
 }
 
@@ -752,18 +786,18 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
     for (size_t i = 0; i < pages; i++) {
         if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys + i * 0x1000, flags)) {
             for (size_t j = 0; j < i; j++) {
-                vmm_unmap_page_in(g_pml4, virt_base + j * 0x1000);
+                vmm_unmap_page_no_flush_in(g_pml4, virt_base + j * 0x1000);
             }
             for (size_t frame = 0; frame < pages; frame++) {
                 pmm_free_frame(reinterpret_cast<void *>(phys + frame * 0x1000));
             }
             dma_free_virt_range(virt_base, size);
-            vmm_flush_tlb_all();
+            vmm_invalidate_tlb_range(virt_base, i);
             return alloc;
         }
     }
 
-    vmm_flush_tlb_all();
+    vmm_invalidate_tlb_range(virt_base, pages);
 
     alloc.virt = virt_base;
     alloc.phys = phys;
@@ -790,6 +824,11 @@ void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
 
     uint64_t pages = (virt_end - virt_start) / 0x1000ULL;
 
+    uint64_t *pml4 = g_pml4;
+    Process *curr = process_get_current();
+    if (curr && curr->page_table)
+        pml4 = curr->page_table;
+
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t v = virt_start + i * 0x1000;
         uint64_t phys = vmm_virt_to_phys(v);
@@ -801,9 +840,9 @@ void vmm_remap_framebuffer(uint64_t virt_addr, uint64_t size)
         if (g_pml4[pml4_index] & PTE_USER)
             flags |= PTE_USER;
 
-        vmm_map_page(v, phys & ~0xFFFULL, flags);
+        (void)vmm_map_page_no_flush_in(pml4, v, phys & ~0xFFFULL, flags);
     }
-    vmm_flush_tlb_all();
+    vmm_invalidate_tlb_range(virt_start, pages);
 }
 
 void vmm_free_dma(const DMAAllocation &alloc)
@@ -812,13 +851,13 @@ void vmm_free_dma(const DMAAllocation &alloc)
         return;
     size_t pages = (alloc.size + 4095) / 4096;
     for (size_t i = 0; i < pages; i++) {
-        vmm_unmap_page_in(g_pml4, alloc.virt + i * 4096);
+        vmm_unmap_page_no_flush_in(g_pml4, alloc.virt + i * 4096);
     }
     for (size_t i = 0; i < pages; i++) {
         pmm_free_frame(reinterpret_cast<void *>(alloc.phys + i * 4096));
     }
     dma_free_virt_range(alloc.virt, alloc.size);
-    vmm_flush_tlb_all();
+    vmm_invalidate_tlb_range(alloc.virt, pages);
 }
 
 bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)

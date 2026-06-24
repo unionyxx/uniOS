@@ -74,3 +74,4 @@ void vmm_free_dma(const DMAAllocation &alloc);
 
 bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code);
 void vmm_invalidate_tlb(uint64_t virt);
+void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages);

@@ -59,7 +59,9 @@ static inline uint64_t spinlock_acquire_irqsave(Spinlock *sl)
         return flags;
 
     while (__sync_lock_test_and_set(&sl->locked, 1)) {
-        asm volatile("pause" ::: "memory");
+        while (sl->locked) {
+            asm volatile("pause" ::: "memory");
+        }
     }
 
     asm volatile("" ::: "memory");
@@ -88,7 +90,9 @@ static inline void spinlock_acquire(Spinlock *sl)
         return;
 
     while (__sync_lock_test_and_set(&sl->locked, 1)) {
-        asm volatile("pause" ::: "memory");
+        while (sl->locked) {
+            asm volatile("pause" ::: "memory");
+        }
     }
 
     asm volatile("" ::: "memory");

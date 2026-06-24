@@ -1,6 +1,7 @@
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/pic.h>
 #include <kernel/irq.h>
+#include <kernel/process.h>
 #include <kernel/scheduler.h>
 #include <kernel/time/timer.h>
 
@@ -96,7 +97,7 @@ uint32_t timer_get_frequency()
 void timer_handler()
 {
     ticks++;
-    // Explicit wake paths handle events/display/process waits now. Keep the
+    // Future work: we could use a delta list or timer wheels to make the sleep queue
     // IRQ path lightweight instead of waking every waiting task every tick.
 }
 
@@ -117,5 +118,10 @@ void timer_poll_wait_ms(uint32_t ms)
 
 void sleep(uint32_t ms)
 {
-    timer_poll_wait_ms(ms);
+    Process *curr = process_get_current();
+    if (curr && curr->pid != 0) {
+        scheduler_sleep_ms(ms);
+    } else {
+        timer_poll_wait_ms(ms);
+    }
 }
