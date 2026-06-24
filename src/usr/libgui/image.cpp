@@ -121,46 +121,6 @@ struct QoiPixel
     uint8_t a;
 };
 
-static bool read_file(const char *path, uint8_t **out_data, uint32_t *out_size)
-{
-    if (out_data)
-        *out_data = nullptr;
-    if (out_size)
-        *out_size = 0;
-    if (!path || !out_data || !out_size)
-        return false;
-
-    VNodeStat st = {};
-    if (stat(path, &st) != 0 || st.is_dir || st.size == 0 || st.size > 0xFFFFFFFFu)
-        return false;
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return false;
-
-    uint8_t *data = static_cast<uint8_t *>(malloc((size_t)st.size));
-    if (!data) {
-        close(fd);
-        return false;
-    }
-
-    uint64_t total = 0;
-    while (total < st.size) {
-        int n = read(fd, data + total, (size_t)(st.size - total));
-        if (n <= 0)
-            break;
-        total += (uint64_t)n;
-    }
-    close(fd);
-    if (total != st.size) {
-        free(data);
-        return false;
-    }
-
-    *out_data = data;
-    *out_size = (uint32_t)st.size;
-    return true;
-}
 
 static uint32_t read_be32(const uint8_t *data)
 {
@@ -574,7 +534,7 @@ bool gui_load_uoic(const char *path, uint32_t logical_px, uint32_t display_scale
 
     uint8_t *data = nullptr;
     uint32_t size = 0;
-    if (!read_file(path, &data, &size))
+    if (!gui_load_file(path, &data, &size))
         return false;
 
     if (size < sizeof(UoicHeader)) {
@@ -628,7 +588,7 @@ bool gui_load_uowp(const char *path, uint16_t preferred_variant, uint32_t target
 
     uint8_t *data = nullptr;
     uint32_t size = 0;
-    if (!read_file(path, &data, &size))
+    if (!gui_load_file(path, &data, &size))
         return false;
 
     if (size < sizeof(UowpHeader)) {
@@ -695,7 +655,7 @@ bool gui_load_uocu(const char *path, uint16_t cursor_role, uint32_t logical_px, 
 
     uint8_t *data = nullptr;
     uint32_t size = 0;
-    if (!read_file(path, &data, &size))
+    if (!gui_load_file(path, &data, &size))
         return false;
 
     if (size < sizeof(UocuHeader)) {

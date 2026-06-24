@@ -55,3 +55,122 @@ static inline void gui_copy_rect_to_canvas(volatile uint32_t *dst, uint32_t dst_
         memcpy(d_row, s_row, (size_t)rect.w * sizeof(uint32_t));
     }
 }
+
+static inline uint32_t gui_blend_premultiplied(uint32_t dst, uint32_t src)
+{
+    uint32_t alpha = src >> 24;
+    if (alpha == 0)
+        return dst;
+    if (alpha == 255)
+        return src;
+
+    uint32_t inv = 255u - alpha;
+    
+    uint32_t dst_rb = dst & 0x00FF00FFu;
+    uint32_t dst_ag = (dst >> 8) & 0x00FF00FFu;
+    
+    uint32_t rb = dst_rb * inv + 0x00800080u;
+    rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+    rb &= 0x00FF00FFu;
+    
+    uint32_t ag = dst_ag * inv + 0x00800080u;
+    ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+    ag &= 0x00FF00FFu;
+    
+    uint32_t src_rb = src & 0x00FF00FFu;
+    uint32_t src_ag = (src >> 8) & 0x00FF00FFu;
+    
+    uint32_t out_rb = src_rb + rb;
+    uint32_t out_ag = src_ag + ag;
+    
+    return ((out_ag << 8) & 0xFF00FF00u) | (out_rb & 0x00FF00FFu);
+}
+
+static inline uint32_t gui_blend_premultiplied_opaque_dst(uint32_t dst, uint32_t src)
+{
+    uint32_t alpha = src >> 24;
+    if (alpha == 0)
+        return dst;
+    if (alpha == 255)
+        return src;
+
+    uint32_t inv = 255u - alpha;
+    
+    uint32_t dst_rb = dst & 0x00FF00FFu;
+    uint32_t dst_ag = (dst >> 8) & 0x00FF00FFu;
+    
+    uint32_t rb = dst_rb * inv + 0x00800080u;
+    rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+    rb &= 0x00FF00FFu;
+    
+    uint32_t ag = dst_ag * inv + 0x00800080u;
+    ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+    ag &= 0x00FF00FFu;
+    
+    uint32_t src_rb = src & 0x00FF00FFu;
+    uint32_t src_ag = (src >> 8) & 0x00FF00FFu;
+    
+    uint32_t out_rb = src_rb + rb;
+    uint32_t out_ag = src_ag + ag;
+    
+    return 0xFF000000u | ((out_ag << 8) & 0x0000FF00u) | (out_rb & 0x00FF00FFu);
+}
+
+static inline uint32_t gui_blend_straight_opaque_dst(uint32_t dst, uint32_t src)
+{
+    uint32_t alpha = src >> 24;
+    if (alpha == 0)
+        return dst;
+    if (alpha == 255)
+        return src;
+
+    uint32_t inv = 255u - alpha;
+    
+    uint32_t src_rb = src & 0x00FF00FFu;
+    uint32_t src_ag = (src >> 8) & 0x00FF00FFu;
+    
+    uint32_t dst_rb = dst & 0x00FF00FFu;
+    uint32_t dst_ag = (dst >> 8) & 0x00FF00FFu;
+    
+    uint32_t rb = src_rb * alpha + dst_rb * inv + 0x00800080u;
+    rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+    rb &= 0x00FF00FFu;
+    
+    uint32_t ag = src_ag * alpha + dst_ag * inv + 0x00800080u;
+    ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+    ag &= 0x00FF00FFu;
+    
+    return 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
+}
+
+static inline uint32_t gui_blend_straight_opaque_dst_coverage(uint32_t dst, uint32_t src, uint8_t coverage)
+{
+    if (coverage == 0)
+        return dst;
+    uint32_t alpha = src >> 24;
+    if (coverage < 255) {
+        alpha = (alpha * coverage + 127u) / 255u;
+    }
+    if (alpha == 0)
+        return dst;
+    if (alpha == 255)
+        return src;
+
+    uint32_t inv = 255u - alpha;
+    
+    uint32_t src_rb = src & 0x00FF00FFu;
+    uint32_t src_ag = (src >> 8) & 0x00FF00FFu;
+    
+    uint32_t dst_rb = dst & 0x00FF00FFu;
+    uint32_t dst_ag = (dst >> 8) & 0x00FF00FFu;
+    
+    uint32_t rb = src_rb * alpha + dst_rb * inv + 0x00800080u;
+    rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+    rb &= 0x00FF00FFu;
+    
+    uint32_t ag = src_ag * alpha + dst_ag * inv + 0x00800080u;
+    ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+    ag &= 0x00FF00FFu;
+    
+    return 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
+}

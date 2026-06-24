@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "gui_canvas_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -602,20 +603,22 @@ static inline uint32_t blend_pixel(uint32_t dst, uint32_t src, uint8_t coverage)
     if (dst_a == 255) {
         uint32_t inv_a = 255u - src_a;
         uint32_t s_rb = src & 0x00FF00FFu;
+        uint32_t s_ag = (src >> 8) & 0x00FF00FFu;
         uint32_t d_rb = dst & 0x00FF00FFu;
+        uint32_t d_ag = (dst >> 8) & 0x00FF00FFu;
 
-        uint32_t rb = (s_rb * src_a + d_rb * inv_a + 0x00800080u);
+        uint32_t rb = s_rb * src_a + d_rb * inv_a + 0x00800080u;
         rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
         rb &= 0x00FF00FFu;
 
-        uint32_t s_g = (src >> 8) & 0xFFu;
-        uint32_t d_g = (dst >> 8) & 0xFFu;
-        uint32_t g = (s_g * src_a + d_g * inv_a + 127u) / 255u;
+        uint32_t ag = s_ag * src_a + d_ag * inv_a + 0x00800080u;
+        ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+        ag &= 0x00FF00FFu;
 
-        return 0xFF000000u | rb | (g << 8);
+        return 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
     }
 
-    // Full ARGB blend
+    // Full ARGB blend fallback
     uint32_t inv_a = 255u - src_a;
     uint32_t out_a = src_a + (dst_a * inv_a + 127u) / 255u;
     if (out_a == 0)
@@ -672,10 +675,47 @@ static void paint_solid_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_
         return;
 
     uint32_t pitch = s->pitch / 4;
+    uint32_t src_rb = color & 0x00FF00FFu;
+    uint32_t src_ag = (color >> 8) & 0x00FF00FFu;
+    uint32_t inv_a = 255u - base_alpha;
+
+    // Check if the target row destination pixels are opaque to use the fast branchless SWAR loop
+    bool opaque_dst = true;
     for (int32_t py = 0; py < h; py++) {
         uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
-        for (int32_t px = 0; px < w; px++)
-            dst[px] = blend_pixel(dst[px], color, 255);
+        if ((dst[0] >> 24) != 255) {
+            opaque_dst = false;
+            break;
+        }
+    }
+
+    if (opaque_dst) {
+        for (int32_t py = 0; py < h; py++) {
+            uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
+            int32_t px = 0;
+            // Vectorization-friendly loop with hoisted constants and zero divisions
+            for (; px < w; px++) {
+                uint32_t d = dst[px];
+                uint32_t d_rb = d & 0x00FF00FFu;
+                uint32_t d_ag = (d >> 8) & 0x00FF00FFu;
+
+                uint32_t rb = src_rb * base_alpha + d_rb * inv_a + 0x00800080u;
+                rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+                rb &= 0x00FF00FFu;
+
+                uint32_t ag = src_ag * base_alpha + d_ag * inv_a + 0x00800080u;
+                ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+                ag &= 0x00FF00FFu;
+
+                dst[px] = 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
+            }
+        }
+    } else {
+        for (int32_t py = 0; py < h; py++) {
+            uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
+            for (int32_t px = 0; px < w; px++)
+                dst[px] = blend_pixel(dst[px], color, 255);
+        }
     }
 }
 
@@ -876,22 +916,28 @@ static inline uint8_t circle_fill_coverage(int32_t px, int32_t py, int32_t cx, i
 {
     if (r <= 0)
         return 0;
-    float rr = static_cast<float>(r) * static_cast<float>(r);
-    float center_x = static_cast<float>(cx);
-    float center_y = static_cast<float>(cy);
-    float edge_dist =
-        libgui_sqrt((px + 0.5f - center_x) * (px + 0.5f - center_x) + (py + 0.5f - center_y) * (py + 0.5f - center_y));
-    if (edge_dist <= static_cast<float>(r) - 0.75f)
+    float dx = static_cast<float>(px) + 0.5f - static_cast<float>(cx);
+    float dy = static_cast<float>(py) + 0.5f - static_cast<float>(cy);
+    float dist_sq = dx * dx + dy * dy;
+
+    float r_inner = static_cast<float>(r) - 0.75f;
+    float r_outer = static_cast<float>(r) + 0.75f;
+
+    if (dist_sq <= r_inner * r_inner)
         return 255;
-    if (edge_dist >= static_cast<float>(r) + 0.75f)
+    if (dist_sq >= r_outer * r_outer)
         return 0;
 
     int hits = 0;
+    float rr = static_cast<float>(r) * static_cast<float>(r);
+    float center_x = static_cast<float>(cx);
+    float center_y = static_cast<float>(cy);
     for (int sy = 0; sy < k_round_aa_samples; sy++) {
         float sample_y = static_cast<float>(py) + k_round_aa_offsets[sy] - center_y;
+        float sample_y_sq = sample_y * sample_y;
         for (int sx = 0; sx < k_round_aa_samples; sx++) {
             float sample_x = static_cast<float>(px) + k_round_aa_offsets[sx] - center_x;
-            if (sample_x * sample_x + sample_y * sample_y <= rr)
+            if (sample_x * sample_x + sample_y_sq <= rr)
                 hits++;
         }
     }
@@ -1378,8 +1424,12 @@ void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
                 continue;
             if (alpha == 255)
                 drow[x] = pixel;
-            else
-                drow[x] = blend_pixel(drow[x], pixel, 255);
+            else {
+                if ((drow[x] >> 24) == 255)
+                    drow[x] = gui_blend_premultiplied_opaque_dst(drow[x], pixel);
+                else
+                    drow[x] = gui_blend_premultiplied(drow[x], pixel);
+            }
         }
     }
 }
@@ -1597,48 +1647,6 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
         }
     }
 
-    uint32_t buffer_pitch = 0;
-    size_t buffer_bytes = 0;
-    if (!gui_surface_layout(w, h, &buffer_pitch, &buffer_bytes)) {
-        LOG_ERROR("gui", "register_window invalid size: %s (%ux%u)", window_title, w, h);
-        return {NULL, 0, 0, 0, false};
-    }
-
-    uint32_t buffer_w = w;
-    uint32_t buffer_h = h;
-
-    int memfd = memfd_create("window_buffer", 0);
-    if (memfd < 0) {
-        LOG_ERROR("gui", "register_window memfd_create failed: %s (%ux%u)", window_title, w, h);
-        return {NULL, 0, 0, 0, false};
-    }
-
-    if (ftruncate(memfd, buffer_bytes) < 0) {
-        LOG_ERROR("gui", "register_window ftruncate failed: %s size=%zu", window_title, buffer_bytes);
-        close(memfd);
-        return {NULL, 0, 0, 0, false};
-    }
-
-    void *mapped_ptr = mmap(NULL, buffer_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
-    if (mapped_ptr == MAP_FAILED) {
-        LOG_ERROR("gui", "register_window mmap failed: %s fd=%d", window_title, memfd);
-        close(memfd);
-        return {NULL, 0, 0, 0, false};
-    }
-
-    int wm_fd = fd_transfer(0, memfd);
-    if (wm_fd < 0) {
-        LOG_ERROR("gui", "register_window fd_transfer failed: %s fd=%d", window_title, memfd);
-        munmap(mapped_ptr, buffer_bytes);
-        close(memfd);
-        return {NULL, 0, 0, 0, false};
-    }
-
-    close(memfd);
-    int shm_id = wm_fd | 0x40000000;
-    uint64_t win_ptr = reinterpret_cast<uint64_t>(mapped_ptr);
-    memset(reinterpret_cast<void *>(win_ptr), 0, buffer_bytes);
-
     int win_idx = -1;
     if (strcmp(window_title, "Menubar") == 0) {
         if (gui_reserve_window_slot(0))
@@ -1657,9 +1665,55 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
 
     if (win_idx < 0 || win_idx >= MAX_WINDOWS) {
         LOG_ERROR("gui", "register_window table full or slot busy: %s", window_title);
-        munmap(reinterpret_cast<void *>(win_ptr), buffer_bytes);
         return {NULL, 0, 0, 0, false};
     }
+
+    uint32_t buffer_pitch = 0;
+    size_t buffer_bytes = 0;
+    if (!gui_surface_layout(w, h, &buffer_pitch, &buffer_bytes)) {
+        LOG_ERROR("gui", "register_window invalid size: %s (%ux%u)", window_title, w, h);
+        g_registry->windows[win_idx].shm_id = WIN_SHM_INVALID;
+        return {NULL, 0, 0, 0, false};
+    }
+
+    uint32_t buffer_w = w;
+    uint32_t buffer_h = h;
+
+    int memfd = memfd_create("window_buffer", 0);
+    if (memfd < 0) {
+        LOG_ERROR("gui", "register_window memfd_create failed: %s (%ux%u)", window_title, w, h);
+        g_registry->windows[win_idx].shm_id = WIN_SHM_INVALID;
+        return {NULL, 0, 0, 0, false};
+    }
+
+    if (ftruncate(memfd, buffer_bytes) < 0) {
+        LOG_ERROR("gui", "register_window ftruncate failed: %s size=%zu", window_title, buffer_bytes);
+        close(memfd);
+        g_registry->windows[win_idx].shm_id = WIN_SHM_INVALID;
+        return {NULL, 0, 0, 0, false};
+    }
+
+    void *mapped_ptr = mmap(NULL, buffer_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
+    if (mapped_ptr == MAP_FAILED) {
+        LOG_ERROR("gui", "register_window mmap failed: %s fd=%d", window_title, memfd);
+        close(memfd);
+        g_registry->windows[win_idx].shm_id = WIN_SHM_INVALID;
+        return {NULL, 0, 0, 0, false};
+    }
+
+    int wm_fd = fd_transfer(0, memfd);
+    if (wm_fd < 0) {
+        LOG_ERROR("gui", "register_window fd_transfer failed: %s fd=%d", window_title, memfd);
+        munmap(mapped_ptr, buffer_bytes);
+        close(memfd);
+        g_registry->windows[win_idx].shm_id = WIN_SHM_INVALID;
+        return {NULL, 0, 0, 0, false};
+    }
+
+    close(memfd);
+    int shm_id = wm_fd | 0x40000000;
+    uint64_t win_ptr = reinterpret_cast<uint64_t>(mapped_ptr);
+    memset(reinterpret_cast<void *>(win_ptr), 0, buffer_bytes);
 
     gui_publish_window_count_for_slot(win_idx);
 
@@ -2765,6 +2819,47 @@ bool gui_intersect_rect(int x1, int y1, int w1, int h1, int x2, int y2, int w2, 
         *ow = (int)(right - left);
     if (oh)
         *oh = (int)(bottom - top);
+    return true;
+}
+
+bool gui_load_file(const char *path, uint8_t **out_data, uint32_t *out_size)
+{
+    if (out_data)
+        *out_data = nullptr;
+    if (out_size)
+        *out_size = 0;
+    if (!path || !out_data || !out_size)
+        return false;
+
+    VNodeStat st = {};
+    if (stat(path, &st) != 0 || st.is_dir || st.size == 0 || st.size > 0xFFFFFFFFu)
+        return false;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return false;
+
+    uint8_t *data = static_cast<uint8_t *>(malloc((size_t)st.size));
+    if (!data) {
+        close(fd);
+        return false;
+    }
+
+    uint64_t total = 0;
+    while (total < st.size) {
+        int n = read(fd, data + total, (size_t)(st.size - total));
+        if (n <= 0)
+            break;
+        total += (uint64_t)n;
+    }
+    close(fd);
+    if (total != st.size) {
+        free(data);
+        return false;
+    }
+
+    *out_data = data;
+    *out_size = (uint32_t)st.size;
     return true;
 }
 

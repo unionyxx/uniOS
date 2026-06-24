@@ -177,47 +177,6 @@ static void build_font_alpha_lut(GuiFont *font, FontRenderProfile profile)
     }
 }
 
-static bool load_file(const char *path, uint8_t **out_data, uint32_t *out_size)
-{
-    if (out_data)
-        *out_data = nullptr;
-    if (out_size)
-        *out_size = 0;
-    if (!path || !out_data || !out_size)
-        return false;
-
-    VNodeStat st = {};
-    if (stat(path, &st) != 0 || st.is_dir || st.size == 0 || st.size > 0xFFFFFFFFu)
-        return false;
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return false;
-
-    uint8_t *data = static_cast<uint8_t *>(malloc((size_t)st.size));
-    if (!data) {
-        close(fd);
-        return false;
-    }
-
-    uint64_t total = 0;
-    while (total < st.size) {
-        int n = read(fd, data + total, (size_t)(st.size - total));
-        if (n <= 0)
-            break;
-        total += (uint64_t)n;
-    }
-    close(fd);
-    if (total != st.size) {
-        free(data);
-        return false;
-    }
-
-    *out_data = data;
-    *out_size = (uint32_t)st.size;
-    return true;
-}
-
 static bool gui_font_load_from_file(GuiFont *font, const char *path)
 {
     if (!font || !path)
@@ -225,7 +184,7 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
 
     uint8_t *data = nullptr;
     uint32_t size = 0;
-    if (!load_file(path, &data, &size))
+    if (!gui_load_file(path, &data, &size))
         return false;
 
     if (size < sizeof(UofHeader)) {

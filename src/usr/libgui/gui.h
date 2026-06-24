@@ -264,6 +264,7 @@ void gui_blit_scaled_cover(Surface *dest, const Surface *src);
 
 bool gui_intersect_rect(int x1, int y1, int w1, int h1, int x2, int y2, int w2, int h2, int *ox, int *oy, int *ow,
                         int *oh);
+bool gui_load_file(const char *path, uint8_t **out_data, uint32_t *out_size);
 Registry *gui_registry(void);
 void gui_apply_theme(GuiThemeMode mode);
 bool gui_sync_theme_from_registry(void);
