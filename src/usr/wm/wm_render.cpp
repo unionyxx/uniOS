@@ -939,16 +939,30 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     }
     uint32_t frame_fill_color = mix_rgb(outline_color, body_color, focused ? 236 : 242);
     uint32_t inner_stroke_color = mix_rgb(body_color, 0xFFFFFFFFu, focused ? 18 : 12);
-    uint32_t separator_color = bar_color;
-
+    
     int lx = (dst->buffer != g_backbuffer.buffer) ? 0 : w.x;
     int ly = (dst->buffer != g_backbuffer.buffer) ? 0 : w.y - title_bar_h;
     int sx = lx, sy = ly, sw = w.w, sh = w.h + title_bar_h;
 
-    int shadow_offset = focused ? gui_scaled_metric(3) : gui_scaled_metric(2);
-    uint32_t shadow_color = focused ? 0x20000000u : 0x12000000u;
-    gui_fill_rounded_rect_clipped(dst, sx, sy + shadow_offset, sw, sh, radius + gui_scaled_metric(1), shadow_color,
-                                  clip);
+    // Multi-layered soft drop shadow styling that fits exactly inside outer.w/outer.h bounds
+    if (focused) {
+        // Layer 1: Ambient soft blur shadow
+        gui_fill_rounded_rect_clipped(dst, sx + gui_scaled_metric(1), sy + gui_scaled_metric(3), sw, sh,
+                                      radius + gui_scaled_metric(2), 0x08000000u, clip);
+        // Layer 2: Mid-range ambient shadow
+        gui_fill_rounded_rect_clipped(dst, sx + gui_scaled_metric(1), sy + gui_scaled_metric(2), sw, sh,
+                                      radius + gui_scaled_metric(1), 0x0C000000u, clip);
+        // Layer 3: Direct key shadow
+        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(1), sw, sh,
+                                      radius, 0x14000000u, clip);
+    } else {
+        // Layer 1: Soft ambient shadow
+        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(2), sw, sh,
+                                      radius + gui_scaled_metric(1), 0x06000000u, clip);
+        // Layer 2: Direct key shadow
+        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(1), sw, sh,
+                                      radius, 0x0A000000u, clip);
+    }
 
     gui_fill_rounded_rect_clipped(dst, sx, sy, sw, sh, radius, outline_color, clip);
     if (sw > border * 2 && sh > border * 2) {
@@ -977,8 +991,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
         if (title_radius > title_fill_h)
             title_radius = title_fill_h;
         fill_top_rounded_rect_clipped(dst, title_fill_x, title_fill_y, title_fill_w, title_fill_h, title_radius,
-                                      bar_color);
-        gui_fill_rect(dst, title_fill_x, sy + title_bar_h, title_fill_w, detail_inset, separator_color);
+                                       bar_color);
     }
 
     const GuiFont *title_font = gui_font_title();
@@ -992,11 +1005,16 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
 
     if (available_w > 0) {
         int raw_title_w = gui_measure_text(title_font, w.title);
-        int centered_x = sx + (w.w - raw_title_w) / 2;
-        if (centered_x < title_left)
+        int centered_x;
+        if (raw_title_w >= available_w) {
             centered_x = title_left;
-        if (centered_x + raw_title_w > title_right)
-            centered_x = title_right - raw_title_w;
+        } else {
+            centered_x = sx + (w.w - raw_title_w) / 2;
+            if (centered_x < title_left)
+                centered_x = title_left;
+            else if (centered_x + raw_title_w > title_right)
+                centered_x = title_right - raw_title_w;
+        }
 
         int ix, iy, iw, ih;
         if (gui_intersect_rect(clip.x, clip.y, clip.w, clip.h, centered_x, title_y, available_w, title_h, &ix, &iy, &iw,
