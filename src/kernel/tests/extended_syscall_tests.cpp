@@ -35,6 +35,15 @@ static void dummy_thread_entry()
     }
 }
 
+static volatile uint32_t g_test_futex = 0;
+static void futex_waiter_thread()
+{
+    sys_futex(&g_test_futex, FUTEX_WAIT, 0);
+    while (true) {
+        scheduler_yield();
+    }
+}
+
 KTEST(extended_syscalls_futex)
 {
     Process *current = process_get_current();
@@ -59,6 +68,49 @@ KTEST(extended_syscalls_futex)
     res = sys_futex(&val, FUTEX_WAKE, 1);
     KTEST_EXPECT_EQ(res, 0); // nobody waiting
 
+    // Test actual blocking and waking to ensure the futex lock is correctly released
+    g_test_futex = 0;
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *stack_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    int64_t thread_pid = sys_thread_create(futex_waiter_thread, nullptr, stack_top, &mock_frame);
+    KTEST_EXPECT(thread_pid > 0);
+
+    // Yield to allow the waiter thread to run and block
+    for (int i = 0; i < 5; i++) {
+        scheduler_yield();
+    }
+
+    // Wake the waiter thread
+    int64_t woken = sys_futex(&g_test_futex, FUTEX_WAKE, 1);
+    KTEST_EXPECT_EQ(woken, 1);
+
+    // Yield to let the waiter thread resume
+    for (int i = 0; i < 5; i++) {
+        scheduler_yield();
+    }
+
+    // Call WAKE again to verify we do not deadlock on bucket->lock
+    int64_t woken2 = sys_futex(&g_test_futex, FUTEX_WAKE, 1);
+    KTEST_EXPECT_EQ(woken2, 0);
+
+    // Reap the child thread
+    Process *child = process_find_by_pid(static_cast<uint64_t>(thread_pid));
+    KTEST_EXPECT(child != nullptr);
+    scheduler_remove_from_ready_queue(child);
+    child->state = ProcessState_Zombie;
+
+    int32_t status = 0;
+    int64_t reaped_pid = process_waitpid(thread_pid, &status, 0);
+    KTEST_EXPECT_EQ(reaped_pid, thread_pid);
+
+    free(stack);
     current->page_table = orig_page_table;
 }
 
@@ -72,8 +124,8 @@ KTEST(extended_syscalls_thread_create)
         parent->page_table = vmm_get_kernel_pml4();
 
     SyscallFrame mock_frame = {};
-    mock_frame.cs = 0x2b;
-    mock_frame.ss = 0x23;
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
     mock_frame.rflags = 0x202;
 
     void *stack = malloc(4096);

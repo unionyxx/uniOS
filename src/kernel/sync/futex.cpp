@@ -70,6 +70,7 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
         }
 
         scheduler_wait(&bucket->wait_queue, &bucket->lock);
+        spinlock_release_irqrestore(&bucket->lock, flags);
         return 0;
     }
     else if (op == FUTEX_WAKE) {
