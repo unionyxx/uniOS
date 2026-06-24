@@ -1,11 +1,9 @@
 #include "wm_core.h"
 
-// Compose dirty rect without cached visible regions. Fallback for overflows.
 void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                             const Registry *registry)
 {
     int start_index = find_top_opaque_covering_window(r);
-    bool covered_by_opaque = (start_index >= 0);
     if (start_index < 0) {
         gui_blit_rect(&g_backbuffer, &g_wallpaper, r.x, r.y, r.x, r.y, r.w, r.h);
         start_index = 0;
@@ -42,7 +40,7 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
     draw_toast_overlay_clipped(r);
 }
 
-static void subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect &cut)
+static bool subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect &cut)
 {
     int initial_count = *count;
     for (int i = 0; i < initial_count; i++) {
@@ -52,41 +50,39 @@ static void subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect 
             continue;
         }
 
-        // Replace current region with its fragments not covered by the cut
+        int fragments = 0;
+        if (overlap.y > current.y) fragments++;
+        if (overlap.y + overlap.h < current.y + current.h) fragments++;
+        if (overlap.x > current.x) fragments++;
+        if (overlap.x + overlap.w < current.x + current.w) fragments++;
+
+        if (*count - 1 + fragments > MAX_VISIBLE_REGIONS) {
+            return false;
+        }
+
         regions[i] = regions[*count - 1];
         (*count)--;
         i--;
         initial_count--;
 
-        // Top fragment
         if (overlap.y > current.y) {
-            if (*count < MAX_VISIBLE_REGIONS) {
-                regions[*count] = {current.x, current.y, current.w, overlap.y - current.y};
-                (*count)++;
-            }
+            regions[*count] = {current.x, current.y, current.w, overlap.y - current.y};
+            (*count)++;
         }
-        // Bottom fragment
         if (overlap.y + overlap.h < current.y + current.h) {
-            if (*count < MAX_VISIBLE_REGIONS) {
-                regions[*count] = {current.x, overlap.y + overlap.h, current.w, (current.y + current.h) - (overlap.y + overlap.h)};
-                (*count)++;
-            }
+            regions[*count] = {current.x, overlap.y + overlap.h, current.w, (current.y + current.h) - (overlap.y + overlap.h)};
+            (*count)++;
         }
-        // Left fragment
         if (overlap.x > current.x) {
-            if (*count < MAX_VISIBLE_REGIONS) {
-                regions[*count] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
-                (*count)++;
-            }
+            regions[*count] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
+            (*count)++;
         }
-        // Right fragment
         if (overlap.x + overlap.w < current.x + current.w) {
-            if (*count < MAX_VISIBLE_REGIONS) {
-                regions[*count] = {overlap.x + overlap.w, overlap.y, (current.x + current.w) - (overlap.x + overlap.w), overlap.h};
-                (*count)++;
-            }
+            regions[*count] = {overlap.x + overlap.w, overlap.y, (current.x + current.w) - (overlap.x + overlap.w), overlap.h};
+            (*count)++;
         }
     }
+    return true;
 }
 
 bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
@@ -109,7 +105,8 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
             int cover_rect_count = 0;
             get_window_opaque_cover_rects(w, cover_rects, &cover_rect_count);
             for (int cr = 0; cr < cover_rect_count; cr++) {
-                subtract_rect_local(wallpaper_regions, &count, cover_rects[cr]);
+                if (!subtract_rect_local(wallpaper_regions, &count, cover_rects[cr]))
+                    return false;
             }
             if (count >= MAX_VISIBLE_REGIONS - 4)
                 break;
@@ -130,21 +127,23 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         if (!dirty_rects_intersect(r, g_window_outer_cache[i]))
             continue;
 
-        // Cache overflow: fallback to unclipped path.
         if (g_window_visible_region_overflow[i])
             return false;
 
         int region_count = g_window_visible_region_count[i];
         if (region_count > MAX_VISIBLE_REGIONS)
             region_count = MAX_VISIBLE_REGIONS;
+        
+        bool focused = (i == focused_index);
+        bool hovered_frame = (i == hover_frame_index);
+        int hover_btn = hovered_frame ? hover_button : -1;
+
         for (int region = 0; region < region_count; region++) {
             DirtyRect visible = {};
             if (!rect_intersection(g_window_visible_regions[i][region], r, &visible))
                 continue;
-            bool focused = (i == focused_index);
-            bool hovered_frame = (i == hover_frame_index);
-            draw_window_decoration_clipped(&g_backbuffer, w, visible, focused, hovered_frame,
-                                           hovered_frame ? hover_button : -1);
+            
+            draw_window_decoration_clipped(&g_backbuffer, w, visible, focused, hovered_frame, hover_btn);
             if (rect_intersection(visible, g_window_client_cache[i], nullptr)) {
                 draw_window_client_clipped(&g_backbuffer, w, visible);
             }
@@ -188,7 +187,7 @@ bool move_backbuffer_rect(const DirtyRect &old_rect, const DirtyRect &new_rect)
     if (src.w != dst.w || src.h != dst.h)
         return false;
 
-    uint32_t stride = g_backbuffer.pitch / 4;
+    size_t stride = g_backbuffer.pitch / sizeof(uint32_t);
     int start = 0, end = src.h, step = 1;
     if (dst.y > src.y) {
         start = src.h - 1;
@@ -196,9 +195,21 @@ bool move_backbuffer_rect(const DirtyRect &old_rect, const DirtyRect &new_rect)
         step = -1;
     }
 
-    for (int row = start; row != end; row += step) {
-        memmove(&g_backbuffer.buffer[(dst.y + row) * stride + dst.x],
-                &g_backbuffer.buffer[(src.y + row) * stride + src.x], (size_t)src.w * sizeof(uint32_t));
+    size_t row_size = (size_t)src.w * sizeof(uint32_t);
+    bool x_overlap = !(dst.x >= src.x + src.w || dst.x + src.w <= src.x);
+
+    if (!x_overlap) {
+        for (int row = start; row != end; row += step) {
+            size_t dst_offset = (size_t)(dst.y + row) * stride + dst.x;
+            size_t src_offset = (size_t)(src.y + row) * stride + src.x;
+            memcpy(&g_backbuffer.buffer[dst_offset], &g_backbuffer.buffer[src_offset], row_size);
+        }
+    } else {
+        for (int row = start; row != end; row += step) {
+            size_t dst_offset = (size_t)(dst.y + row) * stride + dst.x;
+            size_t src_offset = (size_t)(src.y + row) * stride + src.x;
+            memmove(&g_backbuffer.buffer[dst_offset], &g_backbuffer.buffer[src_offset], row_size);
+        }
     }
     return true;
 }

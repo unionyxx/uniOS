@@ -34,8 +34,13 @@ static void process_free_reaped(Process *target)
     if (!target)
         return;
     if (target->stack_phys) {
-        for (size_t i = 0; i < KERNEL_STACK_SIZE / 4096; i++)
-            pmm_free_frame(reinterpret_cast<void *>(target->stack_phys + i * 4096));
+        uintptr_t stack_ptr = target->stack_phys;
+        size_t num_pages = KERNEL_STACK_SIZE / 4096;
+        
+        for (size_t i = 0; i < num_pages; i++) {
+            pmm_free_frame(reinterpret_cast<void*>(stack_ptr));
+            stack_ptr += 4096; // Move to the next page frame
+        }
     }
 
     bool share_page_table = false;
@@ -48,12 +53,9 @@ static void process_free_reaped(Process *target)
     if (curr) {
         do {
             if (curr != target) {
-                if (curr->page_table == target->page_table) {
-                    share_page_table = true;
-                }
-                if (curr->vma_list == target->vma_list) {
-                    share_vma_list = true;
-                }
+                if (curr->page_table == target->page_table) share_page_table = true;
+                if (curr->vma_list == target->vma_list) share_vma_list = true;
+                if (share_page_table && share_vma_list) break;
             }
             curr = curr->next;
         } while (curr != g_proc_list);
@@ -91,6 +93,12 @@ static Process *detach_kernel_zombie_locked()
         return nullptr;
 
     Process *kernel = g_proc_list;
+    if (kernel) {
+        do {
+            if (kernel->pid == 0) break;
+            kernel = kernel->next;
+        } while (kernel != g_proc_list);
+    }
     if (kernel && kernel->pid == 0) {
         Process *prev_child = nullptr;
         Process *child = kernel->children_list;
@@ -159,7 +167,7 @@ static void process_release_private_fds(Process *proc)
 static Process *g_ready_queues[NUM_PRIORITY_LEVELS] = {nullptr};
 static Process *g_ready_tails[NUM_PRIORITY_LEVELS] = {nullptr};
 static Process *g_sleep_queue = nullptr;
-static uint64_t g_last_sleep_tick = 0; // Baseline for true elapsed sleep time
+static uint64_t g_last_sleep_tick = 0;
 
 static void ready_queue_push(Process *p)
 {
@@ -202,16 +210,13 @@ void scheduler_remove_from_ready_queue(Process *p)
         Process *prev = nullptr;
         while (curr) {
             if (curr == p) {
-                if (prev) {
-                    prev->queue_next = curr->queue_next;
-                } else {
-                    g_ready_queues[i] = curr->queue_next;
-                }
-                if (g_ready_tails[i] == curr) {
-                    g_ready_tails[i] = prev;
-                }
+                if (prev) prev->queue_next = curr->queue_next;
+                else g_ready_queues[i] = curr->queue_next;
+                if (g_ready_tails[i] == curr) g_ready_tails[i] = prev;
                 curr->queue_next = nullptr;
-                break;
+                spinlock_release(&g_sched_lock);
+                interrupts_restore(flags);
+                return;
             }
             prev = curr;
             curr = curr->queue_next;
@@ -222,7 +227,6 @@ void scheduler_remove_from_ready_queue(Process *p)
     interrupts_restore(flags);
 }
 
-
 static void sleep_queue_push(Process *p, uint64_t ticks)
 {
     p->state = ProcessState_Sleeping;
@@ -230,7 +234,7 @@ static void sleep_queue_push(Process *p, uint64_t ticks)
         p->wake_time = ticks;
         p->queue_next = nullptr;
         g_sleep_queue = p;
-        g_last_sleep_tick = timer_get_ticks(); // Initialize baseline when queue becomes active
+        g_last_sleep_tick = timer_get_ticks();
         return;
     }
 
@@ -264,7 +268,6 @@ static void wake_sleeping_processes()
     if (now <= g_last_sleep_tick)
         return;
 
-    // Decrement using real elapsed hardware ticks, not scheduler invoke counts
     uint64_t diff = now - g_last_sleep_tick;
     g_last_sleep_tick = now;
 
@@ -393,7 +396,7 @@ static void scheduler_schedule_internal()
     if (next == g_current_proc) {
         g_current_proc->state = ProcessState_Running;
         g_current_proc->last_run_time = now;
-        spinlock_release(&g_sched_lock);
+        spinlock_release_no_restore(&g_sched_lock);
         return;
     }
 
@@ -415,15 +418,12 @@ static void scheduler_schedule_internal()
     tss_set_rsp0(next_rsp0);
     cpu_get_local()->kernel_stack = next_rsp0;
 
-    uint64_t *prev_cr3 =
-        prev->page_table
-            ? reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(prev->page_table) - vmm_get_hhdm_offset())
-            : reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(vmm_get_kernel_pml4()) - vmm_get_hhdm_offset());
-    uint64_t *next_cr3 =
-        g_current_proc->page_table
-            ? reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(g_current_proc->page_table) -
-                                           vmm_get_hhdm_offset())
-            : reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(vmm_get_kernel_pml4()) - vmm_get_hhdm_offset());
+    auto get_cr3 = [](Process *p) -> uint64_t* {
+        uint64_t pt = p->page_table ? reinterpret_cast<uint64_t>(p->page_table) : reinterpret_cast<uint64_t>(vmm_get_kernel_pml4());
+        return reinterpret_cast<uint64_t *>(pt - vmm_get_hhdm_offset());
+    };
+    uint64_t *prev_cr3 = get_cr3(prev);
+    uint64_t *next_cr3 = get_cr3(g_current_proc);
 
     if (prev_cr3 != next_cr3) {
         vmm_switch_address_space(next_cr3);
@@ -686,9 +686,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
 
     kstring::zero_memory(proc, sizeof(Process));
     event_init(proc->event_queue);
-    spinlock_acquire(&g_sched_lock);
-    proc->pid = g_next_pid++;
-    spinlock_release(&g_sched_lock);
+    proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     proc->uid = g_current_proc ? g_current_proc->uid : 0;
     proc->parent_pid = g_current_proc ? g_current_proc->pid : 0;
     if (name)
@@ -722,7 +720,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
     proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
 
-    for (size_t i = 0; i < KERNEL_STACK_SIZE / sizeof(uint64_t); i++)
+    for (size_t i = 0; i < 8; i++)
         proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
 
     uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
@@ -759,7 +757,6 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
 
 void scheduler_notify_input_waiters()
 {
-    // Wake processes waiting for input events to minimize latency.
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
 
@@ -768,7 +765,7 @@ void scheduler_notify_input_waiters()
         do {
             wait_queue_wake_all(&p->event_wait_queue);
             p = p->next;
-        } while (p && p != g_proc_list);
+        } while (p != g_proc_list);
     }
 
     spinlock_release(&g_sched_lock);
@@ -782,10 +779,9 @@ void scheduler_schedule()
     if (!g_current_proc)
         return;
     if (g_current_proc->stack_base) {
-        for (int s = 0; s < 8; s++) {
-            if (g_current_proc->stack_base[s] != 0xDEADBEEFDEADBEEFULL)
-                panic("Stack overflow detected!");
-        }
+        if (g_current_proc->stack_base[0] != 0xDEADBEEFDEADBEEFULL ||
+            g_current_proc->stack_base[7] != 0xDEADBEEFDEADBEEFULL)
+            panic("Stack overflow detected!");
     }
 
     const uint64_t flags = interrupts_save_disable();
@@ -810,14 +806,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     kstring::zero_memory(child, sizeof(Process));
     event_init(child->event_queue);
 
-    // Allocate a PID under the scheduler lock without allowing timer-driven
-    // preemption to interleave with scheduler state updates.
-    uint64_t flags = interrupts_save_disable();
-    spinlock_acquire(&g_sched_lock);
-    child->pid = g_next_pid++;
-    spinlock_release(&g_sched_lock);
-    interrupts_restore(flags);
-
+    child->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     child->parent_pid = g_current_proc->pid;
     child->uid = g_current_proc->uid;
     child->state = ProcessState_Ready;
@@ -883,11 +872,12 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
 
     uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
 
-    const size_t total_frame_size = sizeof(SyscallFrame) + sizeof(Context);
-    stack_top_hhdm -= total_frame_size;
-    stack_top_hhdm &= ~0xFULL;
+    stack_top_hhdm -= sizeof(SyscallFrame);
+    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm);
 
-    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm + sizeof(Context));
+    stack_top_hhdm -= sizeof(Context);
+    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(Context) - 1);
     Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
 
     *child_frame = *frame;
@@ -895,9 +885,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     child_context->rip = reinterpret_cast<uint64_t>(fork_ret);
     child->sp = stack_top_hhdm;
 
-    // Link the child into the process list and ready queue atomically with
-    // respect to timer interrupts and scheduler activity.
-    flags = interrupts_save_disable();
+    const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     g_proc_tail->next = child;
     g_proc_tail = child;
@@ -918,22 +906,7 @@ void process_exit(int32_t status)
 {
     DEBUG_INFO("Process %d exiting with status %d", g_current_proc->pid, status);
 
-    spinlock_acquire(&g_current_proc->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (g_current_proc->fd_table[i].used) {
-            FileDescriptor *f = &g_current_proc->fd_table[i];
-            VNode *node = f->vnode;
-            f->used = false;
-            f->vnode = nullptr;
-            if (node) {
-                spinlock_release(&g_current_proc->fd_lock);
-                vfs_close_vnode(node);
-                spinlock_acquire(&g_current_proc->fd_lock);
-            }
-        }
-    }
-    spinlock_release(&g_current_proc->fd_lock);
-
+    process_release_private_fds(g_current_proc);
     shm_cleanup_process(g_current_proc);
 
     const uint64_t flags = interrupts_save_disable();
@@ -985,7 +958,6 @@ void process_exit(int32_t status)
     }
 
     if (parent) {
-        // Reverted to accurate wildcard (0) logic. Step 1 `wake_all` handles the strict PID wakes
         if (parent->state == ProcessState_Waiting && parent->wait_for_pid == 0) {
             scheduler_wake_process_locked(parent);
         }
@@ -1053,6 +1025,11 @@ void process_exit(int32_t status)
         }
 
         if (nohang) {
+            if (!g_current_proc->children_list) {
+                spinlock_release(&g_sched_lock);
+                interrupts_restore(flags);
+                return -1;
+            }
             if (pid != -1) {
                 Process *child = nullptr;
                 Process *c = g_current_proc->children_list;
@@ -1074,7 +1051,6 @@ void process_exit(int32_t status)
             return 0;
         }
 
-        // Reverted to 0 for wildcard representation as initially architected
         if (pid == -1) {
             g_current_proc->state = ProcessState_Waiting;
             g_current_proc->wait_for_pid = 0;
@@ -1110,9 +1086,7 @@ void scheduler_sleep(uint64_t ticks)
     spinlock_acquire(&g_sched_lock);
 
     sleep_queue_push(g_current_proc, ticks);
-
-    spinlock_release(&g_sched_lock);
-    scheduler_schedule();
+    scheduler_schedule_internal();
     interrupts_restore(flags);
 }
 
@@ -1121,7 +1095,6 @@ void scheduler_sleep_ms(uint64_t ms)
     if (ms == 0)
         return;
 
-    // Ceil(ms * freq / 1000) without overflowing for very large values.
     const uint32_t freq = timer_get_frequency();
     if (freq == 0) {
         timer_poll_wait_ms(static_cast<uint32_t>(ms > UINT32_MAX ? UINT32_MAX : ms));
@@ -1147,7 +1120,7 @@ extern "C" void thread_ret();
 [[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame)
 {
     if (!entry || !stack_top || !frame) {
-        return -22; // -EINVAL
+        return -22;
     }
 
     Process *parent = process_get_current();
@@ -1162,12 +1135,7 @@ extern "C" void thread_ret();
     kstring::zero_memory(thread, sizeof(Process));
     event_init(thread->event_queue);
 
-    uint64_t flags = interrupts_save_disable();
-    spinlock_acquire(&g_sched_lock);
-    thread->pid = g_next_pid++;
-    spinlock_release(&g_sched_lock);
-    interrupts_restore(flags);
-
+    thread->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     thread->parent_pid = parent->pid;
     thread->uid = parent->uid;
     thread->state = ProcessState_Ready;
@@ -1179,7 +1147,6 @@ extern "C" void thread_ret();
     kstring::memcpy(thread->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
     thread->fpu_initialized = true;
 
-    // copy fd table, bump vnode refcounts
     spinlock_init(&thread->fd_lock);
     spinlock_acquire(&parent->fd_lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -1194,12 +1161,10 @@ extern "C" void thread_ret();
     thread->cursor_y = parent->cursor_y;
     kstring::strncpy(thread->cwd, parent->cwd, sizeof(thread->cwd));
 
-
     thread->page_table = parent->page_table;
     thread->vma_list = parent->vma_list;
     spinlock_init(&thread->vma_lock);
-    thread->vma_lock_ptr = parent->vma_lock_ptr; // Share parent's VMA lock
-
+    thread->vma_lock_ptr = parent->vma_lock_ptr;
 
     const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
     void *kstack_phys = pmm_alloc_frames(stack_pages);
@@ -1217,11 +1182,13 @@ extern "C" void thread_ret();
         hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
 
     uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
-    const size_t total_frame_size = sizeof(SyscallFrame) + sizeof(Context);
-    stack_top_hhdm -= total_frame_size;
-    stack_top_hhdm &= ~0xFULL;
 
-    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm + sizeof(Context));
+    stack_top_hhdm -= sizeof(SyscallFrame);
+    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm);
+
+    stack_top_hhdm -= sizeof(Context);
+    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(Context) - 1);
     Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
 
     kstring::zero_memory(child_frame, sizeof(SyscallFrame));
@@ -1230,7 +1197,7 @@ extern "C" void thread_ret();
     child_frame->cs = frame->cs;
     child_frame->ss = frame->ss;
     child_frame->rflags = frame->rflags;
-    child_frame->arg6 = reinterpret_cast<uint64_t>(arg); // r9 -> rdi via thread_ret
+    child_frame->arg6 = reinterpret_cast<uint64_t>(arg);
 
     kstring::zero_memory(child_context, sizeof(Context));
     child_context->rip = reinterpret_cast<uint64_t>(thread_ret);
@@ -1239,7 +1206,7 @@ extern "C" void thread_ret();
     kstring::strncpy(thread->name, parent->name, 24);
     kstring::strncat(thread->name, "/thr", 7);
 
-    flags = interrupts_save_disable();
+    const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     g_proc_tail->next = thread;
     g_proc_tail = thread;
@@ -1286,4 +1253,3 @@ void preempt_enable()
         scheduler_yield();
     }
 }
-
