@@ -558,21 +558,14 @@ static inline void window_button_center(const Window &w, int button_index, int *
 
 static inline int window_effective_w(const Window &w)
 {
-    if (w.transparent)
-        return (w.buffer_w > 0 && w.buffer_w < w.w) ? w.buffer_w : w.w;
-    int border = wm_frame_border();
-    int max_outer_w = w.buffer_w > 0 ? w.buffer_w + border * 2 : w.w;
-    return max_outer_w < w.w ? max_outer_w : w.w;
+    return w.w;
 }
 
 static inline int window_effective_h(const Window &w)
 {
-    if (w.transparent)
-        return (w.buffer_h > 0 && w.buffer_h < w.h) ? w.buffer_h : w.h;
-    int border = wm_frame_border();
-    int max_outer_h = w.buffer_h > 0 ? w.buffer_h + border : w.h;
-    return max_outer_h < w.h ? max_outer_h : w.h;
+    return w.h;
 }
+
 
 static inline DirtyRect window_visible_client_bounds(const Window &w)
 {

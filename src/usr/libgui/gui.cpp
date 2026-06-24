@@ -1767,7 +1767,7 @@ int gui_sync_window_size(Surface *s)
     uint32_t new_w = (g_my_window->w > 0) ? static_cast<uint32_t>(g_my_window->w) : s->width;
     uint32_t new_h = (g_my_window->h > 0) ? static_cast<uint32_t>(g_my_window->h) : s->height;
     bool requested_resize =
-        (g_my_window->flags & WIN_FLAG_RESIZABLE) != 0 && (new_w != g_window_buffer_w || new_h != g_window_buffer_h);
+        (g_my_window->flags & WIN_FLAG_RESIZABLE) != 0 && (new_w > g_window_buffer_w || new_h > g_window_buffer_h);
     if (requested_resize && !gui_resize_window_backing(s, new_w, new_h)) {
         new_w = g_window_buffer_w;
         new_h = g_window_buffer_h;
