@@ -1887,7 +1887,11 @@ extern "C" int main(int argc, char **argv)
                 g_frame_stats.frames_skipped++;
             // Flush deferred settings persist during idle to avoid blocking I/O during compositing.
             flush_pending_settings_persist(registry);
-            yield();
+            if (g_dirty_count == 0 && last_seq <= g_display_queue.completed_sequence) {
+                sleep_ms(8);
+            } else {
+                yield();
+            }
         } else {
             // Non-blocking Swapchain present-wait implementation
             if (g_wait_start_ticks == 0) {
@@ -1899,8 +1903,8 @@ extern "C" int main(int argc, char **argv)
                 g_display_queue.completed_sequence = tgt;
                 g_wait_start_ticks = 0;
             } else {
-                yield();
-                continue; // Yield and immediately process input events
+                sleep_ms(2);
+                continue; // Sleep briefly to prevent 100% CPU busy wait, then process input events
             }
         }
     }
