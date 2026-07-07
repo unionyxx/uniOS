@@ -948,7 +948,18 @@ extern "C" int main(int argc, char **argv)
     sync_control_center_state_from_registry(registry);
     Event ev;
 
+    uint64_t drag_frames = 0;
+    uint64_t drag_events_ticks = 0;
+    uint64_t drag_move_ticks = 0;
+    uint64_t drag_compose_ticks = 0;
+    uint64_t drag_present_ticks = 0;
+    uint64_t drag_wait_ticks = 0;
+    uint64_t drag_total_ticks = 0;
+    uint64_t drag_start_log_ticks = 0;
+
     while (true) {
+        uint64_t t0 = get_ticks();
+        uint64_t t_events_start = get_ticks();
         uint32_t event_budget = 256;
         while (event_budget-- > 0 && get_event(&ev)) {
             if (ev.type == EVT_MOUSE_MOVE) {
