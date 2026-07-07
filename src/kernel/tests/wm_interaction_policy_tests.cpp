@@ -1,5 +1,6 @@
 #include <kernel/ktest.h>
 #include <wm/interaction_policy.h>
+#include <drivers/class/hid/ps2_mouse.h>
 
 KTEST(wm_policy_submit_when_queue_has_capacity)
 {
@@ -198,4 +199,11 @@ KTEST(wm_exposed_transition_reports_uncovered_strip_for_horizontal_move)
     KTEST_EXPECT_EQ(damage.rects[0].y, 100);
     KTEST_EXPECT_EQ(damage.rects[0].w, 40);
     KTEST_EXPECT_EQ(damage.rects[0].h, 80);
+}
+
+KTEST(ps2_mouse_thread_safety)
+{
+    MouseState state = ps2_mouse_get_state();
+    KTEST_EXPECT(state.x >= 0);
+    KTEST_EXPECT(state.y >= 0);
 }

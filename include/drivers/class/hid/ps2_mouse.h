@@ -14,5 +14,5 @@ struct MouseState
 
 void ps2_mouse_init();
 void ps2_mouse_handler();
-const MouseState *ps2_mouse_get_state();
+MouseState ps2_mouse_get_state();
 int8_t ps2_mouse_get_scroll();

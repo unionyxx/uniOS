@@ -70,12 +70,12 @@ void input_mouse_get_state(InputMouseState *state)
         return;
     state->scroll_delta = 0;
 
-    const MouseState *ps2_mouse = ps2_mouse_get_state();
-    state->x = ps2_mouse->x;
-    state->y = ps2_mouse->y;
-    state->left = ps2_mouse->left_button;
-    state->right = ps2_mouse->right_button;
-    state->middle = ps2_mouse->middle_button;
+    MouseState ps2_mouse = ps2_mouse_get_state();
+    state->x = ps2_mouse.x;
+    state->y = ps2_mouse.y;
+    state->left = ps2_mouse.left_button;
+    state->right = ps2_mouse.right_button;
+    state->middle = ps2_mouse.middle_button;
     state->scroll_delta = ps2_mouse_get_scroll();
 
     if (usb_hid_mouse_available()) {

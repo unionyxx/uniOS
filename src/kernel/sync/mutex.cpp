@@ -53,10 +53,15 @@ void mutex_unlock(Mutex *mtx)
     mtx->owner_pid = 0;
     __sync_lock_release(&mtx->locked);
 
-    // Wake all waiting processes (they will contend for the lock again)
-    // Alternatively, we could wake just one, but then we must ensure it gets the lock.
-    // Given the current MLFQ, wake_all is simpler and prevents starvation.
-    scheduler_wake_all(&mtx->wait_queue);
+    // Wake exactly one waiter (wake-one). If that waiter resumes, races for
+    // the lock, and loses, mutex_lock's outer loop puts it back on
+    // wait_queue via scheduler_wait; the next unlock then wakes the (possibly
+    // different) head. This is the standard "wake-one + resleep on miss"
+    // pattern (cf. Linux __mutex_unlock_slowpath): it guarantees forward
+    // progress for waiters without a thundering herd on every unlock.
+    if (mtx->wait_queue.head) {
+        scheduler_wake_one(&mtx->wait_queue);
+    }
 
     spinlock_release_irqrestore(&mtx->wait_lock, flags);
 }

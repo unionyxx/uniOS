@@ -509,6 +509,56 @@ void scheduler_wake_all(WaitQueue *q)
     interrupts_restore(flags);
 }
 
+void scheduler_wake_one(WaitQueue *q)
+{
+    if (!q)
+        return;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    // Wake exactly the head waiter, if any. If the woken task loses the race
+    // for the lock and re-enters scheduler_wait, it re-queues itself; the
+    // next unlock will pick up the (possibly different) head. This mirrors
+    // Linux's __mutex_wakeup and avoids the thundering-herd of wake_all on
+    // contended mutexes while preserving the existing wait_queue semantics.
+    Process *p = q->head;
+    if (p) {
+        // Detach the head from the wait queue.
+        Process *next = p->queue_next;
+        q->head = next;
+        if (!next)
+            q->tail = nullptr;
+        p->queue_next = nullptr;
+        p->waiting_queue = nullptr;
+
+        if (p->state == ProcessState_Waiting || p->state == ProcessState_Blocked) {
+            p->state = ProcessState_Ready;
+            interactive_boost_if_needed(p);
+            ready_queue_push(p);
+        }
+
+        // Preserve the existing side-effect: a non-epoll wake also nudges the
+        // global epoll wait queue. This is removed in the epoll refactor step.
+        if (q != &g_epoll_wait_queue && g_epoll_wait_queue.head) {
+            Process *e = g_epoll_wait_queue.head;
+            g_epoll_wait_queue.head = e->queue_next;
+            if (!g_epoll_wait_queue.head)
+                g_epoll_wait_queue.tail = nullptr;
+            e->queue_next = nullptr;
+            e->waiting_queue = nullptr;
+            if (e->state == ProcessState_Waiting || e->state == ProcessState_Blocked) {
+                e->state = ProcessState_Ready;
+                interactive_boost_if_needed(e);
+                ready_queue_push(e);
+            }
+        }
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+}
+
 void scheduler_wake_process(Process *p)
 {
     if (!p)

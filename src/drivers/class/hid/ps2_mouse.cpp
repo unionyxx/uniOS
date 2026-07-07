@@ -5,9 +5,11 @@
 #include <kernel/arch/x86_64/pic.h>
 #include <kernel/irq.h>
 #include <kernel/scheduler.h>
+#include <kernel/sync/spinlock.h>
 
 extern const BootFramebuffer *g_framebuffer;
 
+static Spinlock g_mouse_lock = SPINLOCK_INIT;
 static MouseState state = {0, 0, false, false, false, 0};
 static uint8_t mouse_cycle = 0;
 static uint8_t mouse_packet_size = 3;
@@ -122,6 +124,7 @@ void ps2_mouse_init()
 void ps2_mouse_handler()
 {
     uint8_t data = inb(MOUSE_DATA);
+    uint64_t flags = spinlock_acquire_irqsave(&g_mouse_lock);
 
     switch (mouse_cycle) {
         case 0:
@@ -182,19 +185,26 @@ void ps2_mouse_handler()
                 if (state.y >= (int32_t)g_framebuffer->height)
                     state.y = g_framebuffer->height - 1;
             }
+            spinlock_release_irqrestore(&g_mouse_lock, flags);
             scheduler_notify_input_waiters();
-            break;
+            return;
     }
+    spinlock_release_irqrestore(&g_mouse_lock, flags);
 }
 
-const MouseState *ps2_mouse_get_state()
+MouseState ps2_mouse_get_state()
 {
-    return &state;
+    uint64_t flags = spinlock_acquire_irqsave(&g_mouse_lock);
+    MouseState copy = state;
+    spinlock_release_irqrestore(&g_mouse_lock, flags);
+    return copy;
 }
 
 int8_t ps2_mouse_get_scroll()
 {
+    uint64_t flags = spinlock_acquire_irqsave(&g_mouse_lock);
     int8_t delta = state.scroll_delta;
     state.scroll_delta = 0;
+    spinlock_release_irqrestore(&g_mouse_lock, flags);
     return delta;
 }
