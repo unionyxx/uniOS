@@ -447,7 +447,7 @@ static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rec
     }
 }
 
-static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwrite_full_frame)
+static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwrite_full_frame, bool actively_resizing)
 {
     if (slot_index >= g_presentbuffer_slot_count)
         return false;
@@ -456,7 +456,7 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     if (!dst.surface.buffer)
         return false;
 
-    if (overwrite_full_frame) {
+    if (overwrite_full_frame || actively_resizing) {
         clear_presentbuffer_slot_stale(dst);
         return true;
     }
@@ -529,12 +529,15 @@ static bool select_presentbuffer_slot_for_frame()
     if (g_presentbuffer_slot_count == 0)
         return false;
 
+    bool actively_resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE &&
+                             g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count;
+
     bool overwrite_full_frame = dirty_set_is_single_fullscreen_rect();
     for (uint32_t offset = 0; offset < g_presentbuffer_slot_count; offset++) {
         uint32_t index = (g_presentbuffer_active_slot + offset) % g_presentbuffer_slot_count;
         if (g_presentbuffer_slots[index].in_flight_sequence != 0)
             continue;
-        if (!sync_presentbuffer_slot_from_active(index, overwrite_full_frame))
+        if (!sync_presentbuffer_slot_from_active(index, overwrite_full_frame, actively_resizing))
             continue;
 
         g_presentbuffer_active_slot = index;
@@ -960,7 +963,7 @@ extern "C" int main(int argc, char **argv)
     while (true) {
         uint64_t t0 = get_ticks();
         uint64_t t_events_start = get_ticks();
-        uint32_t event_budget = 256;
+        uint32_t event_budget = 32;
         while (event_budget-- > 0 && get_event(&ev)) {
             if (ev.type == EVT_MOUSE_MOVE) {
                 g_input.pending_mouse_x = ev.mouse.x;
@@ -1388,6 +1391,7 @@ extern "C" int main(int argc, char **argv)
                 gui_apply_theme(next_theme);
                 refresh_wm_metrics();
                 reload_wallpaper(registry, true);
+                recapture_shell_blur_sources(registry);
                 enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             } else if (flags_changed) {
                 enqueue_damage_rect(0, 0, g_screen.width, wm_menubar_h());
@@ -1399,6 +1403,7 @@ extern "C" int main(int argc, char **argv)
             if (transparency_changed) {
                 capture_shell_backdrop_for_rect(
                     {0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)}, registry);
+                recapture_shell_blur_sources(registry);
                 enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
             }
         }
@@ -1899,7 +1904,7 @@ extern "C" int main(int argc, char **argv)
             // Flush deferred settings persist during idle to avoid blocking I/O during compositing.
             flush_pending_settings_persist(registry);
             if (g_dirty_count == 0 && last_seq <= g_display_queue.completed_sequence) {
-                sleep_ms(8);
+                sleep_ms(1);
             } else {
                 yield();
             }
@@ -1914,7 +1919,7 @@ extern "C" int main(int argc, char **argv)
                 g_display_queue.completed_sequence = tgt;
                 g_wait_start_ticks = 0;
             } else {
-                sleep_ms(2);
+                sleep_ms(1);
                 continue; // Sleep briefly to prevent 100% CPU busy wait, then process input events
             }
         }

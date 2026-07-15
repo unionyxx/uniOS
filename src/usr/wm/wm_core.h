@@ -529,6 +529,11 @@ static inline int wm_window_damage_pad()
     int pad = gui_scaled_metric(WINDOW_DAMAGE_PAD_BASE) + wm_frame_border() + wm_frame_shadow_offset_y();
     return pad < CURSOR_DAMAGE_PAD ? CURSOR_DAMAGE_PAD : pad;
 }
+static inline int wm_window_damage_pad_interactive()
+{
+    int pad = gui_scaled_metric(WINDOW_DAMAGE_PAD_BASE) + wm_frame_border();
+    return pad < 2 ? 2 : pad;
+}
 static inline DirtyRect rect_expand(const DirtyRect &rect, int pad)
 {
     if (pad <= 0 || rect.w <= 0 || rect.h <= 0)
@@ -632,6 +637,7 @@ void init_wallpaper();
 void reload_wallpaper(Registry *registry, bool prefer_requested);
 bool init_shell_blur_buffers(Registry *registry, uint32_t dock_w, uint32_t dock_h);
 void capture_shell_backdrop_for_rect(const DirtyRect &rect, Registry *registry);
+void recapture_shell_blur_sources(Registry *registry);
 void flush_shell_blur_updates(Registry *registry);
 bool move_backbuffer_rect(const DirtyRect &old_rect, const DirtyRect &new_rect);
 void draw_context_menu_overlay(const Registry *registry);

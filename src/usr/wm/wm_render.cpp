@@ -74,6 +74,31 @@ static bool g_menubar_blur_dirty = false;
 static bool g_dock_blur_dirty = false;
 static uint64_t g_last_blur_vblank = 0;
 
+// Blur source dirty rect tracking - must be declared before first use in mark_shell_blur_dirty
+static DirtyRect g_menubar_blur_dirty_rects[MAX_DIRTY_RECTS];
+static int g_menubar_blur_dirty_count = 0;
+static DirtyRect g_dock_blur_dirty_rects[MAX_DIRTY_RECTS];
+static int g_dock_blur_dirty_count = 0;
+
+static void add_blur_dirty_rect(DirtyRect *rects, int *count, const DirtyRect &r)
+{
+    DirtyRect clip = r;
+    if (!clip_dirty_rect_to_screen(clip))
+        return;
+    if (*count < MAX_DIRTY_RECTS) {
+        rects[(*count)++] = clip;
+    } else {
+        if (*count == 1) {
+            rects[0] = rect_union(rects[0], clip);
+        }
+    }
+}
+
+static void clear_blur_dirty_rects(DirtyRect *rects, int *count)
+{
+    *count = 0;
+}
+
 void invalidate_window_decoration_cache(Window &w)
 {
     w.decoration_cache_theme_sig = 0;
@@ -387,7 +412,7 @@ static void compose_desktop_for_blur(Surface *dst, const DirtyRect &clip, int of
         gui_blit_rect(dst, &g_wallpaper, shifted_clip.x, shifted_clip.y, clip.x, clip.y, clip.w, clip.h);
     }
 
-    start_index = (start_index < WM_FIRST_USER_WINDOW) ? 2 : start_index;
+    start_index = (start_index < WM_FIRST_USER_WINDOW) ? WM_FIRST_USER_WINDOW : start_index;
 
     for (int i = start_index; i < g_window_count; ++i) {
         if (!g_window_visible_cache[i] || !g_windows[i].buffer || g_windows[i].transparent ||
@@ -421,6 +446,7 @@ static void mark_shell_blur_dirty(Registry *registry, const DirtyRect &screen_re
     if (g_menubar_blur_source.buffer && rect_intersection(screen_rect, menubar_rect, &overlap)) {
         compose_desktop_for_blur(&g_menubar_blur_source, overlap, 0, 0);
         g_menubar_blur_dirty = true;
+        add_blur_dirty_rect(g_menubar_blur_dirty_rects, &g_menubar_blur_dirty_count, overlap);
     }
 
     if (g_dock_blur_source.buffer && registry->window_count > 1) {
@@ -429,6 +455,33 @@ static void mark_shell_blur_dirty(Registry *registry, const DirtyRect &screen_re
         if (clip_dirty_rect_to_screen(dock_rect) && rect_intersection(screen_rect, dock_rect, &overlap)) {
             compose_desktop_for_blur(&g_dock_blur_source, overlap, dock_rect.x, dock_rect.y);
             g_dock_blur_dirty = true;
+            add_blur_dirty_rect(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count, overlap);
+        }
+    }
+}
+
+void recapture_shell_blur_sources(Registry *registry)
+{
+    if (!registry || !g_backbuffer.buffer)
+        return;
+
+    // Re-capture full menubar source
+    if (g_menubar_blur_source.buffer) {
+        int menubar_h = wm_menubar_h();
+        DirtyRect full_menubar = {0, 0, static_cast<int>(g_screen.width), menubar_h};
+        compose_desktop_for_blur(&g_menubar_blur_source, full_menubar, 0, 0);
+        g_menubar_blur_dirty = true;
+        clear_blur_dirty_rects(g_menubar_blur_dirty_rects, &g_menubar_blur_dirty_count);
+    }
+
+    // Re-capture full dock source
+    if (g_dock_blur_source.buffer && registry->window_count > 1) {
+        DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y,
+                               registry->windows[1].w, registry->windows[1].h};
+        if (clip_dirty_rect_to_screen(dock_rect)) {
+            compose_desktop_for_blur(&g_dock_blur_source, dock_rect, dock_rect.x, dock_rect.y);
+            g_dock_blur_dirty = true;
+            clear_blur_dirty_rects(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count);
         }
     }
 }
@@ -485,8 +538,19 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
 
         if (py >= top_band_end) {
             if (full_opaque) {
-                for (int px = start_x; px < end_x; ++px)
-                    dst_row[px] = color;
+                int span = end_x - start_x;
+                if (span <= 0)
+                    continue;
+                uint32_t *span_dst = &dst_row[start_x];
+                uint32_t v0 = color, v1 = color, v2 = color, v3 = color;
+                int i = 0;
+                for (; i + 7 < span; i += 8) {
+                    span_dst[0] = v0; span_dst[1] = v1; span_dst[2] = v2; span_dst[3] = v3;
+                    span_dst[4] = v0; span_dst[5] = v1; span_dst[6] = v2; span_dst[7] = v3;
+                    span_dst += 8;
+                }
+                for (; i < span; ++i)
+                    *span_dst++ = v0;
             } else {
                 for (int px = start_x; px < end_x; ++px)
                     dst_row[px] = blend_rgb(dst_row[px], color, base_alpha);
@@ -525,16 +589,26 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
                 continue;
             if (coverage == 255 && full_opaque)
                 dst_row[px] = color;
-            else
+            else if (coverage)
                 dst_row[px] = blend_rgb(dst_row[px], color, coverage);
         }
 
         int center_lo = start_x > center_start_x ? start_x : center_start_x;
         int center_hi = end_x < center_end_x ? end_x : center_end_x;
-        if (full_opaque) {
-            for (int px = center_lo; px < center_hi; ++px)
-                dst_row[px] = color;
-        } else {
+        int center_w = center_hi - center_lo;
+        if (full_opaque && center_w > 0) {
+            uint32_t *center_dst = &dst_row[center_lo];
+            uint32_t v0 = color, v1 = color, v2 = color, v3 = color;
+            uint32_t *p = center_dst;
+            int i = 0;
+            for (; i + 7 < center_w; i += 8) {
+                p[0] = v0; p[1] = v1; p[2] = v2; p[3] = v3;
+                p[4] = v0; p[5] = v1; p[6] = v2; p[7] = v3;
+                p += 8;
+            }
+            for (; i < center_w; ++i)
+                *p++ = v0;
+        } else if (center_w > 0) {
             for (int px = center_lo; px < center_hi; ++px)
                 dst_row[px] = blend_rgb(dst_row[px], color, base_alpha);
         }
@@ -547,7 +621,7 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
                 continue;
             if (coverage == 255 && full_opaque)
                 dst_row[px] = color;
-            else
+            else if (coverage)
                 dst_row[px] = blend_rgb(dst_row[px], color, coverage);
         }
     }
@@ -783,6 +857,8 @@ void flush_shell_blur_updates(Registry *registry)
         registry->dk_blur_generation = 0;
         g_menubar_blur_dirty = false;
         g_dock_blur_dirty = false;
+        clear_blur_dirty_rects(g_menubar_blur_dirty_rects, &g_menubar_blur_dirty_count);
+        clear_blur_dirty_rects(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count);
         asm volatile("sfence" ::: "memory");
         return;
     }
@@ -826,24 +902,53 @@ void flush_shell_blur_updates(Registry *registry)
 
         if (intersects_menubar) {
             g_menubar_blur_dirty = true;
+            add_blur_dirty_rect(g_menubar_blur_dirty_rects, &g_menubar_blur_dirty_count, menubar_rect);
         }
         if (intersects_dock) {
             g_dock_blur_dirty = true;
+            add_blur_dirty_rect(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count, dock_rect);
         }
     }
 
     g_last_blur_vblank = g_display_queue.vblank_count;
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
 
-    static bool s_blur_stagger_toggle = false;
-    s_blur_stagger_toggle = !s_blur_stagger_toggle;
-
-    if (g_menubar_blur_dirty && g_menubar_blur.buffer && g_menubar_blur_source.buffer &&
-        (!g_dock_blur_dirty || s_blur_stagger_toggle)) {
+    // Always process both surfaces every frame - no stagger
+    if (g_menubar_blur_dirty && g_menubar_blur.buffer && g_menubar_blur_source.buffer) {
+        if (g_menubar_blur_dirty_count > 0) {
+            // Recompose only dirty regions
+            for (int i = 0; i < g_menubar_blur_dirty_count; i++) {
+                compose_desktop_for_blur(&g_menubar_blur_source, g_menubar_blur_dirty_rects[i], 0, 0);
+            }
+            clear_blur_dirty_rects(g_menubar_blur_dirty_rects, &g_menubar_blur_dirty_count);
+        } else {
+            // Full recomposition
+            int menubar_h = wm_menubar_h();
+            DirtyRect full = {0, 0, static_cast<int>(g_screen.width), menubar_h};
+            compose_desktop_for_blur(&g_menubar_blur_source, full, 0, 0);
+        }
         blur_surface_material(&g_menubar_blur_source, &g_menubar_blur, 48.0f, is_light ? 85 : 80, is_light ? 8 : 12);
         registry->mb_blur_generation = registry->mb_blur_generation + 1u;
         g_menubar_blur_dirty = false;
-    } else if (g_dock_blur_dirty && g_dock_blur.buffer && g_dock_blur_source.buffer) {
+    }
+
+    if (g_dock_blur_dirty && g_dock_blur.buffer && g_dock_blur_source.buffer) {
+        if (g_dock_blur_dirty_count > 0) {
+            // Recompose only dirty regions
+            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y,
+                                   registry->windows[1].w, registry->windows[1].h};
+            clip_dirty_rect_to_screen(dock_rect);
+            for (int i = 0; i < g_dock_blur_dirty_count; i++) {
+                compose_desktop_for_blur(&g_dock_blur_source, g_dock_blur_dirty_rects[i], dock_rect.x, dock_rect.y);
+            }
+            clear_blur_dirty_rects(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count);
+        } else {
+            // Full recomposition
+            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y,
+                                   registry->windows[1].w, registry->windows[1].h};
+            clip_dirty_rect_to_screen(dock_rect);
+            compose_desktop_for_blur(&g_dock_blur_source, dock_rect, dock_rect.x, dock_rect.y);
+        }
         blur_surface_material(&g_dock_blur_source, &g_dock_blur, 36.0f, is_light ? 82 : 78, is_light ? 8 : 10);
         registry->dk_blur_generation = registry->dk_blur_generation + 1u;
         g_dock_blur_dirty = false;
@@ -1064,6 +1169,48 @@ static void draw_window_decoration_buttons(Surface *dst, const Window &w, bool f
     }
 }
 
+static void draw_window_decoration_buttons_clipped(Surface *dst, const Window &w, const DirtyRect &clip,
+                                                   bool focused, int hovered_button)
+{
+    if (w.transparent)
+        return;
+
+    ensure_button_icons();
+
+    uint32_t bar_color = get_window_app_background(w);
+    uint32_t button_colors[3] = {g_gui_chrome.button_close, g_gui_chrome.button_minimize, g_gui_chrome.button_maximize};
+    uint32_t button_outline = focused ? 0x65000000u : 0x38000000u;
+    int button_size = wm_button_size();
+    int r = button_size / 2;
+
+    Surface *icons[3] = {&g_icon_close, &g_icon_minimize, &g_icon_maximize};
+
+    for (int i = 0; i < 3; i++) {
+        int cx = 0, cy = 0;
+        window_button_center(w, i, &cx, &cy);
+
+        // Check if this button intersects the clip rect
+        if (cx - r >= clip.x + clip.w || cx + r <= clip.x ||
+            cy - r >= clip.y + clip.h || cy + r <= clip.y) {
+            continue;
+        }
+
+        uint32_t button_fill = focused ? button_colors[i] : mix_rgb(button_colors[i], bar_color, 138);
+        if (hovered_button == i) {
+            button_fill = 0xFF000000u | (mix_rgb(button_colors[i], 0xFFFFFFFFu, focused ? 22 : 16) & 0x00FFFFFFu);
+        }
+
+        gui_fill_circle(dst, cx, cy, r, button_fill);
+        gui_draw_circle_stroke(dst, cx, cy, r, 1, button_outline);
+
+        if (icons[i]->buffer) {
+            int ix = cx - static_cast<int>(icons[i]->width) / 2;
+            int iy = cy - static_cast<int>(icons[i]->height) / 2;
+            gui_blit_alpha(dst, icons[i], ix, iy);
+        }
+    }
+}
+
 static void ensure_window_decoration_cache(Window &w, bool focused, bool hovered_frame, int hovered_button)
 {
     (void)hovered_frame;
@@ -1153,10 +1300,16 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
     if (!dst || !dst->buffer || w.transparent)
         return;
 
-    ensure_window_decoration_cache(w, focused, hovered_frame, hovered_button);
+    bool actively_resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE &&
+                             g_input.drag_index >= 0 && g_input.drag_index < g_window_count &&
+                             g_windows[g_input.drag_index].entry == w.entry;
+
+    if (!actively_resizing) {
+        ensure_window_decoration_cache(w, focused, hovered_frame, hovered_button);
+    }
     DirtyRect outer = window_outer_bounds(w);
 
-    if (w.decoration_cache.buffer) {
+    if (w.decoration_cache.buffer && !actively_resizing) {
         DirtyRect visible = {};
         if (rect_intersection(outer, clip, &visible)) {
             int src_x = visible.x - outer.x, src_y = visible.y - outer.y;
@@ -1166,9 +1319,12 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
                                   &w.decoration_cache.buffer[static_cast<size_t>(src_y) * cache_stride + src_x],
                                   cache_stride, visible.w, visible.h);
         }
+    } else {
+        // Active resize or no cache: draw frame directly for the dirty rect
+        draw_window_decoration_frame(dst, w, clip, focused);
     }
 
-    if (w.button_cache.buffer) {
+    if (w.button_cache.buffer && !actively_resizing) {
         DirtyRect b0 = window_button_bounds(w, 0);
         DirtyRect buttons_rect = {b0.x, b0.y, w.button_cache_w, w.button_cache_h};
         DirtyRect visible = {};
@@ -1180,6 +1336,8 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
                                   &w.button_cache.buffer[static_cast<size_t>(src_y) * cache_stride + src_x],
                                   cache_stride, visible.w, visible.h);
         }
+    } else if (actively_resizing) {
+        draw_window_decoration_buttons_clipped(dst, w, clip, focused, hovered_button);
     }
 }
 
@@ -1291,8 +1449,10 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         copy_y = w.transparent ? iy : ry;
         copy_w = w.transparent ? iw : rw;
         copy_h = w.transparent ? ih : rh;
-        src_x = copy_x - w.x + w.scroll_x;
-        src_y = copy_y - w.y + w.scroll_y;
+        int client_left = w.transparent ? w.x : inner_left;
+        int client_top = w.transparent ? w.y : inner_top;
+        src_x = copy_x - client_left + w.scroll_x;
+        src_y = copy_y - client_top + w.scroll_y;
 
         if (src_x < 0) {
             int delta = -src_x;
@@ -1310,10 +1470,6 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             copy_w = w.buffer_w - src_x;
         if (src_y + copy_h > w.buffer_h)
             copy_h = w.buffer_h - src_y;
-        if (src_x + copy_w > w.w)
-            copy_w = w.w - src_x;
-        if (src_y + copy_h > w.h)
-            copy_h = w.h - src_y;
         if (copy_w < 0) copy_w = 0;
         if (copy_h < 0) copy_h = 0;
     }
@@ -1328,10 +1484,25 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                     continue;
                 uint32_t *dst_ptr = &dst->buffer[static_cast<size_t>(dst_y) * dst_stride];
                 bool row_in_blit = (copy_w > 0 && copy_h > 0 && dst_y >= copy_y && dst_y < copy_y + copy_h);
-                for (int x = rx; x < rect_right; ++x) {
-                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
+                if (!row_in_blit) {
+                    int span = rect_right - rx;
+                    if (span <= 0)
                         continue;
-                    dst_ptr[x] = fill;
+                    uint32_t *p = &dst_ptr[rx];
+                    int i = 0;
+                    for (; i + 7 < span; i += 8) {
+                        p[0] = fill; p[1] = fill; p[2] = fill; p[3] = fill;
+                        p[4] = fill; p[5] = fill; p[6] = fill; p[7] = fill;
+                        p += 8;
+                    }
+                    for (; i < span; ++i) *p++ = fill;
+                } else {
+                    int left_end = copy_x < rx ? rx : (copy_x > rect_right ? rect_right : copy_x);
+                    for (int x = rx; x < left_end; ++x) dst_ptr[x] = fill;
+                    int right_start = copy_x + copy_w;
+                    if (right_start < rx) right_start = rx;
+                    if (right_start > rect_right) right_start = rect_right;
+                    for (int x = right_start; x < rect_right; ++x) dst_ptr[x] = fill;
                 }
             }
         } else {
@@ -1344,10 +1515,25 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                 bool row_in_blit = (copy_w > 0 && copy_h > 0 && dst_y >= copy_y && dst_y < copy_y + copy_h);
 
                 if (dst_y < rounded_start_y) {
-                    for (int x = rx; x < rect_right; ++x) {
-                        if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
-                            continue;
-                        dst_ptr[x] = fill;
+                    if (!row_in_blit) {
+                        int span = rect_right - rx;
+                        if (span > 0) {
+                            uint32_t *p = &dst_ptr[rx];
+                            int i = 0;
+                            for (; i + 7 < span; i += 8) {
+                                p[0] = fill; p[1] = fill; p[2] = fill; p[3] = fill;
+                                p[4] = fill; p[5] = fill; p[6] = fill; p[7] = fill;
+                                p += 8;
+                            }
+                            for (; i < span; ++i) *p++ = fill;
+                        }
+                    } else {
+                        int left_end = copy_x < rx ? rx : (copy_x > rect_right ? rect_right : copy_x);
+                        for (int x = rx; x < left_end; ++x) dst_ptr[x] = fill;
+                        int right_start = copy_x + copy_w;
+                        if (right_start < rx) right_start = rx;
+                        if (right_start > rect_right) right_start = rect_right;
+                        for (int x = right_start; x < rect_right; ++x) dst_ptr[x] = fill;
                     }
                     continue;
                 }
@@ -1355,35 +1541,92 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                 refresh_corner_mask(dst_y - inner_top);
 
                 int left_end = center_start_x < rect_right ? center_start_x : rect_right;
-                for (int x = rx; x < left_end; ++x) {
-                    int local = x - inner_left;
-                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
-                        continue;
-                    uint8_t coverage = corner_mask[local];
-                    if (coverage == 255)
-                        dst_ptr[x] = fill;
-                    else if (coverage > 0)
-                        dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                if (!row_in_blit) {
+                    for (int x = rx; x < left_end; ++x) {
+                        int local = x - inner_left;
+                        uint8_t coverage = corner_mask[local];
+                        if (coverage == 255)
+                            dst_ptr[x] = fill;
+                        else if (coverage > 0)
+                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                    }
+                } else {
+                    int cap_lo = copy_x < rx ? rx : (copy_x > rect_right ? rect_right : copy_x);
+                    for (int x = rx; x < cap_lo; ++x) {
+                        int local = x - inner_left;
+                        uint8_t coverage = corner_mask[local];
+                        if (coverage == 255)
+                            dst_ptr[x] = fill;
+                        else if (coverage > 0)
+                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                    }
+                    int cap_hi = copy_x + copy_w;
+                    if (cap_hi < rx) cap_hi = rx;
+                    if (cap_hi > left_end) cap_hi = left_end;
+                    for (int x = cap_hi; x < left_end; ++x) {
+                        int local = x - inner_left;
+                        uint8_t coverage = corner_mask[local];
+                        if (coverage == 255)
+                            dst_ptr[x] = fill;
+                        else if (coverage > 0)
+                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                    }
                 }
 
                 int center_lo = rx > center_start_x ? rx : center_start_x;
                 int center_hi = rect_right < center_end_x ? rect_right : center_end_x;
-                for (int x = center_lo; x < center_hi; ++x) {
-                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
-                        continue;
-                    dst_ptr[x] = fill;
+                if (!row_in_blit) {
+                    int span = center_hi - center_lo;
+                    if (span > 0) {
+                        uint32_t *p = &dst_ptr[center_lo];
+                        int i = 0;
+                        for (; i + 7 < span; i += 8) {
+                            p[0] = fill; p[1] = fill; p[2] = fill; p[3] = fill;
+                            p[4] = fill; p[5] = fill; p[6] = fill; p[7] = fill;
+                            p += 8;
+                        }
+                        for (; i < span; ++i) *p++ = fill;
+                    }
+                } else {
+                    int lo = copy_x < center_lo ? center_lo : (copy_x > center_hi ? center_hi : copy_x);
+                    for (int x = center_lo; x < lo; ++x) dst_ptr[x] = fill;
+                    int hi_start = copy_x + copy_w;
+                    if (hi_start < center_lo) hi_start = center_lo;
+                    if (hi_start > center_hi) hi_start = center_hi;
+                    for (int x = hi_start; x < center_hi; ++x) dst_ptr[x] = fill;
                 }
 
                 int right_lo = rx > center_end_x ? rx : center_end_x;
-                for (int x = right_lo; x < rect_right; ++x) {
-                    int local = inner_w - 1 - (x - inner_left);
-                    if (row_in_blit && x >= copy_x && x < copy_x + copy_w)
-                        continue;
-                    uint8_t coverage = corner_mask[local];
-                    if (coverage == 255)
-                        dst_ptr[x] = fill;
-                    else if (coverage > 0)
-                        dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                if (!row_in_blit) {
+                    for (int x = right_lo; x < rect_right; ++x) {
+                        int local = inner_w - 1 - (x - inner_left);
+                        uint8_t coverage = corner_mask[local];
+                        if (coverage == 255)
+                            dst_ptr[x] = fill;
+                        else if (coverage > 0)
+                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                    }
+                } else {
+                    int cap_lo = copy_x < right_lo ? right_lo : (copy_x > rect_right ? rect_right : copy_x);
+                    for (int x = right_lo; x < cap_lo; ++x) {
+                        int local = inner_w - 1 - (x - inner_left);
+                        uint8_t coverage = corner_mask[local];
+                        if (coverage == 255)
+                            dst_ptr[x] = fill;
+                        else if (coverage > 0)
+                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                    }
+                    int cap_hi = copy_x + copy_w;
+                    if (cap_hi < right_lo) cap_hi = right_lo;
+                    if (cap_hi > rect_right) cap_hi = rect_right;
+                    for (int x = cap_hi; x < rect_right; ++x) {
+                        int local = inner_w - 1 - (x - inner_left);
+                        uint8_t coverage = corner_mask[local];
+                        if (coverage == 255)
+                            dst_ptr[x] = fill;
+                        else if (coverage > 0)
+                            dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
+                    }
                 }
             }
         }

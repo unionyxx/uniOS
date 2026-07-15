@@ -7,6 +7,38 @@ ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true,
 NotificationCenterState g_notifications = {};
 WmMetrics g_metrics = {};
 
+static bool g_persist_settings_pending = false;
+
+// Branchless integer absolute difference
+static inline int wm_abs(int x)
+{
+    int mask = x >> 31;
+    return (x ^ mask) - mask;
+}
+
+static bool dirty_rect_less(const DirtyRect &a, const DirtyRect &b);
+
+// Optimized non-recursive Shell Sort for DirtyRect arrays (Ciura-style sequence)
+static void shell_sort_dirty_rects(DirtyRect *arr, int n)
+{
+    int gap = 1;
+    while (gap < n) {
+        gap = gap * 3 + 1;
+    }
+    while (gap > 0) {
+        for (int i = gap; i < n; i++) {
+            DirtyRect temp = arr[i];
+            int j = i;
+            while (j >= gap && dirty_rect_less(temp, arr[j - gap])) {
+                arr[j] = arr[j - gap];
+                j -= gap;
+            }
+            arr[j] = temp;
+        }
+        gap /= 3;
+    }
+}
+
 void refresh_wm_metrics()
 {
     int scale = gui_ui_scale_pct();
@@ -81,7 +113,6 @@ void enqueue_damage_rect(int x, int y, int w, int h)
     if (!clip_dirty_rect_to_screen(incoming))
         return;
 
-    // Full-screen damage.
     if (incoming.x == 0 && incoming.y == 0 && incoming.w == (int)g_screen.width && incoming.h == (int)g_screen.height) {
         g_dirty_rects[0] = incoming;
         g_dirty_count = 1;
@@ -89,7 +120,6 @@ void enqueue_damage_rect(int x, int y, int w, int h)
         return;
     }
 
-    // Fast path for non-overlapping rects.
     if (g_dirty_count < MAX_DIRTY_RECTS) {
         bool overlaps = false;
         for (int i = 0; i < g_dirty_count; i++) {
@@ -105,7 +135,6 @@ void enqueue_damage_rect(int x, int y, int w, int h)
         }
     }
 
-    // Merge damage rects.
     bool resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE;
     if (resizing && g_dirty_count > 1) {
         collapse_dirty_rects_to_bounds();
@@ -128,6 +157,7 @@ void invalidate_dirty_frame()
 {
     g_dirty_frame_ready = false;
 }
+
 void invalidate_window_visibility_cache()
 {
     g_window_visibility_cache_dirty = true;
@@ -141,45 +171,10 @@ static bool dirty_rect_less(const DirtyRect &a, const DirtyRect &b)
     return a.x < b.x;
 }
 
-static void swap_dirty_rect(DirtyRect *a, DirtyRect *b)
-{
-    DirtyRect t = *a;
-    *a = *b;
-    *b = t;
-}
-
-static int partition_dirty_rects(DirtyRect *arr, int low, int high)
-{
-    DirtyRect pivot = arr[high];
-    int i = low - 1;
-    for (int j = low; j < high; j++) {
-        if (dirty_rect_less(arr[j], pivot)) {
-            i++;
-            swap_dirty_rect(&arr[i], &arr[j]);
-        }
-    }
-    swap_dirty_rect(&arr[i + 1], &arr[high]);
-    return i + 1;
-}
-
-static void quicksort_dirty_rects(DirtyRect *arr, int low, int high)
-{
-    while (low < high) {
-        int pi = partition_dirty_rects(arr, low, high);
-        if (pi - low < high - pi) {
-            quicksort_dirty_rects(arr, low, pi - 1);
-            low = pi + 1;
-        } else {
-            quicksort_dirty_rects(arr, pi + 1, high);
-            high = pi - 1;
-        }
-    }
-}
-
 static void sort_dirty_rects()
 {
     if (g_dirty_count > 1)
-        quicksort_dirty_rects(g_dirty_rects, 0, g_dirty_count - 1);
+        shell_sort_dirty_rects(g_dirty_rects, g_dirty_count);
 }
 
 void normalize_dirty_rects(bool interactive)
@@ -204,9 +199,13 @@ void normalize_dirty_rects(bool interactive)
 
 bool clip_dirty_rect_to_screen(DirtyRect &rect)
 {
-    int64_t x = rect.x, y = rect.y, w = rect.w, h = rect.h;
+    int x = rect.x, y = rect.y, w = rect.w, h = rect.h;
     if (w <= 0 || h <= 0)
         return false;
+
+    int screen_w = (int)g_screen.width;
+    int screen_h = (int)g_screen.height;
+
     if (x < 0) {
         w += x;
         x = 0;
@@ -215,19 +214,22 @@ bool clip_dirty_rect_to_screen(DirtyRect &rect)
         h += y;
         y = 0;
     }
-    int64_t max_w = (int64_t)g_screen.width - x, max_h = (int64_t)g_screen.height - y;
-    if (max_w <= 0 || max_h <= 0)
+
+    if (x >= screen_w || y >= screen_h)
         return false;
-    if (w > max_w)
-        w = max_w;
-    if (h > max_h)
-        h = max_h;
+
+    if (x + w > screen_w)
+        w = screen_w - x;
+    if (y + h > screen_h)
+        h = screen_h - y;
+
     if (w <= 0 || h <= 0)
         return false;
-    rect.x = clamp_i64_to_int(x);
-    rect.y = clamp_i64_to_int(y);
-    rect.w = clamp_i64_to_int(w);
-    rect.h = clamp_i64_to_int(h);
+
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
     return true;
 }
 
@@ -265,7 +267,6 @@ bool post_window_resize_configure(Window &w)
     w.resize_configure_pending = true;
     w.last_configure_ticks = get_ticks();
 
-    // Notify client of resize.
     w.entry->resize_serial = w.pending_configure_serial;
     asm volatile("sfence" ::: "memory");
 
@@ -304,19 +305,19 @@ static void apply_window_move_snap(const Window &w, int *x, int *y, int width, i
     int nx = *x;
     int ny = *y;
     int edges = RESIZE_NONE;
-    if (wm_fabsf((float)(nx - left)) <= (float)threshold) {
+    if (wm_abs(nx - left) <= threshold) {
         nx = left;
         edges |= RESIZE_LEFT;
     }
-    if (wm_fabsf((float)((nx + width) - right)) <= (float)threshold) {
+    if (wm_abs((nx + width) - right) <= threshold) {
         nx = right - width;
         edges |= RESIZE_RIGHT;
     }
-    if (wm_fabsf((float)(ny - min_y)) <= (float)threshold) {
+    if (wm_abs(ny - min_y) <= threshold) {
         ny = min_y;
         edges |= RESIZE_TOP;
     }
-    if (wm_fabsf((float)((ny + height) - bottom)) <= (float)threshold) {
+    if (wm_abs((ny + height) - bottom) <= threshold) {
         ny = bottom - height;
         edges |= RESIZE_BOTTOM;
     }
@@ -327,8 +328,8 @@ static void apply_window_move_snap(const Window &w, int *x, int *y, int width, i
         enqueue_damage_rect(nx, ny, width, height);
     } else if (g_input.snap_edges != RESIZE_NONE) {
         int escape = wm_snap_escape();
-        if (wm_fabsf((float)(*x - g_input.snap_preview.x)) > (float)escape ||
-            wm_fabsf((float)(*y - g_input.snap_preview.y)) > (float)escape) {
+        if (wm_abs(*x - g_input.snap_preview.x) > escape ||
+            wm_abs(*y - g_input.snap_preview.y) > escape) {
             DirtyRect old_preview = g_input.snap_preview;
             g_input.snap_edges = RESIZE_NONE;
             g_input.snap_preview = {};
@@ -355,6 +356,7 @@ DirtyRect window_client_bounds(const Window &w)
 {
     return {w.x, w.y, w.w, w.h};
 }
+
 DirtyRect window_outer_bounds(const Window &w)
 {
     int eff_w = window_effective_w(w);
@@ -364,6 +366,7 @@ DirtyRect window_outer_bounds(const Window &w)
     int t_h = wm_title_bar_h();
     return {w.x, w.y - t_h, eff_w + wm_frame_shadow_offset_x(), eff_h + t_h + wm_frame_shadow_offset_y()};
 }
+
 static inline int window_safe_side_inset()
 {
     int inset = gui_scaled_metric(FRAME_OCCLUSION_INSET) + wm_frame_border() + wm_frame_shadow_offset_x();
@@ -448,10 +451,12 @@ bool is_visible_state(uint32_t state)
 {
     return state != WIN_MINIMIZED && state != WIN_HIDDEN;
 }
+
 bool is_window_visible(const Window &w)
 {
     return w.active && (!w.entry || is_visible_state(w.entry->state));
 }
+
 bool is_user_window(const Window &w)
 {
     return w.entry && (w.entry->flags & WIN_FLAG_SYSTEM) == 0;
@@ -484,38 +489,56 @@ static bool subtract_region_list(DirtyRect *regions, int *region_count, const Di
             continue;
         }
 
-        // If fragmentation limit approached, aggressively merge or discard sub-pixel slivers
         if (*region_count > MAX_VISIBLE_REGIONS - 4) {
             merge_adjacent_regions(regions, region_count);
             if (*region_count > MAX_VISIBLE_REGIONS - 4)
-                return false; // Force fallback to painter's alg
+                return false;
         }
 
         regions[i] = regions[*region_count - 1];
         (*region_count)--;
 
-        int o_b = overlap.y + overlap.h, c_b = current.y + current.h;
-        int o_r = overlap.x + overlap.w, c_r = current.x + current.w;
+        // Fast path: region is completely consumed by overlap
+        if (overlap.x == current.x && overlap.y == current.y && overlap.w == current.w && overlap.h == current.h) {
+            continue;
+        }
+
+        int o_b = overlap.y + overlap.h;
+        int c_b = current.y + current.h;
+        int o_r = overlap.x + overlap.w;
+        int c_r = current.x + current.w;
 
         if (current.y < overlap.y) {
-            if (*region_count >= MAX_VISIBLE_REGIONS)
-                return false;
-            regions[(*region_count)++] = {current.x, current.y, current.w, overlap.y - current.y};
+            int h = overlap.y - current.y;
+            if (h > 0) {
+                if (*region_count >= MAX_VISIBLE_REGIONS)
+                    return false;
+                regions[(*region_count)++] = {current.x, current.y, current.w, h};
+            }
         }
         if (o_b < c_b) {
-            if (*region_count >= MAX_VISIBLE_REGIONS)
-                return false;
-            regions[(*region_count)++] = {current.x, o_b, current.w, c_b - o_b};
+            int h = c_b - o_b;
+            if (h > 0) {
+                if (*region_count >= MAX_VISIBLE_REGIONS)
+                    return false;
+                regions[(*region_count)++] = {current.x, o_b, current.w, h};
+            }
         }
         if (current.x < overlap.x) {
-            if (*region_count >= MAX_VISIBLE_REGIONS)
-                return false;
-            regions[(*region_count)++] = {current.x, overlap.y, overlap.x - current.x, overlap.h};
+            int w = overlap.x - current.x;
+            if (w > 0) {
+                if (*region_count >= MAX_VISIBLE_REGIONS)
+                    return false;
+                regions[(*region_count)++] = {current.x, overlap.y, w, overlap.h};
+            }
         }
         if (o_r < c_r) {
-            if (*region_count >= MAX_VISIBLE_REGIONS)
-                return false;
-            regions[(*region_count)++] = {o_r, overlap.y, c_r - o_r, overlap.h};
+            int w = c_r - o_r;
+            if (w > 0) {
+                if (*region_count >= MAX_VISIBLE_REGIONS)
+                    return false;
+                regions[(*region_count)++] = {o_r, overlap.y, w, overlap.h};
+            }
         }
     }
     return true;
@@ -526,7 +549,7 @@ static void merge_adjacent_regions(DirtyRect *regions, int *count)
     if (!regions || !count || *count <= 1)
         return;
 
-    quicksort_dirty_rects(regions, 0, *count - 1);
+    shell_sort_dirty_rects(regions, *count);
 
     int write = 0;
     for (int read = 1; read < *count; read++) {
@@ -552,7 +575,8 @@ static void merge_adjacent_regions(DirtyRect *regions, int *count)
 
 void refresh_window_visible_regions()
 {
-    for (int i = 0; i < (g_window_count > MAX_WINDOWS ? MAX_WINDOWS : g_window_count); i++) {
+    const int limit = g_window_count > MAX_WINDOWS ? MAX_WINDOWS : g_window_count;
+    for (int i = 0; i < limit; i++) {
         g_window_visible_region_count[i] = 0;
         g_window_visible_region_overflow[i] = false;
         if (!g_window_visible_cache[i] || !g_windows[i].buffer || g_windows[i].transparent)
@@ -651,6 +675,7 @@ static int window_slot(const Registry *registry, const Window &w)
 {
     return w.entry ? (int)(w.entry - &registry->windows[0]) : -1;
 }
+
 int find_window_by_entry(const WindowEntry *entry)
 {
     if (!entry)
@@ -660,6 +685,7 @@ int find_window_by_entry(const WindowEntry *entry)
             return i;
     return -1;
 }
+
 int find_window_by_shm(int shm_id)
 {
     if (!gui_shm_id_is_valid(shm_id))
@@ -801,9 +827,14 @@ static void mark_window_decoration_damage(const Window &w)
     mark_window_titlebar_damage(w);
     mark_window_chrome_damage(w);
 
-    int shadow_extent = gui_scaled_metric(8) + gui_scaled_metric(3) + gui_scaled_metric(2) + gui_scaled_metric(1);
-    if (shadow_extent < CURSOR_MAX_SIZE)
-        shadow_extent = CURSOR_MAX_SIZE;
+    bool interactive = g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW;
+    int shadow_extent = interactive ? (wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y()
+                                            ? wm_frame_shadow_offset_x()
+                                            : wm_frame_shadow_offset_y())
+                                    : gui_scaled_metric(8) + gui_scaled_metric(3) + gui_scaled_metric(2) +
+                                          gui_scaled_metric(1);
+    if (shadow_extent < CURSOR_DAMAGE_PAD)
+        shadow_extent = CURSOR_DAMAGE_PAD;
 
     int side_strip = shadow_extent;
     if (side_strip > outer.w)
@@ -823,7 +854,8 @@ static void mark_window_decoration_damage(const Window &w)
 
 static void mark_exposed_transition_damage(const DirtyRect &old_outer, const DirtyRect &new_outer)
 {
-    int pad = wm_window_damage_pad();
+    bool manip = g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW;
+    int pad = manip ? wm_window_damage_pad_interactive() : wm_window_damage_pad();
     DirtyRect old_padded = rect_expand(old_outer, pad);
     DirtyRect new_padded = rect_expand(new_outer, pad);
     wm::ExposedTransitionDamage dmg =
@@ -834,7 +866,9 @@ static void mark_exposed_transition_damage(const DirtyRect &old_outer, const Dir
 
 void mark_window_transition_damage(const Window &old_w, const Window &new_w)
 {
-    int pad = wm_window_damage_pad();
+    int pad = (g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW)
+                  ? wm_window_damage_pad_interactive()
+                  : wm_window_damage_pad();
     DirtyRect last_rendered_outer;
     if (old_w.transparent) {
         last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y, old_w.last_rendered_w, old_w.last_rendered_h};
@@ -859,7 +893,7 @@ void mark_window_transition_damage(const Window &old_w, const Window &new_w)
     if (o.x < overlap.x)
         enqueue_damage_rect(o.x, overlap.y, overlap.x - o.x, overlap.h);
     if (overlap.x + overlap.w < o.x + o.w)
-        enqueue_damage_rect(overlap.x + overlap.w, overlap.y, o.x + o.w - (overlap.x + overlap.w), overlap.h);
+        enqueue_damage_rect(overlap.x + overlap.w, overlap.y, o.x + o.w - (overlap.x + overlap.w), overlap.y + o.h - overlap.y);
 }
 
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
@@ -1021,13 +1055,19 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         w.entry->position_serial++;
         asm volatile("sfence" ::: "memory");
 
+        // Update last_rendered immediately so damage calculation uses current state
+        // (not stale values from last submitted frame, which may be many frames ago during resize)
+        w.last_rendered_x = x;
+        w.last_rendered_y = y;
+        w.last_rendered_w = width;
+        w.last_rendered_h = height;
+
         DirtyRect old_covered = window_opaque_bounds(old);
         DirtyRect new_covered = window_opaque_bounds(w);
         capture_shell_backdrop_for_rect(old_covered, gui_registry());
         capture_shell_backdrop_for_rect(new_covered, gui_registry());
 
         if (size_changed) {
-            invalidate_window_decoration_cache(w);
             if (clamp_window_scroll(w))
                 publish_window_scroll(w);
             post_window_resize_configure(w);
@@ -1048,15 +1088,13 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
             mark_exposed_transition_damage(window_outer_bounds(old), window_outer_bounds(w));
             mark_window_decoration_damage(w);
 
-            // Ensure the old drop shadow is cleared when moving windows quickly.
             int shadow_pad = wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y() ? wm_frame_shadow_offset_x()
                                                                                      : wm_frame_shadow_offset_y();
             enqueue_damage_rect_expanded(window_outer_bounds(old), shadow_pad);
         } else if (size_changed) {
-            // During resize, mark the full bounding box of old + new outer bounds as damaged.
-            // The strip-based decomposition in mark_window_transition_damage can leave sub-pixel
-            // gaps when shadows are involved, causing stale content on persistent framebuffers.
-            int pad = wm_window_damage_pad();
+            int pad = (g_input.pointer_down && g_input.drag_edges != RESIZE_NONE)
+                          ? wm_window_damage_pad_interactive()
+                          : wm_window_damage_pad();
             DirtyRect last_rendered_outer;
             if (old.transparent) {
                 last_rendered_outer = {old.last_rendered_x, old.last_rendered_y, old.last_rendered_w, old.last_rendered_h};
@@ -1352,9 +1390,8 @@ static bool point_in_rounded_window_client(const Window &w, int px, int py)
 
     int inner_r = gui_scaled_metric(12) - wm_frame_border();
     if (inner_r <= 0)
-        return true; // Fast path for square windows
+        return true;
 
-    // Fast path: Point is inside the core un-rounded rectangle
     if (px >= client.x + inner_r && px < client.x + client.w - inner_r)
         return true;
     if (py < client.y + client.h - inner_r)
@@ -1373,14 +1410,17 @@ bool point_in_titlebar(const Window &w, int px, int py)
 {
     return point_in_rounded_window_titlebar(w, px, py);
 }
+
 bool point_in_client(const Window &w, int px, int py)
 {
     return point_in_rounded_window_client(w, px, py);
 }
+
 bool point_in_outer(const Window &w, int px, int py)
 {
     return point_in_rounded_window_outer(w, px, py);
 }
+
 bool point_in_button(const Window &w, int px, int py, int idx)
 {
     return point_in_rect(window_button_bounds(w, idx), px, py);
@@ -1442,9 +1482,9 @@ static void copy_cstr(char *dst, size_t dst_size, const char *src)
     dst[i] = '\0';
 }
 
-static char ascii_lower(char c)
+static inline char ascii_lower(char c)
 {
-    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+    return (c >= 'A' && c <= 'Z') ? (char)(c | 0x20) : c;
 }
 
 static bool ascii_starts_with_ci(const char *text, const char *query)
@@ -2065,6 +2105,7 @@ bool handle_control_center_pointer_down(Registry *registry, int mouse_x, int mou
     } else if (hit == CONTROL_ITEM_TRANSPARENCY) {
         g_control_center.transparency_level = (g_control_center.transparency_level > 200) ? 180 : 255;
         publish_control_center_settings(registry);
+        recapture_shell_blur_sources(registry);
     } else if (hit == CONTROL_ITEM_VOLUME) {
         g_control_center.volume_dragging = true;
         set_control_center_volume_from_x(mouse_x);
@@ -2175,6 +2216,7 @@ void open_storage_prompt()
     g_storage_prompt.dismissed = false;
     sync_storage_prompt_state(true);
 }
+
 void dismiss_storage_prompt()
 {
     if (!g_storage_prompt.visible)
@@ -2184,6 +2226,7 @@ void dismiss_storage_prompt()
     g_storage_prompt.hovered_button = -1;
     enqueue_damage_rect(0, 0, g_screen.width, g_screen.height);
 }
+
 void update_storage_prompt_hover(int mx, int my)
 {
     if (!g_storage_prompt.visible)
@@ -2429,8 +2472,8 @@ void update_context_menu_hover(const Registry *registry, int mx, int my)
 
 static void launch_or_focus_app(Registry *registry, const char *title, const char *path)
 {
-    for (uint32_t i = WM_FIRST_USER_WINDOW;
-         i < (registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count); i++) {
+    const uint32_t win_limit = registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count;
+    for (uint32_t i = WM_FIRST_USER_WINDOW; i < win_limit; i++) {
         WindowEntry &e = registry->windows[i];
         if (!e.ready || !gui_shm_id_is_valid(e.shm_id) || !e.owner_pid || strcmp(e.title, title) != 0)
             continue;
@@ -2689,7 +2732,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.min_h = entry ? entry->min_h : 0;
     win.active = true;
     win.transparent = transparent;
-    win.needs_full_redraw = false; // Initial state.
+    win.needs_full_redraw = false;
     win.last_commit_ticks = get_ticks();
     win.damage_ptr = d_ptr;
     win.first_damage_received = false;
@@ -2892,9 +2935,6 @@ void update_cursor_kind()
         g_input.cursor_kind = n_k;
     }
 }
-// P3-8: Deferred persist — avoid blocking filesystem I/O on the compositor main loop.
-// Callers set the pending flag; the main loop flushes during idle.
-static bool g_persist_settings_pending = false;
 
 void persist_wm_settings()
 {
@@ -2906,8 +2946,6 @@ void flush_pending_settings_persist(const Registry *registry)
     if (!g_persist_settings_pending || !registry)
         return;
     g_persist_settings_pending = false;
-    // P3-7: Unified persist — uses persist_runtime_settings for a single
-    // serialization format and the registry as the single source of truth.
     persist_runtime_settings(registry);
 }
 
