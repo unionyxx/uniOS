@@ -94,7 +94,7 @@ static void add_blur_dirty_rect(DirtyRect *rects, int *count, const DirtyRect &r
     }
 }
 
-static void clear_blur_dirty_rects(DirtyRect *rects, int *count)
+static void clear_blur_dirty_rects(DirtyRect * /*rects*/, int *count)
 {
     *count = 0;
 }
@@ -1355,7 +1355,7 @@ static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint
     return 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
 }
 
-static void compute_bottom_corner_row(int local_y, int inner_w, int inner_h, int inner_r, uint8_t *out_mask)
+static void compute_bottom_corner_row(int local_y, int /*inner_w*/, int inner_h, int inner_r, uint8_t *out_mask)
 {
     if (inner_r <= 0 || !out_mask)
         return;

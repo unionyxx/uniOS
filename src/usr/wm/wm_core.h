@@ -279,6 +279,9 @@ struct WmInputState
     int hover_resize_edges = RESIZE_NONE;
     int hover_button = -1;
     GuiCursorKind cursor_kind = GUI_CURSOR_ARROW;
+    GuiCursorKind last_cursor_kind = GUI_CURSOR_ARROW;
+    int last_cursor_x = 0;
+    int last_cursor_y = 0;
     int drag_offset_x = 0;
     int drag_offset_y = 0;
     int drag_origin_mouse_x = 0;

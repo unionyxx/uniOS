@@ -1330,18 +1330,21 @@ int hit_test_resize(const Window &w, int px, int py)
     if (!is_user_window(w) || !is_window_visible(w) || w.transparent || !w.entry ||
         !(w.entry->flags & WIN_FLAG_RESIZABLE) || w.entry->state == WIN_MAXIMIZED)
         return RESIZE_NONE;
-    int edges = RESIZE_NONE, grip = wm_resize_grip();
-    int border = wm_frame_border();
-    int64_t l = w.x - border, r = w.x + w.w + border, t = w.y - wm_title_bar_h() - border, b = w.y + w.h + border;
-    if (px < l - grip || px >= r + grip || py < t - grip || py >= b + grip)
+
+    DirtyRect outer = window_outer_bounds(w);
+    int grip = wm_resize_grip();
+
+    if (px < outer.x - grip || px >= outer.x + outer.w + grip || py < outer.y - grip || py >= outer.y + outer.h + grip)
         return RESIZE_NONE;
-    if (px < l + grip)
+
+    int edges = RESIZE_NONE;
+    if (px < outer.x + grip)
         edges |= RESIZE_LEFT;
-    if (px >= r - grip)
+    if (px >= outer.x + outer.w - grip)
         edges |= RESIZE_RIGHT;
-    if (py < t + grip)
+    if (py < outer.y + grip)
         edges |= RESIZE_TOP;
-    if (py >= b - grip)
+    if (py >= outer.y + outer.h - grip)
         edges |= RESIZE_BOTTOM;
     return edges;
 }
@@ -2779,6 +2782,9 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
     g_input.old_mouse_y = g_input.mouse_y;
     g_input.mouse_x = new_x;
     g_input.mouse_y = new_y;
+    // Update last cursor render position
+    g_input.last_cursor_x = g_input.mouse_x;
+    g_input.last_cursor_y = g_input.mouse_y;
 
     if (update_control_center_drag(g_input.mouse_x, g_input.mouse_y)) {
         mark_cursor_transition_damage(g_input.old_mouse_x, g_input.old_mouse_y, g_input.cursor_kind, g_input.mouse_x,
@@ -2930,8 +2936,13 @@ void update_cursor_kind()
     if (!g_input.pointer_down)
         reset_window_snap_state();
     if (n_k != g_input.cursor_kind) {
-        mark_cursor_transition_damage(g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind, g_input.mouse_x,
-                                      g_input.mouse_y, n_k);
+        // Old cursor was rendered at last_cursor_x/last_cursor_y with last_cursor_kind
+        // New cursor will be rendered at mouse_x/mouse_y with n_k
+        mark_cursor_transition_damage(g_input.last_cursor_x, g_input.last_cursor_y, g_input.last_cursor_kind,
+                                      g_input.mouse_x, g_input.mouse_y, n_k);
+        g_input.last_cursor_kind = n_k;
+        g_input.last_cursor_x = g_input.mouse_x;
+        g_input.last_cursor_y = g_input.mouse_y;
         g_input.cursor_kind = n_k;
     }
 }

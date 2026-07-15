@@ -42,9 +42,24 @@ def parse_args() -> argparse.Namespace:
 
 def render_svg(svg_path: Path, width: int, height: int, variant: int) -> Image.Image:
     if cairosvg is None:
-        # Fallback to a solid color if CairoSVG is missing
-        color = (200, 200, 200, 255) if variant == UOWP_VARIANT_LIGHT else (40, 40, 40, 255)
-        return Image.new("RGBA", (width, height), color)
+        # Fallback to a gradient if CairoSVG is missing
+        image = Image.new("RGBA", (width, height))
+        pixels = image.load()
+        for y in range(height):
+            t = y / max(1, height - 1)
+            if variant == UOWP_VARIANT_LIGHT:
+                # Light theme: warm gradient
+                r = int(200 + 55 * t)
+                g = int(180 + 40 * t)
+                b = int(160 + 30 * t)
+            else:
+                # Dark theme: cool dark gradient
+                r = int(20 + 30 * t)
+                g = int(25 + 40 * t)
+                b = int(40 + 60 * t)
+            for x in range(width):
+                pixels[x, y] = (r, g, b, 255)
+        return image
     png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=width, output_height=height)
     return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
 

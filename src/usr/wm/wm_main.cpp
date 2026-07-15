@@ -229,6 +229,12 @@ static bool sample_stable_window_entry(const WindowEntry &entry, WindowEntrySnap
 
 static bool cursor_backend_allowed()
 {
+    // Re-enable cursor backend if display copy path is no longer active
+    if (g_cursor_backend_disabled && !g_display_copy_path &&
+        (g_display_caps.flags & DISPLAY_FLAG_HAS_COMPOSITOR) != 0 &&
+        (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) != 0 && g_presentbuffer_handle != 0) {
+        g_cursor_backend_disabled = false;
+    }
     return !g_cursor_backend_disabled && !g_display_copy_path &&
            (g_display_caps.flags & DISPLAY_FLAG_HAS_COMPOSITOR) != 0 &&
            (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) != 0 && g_presentbuffer_handle != 0;
@@ -340,12 +346,12 @@ static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_re
                           &cursor_rect.w, &cursor_rect.h);
     if (!clip_dirty_rect_to_screen(cursor_rect))
         return false;
-    if (!dirty_set_intersects_rect(cursor_rect))
-        return false;
 
+    // Always track cursor movement - add to damage if not already fully contained
     if (!dirty_set_contains_rect(cursor_rect)) {
         enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
         normalize_dirty_rects(interactive);
+        // Re-get bounds after potential normalization
         gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y, &cursor_rect.x, &cursor_rect.y,
                               &cursor_rect.w, &cursor_rect.h);
         if (!clip_dirty_rect_to_screen(cursor_rect))
@@ -1215,8 +1221,13 @@ extern "C" int main(int argc, char **argv)
                 g_input.pointer_down = false;
                 g_input.drag_index = -1;
                 g_input.drag_edges = RESIZE_NONE;
-                mark_cursor_transition_damage(g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind, g_input.mouse_x,
-                                              g_input.mouse_y, g_input.cursor_kind);
+                // Transition from drag cursor to arrow at the release position
+                mark_cursor_transition_damage(g_input.last_cursor_x, g_input.last_cursor_y, g_input.cursor_kind,
+                                              g_input.mouse_x, g_input.mouse_y, GUI_CURSOR_ARROW);
+                g_input.cursor_kind = GUI_CURSOR_ARROW;
+                g_input.last_cursor_kind = GUI_CURSOR_ARROW;
+                g_input.last_cursor_x = g_input.mouse_x;
+                g_input.last_cursor_y = g_input.mouse_y;
 
                 if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_button >= 0) {
                     DirtyRect outer = window_outer_bounds(g_windows[g_input.hover_frame_index]);
@@ -1814,11 +1825,20 @@ extern "C" int main(int argc, char **argv)
                     CursorPresentBuffer *cursor_buffer = ensure_cursor_present_buffer(g_input.cursor_kind);
                     if (cursor_buffer && cursor_buffer->handle != 0) {
                         g_frame_cursor_handle = cursor_buffer->handle;
-                        g_frame_cursor_x = cursor_rect.x;
-                        g_frame_cursor_y = cursor_rect.y;
+                        // Hardware cursor expects HOTSPOT position (mouse position), not bounds top-left
+                        g_frame_cursor_x = g_input.mouse_x;
+                        g_frame_cursor_y = g_input.mouse_y;
                         draw_software_cursor = false;
+                        g_cursor_backend_disabled = false; // Re-enable if it works
                     } else {
                         g_cursor_backend_disabled = true;
+                        g_frame_cursor_handle = 0; // Clear stale handle
+                    }
+                } else {
+                    // Force software cursor when backend is disabled or no cursor to draw
+                    if (!cursor_backend_allowed()) {
+                        g_frame_cursor_handle = 0; // Clear stale handle
+                        draw_software_cursor = true;
                     }
                 }
 
@@ -1850,9 +1870,13 @@ extern "C" int main(int argc, char **argv)
                 flush_shell_blur_updates(registry);
 
                 if (draw_cursor) {
+                    // Clear previous cursor position from presentbuffer by re-blitting from backbuffer
+                    // Use cursor_rect (bounds) for clearing the exact cursor image area
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, cursor_rect.x, cursor_rect.y, cursor_rect.x,
                                   cursor_rect.y, cursor_rect.w, cursor_rect.h);
                     if (draw_software_cursor) {
+                        // gui_draw_cursor_kind expects the HOTSPOT position (mouse coordinates),
+                        // not the bounds top-left. It subtracts the hotspot internally.
                         gui_draw_cursor_kind(&g_presentbuffer, g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind);
                         g_frame_stats.cursor_software_frames++;
                     } else {
