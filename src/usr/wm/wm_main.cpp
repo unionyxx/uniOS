@@ -1597,33 +1597,42 @@ extern "C" int main(int argc, char **argv)
 
                 sync_window_runtime_metadata(w, entry_snapshot);
 
-                int nx = entry_snapshot.x, ny = entry_snapshot.y;
-                int nw = w.resize_configure_pending ? w.w : entry_snapshot.w;
-                int nh = w.resize_configure_pending ? w.h : entry_snapshot.h;
-
-                if (nw > static_cast<int>(g_screen.width) * 2)
-                    nw = static_cast<int>(g_screen.width) * 2;
-                if (nh > static_cast<int>(g_screen.height) * 2)
-                    nh = static_cast<int>(g_screen.height) * 2;
-
                 w.min_w = entry_snapshot.min_w > 0 ? entry_snapshot.min_w : 0;
                 w.min_h = entry_snapshot.min_h > 0 ? entry_snapshot.min_h : 0;
 
-                if (!w.resize_configure_pending && nw > 0 && nh > 0 &&
-                    (w.x != nx || w.y != ny || w.w != nw || w.h != nh)) {
-                    Window old = w;
-                    w.x = nx;
-                    w.y = ny;
-                    w.w = nw;
-                    w.h = nh;
-                    w.needs_full_redraw = (old.w != nw) || (old.h != nh);
-                    if (clamp_window_scroll(w) && w.entry) {
-                        w.entry->scroll_x = w.scroll_x;
-                        w.entry->scroll_y = w.scroll_y;
-                        smp_wmb();
+                if (i < WM_FIRST_USER_WINDOW) {
+                    int nx = entry_snapshot.x, ny = entry_snapshot.y;
+                    int nw = w.resize_configure_pending ? w.w : entry_snapshot.w;
+                    int nh = w.resize_configure_pending ? w.h : entry_snapshot.h;
+
+                    if (nw > static_cast<int>(g_screen.width) * 2)
+                        nw = static_cast<int>(g_screen.width) * 2;
+                    if (nh > static_cast<int>(g_screen.height) * 2)
+                        nh = static_cast<int>(g_screen.height) * 2;
+
+                    if (!w.resize_configure_pending && nw > 0 && nh > 0 &&
+                        (w.x != nx || w.y != ny || w.w != nw || w.h != nh)) {
+                        Window old = w;
+                        w.x = nx;
+                        w.y = ny;
+                        w.w = nw;
+                        w.h = nh;
+                        w.needs_full_redraw = (old.w != nw) || (old.h != nh);
+                        if (clamp_window_scroll(w) && w.entry) {
+                            w.entry->scroll_x = w.scroll_x;
+                            w.entry->scroll_y = w.scroll_y;
+                            smp_wmb();
+                        }
+                        mark_window_transition_damage(old, w);
+                        invalidate_window_visibility_cache();
                     }
-                    mark_window_transition_damage(old, w);
-                    invalidate_window_visibility_cache();
+                } else if (w.entry && (entry_snapshot.x != w.x || entry_snapshot.y != w.y || entry_snapshot.w != w.w ||
+                                       entry_snapshot.h != w.h)) {
+                    w.entry->x = w.x;
+                    w.entry->y = w.y;
+                    w.entry->w = w.w;
+                    w.entry->h = w.h;
+                    smp_wmb();
                 }
 
                 if (entry_snapshot.owner_pid)
