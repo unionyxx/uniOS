@@ -125,6 +125,35 @@ static bool display_is_copy_backend_active()
     return (flags & DISPLAY_FLAG_USES_COPY_PATH) != 0 && (flags & DISPLAY_FLAG_HAS_PAGE_FLIP) == 0;
 }
 
+static uint32_t display_scale_channel_to_mask(uint32_t channel, uint8_t size)
+{
+    if (size == 0)
+        return 0;
+    if (size >= 32)
+        return channel;
+
+    uint32_t max_value = (1u << size) - 1u;
+    return (channel * max_value + 127u) / 255u;
+}
+
+static uint32_t display_convert_xrgb_to_boot_pixel(uint32_t pixel, const BootFramebuffer &fb)
+{
+    if (fb.red_mask_size == 0 || fb.green_mask_size == 0 || fb.blue_mask_size == 0)
+        return pixel;
+
+    uint32_t red = display_scale_channel_to_mask((pixel >> 16) & 0xFFu, fb.red_mask_size);
+    uint32_t green = display_scale_channel_to_mask((pixel >> 8) & 0xFFu, fb.green_mask_size);
+    uint32_t blue = display_scale_channel_to_mask(pixel & 0xFFu, fb.blue_mask_size);
+    return (red << fb.red_mask_shift) | (green << fb.green_mask_shift) | (blue << fb.blue_mask_shift) |
+           0xFF000000u;
+}
+
+static bool display_boot_format_is_xrgb(const BootFramebuffer &fb)
+{
+    return fb.red_mask_size == 8 && fb.red_mask_shift == 16 && fb.green_mask_size == 8 &&
+           fb.green_mask_shift == 8 && fb.blue_mask_size == 8 && fb.blue_mask_shift == 0;
+}
+
 static uint64_t display_buffer_kernel_page_flags(uint32_t buffer_flags)
 {
     if (display_is_copy_backend_active())
@@ -414,6 +443,8 @@ void display_copy_present(DisplayDevice *device, const DisplayPresentRequest &re
 
     DisplayHead *head = &device->primary_head;
     volatile uint32_t *dest = (volatile uint32_t *)device->boot_framebuffer->address;
+    const BootFramebuffer &fb = *device->boot_framebuffer;
+    const bool convert_pixels = !display_boot_format_is_xrgb(fb);
     uint32_t dest_stride = head->caps.pitch / 4u;
     Rect full_rect = gui_rect_make(0, 0, (int32_t)head->caps.width, (int32_t)head->caps.height);
     const Rect *rects = request.rect_count ? request.rects : &full_rect;
@@ -441,10 +472,15 @@ void display_copy_present(DisplayDevice *device, const DisplayPresentRequest &re
         for (int32_t py = 0; py < rect.h; py++) {
             size_t dst_row_index = ((size_t)(rect.y + py) * dest_stride) + (size_t)rect.x;
             const uint32_t *src_row = &request.buffer[(uint32_t)(src_y + py) * request.stride + (uint32_t)src_x];
-            if ((uint32_t)rect.w < 64u)
-                gfx_copy_line((uint32_t *)&dest[dst_row_index], src_row, (uint32_t)rect.w);
-            else
-                gfx_copy_line_nt((uint32_t *)&dest[dst_row_index], src_row, (uint32_t)rect.w);
+            if (!convert_pixels) {
+                if ((uint32_t)rect.w < 64u)
+                    gfx_copy_line((uint32_t *)&dest[dst_row_index], src_row, (uint32_t)rect.w);
+                else
+                    gfx_copy_line_nt((uint32_t *)&dest[dst_row_index], src_row, (uint32_t)rect.w);
+            } else {
+                for (int32_t px = 0; px < rect.w; px++)
+                    dest[dst_row_index + (size_t)px] = display_convert_xrgb_to_boot_pixel(src_row[px], fb);
+            }
         }
     }
 
