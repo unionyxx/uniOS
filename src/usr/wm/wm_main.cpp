@@ -1938,14 +1938,11 @@ extern "C" int main(int argc, char **argv)
                 g_wait_start_ticks = get_ticks();
             }
             if (get_ticks() - g_wait_start_ticks > 250) {
-                LOG_ERROR("wm", "Display driver timeout, forcing sequence");
-                uint32_t tgt = wm::completion_target_for_available_slot(last_seq, limit);
-                g_display_queue.completed_sequence = tgt;
-                g_wait_start_ticks = 0;
-            } else {
-                sleep_ms(1);
-                continue; // Sleep briefly to prevent 100% CPU busy wait, then process input events
+                LOG_ERROR("wm", "Display driver has not completed the pending frame");
+                g_wait_start_ticks = get_ticks();
             }
+            sleep_ms(1);
+            continue; // Wait without releasing ownership of an in-flight present buffer.
         }
     }
     return 0;
