@@ -262,8 +262,13 @@ bool post_window_resize_configure(Window &w)
     if (!w.entry || !(w.entry->flags & WIN_FLAG_RESIZABLE) || !w.owner_pid || w.target_w <= 0 || w.target_h <= 0)
         return false;
 
-    w.pending_configure_serial = next_configure_serial(w);
-    w.entry_resize_serial = w.pending_configure_serial;
+    if (w.resize_configure_pending && w.pending_configure_serial != 0) {
+        // Retries retransmit the outstanding configure instead of creating a new generation.
+        w.entry_resize_serial = w.pending_configure_serial;
+    } else {
+        w.pending_configure_serial = next_configure_serial(w);
+        w.entry_resize_serial = w.pending_configure_serial;
+    }
     w.resize_configure_pending = true;
     w.last_configure_ticks = get_ticks();
 
