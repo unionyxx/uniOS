@@ -185,10 +185,7 @@ static inline bool damage_push_rect(Damage *damage, Rect rect)
     uint32_t producer = damage->producer_seq;
     uint32_t consumer = damage->consumer_seq;
     if (producer - consumer >= DAMAGE_QUEUE_CAPACITY) {
-        uint32_t newest = (producer - 1u) % DAMAGE_QUEUE_CAPACITY;
-        damage->entries[newest].rect = gui_rect_union(damage->entries[newest].rect, rect);
-        damage->dropped_updates = damage->dropped_updates + 1u;
-        __sync_synchronize();
+        __sync_fetch_and_add(&damage->dropped_updates, 1u);
         return false;
     }
 
@@ -223,6 +220,13 @@ static inline bool damage_pop_rect(Damage *damage, Rect *out_rect)
     __sync_synchronize();
     damage->consumer_seq = consumer + 1u;
     return true;
+}
+
+static inline uint32_t damage_take_dropped_updates(Damage *damage)
+{
+    if (!damage)
+        return 0;
+    return __sync_lock_test_and_set(&damage->dropped_updates, 0u);
 }
 
 #ifdef __cplusplus

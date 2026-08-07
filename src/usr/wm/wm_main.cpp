@@ -1649,6 +1649,9 @@ extern "C" int main(int argc, char **argv)
                 }
             }
             if (w.damage_ptr) {
+                if (damage_take_dropped_updates(w.damage_ptr) != 0)
+                    w.needs_full_redraw = true;
+
                 Rect d = {};
                 while (damage_pop_rect(w.damage_ptr, &d)) {
                     if (!w.first_damage_received) {

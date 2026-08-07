@@ -1,6 +1,7 @@
 #include <kernel/ktest.h>
 #include <wm/interaction_policy.h>
 #include <drivers/class/hid/ps2_mouse.h>
+#include <uapi/gui.h>
 
 KTEST(wm_policy_submit_when_queue_has_capacity)
 {
@@ -199,6 +200,46 @@ KTEST(wm_exposed_transition_reports_uncovered_strip_for_horizontal_move)
     KTEST_EXPECT_EQ(damage.rects[0].y, 100);
     KTEST_EXPECT_EQ(damage.rects[0].w, 40);
     KTEST_EXPECT_EQ(damage.rects[0].h, 80);
+}
+
+KTEST(gui_damage_overflow_preserves_published_entries)
+{
+    Damage damage = {};
+    damage_reset(&damage);
+
+    for (uint32_t i = 0; i < DAMAGE_QUEUE_CAPACITY; i++) {
+        KTEST_EXPECT(damage_push(&damage, (int32_t)i, (int32_t)(i + 10u), 2, 3));
+    }
+
+    KTEST_EXPECT(!damage_push(&damage, 100, 200, 30, 40));
+    KTEST_EXPECT_EQ(damage.dropped_updates, 1u);
+
+    for (uint32_t i = 0; i < DAMAGE_QUEUE_CAPACITY; i++) {
+        Rect rect = {};
+        KTEST_EXPECT(damage_pop_rect(&damage, &rect));
+        KTEST_EXPECT_EQ(rect.x, (int32_t)i);
+        KTEST_EXPECT_EQ(rect.y, (int32_t)(i + 10u));
+        KTEST_EXPECT_EQ(rect.w, 2);
+        KTEST_EXPECT_EQ(rect.h, 3);
+    }
+
+    Rect rect = {};
+    KTEST_EXPECT(!damage_pop_rect(&damage, &rect));
+    KTEST_EXPECT_EQ(damage_take_dropped_updates(&damage), 1u);
+    KTEST_EXPECT_EQ(damage_take_dropped_updates(&damage), 0u);
+}
+
+KTEST(gui_damage_overflow_counts_each_dropped_update)
+{
+    Damage damage = {};
+    damage_reset(&damage);
+
+    for (uint32_t i = 0; i < DAMAGE_QUEUE_CAPACITY; i++)
+        KTEST_EXPECT(damage_push(&damage, (int32_t)i, 0, 1, 1));
+
+    KTEST_EXPECT(!damage_push(&damage, 100, 0, 1, 1));
+    KTEST_EXPECT(!damage_push(&damage, 101, 0, 1, 1));
+    KTEST_EXPECT_EQ(damage_take_dropped_updates(&damage), 2u);
 }
 
 KTEST(ps2_mouse_thread_safety)
