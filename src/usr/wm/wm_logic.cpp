@@ -579,7 +579,7 @@ void refresh_window_visible_regions()
     for (int i = 0; i < limit; i++) {
         g_window_visible_region_count[i] = 0;
         g_window_visible_region_overflow[i] = false;
-        if (!g_window_visible_cache[i] || !g_windows[i].buffer || g_windows[i].transparent)
+        if (!g_window_visible_cache[i] || !g_windows[i].buffer || i < WM_FIRST_USER_WINDOW)
             continue;
 
         DirtyRect regions[MAX_VISIBLE_REGIONS];

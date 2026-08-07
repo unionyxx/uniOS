@@ -453,7 +453,7 @@ static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rec
     }
 }
 
-static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwrite_full_frame, bool actively_resizing)
+static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwrite_full_frame)
 {
     if (slot_index >= g_presentbuffer_slot_count)
         return false;
@@ -462,7 +462,7 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     if (!dst.surface.buffer)
         return false;
 
-    if (overwrite_full_frame || actively_resizing) {
+    if (overwrite_full_frame) {
         clear_presentbuffer_slot_stale(dst);
         return true;
     }
@@ -535,15 +535,12 @@ static bool select_presentbuffer_slot_for_frame()
     if (g_presentbuffer_slot_count == 0)
         return false;
 
-    bool actively_resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE &&
-                             g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count;
-
     bool overwrite_full_frame = dirty_set_is_single_fullscreen_rect();
     for (uint32_t offset = 0; offset < g_presentbuffer_slot_count; offset++) {
         uint32_t index = (g_presentbuffer_active_slot + offset) % g_presentbuffer_slot_count;
         if (g_presentbuffer_slots[index].in_flight_sequence != 0)
             continue;
-        if (!sync_presentbuffer_slot_from_active(index, overwrite_full_frame, actively_resizing))
+        if (!sync_presentbuffer_slot_from_active(index, overwrite_full_frame))
             continue;
 
         g_presentbuffer_active_slot = index;

@@ -11,22 +11,25 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
 
     for (int i = start_index; i < g_window_count; i++) {
         Window &w = g_windows[i];
-        if (!g_window_visible_cache[i] || !w.buffer || w.transparent)
+        if (i < WM_FIRST_USER_WINDOW || !g_window_visible_cache[i] || !w.buffer)
             continue;
         if (!dirty_rects_intersect(g_window_outer_cache[i], r))
             continue;
-        draw_window_decoration_clipped(&g_backbuffer, w, r, (i == focused_index), (i == hover_frame_index),
-                                       (i == hover_frame_index) ? hover_button : -1);
-        draw_window_client_clipped(&g_backbuffer, w, r);
+        if (w.transparent) {
+            draw_window_client_clipped(&g_backbuffer, w, r);
+        } else {
+            draw_window_decoration_clipped(&g_backbuffer, w, r, (i == focused_index), (i == hover_frame_index),
+                                           (i == hover_frame_index) ? hover_button : -1);
+            draw_window_client_clipped(&g_backbuffer, w, r);
+        }
     }
 
-    for (int i = start_index; i < g_window_count; i++) {
+    for (int i = 0; i < WM_FIRST_USER_WINDOW && i < g_window_count; i++) {
         Window &w = g_windows[i];
         if (!g_window_visible_cache[i] || !w.buffer || !w.transparent)
             continue;
-        if (!dirty_rects_intersect(g_window_outer_cache[i], r))
-            continue;
-        draw_window_client_clipped(&g_backbuffer, w, r);
+        if (dirty_rects_intersect(g_window_outer_cache[i], r))
+            draw_window_client_clipped(&g_backbuffer, w, r);
     }
 
     if (g_context_menu.open && rect_intersection(r, context_menu_bounds(), nullptr))
@@ -121,7 +124,7 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
 
     for (int i = start_index; i < g_window_count; i++) {
         Window &w = g_windows[i];
-        if (!g_window_visible_cache[i] || !w.buffer || w.transparent)
+        if (i < WM_FIRST_USER_WINDOW || !g_window_visible_cache[i] || !w.buffer)
             continue;
 
         if (!dirty_rects_intersect(r, g_window_outer_cache[i]))
@@ -142,15 +145,18 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
             DirtyRect visible = {};
             if (!rect_intersection(g_window_visible_regions[i][region], r, &visible))
                 continue;
-            
-            draw_window_decoration_clipped(&g_backbuffer, w, visible, focused, hovered_frame, hover_btn);
-            if (rect_intersection(visible, g_window_client_cache[i], nullptr)) {
+
+            if (w.transparent) {
                 draw_window_client_clipped(&g_backbuffer, w, visible);
+            } else {
+                draw_window_decoration_clipped(&g_backbuffer, w, visible, focused, hovered_frame, hover_btn);
+                if (rect_intersection(visible, g_window_client_cache[i], nullptr))
+                    draw_window_client_clipped(&g_backbuffer, w, visible);
             }
         }
     }
 
-    for (int i = start_index; i < g_window_count; i++) {
+    for (int i = 0; i < WM_FIRST_USER_WINDOW && i < g_window_count; i++) {
         Window &w = g_windows[i];
         if (!g_window_visible_cache[i] || !w.buffer || !w.transparent)
             continue;
