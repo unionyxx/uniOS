@@ -83,6 +83,7 @@ static constexpr uint64_t DISPLAY_BUFFER_MAP_SLOT_SIZE = 0x04000000ULL;
 struct DisplayBufferObject
 {
     bool used;
+    bool ready;
     DisplayBufferHandle handle;
     uint64_t owner_pid;
     DMAAllocation dma;
@@ -293,7 +294,7 @@ static DisplayBufferObject *display_find_buffer_locked(DisplayBufferHandle handl
     if (handle == 0)
         return nullptr;
     for (DisplayBufferObject &buffer : s_display_buffers) {
-        if (buffer.used && buffer.handle == handle)
+        if (buffer.used && buffer.ready && buffer.handle == handle)
             return &buffer;
     }
     return nullptr;
@@ -2082,16 +2083,6 @@ static uint32_t display_present_buffer_internal(DisplayDevice *device, const Dis
     return submitted;
 }
 
-static int display_buffer_copy_out(DisplayBufferObject *buffer, DisplayBufferCreate *request)
-{
-    if (!buffer || !request)
-        return -1;
-    request->stride = buffer->stride;
-    request->handle = buffer->handle;
-    request->size_bytes = display_buffer_bytes(buffer->stride, buffer->height);
-    return 0;
-}
-
 static bool display_map_buffer_into_process(DisplayBufferObject *buffer, DisplayBufferMap *request)
 {
     if (!buffer || !request)
@@ -2771,18 +2762,29 @@ int display_buffer_create(DisplayBufferCreate *request)
         spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return -1;
     }
+    slot->used = true;
+    slot->ready = false;
+    slot->handle = next_handle;
+    slot->owner_pid = process->pid;
     spinlock_release_irqrestore(&s_display_buffer_lock, flags);
 
     DMAAllocation dma = vmm_alloc_dma_with_flags((size_t)((size_bytes + 4095u) / 4096u),
                                                  display_buffer_kernel_page_flags(request->flags));
-    if (dma.virt == 0)
+    if (dma.virt == 0) {
+        flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
+        if (slot->used && !slot->ready && slot->handle == next_handle && slot->owner_pid == process->pid)
+            *slot = {};
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
         return -1;
+    }
     kstring::zero_memory(reinterpret_cast<void *>(dma.virt), dma.size);
 
     flags = spinlock_acquire_irqsave(&s_display_buffer_lock);
-    slot->used = true;
-    slot->handle = next_handle;
-    slot->owner_pid = process->pid;
+    if (!slot->used || slot->ready || slot->handle != next_handle || slot->owner_pid != process->pid) {
+        spinlock_release_irqrestore(&s_display_buffer_lock, flags);
+        vmm_free_dma(dma);
+        return -1;
+    }
     slot->dma = dma;
     slot->width = request->width;
     slot->height = request->height;
@@ -2793,9 +2795,13 @@ int display_buffer_create(DisplayBufferCreate *request)
     slot->mapped_user_addr = 0;
     slot->mapped_user_size = 0;
     slot->wm_access = false;
+    slot->ready = true;
+    request->stride = stride;
+    request->handle = next_handle;
+    request->size_bytes = size_bytes;
     spinlock_release_irqrestore(&s_display_buffer_lock, flags);
 
-    return display_buffer_copy_out(slot, request);
+    return 0;
 }
 
 int display_buffer_map(DisplayBufferMap *request)
