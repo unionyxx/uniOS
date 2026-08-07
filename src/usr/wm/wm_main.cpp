@@ -494,32 +494,30 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     bool cursor_on_screen = clip_dirty_rect_to_screen(cursor_rect);
     bool cursor_erased = false;
 
-    // Batched bounding box repair handles scattered staleness efficiently on SW composers.
-    if (stale_count > 4) {
-        DirtyRect bounds = {};
-        bool have_bounds = false;
-        for (int i = 0; i < stale_count; i++) {
-            DirtyRect stale = dst.stale_rects[i];
-            if (!clip_dirty_rect_to_screen(stale))
-                continue;
-            bounds = have_bounds ? rect_union(bounds, stale) : stale;
-            have_bounds = true;
-            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr)) {
-                cursor_erased = true;
-            }
-        }
-        if (have_bounds) {
-            gui_blit_rect(&dst.surface, &g_backbuffer, bounds.x, bounds.y, bounds.x, bounds.y, bounds.w, bounds.h);
-        }
+    DirtyRect clipped_stale[MAX_DIRTY_RECTS] = {};
+    int clipped_stale_count = 0;
+    DirtyRect bounds = {};
+    uint64_t stale_area = 0;
+    for (int i = 0; i < stale_count; i++) {
+        DirtyRect stale = dst.stale_rects[i];
+        if (!clip_dirty_rect_to_screen(stale))
+            continue;
+        clipped_stale[clipped_stale_count++] = stale;
+        bounds = clipped_stale_count == 1 ? stale : rect_union(bounds, stale);
+        stale_area += static_cast<uint64_t>(stale.w) * static_cast<uint64_t>(stale.h);
+    }
+
+    uint64_t bounds_area = static_cast<uint64_t>(bounds.w) * static_cast<uint64_t>(bounds.h);
+    bool batch_repair = clipped_stale_count > 4 && stale_area != 0 && bounds_area * 2u <= stale_area * 3u;
+    if (batch_repair) {
+        gui_blit_rect(&dst.surface, &g_backbuffer, bounds.x, bounds.y, bounds.x, bounds.y, bounds.w, bounds.h);
+        cursor_erased = cursor_on_screen && rect_intersection(bounds, cursor_rect, nullptr);
     } else {
-        for (int i = 0; i < stale_count; i++) {
-            DirtyRect stale = dst.stale_rects[i];
-            if (!clip_dirty_rect_to_screen(stale))
-                continue;
+        for (int i = 0; i < clipped_stale_count; i++) {
+            DirtyRect stale = clipped_stale[i];
             gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
-            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr)) {
+            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr))
                 cursor_erased = true;
-            }
         }
     }
 
