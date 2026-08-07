@@ -177,7 +177,7 @@ inline void normalize_dirty_rects(DirtyRect *rects, int *count, int screen_w, in
         }
     }
 
-    int collapse_limit = interactive ? 24 : 16;
+    int collapse_limit = interactive ? interactive_dirty_collapse_limit() : non_interactive_dirty_collapse_limit();
     if (*count > collapse_limit) {
         DirtyRect bounds = rects[0];
         for (int i = 1; i < *count; i++)
