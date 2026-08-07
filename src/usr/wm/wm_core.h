@@ -684,6 +684,7 @@ void maximize_window(int index);
 void toggle_maximize_window(int index);
 void restore_window(int index, bool raise);
 void set_window_bounds(Window &w, int x, int y, int width, int height);
+void apply_pending_window_bounds();
 int bring_window_to_front(int index);
 int send_window_to_back(int index);
 void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,

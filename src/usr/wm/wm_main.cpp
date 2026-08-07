@@ -1381,6 +1381,7 @@ extern "C" int main(int argc, char **argv)
             apply_mouse_move(registry, g_input.pending_mouse_x, g_input.pending_mouse_y);
             g_input.have_pending_move = false;
         }
+        apply_pending_window_bounds();
         drain_display_events();
         smp_rmb();
 

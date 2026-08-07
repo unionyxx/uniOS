@@ -94,6 +94,7 @@ static int resolve_context_menu_target_index();
 static bool context_menu_targets_window_entry(const WindowEntry *entry);
 static bool ensure_context_menu_target_valid();
 static void launch_or_focus_app(Registry *registry, const char *title, const char *path);
+static bool g_applying_pending_bounds = false;
 
 static void copy_dirty_rects_to_policy(wm::DirtyRect *dst, int count)
 {
@@ -1047,6 +1048,16 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
     bool size_changed = (w.w != width) || (w.h != height);
     bool moved = (w.x != x) || (w.y != y);
 
+    bool defer_interactive_resize = !g_applying_pending_bounds && size_changed && g_input.pointer_down &&
+                                    g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= WM_FIRST_USER_WINDOW &&
+                                    g_input.drag_index < g_window_count && g_windows[g_input.drag_index].entry == w.entry;
+    if (defer_interactive_resize) {
+        w.entry->active = true;
+        close_context_menu();
+        asm volatile("sfence" ::: "memory");
+        return;
+    }
+
     if (moved || size_changed) {
         Window old = w;
         w.x = x;
@@ -1118,6 +1129,18 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
     w.entry->active = true;
     close_context_menu();
     asm volatile("sfence" ::: "memory");
+}
+
+void apply_pending_window_bounds()
+{
+    g_applying_pending_bounds = true;
+    for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
+        Window &w = g_windows[i];
+        if (w.target_x == w.x && w.target_y == w.y && w.target_w == w.w && w.target_h == w.h)
+            continue;
+        set_window_bounds(w, w.target_x, w.target_y, w.target_w, w.target_h);
+    }
+    g_applying_pending_bounds = false;
 }
 
 int focus_window(int index, bool raise)
