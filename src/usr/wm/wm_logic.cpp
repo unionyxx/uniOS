@@ -751,14 +751,30 @@ static void clear_hover_feedback_state()
     g_input.hover_button = -1;
 }
 
+static void remap_interaction_indices(WindowEntry *drag_entry, WindowEntry *hover_entry)
+{
+    if (drag_entry)
+        g_input.drag_index = find_window_by_entry(drag_entry);
+    if (hover_entry)
+        g_input.hover_frame_index = find_window_by_entry(hover_entry);
+}
+
 int bring_window_to_front(int index)
 {
     if (index < WM_FIRST_USER_WINDOW || index >= g_window_count || index == g_window_count - 1)
         return index;
+    WindowEntry *drag_entry = (g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count)
+                                  ? g_windows[g_input.drag_index].entry
+                                  : nullptr;
+    WindowEntry *hover_entry = (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW &&
+                                g_input.hover_frame_index < g_window_count)
+                                   ? g_windows[g_input.hover_frame_index].entry
+                                   : nullptr;
     Window temp = g_windows[index];
     for (int i = index; i < g_window_count - 1; i++)
         g_windows[i] = g_windows[i + 1];
     g_windows[g_window_count - 1] = temp;
+    remap_interaction_indices(drag_entry, hover_entry);
     return g_window_count - 1;
 }
 
@@ -766,10 +782,18 @@ int send_window_to_back(int index)
 {
     if (index < WM_FIRST_USER_WINDOW || index >= g_window_count || index == WM_FIRST_USER_WINDOW)
         return index;
+    WindowEntry *drag_entry = (g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count)
+                                  ? g_windows[g_input.drag_index].entry
+                                  : nullptr;
+    WindowEntry *hover_entry = (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW &&
+                                g_input.hover_frame_index < g_window_count)
+                                   ? g_windows[g_input.hover_frame_index].entry
+                                   : nullptr;
     Window temp = g_windows[index];
     for (int i = index; i > WM_FIRST_USER_WINDOW; i--)
         g_windows[i] = g_windows[i - 1];
     g_windows[2] = temp;
+    remap_interaction_indices(drag_entry, hover_entry);
     return 2;
 }
 
