@@ -674,7 +674,7 @@ int find_top_visible_user_window();
 int find_registry_focused_user_window(const Registry *registry);
 int find_window_by_shm(int shm_id);
 int find_window_by_entry(const WindowEntry *entry);
-void focus_window_owner(const Window *w);
+bool focus_window_owner(const Window *w);
 void publish_focus(Registry *registry, const Window *w);
 void clear_window_focus(Registry *registry);
 int focus_window(int index, bool raise);

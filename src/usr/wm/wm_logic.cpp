@@ -714,9 +714,9 @@ int find_registry_focused_user_window(const Registry *registry)
     return -1;
 }
 
-void focus_window_owner(const Window *w)
+bool focus_window_owner(const Window *w)
 {
-    syscall1(SYS_GUI_SET_FOCUS, w ? w->owner_pid : 0);
+    return syscall1(SYS_GUI_SET_FOCUS, w ? w->owner_pid : 0) == 0;
 }
 
 void publish_focus(Registry *registry, const Window *w)
@@ -736,8 +736,8 @@ void publish_focus(Registry *registry, const Window *w)
 void clear_window_focus(Registry *registry)
 {
     int previous = find_registry_focused_user_window(registry);
-    focus_window_owner(nullptr);
-    publish_focus(registry, nullptr);
+    if (focus_window_owner(nullptr))
+        publish_focus(registry, nullptr);
     if (previous >= WM_FIRST_USER_WINDOW && previous < g_window_count && is_window_visible(g_windows[previous]))
         mark_window_chrome_damage(g_windows[previous]);
 }
@@ -1201,11 +1201,11 @@ int focus_window(int index, bool raise)
     if (w.entry && w.entry->owner_pid)
         w.owner_pid = w.entry->owner_pid;
     if (index >= WM_FIRST_USER_WINDOW && is_window_visible(w)) {
-        focus_window_owner(&w);
-        publish_focus(gui_registry(), &w);
+        if (focus_window_owner(&w))
+            publish_focus(gui_registry(), &w);
     } else {
-        focus_window_owner(nullptr);
-        publish_focus(gui_registry(), nullptr);
+        if (focus_window_owner(nullptr))
+            publish_focus(gui_registry(), nullptr);
     }
 
     bool hover_cleared_on_target = raise && target_entry && hover_entry == target_entry;
@@ -1308,8 +1308,9 @@ void minimize_window(int index)
     invalidate_window_visibility_cache();
 
     int focus_idx = find_top_visible_user_window();
-    focus_window_owner(focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
-    publish_focus(gui_registry(), focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
+    Window *focus_target = focus_idx >= 0 ? &g_windows[focus_idx] : nullptr;
+    if (focus_window_owner(focus_target))
+        publish_focus(gui_registry(), focus_target);
     if (focus_idx >= WM_FIRST_USER_WINDOW)
         mark_window_chrome_damage(g_windows[focus_idx]);
 }
@@ -1369,8 +1370,9 @@ void close_window(int index)
 
     invalidate_window_visibility_cache();
     int focus_idx = find_top_visible_user_window();
-    focus_window_owner(focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
-    publish_focus(gui_registry(), focus_idx >= 0 ? &g_windows[focus_idx] : nullptr);
+    Window *focus_target = focus_idx >= 0 ? &g_windows[focus_idx] : nullptr;
+    if (focus_window_owner(focus_target))
+        publish_focus(gui_registry(), focus_target);
     if (focus_idx >= WM_FIRST_USER_WINDOW)
         mark_window_chrome_damage(g_windows[focus_idx]);
     if (owner)
