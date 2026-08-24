@@ -909,7 +909,12 @@ extern "C" int main(int argc, char **argv)
     syscall1(SYS_SET_QUIET, 1);
     smp_wmb();
 
-    if (!init_shell_blur_buffers(registry, dock_w, dock_h)) {
+    // The firmware framebuffer backend copies pixels to the display and has
+    // no compositor to amortize translucent shell surfaces. Blur there costs
+    // hundreds of milliseconds and adds a visible hitch on every full-screen
+    // startup/resize. Keep that backend solid; compositor/page-flip backends
+    // retain the normal lazy blur path.
+    if (g_display_copy_path || !init_shell_blur_buffers(registry, dock_w, dock_h)) {
         registry->mb_blur_generation = 0;
         registry->dk_blur_generation = 0;
     }
@@ -923,7 +928,9 @@ extern "C" int main(int argc, char **argv)
     gui_blit_rect(&g_backbuffer, &g_wallpaper, 0, 0, 0, 0, g_screen.width, g_screen.height);
     capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)},
                                     registry);
-    flush_shell_blur_updates(registry);
+    // The shell blur is the most expensive part of startup. The first frame
+    // uses the desktop background immediately; the normal compositor loop
+    // resolves the marked blur surfaces before its next present.
     select_presentbuffer_slot_for_frame();
 
     gui_blit_rect(&g_presentbuffer, &g_backbuffer, 0, 0, 0, 0, g_screen.width, g_screen.height);
@@ -938,6 +945,12 @@ extern "C" int main(int argc, char **argv)
 
     mark_other_presentbuffer_slots_stale(&init_pres, 1, g_presentbuffer_active_slot);
     uint32_t frame_seq = (last_seq ? last_seq : 1) + 1;
+
+    // Ensure deferred shell blur is built on the next compositor frame even
+    // when no input or application damage arrives after boot.
+    enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), menubar_h);
+    enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                        registry->windows[1].h);
 
     smp_wmb();
     registry->magic = REGISTRY_MAGIC;
