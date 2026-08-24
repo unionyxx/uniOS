@@ -4,6 +4,7 @@
 #include <kernel/arch/x86_64/idt.h>
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/pic.h>
+#include <kernel/cpu.h>
 #include <kernel/debug.h>
 #include <kernel/irq.h>
 #include <kernel/mm/vmm.h>
@@ -25,6 +26,8 @@ constexpr uint8_t kVectorKeyboard = 33;
 constexpr uint8_t kVectorMouse = 44;
 constexpr uint8_t kVectorSpurious = 0xFF;
 static uint8_t g_resched_vector = 0;
+static uint8_t g_stop_vector = 0;
+static volatile uint32_t g_stop_initiated = 0;
 
 constexpr uint32_t LAPIC_ID = 0x020;
 constexpr uint32_t LAPIC_TPR = 0x080;
@@ -324,6 +327,8 @@ void apic_init()
     // vector reserves it from other users.
     if (g_resched_vector == 0)
         g_resched_vector = idt_allocate_free_vector();
+    if (g_stop_vector == 0)
+        g_stop_vector = idt_allocate_free_vector();
 }
 
 // Wakes every other core so idle ones re-run schedule() and pull work.
@@ -331,6 +336,28 @@ void apic_send_resched_ipi_to_others()
 {
     if (g_resched_vector != 0)
         apic_send_ipi_all_excluding_self(g_resched_vector);
+}
+
+void apic_stop_other_cpus()
+{
+    if (g_stop_vector == 0 || g_cpu_online_count <= 1)
+        return;
+
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&g_stop_initiated, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+
+    __atomic_store_n(&g_cpu_stopped_count, 0, __ATOMIC_RELEASE);
+    apic_send_ipi_all_excluding_self(g_stop_vector);
+
+    const int target = __atomic_load_n(&g_cpu_online_count, __ATOMIC_ACQUIRE) - 1;
+    constexpr uint32_t kMaxStopPolls = 10000000;
+    for (uint32_t i = 0; i < kMaxStopPolls; i++) {
+        if (__atomic_load_n(&g_cpu_stopped_count, __ATOMIC_ACQUIRE) >= target)
+            break;
+        asm volatile("pause");
+    }
 }
 
 extern "C" void irq_handler(void *stack_frame)
@@ -362,6 +389,19 @@ extern "C" void irq_handler(void *stack_frame)
     if (g_resched_vector != 0 && vector == g_resched_vector) {
         send_interrupt_eoi(vector);
         scheduler_schedule();
+        return;
+    }
+
+    // Stop IPI: never enter the scheduler or acquire a kernel lock here.
+    // This path is used while another CPU is panicking or resetting.
+    if (g_stop_vector != 0 && vector == g_stop_vector) {
+        send_interrupt_eoi(vector);
+        cpu_get_local()->stop_requested = true;
+        __sync_fetch_and_add(&g_cpu_stopped_count, 1);
+        asm volatile("cli\n"
+                     "1:\n"
+                     "hlt\n"
+                     "jmp 1b\n");
         return;
     }
 
@@ -427,6 +467,11 @@ bool apic_send_sipi(uint8_t dest_apic_id, uint8_t vector)
     return icr_send_to(dest_apic_id, ICR_DELIVERY_SIPI | vector);
 }
 
+bool apic_send_ipi_to(uint8_t dest_apic_id, uint8_t vector)
+{
+    return icr_send_to(dest_apic_id, 0x00004000 | vector);
+}
+
 void apic_send_ipi_all_excluding_self(uint8_t vector)
 {
     if (g_apic_enabled && g_lapic_base) {
@@ -439,8 +484,10 @@ void apic_send_ipi_all_excluding_self(uint8_t vector)
         // Vector: vector
         lapic_write(LAPIC_ICR_LO, 0x000C0000 | 0x4000 | vector);
 
-        // Wait for the transmission to complete
-        while (lapic_read(LAPIC_ICR_LO) & (1u << 12)) {
+        // Bound the wait: panic/shutdown must never wedge forever on a
+        // virtual or faulty LAPIC with sticky delivery status.
+        constexpr uint32_t kMaxStatusPolls = 100000000u;
+        for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
             asm volatile("pause");
         }
     }

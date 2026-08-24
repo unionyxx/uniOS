@@ -1,5 +1,6 @@
 #include <drivers/video/framebuffer.h>
 #include <kernel/debug.h>
+#include <kernel/irq.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
@@ -9,6 +10,7 @@
 
 void hcf()
 {
+    apic_stop_other_cpus();
     // Force the backbuffer to the screen so we can actually see the panic!
     extern void gfx_swap_buffers(bool force);
     gfx_swap_buffers(true);
@@ -27,6 +29,7 @@ void panic(const char *message)
 
 void panic_with_details(const char *message, const char *file, int line, const char *func)
 {
+    apic_stop_other_cpus();
     uint32_t bg = g_theme ? g_theme->window_bg : 0x011116; // Default to mocha-like dark
     uint32_t text = g_theme ? g_theme->text_primary : 0xcdd6f4;
     uint32_t alert = g_theme ? g_theme->btn_close : 0xf38ba8;

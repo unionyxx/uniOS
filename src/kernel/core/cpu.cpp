@@ -15,6 +15,7 @@ uint32_t g_xsave_mask_hi = 0;
 
 PerCpu g_cpus[CONFIG_SMP_MAX_CPUS] = {};
 volatile int g_cpu_online_count = 1;
+volatile int g_cpu_stopped_count = 0;
 static uint32_t g_bsp_apic_id = 0;
 
 extern "C" void syscall_entry();

@@ -44,6 +44,7 @@ struct alignas(64) PerCpu
     uint32_t cpu_id;
     uint32_t apic_id;
     volatile bool online;
+    volatile bool stop_requested;
 };
 
 static_assert(offsetof(PerCpu, kernel_stack) == 0, "usermode.asm ABI: [gs:0]");
@@ -52,6 +53,7 @@ static_assert(offsetof(PerCpu, user_stack) == 8, "usermode.asm ABI: [gs:8]");
 // Index 0 is the BSP. All entries are page-aligned instances; unused slots stay zeroed.
 extern PerCpu g_cpus[CONFIG_SMP_MAX_CPUS];
 extern "C" volatile int g_cpu_online_count;
+extern "C" volatile int g_cpu_stopped_count;
 
 static inline PerCpu *cpu_get_local()
 {

@@ -683,18 +683,17 @@ static void shutdown_mark_user_processes_zombie()
 
 static void shutdown_prepare(uint32_t action, const char *message)
 {
-    const uint64_t flags = interrupts_save_disable();
-    if (g_shutdown_action != 0) {
-        interrupts_restore(flags);
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&g_shutdown_action, &expected, action, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE)) {
         DEBUG_WARN("Shutdown already in progress; ignoring duplicate request.");
         halt_forever();
     }
-    g_shutdown_action = action;
-    interrupts_restore(flags);
 
     DEBUG_INFO("%s", message);
     shutdown_mark_user_processes_zombie();
     vfs_sync();
+    apic_stop_other_cpus();
     asm volatile("cli" ::: "memory");
 }
 

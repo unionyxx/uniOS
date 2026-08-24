@@ -572,7 +572,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
   qemu_headless = ['-serial', 'stdio', '-display', 'none']
   qemu_no_reboot = ['-no-reboot']
 
-#SMP variants : default run / smoke targets stay single - core until smp - smoke proves stable.
+  # SMP variants: default run/smoke targets remain single-core.
   qemu_smp2 = ['-smp', '2']
   qemu_smp4 = ['-smp', '4']
 
@@ -678,8 +678,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     timeout : 45,
   )
 
-#Opt - in SMP smoke : not part of the default 'smoke' suite.
-#Run with : meson test - C build / debug-- suite smoke - smp
+  # Opt-in SMP smoke: meson test -C build/debug --suite smoke-smp
   test(
     'qemu-smoke-smp',
     py,
@@ -697,6 +696,36 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     depends : [boot_disk],
     suite : 'smoke-smp',
     timeout : 60,
+  )
+
+  test(
+    'qemu-smoke-smp4',
+    py,
+    args : [
+      qemu_smoke,
+      '--timeout',
+      '180',
+      '--success',
+      'SMP scheduler ready on 4 CPUs',
+    ] + qemu_smoke_success_args + [
+      '--fail',
+      'ktest suite failed',
+      '--fail',
+      'KERNEL PANIC',
+      '--',
+    ] + qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    depends : [boot_disk],
+    suite : 'smoke-smp4',
+    timeout : 195,
+  )
+
+  run_target(
+    'smp-soak',
+    depends : [boot_disk],
+    command : [py, qemu_smoke, '--timeout', '180', '--hold', '5', '--repeat', '4',
+               '--success', 'SMP scheduler ready on 4 CPUs', '--success', 'ktest suite passed',
+               '--fail', 'ktest suite failed', '--fail', 'KERNEL PANIC', '--'] +
+              qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
   )
 endif
 

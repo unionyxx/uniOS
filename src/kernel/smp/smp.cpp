@@ -362,6 +362,7 @@ void smp_init()
 
     BOOT_SUCCESS("SMP: %u of %u AP(s) online (%d CPUs total)", started, ap_count,
                  __atomic_load_n(&g_cpu_online_count, __ATOMIC_ACQUIRE));
+    BOOT_SUCCESS("SMP scheduler ready on %d CPUs", __atomic_load_n(&g_cpu_online_count, __ATOMIC_ACQUIRE));
 }
 
 uint32_t smp_ap_count()

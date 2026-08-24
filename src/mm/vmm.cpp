@@ -87,10 +87,17 @@ void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages)
 
             g_tlb_shootdown.target_addr = virt_start;
             g_tlb_shootdown.num_pages = pages;
-            g_tlb_shootdown.active_cores = others;
+            g_tlb_shootdown.active_cores = 0;
 
             if (g_tlb_shootdown_vector != 0) {
-                apic_send_ipi_all_excluding_self(g_tlb_shootdown_vector);
+                const uint32_t sender_id = apic_get_current_id();
+                for (uint32_t i = 0; i < CONFIG_SMP_MAX_CPUS; i++) {
+                    if (!__atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) || g_cpus[i].apic_id == sender_id)
+                        continue;
+                    __sync_fetch_and_add(&g_tlb_shootdown.active_cores, 1);
+                    if (!apic_send_ipi_to(static_cast<uint8_t>(g_cpus[i].apic_id), g_tlb_shootdown_vector))
+                        __sync_fetch_and_sub(&g_tlb_shootdown.active_cores, 1);
+                }
             }
 
             // Spin-wait until all other cores have processed the invalidation
