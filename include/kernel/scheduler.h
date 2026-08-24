@@ -23,6 +23,10 @@ struct Process;
 
 void scheduler_init();
 [[nodiscard]] Process *scheduler_create_task(void (*entry)(), const char *name);
+// Deferred variant: task is built but NOT queued; fill setup fields, then
+// publish with scheduler_enqueue_task() (safe against cross-core pickup).
+[[nodiscard]] Process *scheduler_create_task_deferred(void (*entry)(), const char *name);
+void scheduler_enqueue_task(Process *proc);
 // Per-core idle context: pid 0, never queued; schedule() parks on it.
 [[nodiscard]] Process *scheduler_create_idle_task(void (*entry)(), const char *name);
 void scheduler_schedule();

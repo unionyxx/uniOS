@@ -107,21 +107,11 @@ extern "C" [[gnu::target("no-sse")]] void ap_main(PerCpu *cpu)
     apic_timer_start_this_core(apic_timer_bsp_initcnt());
 
     __atomic_store_n(&cpu->online, true, __ATOMIC_RELEASE);
-    __sync_fetch_and_add(&g_cpu_online_count, 1);
-    BOOT_SUCCESS("SMP: core %u online (%d CPUs total)", cpu->cpu_id,
-                 __atomic_load_n(&g_cpu_online_count, __ATOMIC_ACQUIRE));
 
-    // Park until multi-core scheduling is enabled: the per-core idle task and
-    // RESCHED IPI plumbing exist, but letting a second core run schedule()
-    // still exposes a bring-up race (system-wide stall shortly after the
-    // first AP goes online). Parked cores keep servicing TLB-shootdown IPIs
-    // and their LAPIC timer. Follow-up: resolve the AP scheduler-handoff race
-    // and replace this loop with scheduler_enter_idle(cpu->idle).
-    asm volatile("1:\n"
-                 "sti\n"
-                 "hlt\n"
-                 "cli\n"
-                 "jmp 1b\n");
+    // Adopt the per-core idle context and start pulling work from the global
+    // runqueue. Never returns; the online count is incremented inside the
+    // scheduler handoff while the sched lock is held.
+    scheduler_enter_idle(cpu->idle);
 }
 
 namespace {
@@ -251,7 +241,18 @@ bool start_ap(uint32_t slot, uint32_t apic_id, uint8_t sipi_vector, uint8_t *tra
     }
     cpu->idle = idle;
 
-    const uint64_t stack_top = reinterpret_cast<uint64_t>(idle->stack_base) + KERNEL_STACK_SIZE;
+    // Dedicated bootstrap stack for the AP's pre-scheduler C code. It must be
+    // SEPARATE from the idle task's stack: scheduler_enter_idle() switches
+    // onto idle->sp, and enter_idle's own live frames would clobber the
+    // prepared bootstrap context if both lived on the same buffer (the AP
+    // then jumps into the weeds still holding g_sched_lock, freezing the
+    // machine). The bootstrap stack is abandoned after the handoff.
+    void *boot_stack = pmm_alloc_frames(KERNEL_STACK_SIZE / 4096);
+    if (!boot_stack) {
+        BOOT_ERROR("SMP: no bootstrap stack for AP %u", apic_id);
+        return false;
+    }
+    const uint64_t stack_top = reinterpret_cast<uint64_t>(boot_stack) + vmm_get_hhdm_offset() + KERNEL_STACK_SIZE;
 
     cpu->cpu_id = slot;
     cpu->apic_id = apic_id;

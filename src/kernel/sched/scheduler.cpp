@@ -467,9 +467,9 @@ static void scheduler_schedule_internal()
         }
     }
 
-    if (next == current_proc()) {
-        current_proc()->state = ProcessState_Running;
-        current_proc()->last_run_time = now;
+    if (next == cur) {
+        cur->state = ProcessState_Running;
+        cur->last_run_time = now;
         spinlock_release_no_restore(&g_sched_lock);
         return;
     }
@@ -926,6 +926,102 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     return proc;
 }
 
+// Creates a task WITHOUT queueing it. The caller MUST fill any Process fields
+// the task needs (page_table, exec_entry, ...) and then publish it atomically
+// via scheduler_enqueue_task(). This closes the race where another core pops
+// the freshly queued task before its setup fields are written.
+Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
+{
+    const uint64_t flags = interrupts_save_disable();
+    Process *proc = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
+    if (!proc) {
+        interrupts_restore(flags);
+        return nullptr;
+    }
+
+    kstring::zero_memory(proc, sizeof(Process));
+    event_init(proc->event_queue);
+    proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    proc->uid = current_proc() ? current_proc()->uid : 0;
+    proc->parent_pid = current_proc() ? current_proc()->pid : 0;
+    if (name)
+        kstring::strncpy(proc->name, name, 31);
+    proc->state = ProcessState_Ready;
+    proc->priority = 1;
+    proc->time_slice = 0;
+    proc->last_run_time = timer_get_ticks();
+    proc->cwd[0] = '/';
+    proc->cwd[1] = '\0';
+    spinlock_init(&proc->fd_lock);
+    spinlock_init(&proc->vma_lock);
+    proc->vma_lock_ptr = &proc->vma_lock;
+
+    for (auto &fd : proc->fd_table)
+        fd.used = false;
+    proc->fd_table[0].used = proc->fd_table[1].used = proc->fd_table[2].used = true;
+
+    init_fpu_state(proc->fpu_state);
+    proc->fpu_initialized = true;
+
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    void *frames = pmm_alloc_frames(stack_pages);
+    if (!frames) {
+        aligned_free(proc);
+        interrupts_restore(flags);
+        return nullptr;
+    }
+
+    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
+    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
+    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
+
+    for (size_t i = 0; i < 8; i++)
+        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+
+    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+
+    *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
+    *(--stack_top) = reinterpret_cast<uint64_t>(entry);
+    *(--stack_top) = 0;
+    *(--stack_top) = 0;
+    *(--stack_top) = 0;
+    *(--stack_top) = 0;
+    *(--stack_top) = 0;
+
+    proc->sp = reinterpret_cast<uint64_t>(stack_top);
+    interrupts_restore(flags);
+    return proc;
+}
+
+// Publishes a deferred-created task onto the runqueue.
+void scheduler_enqueue_task(Process *proc)
+{
+    if (!proc)
+        return;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    // Insert into the process list.
+    g_proc_tail->next = proc;
+    proc->next = g_proc_list;
+    g_proc_tail = proc;
+
+    proc->children_list = nullptr;
+    if (current_proc()) {
+        proc->sibling_next = current_proc()->children_list;
+        current_proc()->children_list = proc;
+    } else {
+        proc->sibling_next = nullptr;
+    }
+
+    ready_queue_push(proc);
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    scheduler_notify_idle_cpus();
+}
+
 // Creates a per-core idle task: pid 0, never queued on the global runqueue,
 // invisible to the process list. Each core parks on its own instance when
 // nothing is runnable.
@@ -1133,7 +1229,8 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
 
 void process_exit(int32_t status)
 {
-    DEBUG_INFO("Process %d exiting with status %d", current_proc()->pid, status);
+    DEBUG_INFO("Process %d (%s) exiting with status %d on cpu%u", current_proc()->pid, current_proc()->name, status,
+               cpu_get_local()->cpu_id);
 
     process_release_private_fds(current_proc());
     shm_cleanup_process(current_proc());

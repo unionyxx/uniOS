@@ -1246,11 +1246,12 @@ static void user_task_wrapper()
         return -1;
     }
 
-    const uint64_t flags = interrupts_save_disable();
-
-    Process *child = scheduler_create_task(user_task_wrapper, path);
+    // Deferred creation: fill address-space fields BEFORE the task becomes
+    // visible to other cores. Queueing first raced the field stores, and a
+    // fast core could enter user mode with the kernel page tables still
+    // active (observed as a supervisor-only 2MiB fault at the ELF entry).
+    Process *child = scheduler_create_task_deferred(user_task_wrapper, path);
     if (!child) {
-        interrupts_restore(flags);
         if (loader_proc->vma_list)
             vma_free_all(loader_proc->vma_list);
         vmm_free_address_space(new_pml4);
@@ -1264,7 +1265,7 @@ static void user_task_wrapper()
     loader_proc->vma_list = nullptr;
     child->exec_entry = entry;
 
-    interrupts_restore(flags);
+    scheduler_enqueue_task(child);
     aligned_free(loader_proc);
     DEBUG_SUCCESS("kernel_exec: launched %s as pid %lu", resolved, child->pid);
     return static_cast<int64_t>(child->pid);
