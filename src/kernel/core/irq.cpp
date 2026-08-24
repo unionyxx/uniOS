@@ -7,13 +7,14 @@
 #include <kernel/debug.h>
 #include <kernel/irq.h>
 #include <kernel/mm/vmm.h>
-#include <kernel/scheduler.h>
 #include <kernel/process.h>
+#include <kernel/scheduler.h>
 #include <kernel/time/timer.h>
 #include <stdint.h>
 
 static uint64_t g_lapic_base = 0;
 static bool g_apic_enabled = false;
+static uint32_t g_lapic_timer_initcnt = 0;
 static IrqVectorHandler g_vector_handlers[IDT_ENTRIES] = {};
 static void *g_vector_contexts[IDT_ENTRIES] = {};
 
@@ -23,11 +24,14 @@ constexpr uint8_t kVectorTimer = 32;
 constexpr uint8_t kVectorKeyboard = 33;
 constexpr uint8_t kVectorMouse = 44;
 constexpr uint8_t kVectorSpurious = 0xFF;
+static uint8_t g_resched_vector = 0;
 
 constexpr uint32_t LAPIC_ID = 0x020;
 constexpr uint32_t LAPIC_TPR = 0x080;
 constexpr uint32_t LAPIC_EOI = 0x0B0;
 constexpr uint32_t LAPIC_SVR = 0x0F0;
+constexpr uint32_t LAPIC_ICR_LO = 0x300;
+constexpr uint32_t LAPIC_ICR_HI = 0x310;
 constexpr uint32_t LAPIC_LVT_TIMER = 0x320;
 constexpr uint32_t LAPIC_INITCNT = 0x380;
 constexpr uint32_t LAPIC_CURRCNT = 0x390;
@@ -38,6 +42,11 @@ constexpr uint32_t LAPIC_TIMER_MASK = 1u << 16;
 constexpr uint32_t LAPIC_TIMER_PER = 1u << 17;
 constexpr uint32_t LAPIC_DIVIDE_16 = 0x3;   // xAPIC divide-by-16 encoding
 constexpr uint32_t PIT_10MS_RELOAD = 11931; // 1.193182 MHz / 100
+
+// ICR low dword layouts: delivery mode sits in bits [10:8], level assert in
+// bit 14. INIT = 101b, STARTUP = 110b — both require the assert bit.
+constexpr uint32_t ICR_DELIVERY_INIT = 0x00004500;
+constexpr uint32_t ICR_DELIVERY_SIPI = 0x00004600;
 
 inline volatile uint32_t *lapic_reg(uint32_t off)
 {
@@ -205,12 +214,40 @@ void apic_timer_init(uint32_t frequency)
     if (initcnt > 0xFFFFFFFFull)
         initcnt = 0xFFFFFFFFull;
 
-    lapic_write(LAPIC_DIVIDE, LAPIC_DIVIDE_16);
-    lapic_write(LAPIC_LVT_TIMER, kVectorTimer | LAPIC_TIMER_PER);
-    lapic_write(LAPIC_INITCNT, static_cast<uint32_t>(initcnt));
+    g_lapic_timer_initcnt = static_cast<uint32_t>(initcnt);
+    BOOT_LOG("APIC: timer calibrated (initcnt=%u)", g_lapic_timer_initcnt);
 
+    apic_timer_start_this_core(g_lapic_timer_initcnt);
     timer_set_frequency(frequency);
-    BOOT_LOG("APIC: timer initialized at %u Hz (initcnt=%u)", frequency, static_cast<uint32_t>(initcnt));
+}
+
+// Programs this core's LAPIC timer without PIT recalibration (PIT channel 2
+// is shared hardware; APs reuse the BSP's calibrated count).
+void apic_timer_start_this_core(uint32_t initcnt)
+{
+    if (!g_lapic_base || initcnt == 0)
+        return;
+
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_MASK | kVectorTimer);
+    lapic_write(LAPIC_DIVIDE, LAPIC_DIVIDE_16);
+    lapic_write(LAPIC_INITCNT, initcnt);
+    lapic_write(LAPIC_LVT_TIMER, kVectorTimer | LAPIC_TIMER_PER);
+}
+
+uint32_t apic_timer_bsp_initcnt()
+{
+    return g_lapic_timer_initcnt;
+}
+
+// Enables the LAPIC on the current core. g_lapic_base is process-global
+// (same physical address on every core), only the MSRs/registers are per-core.
+void apic_enable_this_core()
+{
+    if (!g_lapic_base)
+        return;
+
+    lapic_write(LAPIC_TPR, 0);
+    lapic_write(LAPIC_SVR, LAPIC_SW_ENABLE | kVectorSpurious);
 }
 
 void apic_init()
@@ -281,6 +318,19 @@ void apic_init()
 
     // Do not hardcode keyboard/mouse routing here if registration also programs IOAPIC.
     apic_timer_init(1000);
+
+    // Dedicated RESCHED vector for waking idle cores (SMP scheduling).
+    // Handled directly in irq_handler before generic dispatch; allocating the
+    // vector reserves it from other users.
+    if (g_resched_vector == 0)
+        g_resched_vector = idt_allocate_free_vector();
+}
+
+// Wakes every other core so idle ones re-run schedule() and pull work.
+void apic_send_resched_ipi_to_others()
+{
+    if (g_resched_vector != 0)
+        apic_send_ipi_all_excluding_self(g_resched_vector);
 }
 
 extern "C" void irq_handler(void *stack_frame)
@@ -303,6 +353,15 @@ extern "C" void irq_handler(void *stack_frame)
         } else {
             scheduler_schedule();
         }
+        return;
+    }
+
+    // Resched IPI: EOI first (like the timer), then schedule. If the schedule
+    // switches away, this handler never returns — that is by design and safe
+    // because the EOI already happened.
+    if (g_resched_vector != 0 && vector == g_resched_vector) {
+        send_interrupt_eoi(vector);
+        scheduler_schedule();
         return;
     }
 
@@ -339,17 +398,38 @@ void apic_send_eoi()
         lapic_write(LAPIC_EOI, 0);
 }
 
+static bool icr_send_to(uint8_t dest_apic_id, uint32_t icr_low)
+{
+    if (!g_apic_enabled || !g_lapic_base)
+        return false;
+
+    // Bounded waits: some virtual LAPICs keep the delivery-status bit sticky
+    // for INIT/SIPI, so an unbounded spin here would wedge the BSP.
+    constexpr uint32_t kMaxStatusPolls = 100000000u;
+
+    // Wait for any previous IPI to clear
+    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
+        asm volatile("pause");
+    }
+
+    lapic_write(LAPIC_ICR_HI, static_cast<uint32_t>(dest_apic_id) << 24);
+    lapic_write(LAPIC_ICR_LO, icr_low);
+    return true;
+}
+
+bool apic_send_init_ipi(uint8_t dest_apic_id)
+{
+    return icr_send_to(dest_apic_id, ICR_DELIVERY_INIT);
+}
+
+bool apic_send_sipi(uint8_t dest_apic_id, uint8_t vector)
+{
+    return icr_send_to(dest_apic_id, ICR_DELIVERY_SIPI | vector);
+}
+
 void apic_send_ipi_all_excluding_self(uint8_t vector)
 {
     if (g_apic_enabled && g_lapic_base) {
-        constexpr uint32_t LAPIC_ICR_LO = 0x300;
-        constexpr uint32_t LAPIC_ICR_HI = 0x310;
-
-        // Wait for any previous IPI to clear
-        while (lapic_read(LAPIC_ICR_LO) & (1u << 12)) {
-            asm volatile("pause");
-        }
-
         // Clear Destination Field in ICR High
         lapic_write(LAPIC_ICR_HI, 0);
 

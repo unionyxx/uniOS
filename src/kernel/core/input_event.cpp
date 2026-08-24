@@ -13,15 +13,22 @@ void event_init(EventQueue &q)
 {
     q.head = 0;
     q.tail = 0;
+    spinlock_init(&q.lock);
 }
 
+// Producers run in IRQ context (HID handlers) and syscall context; the WM
+// consumes from another core once SMP starts. IRQ-safe lock is mandatory.
 void event_push(EventQueue &q, const Event &e)
 {
+    const uint64_t flags = spinlock_acquire_irqsave(&q.lock);
     int next = (q.tail + 1) % EVENT_QUEUE_SIZE;
-    if (next == q.head)
+    if (next == q.head) {
+        spinlock_release_irqrestore(&q.lock, flags);
         return;
+    }
     q.events[q.tail] = e;
     q.tail = next;
+    spinlock_release_irqrestore(&q.lock, flags);
 
     extern void scheduler_notify_input_waiters();
     scheduler_notify_input_waiters();
@@ -29,10 +36,14 @@ void event_push(EventQueue &q, const Event &e)
 
 bool event_poll(EventQueue &q, Event &out)
 {
-    if (q.head == q.tail)
+    const uint64_t flags = spinlock_acquire_irqsave(&q.lock);
+    if (q.head == q.tail) {
+        spinlock_release_irqrestore(&q.lock, flags);
         return false;
+    }
     out = q.events[q.head];
     q.head = (q.head + 1) % EVENT_QUEUE_SIZE;
+    spinlock_release_irqrestore(&q.lock, flags);
     return true;
 }
 

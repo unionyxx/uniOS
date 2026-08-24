@@ -20,9 +20,9 @@ STATIC_ASSERT(offsetof(Process, vma_list) == 8456, "Process::vma_list offset mis
 
 using kstring::memcpy;
 
+#include <kernel/arch/x86_64/idt.h>
 #include <kernel/cpu.h>
 #include <kernel/irq.h>
-#include <kernel/arch/x86_64/idt.h>
 
 static uint64_t *g_pml4 = nullptr;
 static uint64_t g_hhdm_offset = 0;
@@ -275,8 +275,6 @@ Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
     pt[(virt >> 12) & 0x1FF] = phys | flags;
     return true;
 }
-
-
 
 uint64_t vmm_virt_to_phys_in(const uint64_t *pml4, uint64_t virt)
 {

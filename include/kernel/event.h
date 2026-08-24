@@ -1,4 +1,5 @@
 #pragma once
+#include <kernel/sync/spinlock.h>
 #include <stdint.h>
 #include <uapi/event.h>
 
@@ -8,6 +9,7 @@ struct EventQueue
 {
     Event events[EVENT_QUEUE_SIZE];
     int head, tail;
+    Spinlock lock;
 };
 
 void event_init(EventQueue &q);

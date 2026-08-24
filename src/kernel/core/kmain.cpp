@@ -36,6 +36,7 @@
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
+#include <kernel/smp.h>
 #include <kernel/terminal.h>
 #include <kernel/time/timer.h>
 #include <libk/kstring.h>
@@ -253,8 +254,7 @@ static bool mount_persistent_data_volume()
                         BOOT_SUCCESS("Persistent data volume mounted at /data from %s",
                                      dev->name ? dev->name : "(unnamed)");
                     } else if (phase == 1) {
-                        BOOT_SUCCESS("FAT32 data volume mounted at /data from %s",
-                                     dev->name ? dev->name : "(unnamed)");
+                        BOOT_SUCCESS("FAT32 data volume mounted at /data from %s", dev->name ? dev->name : "(unnamed)");
                     } else {
                         BOOT_WARN("Storage: using boot FAT32 volume for /data from %s",
                                   dev->name ? dev->name : "(unnamed)");
@@ -411,9 +411,12 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     boot_splash_set_progress(58);
     display_init(fb);
     scheduler_init();
-    if (Process *idle = scheduler_create_task(idle_task_entry, "Idle")) {
-        idle->priority = 2; // IDLE priority
-        idle->state = ProcessState_Ready;
+    // Per-core idle context for the BSP. Never queued on the shared runqueue
+    // and never made current — the boot task keeps running; schedule()'s
+    // empty-queue fallback parks here only if the boot task ever blocks.
+    // APs get their own private idles during smp_init().
+    if (Process *idle = scheduler_create_idle_task(idle_task_entry, "Idle")) {
+        cpu_get_local()->idle = idle;
     }
 
 #ifdef DEBUG
@@ -485,6 +488,8 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     DEBUG_TRACE("kernel tests disabled in release build");
 #endif
     boot_splash_set_progress(100);
+
+    smp_init();
 
     if (Process *deferred = scheduler_create_task(deferred_boot_services_task, "DeferredInit")) {
         deferred->priority = 0;

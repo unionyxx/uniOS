@@ -1,5 +1,6 @@
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/pic.h>
+#include <kernel/cpu.h>
 #include <kernel/irq.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
@@ -96,7 +97,12 @@ uint32_t timer_get_frequency()
 
 void timer_handler()
 {
-    ticks++;
+    // Every core programs its own LAPIC timer, but only the BSP advances the
+    // global tick: all sleep/deadline math assumes timer_get_frequency() Hz.
+    // Per-core accounting arrives with multi-core scheduling (Phase 4).
+    if (cpu_get_local()->cpu_id != 0)
+        return;
+    __sync_add_and_fetch(&ticks, 1);
     // Future work: we could use a delta list or timer wheels to make the sleep queue
     // IRQ path lightweight instead of waking every waiting task every tick.
 }

@@ -67,6 +67,11 @@ void idt_init()
     load_idt(&idtr);
 }
 
+void idt_load()
+{
+    load_idt(&idtr);
+}
+
 uint8_t idt_allocate_free_vector()
 {
     // Start searching from 48, past exceptions and ISA IRQs.

@@ -252,6 +252,34 @@ void *pmm_alloc_frames(size_t count)
     return nullptr;
 }
 
+bool pmm_reserve_range(uint64_t phys, size_t pages)
+{
+    if (pages == 0 || (phys & 0xFFFULL) != 0)
+        return false;
+
+    const size_t first = static_cast<size_t>(phys / k_frame_size);
+    if (first >= g_bitmap_bits || pages > g_bitmap_bits - first)
+        return false;
+
+    const uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
+
+    for (size_t i = 0; i < pages; i++) {
+        if (g_pmm_bitmap[first + i]) {
+            spinlock_release_irqrestore(&g_pmm_lock, flags);
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < pages; i++) {
+        g_pmm_bitmap.set(first + i, true);
+        g_pmm_refcounts[first + i] = 1;
+        g_free_memory -= k_frame_size;
+    }
+
+    spinlock_release_irqrestore(&g_pmm_lock, flags);
+    return true;
+}
+
 void pmm_refcount_inc(const void *frame)
 {
     if (!frame)

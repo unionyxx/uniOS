@@ -1,44 +1,28 @@
 #include <kernel/arch/x86_64/gdt.h>
-#include <stddef.h>
+#include <kernel/cpu.h>
 
-__attribute__((aligned(0x1000))) static struct gdt_entry
-    gdt[7]; // Null, Kernel Code, Kernel Data, User Code, User Data, TSS (Low), TSS (High)
-static struct gdt_descriptor gdtr;
+// Per-core segment state. Selector layout is identical on every core
+// (0x08 kcode, 0x10 kdata, 0x1B udata, 0x23 ucode, 0x28 TSS) so shared
+// entry assembly works everywhere; only TSS contents differ per core.
+struct alignas(0x1000) CoreSegmentArea
+{
+    gdt_entry entries[7]; // Null, Kernel Code, Kernel Data, User Code, User Data, TSS (Low), TSS (High)
+    tss_entry tss;
+    uint8_t rsp0_stack[4096];
+    uint8_t double_fault_stack[4096]; // IST1: double faults survive kernel stack overflow
+    uint8_t nmi_stack[4096];          // IST2
+    uint8_t pf_stack[4096];           // IST3
+};
 
-__attribute__((aligned(16))) static struct tss_entry tss;
-
-// Stack for the TSS (Privilege level 0 stack)
-__attribute__((aligned(16))) static uint8_t tss_stack[4096];
-
-// Dedicated stack for Double Fault handler (IST1)
-// This ensures the CPU can handle double faults even if the kernel stack overflows
-__attribute__((aligned(16))) static uint8_t double_fault_stack[4096];
-
-// Dedicated stack for NMI handler (IST2)
-__attribute__((aligned(16))) static uint8_t nmi_stack[4096];
-
-// Dedicated stack for Page Fault handler (IST3)
-__attribute__((aligned(16))) static uint8_t pf_stack[4096];
+static CoreSegmentArea g_core_seg[CONFIG_SMP_MAX_CPUS] = {};
 
 extern "C" void load_gdt(struct gdt_descriptor *gdtr);
 extern "C" void load_tss(void);
 
-[[gnu::target("no-sse")]] void gdt_init()
+[[gnu::target("no-sse")]] static void fill_gdt_entries(gdt_entry *gdt, const tss_entry *tss)
 {
-    // Zero the TSS first
-    auto *tss_ptr = reinterpret_cast<uint8_t *>(&tss);
-    for (size_t i = 0; i < sizeof(tss); i++) {
-        tss_ptr[i] = 0;
-    }
-
-    // Setup TSS
-    tss.rsp0 = (uint64_t)&tss_stack[sizeof(tss_stack)];
-    tss.iomap_base = sizeof(tss);
-
-    // Setup ISTs
-    tss.ist1 = (uint64_t)&double_fault_stack[sizeof(double_fault_stack)];
-    tss.ist2 = (uint64_t)&nmi_stack[sizeof(nmi_stack)];
-    tss.ist3 = (uint64_t)&pf_stack[sizeof(pf_stack)];
+    const uint64_t tss_base = reinterpret_cast<uint64_t>(tss);
+    const uint64_t tss_limit = sizeof(tss_entry) - 1;
 
     // Null descriptor (0x00)
     gdt[0] = {0, 0, 0, 0, 0, 0};
@@ -76,30 +60,53 @@ extern "C" void load_tss(void);
               .base_high = 0};
 
     // TSS Descriptor - Selector 0x28
-    uint64_t tss_base = (uint64_t)&tss;
-    uint64_t tss_limit = sizeof(tss) - 1;
-
-    gdt[5] = {.limit_low = (uint16_t)(tss_limit & 0xFFFF),
-              .base_low = (uint16_t)(tss_base & 0xFFFF),
-              .base_middle = (uint8_t)((tss_base >> 16) & 0xFF),
+    gdt[5] = {.limit_low = static_cast<uint16_t>(tss_limit & 0xFFFF),
+              .base_low = static_cast<uint16_t>(tss_base & 0xFFFF),
+              .base_middle = static_cast<uint8_t>((tss_base >> 16) & 0xFF),
               .access = 0x89,
-              .granularity = (uint8_t)(((tss_limit >> 16) & 0x0F)),
-              .base_high = (uint8_t)((tss_base >> 24) & 0xFF)};
+              .granularity = static_cast<uint8_t>(((tss_limit >> 16) & 0x0F)),
+              .base_high = static_cast<uint8_t>((tss_base >> 24) & 0xFF)};
 
     auto *tss_high = reinterpret_cast<uint64_t *>(&gdt[6]);
     *tss_high = (tss_base >> 32) & 0xFFFFFFFF;
+}
 
-    gdtr.size = sizeof(gdt) - 1;
-    gdtr.offset = (uint64_t)&gdt;
+[[gnu::target("no-sse")]] void gdt_init_cpu(unsigned cpu_id)
+{
+    if (cpu_id >= CONFIG_SMP_MAX_CPUS)
+        return;
 
+    CoreSegmentArea &area = g_core_seg[cpu_id];
+    tss_entry &tss = area.tss;
+
+    tss.rsp0 = reinterpret_cast<uint64_t>(&area.rsp0_stack[sizeof(area.rsp0_stack)]);
+    tss.iomap_base = sizeof(tss_entry);
+
+    tss.ist1 = reinterpret_cast<uint64_t>(&area.double_fault_stack[sizeof(area.double_fault_stack)]);
+    tss.ist2 = reinterpret_cast<uint64_t>(&area.nmi_stack[sizeof(area.nmi_stack)]);
+    tss.ist3 = reinterpret_cast<uint64_t>(&area.pf_stack[sizeof(area.pf_stack)]);
+
+    fill_gdt_entries(area.entries, &tss);
+
+    gdt_descriptor gdtr = {
+        .size = sizeof(area.entries) - 1,
+        .offset = reinterpret_cast<uint64_t>(area.entries),
+    };
     load_gdt(&gdtr);
     load_tss();
 }
 
-// Update TSS rsp0 for context switching
-// Must be called before switching to a new task to ensure Ring 3 -> Ring 0
-// transitions use the correct kernel stack
+void gdt_init()
+{
+    gdt_init_cpu(0);
+}
+
+// Must run on the core whose rsp0 is being updated; scheduler context switches
+// are always local to the current core.
 void tss_set_rsp0(uint64_t rsp0)
 {
-    tss.rsp0 = rsp0;
+    const PerCpu *cpu = cpu_get_local();
+    if (!cpu || cpu->cpu_id >= CONFIG_SMP_MAX_CPUS)
+        return;
+    g_core_seg[cpu->cpu_id].tss.rsp0 = rsp0;
 }

@@ -36,5 +36,8 @@ struct tss_entry
     uint16_t iomap_base;
 } __attribute__((packed));
 
+// Builds and loads this core's GDT/TSS (selector layout identical on all cores).
+// Must run ON the target core. cpu_id indexes the per-core instance table.
 void gdt_init();
+void gdt_init_cpu(unsigned cpu_id);
 void tss_set_rsp0(uint64_t rsp0);

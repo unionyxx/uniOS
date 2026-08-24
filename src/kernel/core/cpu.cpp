@@ -13,8 +13,9 @@ extern "C" uint32_t g_xsave_mask_hi;
 uint32_t g_xsave_mask_lo = 0;
 uint32_t g_xsave_mask_hi = 0;
 
-CpuLocal g_bsp_cpu_local;
+PerCpu g_cpus[CONFIG_SMP_MAX_CPUS] = {};
 volatile int g_cpu_online_count = 1;
+static uint32_t g_bsp_apic_id = 0;
 
 extern "C" void syscall_entry();
 
@@ -77,13 +78,33 @@ enum : uint64_t
 }
 } // namespace
 
-[[gnu::target("no-sse")]] void syscall_init()
+PerCpu *cpu_by_apic_id(uint32_t apic_id)
 {
-    // Initialize per-CPU data for BSP
-    g_bsp_cpu_local.kernel_stack = 0; // Will be set by scheduler
-    g_bsp_cpu_local.user_stack = 0;
+    for (uint32_t i = 0; i < CONFIG_SMP_MAX_CPUS; i++) {
+        if (g_cpus[i].online && g_cpus[i].apic_id == apic_id)
+            return &g_cpus[i];
+    }
+    return nullptr;
+}
 
-    const uint64_t gs_base = reinterpret_cast<uint64_t>(&g_bsp_cpu_local);
+uint32_t cpu_bsp_apic_id()
+{
+    return g_bsp_apic_id;
+}
+
+// Configures this core's syscall MSRs and points GS at its own PerCpu instance.
+[[gnu::target("no-sse")]] static void cpu_configure_this_core(uint32_t cpu_id, uint32_t apic_id)
+{
+    if (cpu_id >= CONFIG_SMP_MAX_CPUS)
+        return;
+
+    PerCpu *cpu = &g_cpus[cpu_id];
+    cpu->cpu_id = cpu_id;
+    cpu->apic_id = apic_id;
+    cpu->kernel_stack = 0; // Will be set by the scheduler
+    cpu->user_stack = 0;
+
+    const uint64_t gs_base = reinterpret_cast<uint64_t>(cpu);
     wrmsr64(kMsrGsBase, gs_base);
     wrmsr64(kMsrKernelGsBase, gs_base);
 
@@ -104,6 +125,51 @@ enum : uint64_t
     uint64_t efer = rdmsr64(kMsrEfer);
     efer |= kEferSce;
     wrmsr64(kMsrEfer, efer);
+}
+
+// Applies BSP-detected feature globals to this core's control registers and FPU.
+[[gnu::target("no-sse")]] static void cpu_control_regs_this_core()
+{
+    uint64_t cr4 = 0;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    if (g_cpu_features.has_sse) {
+        cr4 |= kCr4Osfxsr;
+        cr4 |= kCr4Osxmmexcpt;
+    }
+    // SMEP and SMAP remain disabled until all user mappings and entry paths are audited.
+    if (g_use_xsave)
+        cr4 |= kCr4Osxsave;
+    if (g_cpu_features.has_fsgsbase)
+        cr4 |= kCr4Fsgsbase;
+    asm volatile("mov %0, %%cr4" ::"r"(cr4) : "memory");
+
+    if (g_use_xsave) {
+        const uint64_t xcr0 = (static_cast<uint64_t>(g_xsave_mask_hi) << 32) | g_xsave_mask_lo;
+        asm volatile("xsetbv" ::"a"(static_cast<uint32_t>(xcr0)), "d"(static_cast<uint32_t>(xcr0 >> 32)), "c"(0));
+    }
+
+    uint64_t cr0 = 0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~kCr0Em;
+    cr0 &= ~kCr0Ts;
+    cr0 |= kCr0Mp;
+    cr0 |= kCr0Ne;
+    cr0 |= kCr0Wp;
+    asm volatile("mov %0, %%cr0" ::"r"(cr0) : "memory");
+
+    if (g_cpu_features.has_nx) {
+        uint64_t efer = rdmsr64(kMsrEfer);
+        efer |= kEferNxe;
+        wrmsr64(kMsrEfer, efer);
+    }
+
+    asm volatile("fninit");
+}
+
+[[gnu::target("no-sse")]] void cpu_core_setup(const uint32_t cpu_id, const uint32_t apic_id)
+{
+    cpu_control_regs_this_core();
+    cpu_configure_this_core(cpu_id, apic_id);
 }
 
 [[gnu::target("no-sse")]] void cpu_init()
@@ -158,26 +224,12 @@ enum : uint64_t
     const bool enable_xsave = g_cpu_features.has_xsave && max_basic_leaf >= 0x0DU;
     const bool enable_avx = enable_xsave && g_cpu_features.has_sse && g_cpu_features.has_avx;
 
-    uint64_t cr4 = 0;
-    asm volatile("mov %%cr4, %0" : "=r"(cr4));
-    if (g_cpu_features.has_sse) {
-        cr4 |= kCr4Osfxsr;
-        cr4 |= kCr4Osxmmexcpt;
-    }
-    // SMEP and SMAP remain disabled until all user mappings and entry paths are audited.
-    if (enable_xsave)
-        cr4 |= kCr4Osxsave;
-    if (g_cpu_features.has_fsgsbase)
-        cr4 |= kCr4Fsgsbase;
-    asm volatile("mov %0, %%cr4" ::"r"(cr4) : "memory");
-
     if (enable_xsave) {
         uint64_t xcr0 = kXcr0X87;
         if (g_cpu_features.has_sse)
             xcr0 |= kXcr0Sse;
         if (enable_avx)
             xcr0 |= kXcr0Avx;
-        asm volatile("xsetbv" ::"a"(static_cast<uint32_t>(xcr0)), "d"(static_cast<uint32_t>(xcr0 >> 32)), "c"(0));
         g_xsave_mask_lo = static_cast<uint32_t>(xcr0);
         g_xsave_mask_hi = static_cast<uint32_t>(xcr0 >> 32);
         g_use_xsave = 1;
@@ -186,24 +238,11 @@ enum : uint64_t
         g_cpu_features.has_avx = false;
     }
 
-    uint64_t cr0 = 0;
-    asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~kCr0Em;
-    cr0 &= ~kCr0Ts;
-    cr0 |= kCr0Mp;
-    cr0 |= kCr0Ne;
-    cr0 |= kCr0Wp;
-    asm volatile("mov %0, %%cr0" ::"r"(cr0) : "memory");
+    cpuid(1, 0, eax, ebx, ecx, edx);
+    g_bsp_apic_id = ebx >> 24;
 
-    if (g_cpu_features.has_nx) {
-        uint64_t efer = rdmsr64(kMsrEfer);
-        efer |= kEferNxe;
-        wrmsr64(kMsrEfer, efer);
-    }
-
-    asm volatile("fninit");
-
-    syscall_init();
+    cpu_core_setup(0, g_bsp_apic_id);
+    g_cpus[0].online = true;
 
     BOOT_LOG("Features: SSE:%d SSE2:%d XSAVE:%d AVX:%d ERMS:%d SMEP:%d SMAP:%d NX:%d RDRAND:%d", g_cpu_features.has_sse,
              g_cpu_features.has_sse2, g_cpu_features.has_xsave, g_cpu_features.has_avx, g_cpu_features.has_erms,

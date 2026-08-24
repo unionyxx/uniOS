@@ -9,8 +9,8 @@
 #include <kernel/debug.h>
 #include <kernel/elf.h>
 #include <kernel/event.h>
-#include <kernel/fs/pipe.h>
 #include <kernel/fs/memfd.h>
+#include <kernel/fs/pipe.h>
 #include <kernel/fs/storage_guard.h>
 #include <kernel/fs/unifs.h>
 #include <kernel/fs/vfs.h>
@@ -22,18 +22,18 @@
 #include <kernel/net/dns.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
+#include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
-#include <kernel/sync/spinlock.h>
-#include <kernel/sync/futex.h>
 #include <kernel/sync/epoll.h>
+#include <kernel/sync/futex.h>
+#include <kernel/sync/spinlock.h>
 #include <kernel/syscall.h>
 #include <kernel/time/timer.h>
 #include <libk/kstd.h>
 #include <libk/kstring.h>
 #include <stddef.h>
 #include <uapi/signal.h>
-#include <kernel/panic.h>
 
 using kstd::unique_ptr;
 using kstring::string_view;
@@ -148,8 +148,8 @@ static uint64_t g_random_state = 0x7F4A7C15D39E2B41ULL;
     asm volatile("clac" ::: "memory")
 
 extern "C" {
-    bool safe_copy_from_user(void *dest, const void *src, size_t n);
-    bool safe_copy_to_user(void *dest, const void *src, size_t n);
+bool safe_copy_from_user(void *dest, const void *src, size_t n);
+bool safe_copy_to_user(void *dest, const void *src, size_t n);
 }
 
 [[nodiscard]] static bool checked_mul_size(size_t a, size_t b, size_t *out)
@@ -480,7 +480,8 @@ void signal_send(Process *p, int sig)
 {
     if (!p || sig <= 0 || sig > 31)
         return;
-    p->signals.pending |= (1ULL << sig);
+    // Atomic: sender may run on another core while the target dequeues signals.
+    __sync_or_and_fetch(&p->signals.pending, 1ULL << sig);
     if (p->state == ProcessState_Waiting || p->state == ProcessState_Blocked) {
         scheduler_wake_process(p);
     }
@@ -496,7 +497,8 @@ extern "C" uint8_t g_use_xsave;
 extern "C" uint32_t g_xsave_mask_lo;
 extern "C" uint32_t g_xsave_mask_hi;
 
-struct alignas(64) SignalContext {
+struct alignas(64) SignalContext
+{
     InterruptFrame frame;
     alignas(64) uint8_t fpu_state[1024];
     uint64_t old_mask;
@@ -505,7 +507,8 @@ struct alignas(64) SignalContext {
 
 constexpr uint32_t SIG_CONTEXT_MAGIC = 0x51644374; // 'SigC'
 
-static void restore_fpu_state(const uint8_t *fpu_buffer) {
+static void restore_fpu_state(const uint8_t *fpu_buffer)
+{
     alignas(64) uint8_t sanitized_buf[1024];
     kstring::memcpy(sanitized_buf, fpu_buffer, 1024);
 
@@ -525,17 +528,9 @@ static void restore_fpu_state(const uint8_t *fpu_buffer) {
     if (g_use_xsave) {
         uint32_t lo = g_xsave_mask_lo;
         uint32_t hi = g_xsave_mask_hi;
-        asm volatile(
-            "xrstor %0"
-            :: "m"(*sanitized_buf), "a"(lo), "d"(hi)
-            : "memory"
-        );
+        asm volatile("xrstor %0" ::"m"(*sanitized_buf), "a"(lo), "d"(hi) : "memory");
     } else {
-        asm volatile(
-            "fxrstor64 %0"
-            :: "m"(*sanitized_buf)
-            : "memory"
-        );
+        asm volatile("fxrstor64 %0" ::"m"(*sanitized_buf) : "memory");
     }
 }
 
@@ -547,8 +542,8 @@ static void syscall_frame_to_interrupt_frame(const SyscallFrame *src, uint64_t r
     dst->r12 = src->r12;
     dst->r11 = src->rflags;
     dst->r10 = src->arg4;
-    dst->r9  = src->arg6;
-    dst->r8  = src->arg5;
+    dst->r9 = src->arg6;
+    dst->r8 = src->arg5;
     dst->rbp = src->rbp;
     dst->rdi = 0;
     dst->rsi = 0;
@@ -570,13 +565,12 @@ extern "C" void signal_check(SyscallFrame *frame)
     Process *p = process_get_current();
     if (!p || p->signals.pending == 0)
         return;
-
     for (int i = 1; i < 32; i++) {
-        if (p->signals.pending & (1ULL << i)) {
-            p->signals.pending &= ~(1ULL << i); // Clear pending bit
-
+        // Atomic test-and-clear so a cross-core signal_send cannot be lost.
+        if (__sync_fetch_and_and(&p->signals.pending, ~(1ULL << i)) & (1ULL << i)) {
             if (p->signals.handlers[i] == SIG_DFL) {
                 // Default actions
+
                 if (i == SIGINT || i == SIGTERM || i == SIGQUIT || i == SIGKILL || i == SIGSEGV) {
                     process_exit(-i); // Use negative signum as exit status
                 }
@@ -587,10 +581,10 @@ extern "C" void signal_check(SyscallFrame *frame)
 
                 // Leave space for the Red Zone (128 bytes on x86-64)
                 user_rsp -= 128;
-                
+
                 // Allocate space for the SignalContext
                 user_rsp -= sizeof(SignalContext);
-                
+
                 // Align user stack to 64 bytes for FPU state requirements
                 user_rsp &= ~63ULL;
 
@@ -653,9 +647,8 @@ extern "C" void signal_check_interrupt(InterruptFrame *frame)
         return;
 
     for (int i = 1; i < 32; i++) {
-        if (p->signals.pending & (1ULL << i)) {
-            p->signals.pending &= ~(1ULL << i); // Clear pending bit
-
+        // Atomic test-and-clear so a cross-core signal_send cannot be lost.
+        if (__sync_fetch_and_and(&p->signals.pending, ~(1ULL << i)) & (1ULL << i)) {
             if (p->signals.handlers[i] == SIG_DFL) {
                 // Default actions
                 if (i == SIGINT || i == SIGTERM || i == SIGQUIT || i == SIGKILL || i == SIGSEGV) {
@@ -668,10 +661,10 @@ extern "C" void signal_check_interrupt(InterruptFrame *frame)
 
                 // Leave space for the Red Zone (128 bytes on x86-64)
                 user_rsp -= 128;
-                
+
                 // Allocate space for the SignalContext
                 user_rsp -= sizeof(SignalContext);
-                
+
                 // Align user stack to 64 bytes for FPU state requirements
                 user_rsp &= ~63ULL;
 
@@ -776,8 +769,10 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
     // Sanitize segment registers to prevent privilege escalation
     uint64_t target_cs = k_ctx.frame.cs | 3;
     uint64_t target_ss = k_ctx.frame.ss | 3;
-    if (target_cs != 0x23) target_cs = 0x23;
-    if (target_ss != 0x1B) target_ss = 0x1B;
+    if (target_cs != 0x23)
+        target_cs = 0x23;
+    if (target_ss != 0x1B)
+        target_ss = 0x1B;
 
     k_ctx.frame.cs = target_cs;
     k_ctx.frame.ss = target_ss;
@@ -1557,7 +1552,6 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
     return target_fd;
 }
 
-
 extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2, uint64_t arg3,
                                     SyscallFrame *frame)
 {
@@ -1763,16 +1757,20 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         }
                         void *src_page = memfd_get_page(memfd_node, page_offset + i);
                         if (src_page) {
-                            kstring::memcpy(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
-                                            reinterpret_cast<const void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(src_page))),
-                                            4096);
+                            kstring::memcpy(
+                                reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
+                                reinterpret_cast<const void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(src_page))),
+                                4096);
                         } else {
-                            kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
-                                                 4096);
+                            kstring::zero_memory(
+                                reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
+                                4096);
                         }
                     }
 
-                    if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(frame_ptr), flags).ok()) {
+                    if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(frame_ptr),
+                                         flags)
+                             .ok()) {
                         if (is_shared) {
                             pmm_refcount_dec(frame_ptr);
                         } else {
@@ -2835,17 +2833,21 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_SHM_UNMAP:
             return shm_unmap_from_process(process_get_current(), (int)arg1) ? 0 : static_cast<uint64_t>(-1);
         case SYS_FUTEX:
-            return sys_futex(reinterpret_cast<volatile uint32_t *>(arg1), static_cast<int>(arg2), static_cast<uint32_t>(arg3));
+            return sys_futex(reinterpret_cast<volatile uint32_t *>(arg1), static_cast<int>(arg2),
+                             static_cast<uint32_t>(arg3));
         case SYS_THREAD_CREATE:
-            return sys_thread_create(reinterpret_cast<void (*)()>(arg1), reinterpret_cast<void *>(arg2), reinterpret_cast<void *>(arg3), frame);
+            return sys_thread_create(reinterpret_cast<void (*)()>(arg1), reinterpret_cast<void *>(arg2),
+                                     reinterpret_cast<void *>(arg3), frame);
         case SYS_MPROTECT:
             return sys_mprotect(reinterpret_cast<void *>(arg1), static_cast<size_t>(arg2), static_cast<int>(arg3));
         case SYS_EPOLL_CREATE:
             return sys_epoll_create(static_cast<int>(arg1));
         case SYS_EPOLL_CTL:
-            return sys_epoll_ctl(static_cast<int>(arg1), static_cast<int>(arg2), static_cast<int>(arg3), reinterpret_cast<struct epoll_event *>(frame->arg4));
+            return sys_epoll_ctl(static_cast<int>(arg1), static_cast<int>(arg2), static_cast<int>(arg3),
+                                 reinterpret_cast<struct epoll_event *>(frame->arg4));
         case SYS_EPOLL_WAIT:
-            return sys_epoll_wait(static_cast<int>(arg1), reinterpret_cast<struct epoll_event *>(arg2), static_cast<int>(arg3), static_cast<int>(frame->arg4));
+            return sys_epoll_wait(static_cast<int>(arg1), reinterpret_cast<struct epoll_event *>(arg2),
+                                  static_cast<int>(arg3), static_cast<int>(frame->arg4));
         case SYS_MEMFD_CREATE:
             return sys_memfd_create(reinterpret_cast<const char *>(arg1), static_cast<unsigned int>(arg2));
         case SYS_FTRUNCATE:

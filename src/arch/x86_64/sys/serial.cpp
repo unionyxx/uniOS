@@ -1,9 +1,12 @@
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/serial.h>
+#include <kernel/sync/spinlock.h>
 #include <stdarg.h>
 
 static uint16_t active_port = COM1_PORT;
 static bool serial_initialized = false;
+// Interleaves output from multiple cores once SMP is active.
+static Spinlock g_serial_lock = SPINLOCK_INIT;
 
 // Serial port register offsets
 #define SERIAL_DATA 0         // Data register (R/W)
@@ -112,12 +115,18 @@ void serial_putc(char c)
 
 void serial_puts(const char *str)
 {
+    if (!serial_initialized) {
+        return;
+    }
+
+    const uint64_t flags = spinlock_acquire_irqsave(&g_serial_lock);
     while (*str) {
         if (*str == '\n') {
             serial_putc('\r'); // CR before LF for proper terminal display
         }
         serial_putc(*str++);
     }
+    spinlock_release_irqrestore(&g_serial_lock, flags);
 }
 
 // Simple printf implementation

@@ -49,8 +49,8 @@ kernel_source_paths = []
 if kernel_source_output != ''
   kernel_source_paths = kernel_source_output.split('\n')
 endif
-# Existing build directories do not rerun the directory scan just because a new source
-# file appears, so keep newly added kernel translation units visible to Meson regeneration.
+#Existing build directories do not rerun the directory scan just because a new source
+#file appears, so keep newly added kernel translation units visible to Meson regeneration.
 if not kernel_source_paths.contains('src/drivers/storage/usb_msc.cpp')
   kernel_source_paths += ['src/drivers/storage/usb_msc.cpp']
 endif
@@ -572,6 +572,10 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
   qemu_headless = ['-serial', 'stdio', '-display', 'none']
   qemu_no_reboot = ['-no-reboot']
 
+#SMP variants : default run / smoke targets stay single - core until smp - smoke proves stable.
+  qemu_smp2 = ['-smp', '2']
+  qemu_smp4 = ['-smp', '4']
+
   run_target(
     'run-qemu',
     depends : [boot_disk],
@@ -638,6 +642,12 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
   run_target('run-usb-serial', depends : [boot_disk], command : qemu_base_command + qemu_usb_devices + qemu_usb_boot_command + qemu_serial_stdio)
   run_target('run-usb-headless', depends : [boot_disk], command : qemu_base_command + qemu_usb_devices + qemu_usb_boot_command + qemu_headless)
 
+  run_target('run-smp', depends : [boot_disk], command : qemu_base_command + qemu_smp2 + qemu_disk_boot_command)
+  run_target('run-smp-serial', depends : [boot_disk], command : qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_serial_stdio)
+  run_target('run-smp-headless', depends : [boot_disk], command : qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless)
+  run_target('run-smp4', depends : [boot_disk], command : qemu_base_command + qemu_smp4 + qemu_disk_boot_command)
+  run_target('run-smp4-serial', depends : [boot_disk], command : qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_serial_stdio)
+
   qemu_smoke_success_args = [
     '--success',
     'first desktop frame submitted',
@@ -666,6 +676,27 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     depends : [boot_disk],
     suite : 'smoke',
     timeout : 45,
+  )
+
+#Opt - in SMP smoke : not part of the default 'smoke' suite.
+#Run with : meson test - C build / debug-- suite smoke - smp
+  test(
+    'qemu-smoke-smp',
+    py,
+    args : [
+      qemu_smoke,
+      '--timeout',
+      '45',
+    ] + qemu_smoke_success_args + [
+      '--fail',
+      'ktest suite failed',
+      '--fail',
+      'KERNEL PANIC',
+      '--',
+    ] + qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    depends : [boot_disk],
+    suite : 'smoke-smp',
+    timeout : 60,
   )
 endif
 

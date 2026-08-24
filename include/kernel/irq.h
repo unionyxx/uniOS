@@ -15,3 +15,13 @@ bool apic_is_enabled();
 uint32_t apic_get_current_id();
 void apic_send_eoi();
 void apic_send_ipi_all_excluding_self(uint8_t vector);
+bool apic_send_init_ipi(uint8_t dest_apic_id);
+bool apic_send_sipi(uint8_t dest_apic_id, uint8_t vector);
+// Broadcasts the RESCHED vector to all other online cores.
+void apic_send_resched_ipi_to_others();
+
+// LAPIC timer: the BSP calibrates once (shared PIT channel 2); every core
+// then programs itself with the BSP's count.
+void apic_timer_start_this_core(uint32_t initcnt);
+[[nodiscard]] uint32_t apic_timer_bsp_initcnt();
+void apic_enable_this_core();

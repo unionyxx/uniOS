@@ -19,6 +19,14 @@ void pmm_init();
  */
 [[nodiscard]] void *pmm_alloc_frames(size_t count);
 
+/**
+ * @brief Marks a specific physical range as permanently used (SMP trampoline).
+ * @param phys  Frame-aligned physical address of the first frame.
+ * @param pages Number of frames to reserve.
+ * @return true if every frame was free and is now reserved.
+ */
+[[nodiscard]] bool pmm_reserve_range(uint64_t phys, size_t pages);
+
 /** @brief Frees a previously allocated physical frame. */
 void pmm_free_frame(void *frame);
 
