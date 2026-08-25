@@ -536,8 +536,30 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     '512M',
     '-device', 'virtio-vga,xres=1920,yres=1080',
   ]
+  qemu_kvm = false
   if build_machine.system() == 'linux'
-    qemu_base_command += ['-accel', 'kvm', '-cpu', 'host']
+    # /dev/kvm can exist but be inaccessible to the current user (e.g. CI runners); fall back to TCG.
+    qemu_kvm = run_command('test', '-r', '/dev/kvm', '-a', '-w', '/dev/kvm', check : false).returncode() == 0
+    if qemu_kvm
+      qemu_base_command += ['-accel', 'kvm', '-cpu', 'host']
+    else
+      qemu_base_command += ['-accel', 'tcg', '-cpu', 'max']
+    endif
+  endif
+
+  smoke_qemu_timeout = '30'
+  smoke_qemu_test_timeout = 45
+  smoke_smp_qemu_timeout = '45'
+  smoke_smp_test_timeout = 60
+  smoke_smp4_qemu_timeout = '180'
+  smoke_smp4_test_timeout = 195
+  if build_machine.system() == 'linux' and not qemu_kvm
+    smoke_qemu_timeout = '240'
+    smoke_qemu_test_timeout = 270
+    smoke_smp_qemu_timeout = '120'
+    smoke_smp_test_timeout = 150
+    smoke_smp4_qemu_timeout = '480'
+    smoke_smp4_test_timeout = 510
   endif
 
   qemu_disk_boot_command = [
@@ -669,7 +691,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     args : [
       qemu_smoke,
       '--timeout',
-      '30',
+      smoke_qemu_timeout,
     ] + qemu_smoke_success_args + [
       '--fail',
       'ktest suite failed',
@@ -679,7 +701,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     ] + qemu_base_command + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
     suite : 'smoke',
-    timeout : 45,
+    timeout : smoke_qemu_test_timeout,
   )
 
   # Opt-in SMP smoke: meson test -C build/debug --suite smoke-smp
@@ -689,7 +711,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     args : [
       qemu_smoke,
       '--timeout',
-      '45',
+      smoke_smp_qemu_timeout,
     ] + qemu_smoke_success_args + [
       '--fail',
       'ktest suite failed',
@@ -699,7 +721,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     ] + qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
     suite : 'smoke-smp',
-    timeout : 60,
+    timeout : smoke_smp_test_timeout,
   )
 
   test(
@@ -708,7 +730,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     args : [
       qemu_smoke,
       '--timeout',
-      '180',
+      smoke_smp4_qemu_timeout,
       '--success',
       'SMP scheduler ready on 4 CPUs',
     ] + qemu_smoke_success_args + [
@@ -720,7 +742,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     ] + qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
     suite : 'smoke-smp4',
-    timeout : 195,
+    timeout : smoke_smp4_test_timeout,
   )
 
   run_target(
