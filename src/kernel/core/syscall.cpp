@@ -1327,6 +1327,7 @@ static uint64_t sys_getsysinfo(SystemProfile *out)
         kstring::strncpy(profile.bootloader_version, g_bootloader_version, sizeof(profile.bootloader_version) - 1);
     }
     profile.timer_hz = timer_get_frequency();
+    profile.cpu_count = g_cpu_online_count > 0 ? static_cast<uint32_t>(g_cpu_online_count) : 1u;
 #ifdef DEBUG
     profile.kernel_build_debug = 1;
 #else

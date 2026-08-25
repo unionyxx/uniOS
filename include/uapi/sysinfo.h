@@ -50,8 +50,9 @@ struct SystemProfile
     char bootloader_name[32];
     char bootloader_version[32];
     uint32_t timer_hz;
+    uint32_t cpu_count;
     uint8_t kernel_build_debug;
-    uint8_t reserved[11];
+    uint8_t reserved[7];
 };
 
 #ifdef __cplusplus

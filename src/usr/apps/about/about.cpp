@@ -300,12 +300,13 @@ static void draw_memory_panel(Surface *win, int x, int y, int w, int h, int row_
 }
 
 static void draw_platform_panel(Surface *win, int x, int y, int w, int h, int row_h, const char *vendor,
-                                const char *timer_hz, const char *bootloader)
+                                const char *cores, const char *timer_hz, const char *bootloader)
 {
     draw_section(win, x, y, w, h, "Platform");
     int inner_y = panel_content_top(y);
-    DetailItem items[3] = {{"CPU Vendor", vendor}, {"Timer", timer_hz}, {"Bootloader", bootloader}};
-    for (int i = 0; i < 3; i++) {
+    DetailItem items[4] = {{"CPU Vendor", vendor}, {"CPU Cores", cores}, {"Timer", timer_hz},
+                           {"Bootloader", bootloader}};
+    for (int i = 0; i < 4; i++) {
         draw_detail_row(win, x + gui_space_2(), inner_y + i * row_h, w - gui_space_3(), row_h, items[i],
                         g_gui_style.app_surface);
     }
@@ -317,7 +318,7 @@ static int compute_about_content_height(int content_w, int row_h, int summary_h)
     int h_runtime = get_panel_height(3, row_h);
     int h_display = get_panel_height(5, row_h);
     int h_memory = get_panel_height(5, row_h);
-    int h_platform = get_panel_height(3, row_h);
+    int h_platform = get_panel_height(4, row_h);
 
     int min_panel_w = gui_scaled_metric(280);
     int total = summary_h + gap;
@@ -345,7 +346,7 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
     char proc_buf[32];
     char total[32], used[32], free_kb[32], heap_total[32], heap_used[32];
     char resolution[32], depth[32], nominal_refresh[32], measured_refresh[32], flags[96], bootloader[96], timer_hz[32],
-        time_buf[64];
+        cores_buf[16], time_buf[64];
 
     format_uptime(snapshot->uptime_seconds, uptime_buf, sizeof(uptime_buf));
     snprintf(proc_buf, sizeof(proc_buf), "%d", snapshot->proc_count);
@@ -372,6 +373,7 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
                  profile.bootloader_name[0] ? profile.bootloader_name : "Unknown");
     }
     snprintf(timer_hz, sizeof(timer_hz), "%u Hz", profile.timer_hz);
+    snprintf(cores_buf, sizeof(cores_buf), "%u", profile.cpu_count ? profile.cpu_count : 1u);
     snprintf(time_buf, sizeof(time_buf), "%04u-%02u-%02u %02u:%02u:%02u", now.year, now.month, now.day, now.hour,
              now.minute, now.second);
 
@@ -391,7 +393,7 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
     int h_runtime = get_panel_height(3, row_h);
     int h_display = get_panel_height(5, row_h);
     int h_memory = get_panel_height(5, row_h);
-    int h_platform = get_panel_height(3, row_h);
+    int h_platform = get_panel_height(4, row_h);
     int y = layout.body_rect.y;
 
     draw_summary(win, outer, y, content_w, summary_h, profile.kernel_commit, profile.kernel_build_debug != 0);
@@ -409,8 +411,8 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
 
         draw_memory_panel(win, left_x, y + h_runtime + gap, col_w, h_memory, row_h, total, used, free_kb, heap_total,
                           heap_used);
-        draw_platform_panel(win, right_x, y + h_display + gap, col_w, h_platform, row_h, snapshot->vendor, timer_hz,
-                            bootloader);
+        draw_platform_panel(win, right_x, y + h_display + gap, col_w, h_platform, row_h, snapshot->vendor, cores_buf,
+                            timer_hz, bootloader);
     } else {
         draw_runtime_panel(win, outer, y, content_w, h_runtime, row_h, time_buf, uptime_buf, proc_buf);
         y += h_runtime + gap;
@@ -419,7 +421,8 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
         y += h_display + gap;
         draw_memory_panel(win, outer, y, content_w, h_memory, row_h, total, used, free_kb, heap_total, heap_used);
         y += h_memory + gap;
-        draw_platform_panel(win, outer, y, content_w, h_platform, row_h, snapshot->vendor, timer_hz, bootloader);
+        draw_platform_panel(win, outer, y, content_w, h_platform, row_h, snapshot->vendor, cores_buf, timer_hz,
+                            bootloader);
     }
 
     gui_app_draw_header(win, &layout, "About uniOS", "Hardware, runtime, and display overview", nullptr);

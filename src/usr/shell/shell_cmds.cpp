@@ -1180,6 +1180,9 @@ void cmd_cpuinfo()
     *reinterpret_cast<uint32_t *>(&vendor[8]) = ecx;
     vendor[12] = 0;
     printf("Vendor: %s\n", vendor);
+    SystemProfile info;
+    if (get_sysinfo(&info) == 0)
+        printf("Cores: %u\n", info.cpu_count ? info.cpu_count : 1u);
 }
 
 void cmd_env()
@@ -1368,6 +1371,7 @@ void cmd_sysinfo()
     printf("kernel:     %s\n", info.kernel_commit);
     printf("bootloader: %s %s\n", info.bootloader_name, info.bootloader_version);
     printf("timer_hz:   %u\n", info.timer_hz);
+    printf("cpus:       %u\n", info.cpu_count ? info.cpu_count : 1u);
     printf("debug:      %s\n", info.kernel_build_debug ? "yes" : "no");
 }
 
