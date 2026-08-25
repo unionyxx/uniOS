@@ -1355,6 +1355,24 @@ static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint
     return 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
 }
 
+// While the user interactively resizes a window, the WM geometry changes
+// immediately but the client buffer still holds the previous size. Anchor the
+// committed content to the corner opposite the dragged edges so it visually
+// stays pinned at the fixed corner (as in native toolkits) instead of sliding
+// with the moving grip. The edges stay active until the outstanding configure
+// is acknowledged so releasing the pointer does not snap the content.
+static int active_resize_anchor_edges(const Window &w)
+{
+    if (w.transparent)
+        return RESIZE_NONE;
+    if (g_input.pointer_down && g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= WM_FIRST_USER_WINDOW &&
+        g_input.drag_index < g_window_count && g_windows[g_input.drag_index].entry == w.entry)
+        return g_input.drag_edges;
+    if (w.resize_configure_pending && w.resize_anchor_edges_persist != RESIZE_NONE)
+        return w.resize_anchor_edges_persist;
+    return RESIZE_NONE;
+}
+
 static void compute_bottom_corner_row(int local_y, int /*inner_w*/, int inner_h, int inner_r, uint8_t *out_mask)
 {
     if (inner_r <= 0 || !out_mask)
@@ -1451,6 +1469,24 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         copy_h = w.transparent ? ih : rh;
         int client_left = w.transparent ? w.x : inner_left;
         int client_top = w.transparent ? w.y : inner_top;
+
+        // Valid content size: what the client last committed, bounded by the
+        // mapped buffer. Blitting past it would show stale slack pixels.
+        int content_w_px = w.client_committed_w > 0 ? w.client_committed_w : w.buffer_w;
+        int content_h_px = w.client_committed_h > 0 ? w.client_committed_h : w.buffer_h;
+        if (content_w_px > w.buffer_w)
+            content_w_px = w.buffer_w;
+        if (content_h_px > w.buffer_h)
+            content_h_px = w.buffer_h;
+
+        // While the client catches up to an interactive resize, pin the
+        // content to the corner opposite the dragged edges.
+        int anchor_edges = active_resize_anchor_edges(w);
+        if (anchor_edges & RESIZE_LEFT)
+            client_left += inner_w - content_w_px;
+        if (anchor_edges & RESIZE_TOP)
+            client_top += inner_h - content_h_px;
+
         src_x = copy_x - client_left + w.scroll_x;
         src_y = copy_y - client_top + w.scroll_y;
 
@@ -1466,10 +1502,10 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             copy_h -= delta;
             src_y = 0;
         }
-        if (src_x + copy_w > w.buffer_w)
-            copy_w = w.buffer_w - src_x;
-        if (src_y + copy_h > w.buffer_h)
-            copy_h = w.buffer_h - src_y;
+        if (src_x + copy_w > content_w_px)
+            copy_w = content_w_px - src_x;
+        if (src_y + copy_h > content_h_px)
+            copy_h = content_h_px - src_y;
         if (copy_w < 0) copy_w = 0;
         if (copy_h < 0) copy_h = 0;
     }

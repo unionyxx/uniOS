@@ -55,6 +55,8 @@ static bool g_cursor_backend_disabled = false;
 static DisplayBufferHandle g_frame_cursor_handle = 0;
 static int g_frame_cursor_x = 0;
 static int g_frame_cursor_y = 0;
+static bool g_prev_frame_sw_cursor = false;
+static DirtyRect g_prev_sw_cursor_rect = {};
 
 struct WindowEntrySnapshot
 {
@@ -308,7 +310,7 @@ static void cycle_user_window_focus(Registry *registry)
     }
 }
 
-static bool cursor_backend_allowed()
+bool wm_cursor_backend_allowed()
 {
     // Re-enable cursor backend if display copy path is no longer active
     if (g_cursor_backend_disabled && !g_display_copy_path &&
@@ -324,7 +326,7 @@ static bool cursor_backend_allowed()
 static CursorPresentBuffer *ensure_cursor_present_buffer(GuiCursorKind kind)
 {
     int index = static_cast<int>(kind);
-    if (index < 0 || index > static_cast<int>(GUI_CURSOR_RESIZE_D2) || !cursor_backend_allowed())
+    if (index < 0 || index > static_cast<int>(GUI_CURSOR_RESIZE_D2) || !wm_cursor_backend_allowed())
         return nullptr;
 
     CursorPresentBuffer &slot = g_cursor_present_buffers[index];
@@ -417,7 +419,7 @@ static bool dirty_set_contains_rect(const DirtyRect &target)
     return false;
 }
 
-static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_rect_out)
+static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_rect_out, bool track_damage)
 {
     if (!cursor_rect_out)
         return false;
@@ -428,8 +430,10 @@ static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_re
     if (!clip_dirty_rect_to_screen(cursor_rect))
         return false;
 
-    // Always track cursor movement - add to damage if not already fully contained
-    if (!dirty_set_contains_rect(cursor_rect)) {
+    // Only the software cursor bakes pixels into the frame; the hardware
+    // plane draws it out of band, so cursor damage there would just inflate
+    // the dirty set (and trip the resize dirty-collapse heuristic).
+    if (track_damage && !dirty_set_contains_rect(cursor_rect)) {
         enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
         normalize_dirty_rects(interactive);
         // Re-get bounds after potential normalization
@@ -736,9 +740,16 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
         w.entry_resize_serial = entry.resize_serial;
         w.buffer_resize_serial = entry.buffer_resize_serial;
 
+        if (buffer_resize_serial_changed && entry.w > 0 && entry.h > 0) {
+            // The client just committed content for the geometry it saw.
+            w.client_committed_w = entry.w;
+            w.client_committed_h = entry.h;
+        }
+
         if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
             w.buffer_resize_serial == w.pending_configure_serial) {
             w.resize_configure_pending = false;
+            w.resize_anchor_edges_persist = RESIZE_NONE;
             w.last_configure_ticks = 0;
             w.last_commit_ticks = get_ticks();
         }
@@ -1207,6 +1218,7 @@ extern "C" int main(int argc, char **argv)
                         hit_idx = focus_window(i, true);
                         g_input.drag_index = hit_idx;
                         g_input.drag_edges = redges;
+                        g_windows[hit_idx].resize_anchor_edges_persist = redges;
                         g_input.hover_frame_index = -1;
                         g_input.hover_resize_edges = RESIZE_NONE;
                         g_input.hover_button = -1;
@@ -1838,6 +1850,11 @@ extern "C" int main(int argc, char **argv)
                 if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
                     w.buffer_resize_serial == w.pending_configure_serial) {
                     w.resize_configure_pending = false;
+                    w.resize_anchor_edges_persist = RESIZE_NONE;
+                    if (entry_snapshot.w > 0 && entry_snapshot.h > 0) {
+                        w.client_committed_w = entry_snapshot.w;
+                        w.client_committed_h = entry_snapshot.h;
+                    }
                     w.last_configure_ticks = 0;
                     w.last_commit_ticks = get_ticks();
                 } else if (w.resize_configure_pending && w.owner_pid) {
@@ -2024,10 +2041,19 @@ extern "C" int main(int argc, char **argv)
                 }
                 g_dirty_count = optimized_count;
 
+                bool hw_cursor_allowed = wm_cursor_backend_allowed();
+                // Switching from a software cursor to the hardware plane: the
+                // last baked cursor pixels must be erased once.
+                if (hw_cursor_allowed && g_prev_frame_sw_cursor) {
+                    enqueue_damage_rect(g_prev_sw_cursor_rect.x, g_prev_sw_cursor_rect.y, g_prev_sw_cursor_rect.w,
+                                        g_prev_sw_cursor_rect.h);
+                    normalize_dirty_rects(inter);
+                }
+
                 DirtyRect cursor_rect = {};
-                bool draw_cursor = prepare_cursor_overlay_damage(inter, &cursor_rect);
+                bool draw_cursor = prepare_cursor_overlay_damage(inter, &cursor_rect, !hw_cursor_allowed);
                 bool draw_software_cursor = draw_cursor;
-                if (draw_cursor && cursor_backend_allowed()) {
+                if (draw_cursor && hw_cursor_allowed) {
                     CursorPresentBuffer *cursor_buffer = ensure_cursor_present_buffer(g_input.cursor_kind);
                     if (cursor_buffer && cursor_buffer->handle != 0) {
                         g_frame_cursor_handle = cursor_buffer->handle;
@@ -2039,13 +2065,16 @@ extern "C" int main(int argc, char **argv)
                     } else {
                         g_cursor_backend_disabled = true;
                         g_frame_cursor_handle = 0; // Clear stale handle
-                    }
-                } else {
-                    // Force software cursor when backend is disabled or no cursor to draw
-                    if (!cursor_backend_allowed()) {
-                        g_frame_cursor_handle = 0; // Clear stale handle
+                        // Falling back to the software cursor this frame: the
+                        // cursor rect was not damaged, so add it now.
+                        enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
+                        normalize_dirty_rects(inter);
                         draw_software_cursor = true;
                     }
+                } else if (!hw_cursor_allowed) {
+                    // Force software cursor when backend is disabled or no cursor to draw
+                    g_frame_cursor_handle = 0; // Clear stale handle
+                    draw_software_cursor = draw_cursor;
                 }
 
                 DirtyRect compose_union = {0, 0, 0, 0};
@@ -2076,20 +2105,20 @@ extern "C" int main(int argc, char **argv)
                 if (!g_display_copy_path)
                     flush_shell_blur_updates(registry);
 
-                if (draw_cursor) {
-                    // Clear previous cursor position from presentbuffer by re-blitting from backbuffer
-                    // Use cursor_rect (bounds) for clearing the exact cursor image area
+                if (draw_cursor && draw_software_cursor) {
+                    // Clear any stale pixels then bake the software cursor; the
+                    // hardware plane needs neither (it never touches frames).
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, cursor_rect.x, cursor_rect.y, cursor_rect.x,
                                   cursor_rect.y, cursor_rect.w, cursor_rect.h);
-                    if (draw_software_cursor) {
-                        // gui_draw_cursor_kind expects the HOTSPOT position (mouse coordinates),
-                        // not the bounds top-left. It subtracts the hotspot internally.
-                        gui_draw_cursor_kind(&g_presentbuffer, g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind);
-                        g_frame_stats.cursor_software_frames++;
-                    } else {
-                        g_frame_stats.cursor_backend_frames++;
-                    }
+                    // gui_draw_cursor_kind expects the HOTSPOT position (mouse coordinates),
+                    // not the bounds top-left. It subtracts the hotspot internally.
+                    gui_draw_cursor_kind(&g_presentbuffer, g_input.mouse_x, g_input.mouse_y, g_input.cursor_kind);
+                    g_frame_stats.cursor_software_frames++;
+                } else if (draw_cursor) {
+                    g_frame_stats.cursor_backend_frames++;
                 }
+                g_prev_frame_sw_cursor = draw_cursor && draw_software_cursor;
+                g_prev_sw_cursor_rect = cursor_rect;
                 wm_stats_note_dirty_set(g_dirty_rects, g_dirty_count);
                 g_frame_stats.frames_built++;
                 g_dirty_frame_ready = true;

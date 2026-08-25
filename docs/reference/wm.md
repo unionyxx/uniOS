@@ -35,6 +35,8 @@ For resizable windows:
 3. Client publishes `buffer_resize_serial`; the WM retries the configure until serials match.
 4. Retired buffers are released when the WM's acknowledge generation reaches theirs.
 
+While a resize is in flight the WM geometry changes before the client commits, so the compositor tracks each window's last committed content size (`client_committed_w/h`, updated on adoption and every resize ack) and only blits that region — never the slack pixels of an over-allocated backing. During an interactive edge/corner drag the committed content is anchored to the corner opposite the dragged edges (drag left: content pins right), and the anchor survives pointer release until the outstanding configure is acknowledged, so content never slides with the grip or snaps on release. Programmatic resizes (maximize/restore) clear the anchor.
+
 ## Focus and Z-Order
 
 Z-order is the window array order; focusing raises. `SYS_GUI_SET_FOCUS` (WM-only) records the focused pid and boosts its scheduling priority. Alt+Tab cycles visible user windows; the mouse wheel over empty desktop rotates stacking; titlebar double-click toggles maximize (ABA-guarded).
@@ -47,7 +49,7 @@ On every focus transition the WM posts `EVT_FOCUS`/`EVT_UNFOCUS` to the affected
 - The WM pops damage, offsets it into screen space, intersects it with visible bounds, and feeds the dirty-rect queue (128 rects). Normalization clips, merges touching/overlapping rects, applies a union heuristic, and collapses to bounds when the interactive/non-interactive limit is exceeded.
 - Per dirty rect, composition paints bottom-up: wallpaper (skipped when an opaque window covers the rect), user windows with decorations, system windows (menubar, dock), overlays (context menus, storage prompt, launcher, control center, toasts), then the cursor.
 - Frames submit via `SYS_DISPLAY_COMPOSE_SUBMIT` (single opaque layer + damage + frame sequence + vblank present + hardware cursor) or the copy path. Up to 2 presents are in flight across 3 buffer slots; completion is tracked from display events, and present policy (submit/wait/skip) gates the frame loop. Idle frames sleep ~16 ms.
-- The cursor uses a hardware cursor when the compositor backend supports page flips, otherwise a software cursor rendered into the present buffer.
+- The cursor uses a hardware cursor when the compositor backend supports page flips, otherwise a software cursor rendered into the present buffer. Cursor movement only adds damage on the software path — the hardware plane draws out of band, so damaging every move would inflate the dirty set (and trip the resize collapse heuristic).
 
 ## Wallpaper, Blur, Overlays
 

@@ -957,6 +957,10 @@ void mark_window_transition_damage(const Window &old_w, const Window &new_w)
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
                                    GuiCursorKind new_kind)
 {
+    // The hardware cursor plane is never baked into frames, so its movement
+    // needs no damage; software-cursor frames cover the transition below.
+    if (wm_cursor_backend_allowed())
+        return;
     DirtyRect orct = {}, nrect = {};
     gui_get_cursor_bounds(old_kind, old_x, old_y, &orct.x, &orct.y, &orct.w, &orct.h);
     gui_get_cursor_bounds(new_kind, new_x, new_y, &nrect.x, &nrect.y, &nrect.w, &nrect.h);
@@ -1268,6 +1272,7 @@ void restore_window(int index, bool raise)
     int rh = w.entry->restore_h > 0 ? w.entry->restore_h : w.h;
     w.entry->state = WIN_NORMAL;
     w.active = true;
+    w.resize_anchor_edges_persist = RESIZE_NONE;
     set_window_bounds(w, w.entry->restore_x, w.entry->restore_y, rw, rh);
     close_context_menu();
     invalidate_window_visibility_cache();
@@ -1288,6 +1293,7 @@ void maximize_window(int index)
     }
     w.entry->state = WIN_MAXIMIZED;
     w.active = true;
+    w.resize_anchor_edges_persist = RESIZE_NONE;
     set_window_bounds(w, wm_desktop_margin(), wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin(),
                       (int)g_screen.width - wm_desktop_margin() * 2,
                       (int)g_screen.height - wm_dock_reserved_h() -
@@ -2892,6 +2898,8 @@ bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.target_h = h;
     win.buffer_w = bw;
     win.buffer_h = bh;
+    win.client_committed_w = w;
+    win.client_committed_h = h;
     win.last_rendered_x = x;
     win.last_rendered_y = y;
     win.last_rendered_w = w;

@@ -128,6 +128,14 @@ struct Window
     uint64_t last_configure_ticks;
     bool resize_configure_pending;
     bool first_damage_received;
+    // Size the client last committed content for (updated on adoption and on
+    // every resize ack). Lets the compositor blit only valid buffer content
+    // and anchor it to the fixed corner during interactive resizes.
+    int client_committed_w = 0;
+    int client_committed_h = 0;
+    // Drag-resize edges kept alive until the outstanding configure is acked,
+    // so anchored content does not jump when the pointer is released.
+    int resize_anchor_edges_persist = RESIZE_NONE;
 
     // Consecutive frames the shared WindowEntry could not be sampled stable.
     // Bounded so one busy client cannot force endless full-window re-damage.
@@ -740,6 +748,7 @@ void mark_window_transition_damage(const Window &old_w, const Window &new_w);
 bool post_window_resize_configure(Window &w);
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
                                    GuiCursorKind new_kind);
+bool wm_cursor_backend_allowed();
 bool clamp_window_scroll(Window &w);
 bool scroll_window_content(Window &w, int delta_x, int delta_y);
 void apply_mouse_move(Registry *registry, int new_mouse_x, int new_mouse_y);
