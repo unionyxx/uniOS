@@ -94,6 +94,8 @@ struct Process
     struct Process *next;       // Global process list
     struct Process *queue_next; // Ready/sleep/wait queue next
     WaitQueue *waiting_queue;   // Owning wait queue when blocked on a queue
+    bool in_ready_queue;
+    bool on_cpu;
     WaitQueue wait_queue;       // Child/other waiters blocked on this process
     WaitQueue event_wait_queue; // Waiters blocked in SYS_GET_EVENT for this process
     EventQueue event_queue;

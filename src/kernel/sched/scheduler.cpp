@@ -199,10 +199,13 @@ static void interactive_boost_if_needed(Process *p)
 
 static void ready_queue_push(Process *p)
 {
+    if (!p || p->in_ready_queue || p->on_cpu)
+        return;
     uint8_t prio = p->priority;
     if (prio >= NUM_PRIORITY_LEVELS)
         prio = NUM_PRIORITY_LEVELS - 1;
     p->queue_next = nullptr;
+    p->in_ready_queue = true;
     if (!g_ready_tails[prio]) {
         g_ready_queues[prio] = g_ready_tails[prio] = p;
     } else {
@@ -220,6 +223,7 @@ static Process *ready_queue_pop()
             if (!g_ready_queues[i])
                 g_ready_tails[i] = nullptr;
             p->queue_next = nullptr;
+            p->in_ready_queue = false;
             return p;
         }
     }
@@ -240,6 +244,7 @@ static void scheduler_remove_from_ready_queue_locked(Process *p)
                 if (g_ready_tails[i] == curr)
                     g_ready_tails[i] = prev;
                 curr->queue_next = nullptr;
+                curr->in_ready_queue = false;
                 return;
             }
             prev = curr;
@@ -441,6 +446,7 @@ static void scheduler_schedule_internal()
             cur->time_slice = 0;
         }
         if (!cur_is_idle) {
+            cur->on_cpu = false;
             cur->state = ProcessState_Ready;
             ready_queue_push(cur);
         }
@@ -469,6 +475,7 @@ static void scheduler_schedule_internal()
 
     if (next == cur) {
         cur->state = ProcessState_Running;
+        cur->on_cpu = true;
         cur->last_run_time = now;
         spinlock_release_no_restore(&g_sched_lock);
         return;
@@ -477,8 +484,10 @@ static void scheduler_schedule_internal()
     Process *prev = current_proc();
     if (prev->state == ProcessState_Running)
         prev->state = ProcessState_Ready;
+    prev->on_cpu = false;
 
     set_current_proc(next);
+    next->on_cpu = true;
     current_proc()->state = ProcessState_Running;
     current_proc()->last_run_time = now;
 
@@ -538,6 +547,7 @@ void scheduler_enter_idle(Process *idle)
     spinlock_acquire(&g_sched_lock);
 
     idle->state = ProcessState_Running;
+    idle->on_cpu = true;
     idle->last_run_time = timer_get_ticks();
     set_current_proc(idle);
     tss_set_rsp0(idle->sp); // pid 0 tasks run on their saved sp
@@ -826,6 +836,7 @@ void scheduler_init()
     kproc->next = kproc;
     g_proc_list = g_proc_tail = kproc;
     set_current_proc(kproc);
+    kproc->on_cpu = true;
 
     cpu_get_local()->kernel_stack = current_rsp;
 
@@ -1100,11 +1111,11 @@ extern "C" uint64_t g_kernel_scratch_rsp;
 
 void scheduler_schedule()
 {
-    if (!current_proc())
+    Process *current = current_proc();
+    if (!current)
         return;
-    if (current_proc()->stack_base) {
-        if (current_proc()->stack_base[0] != 0xDEADBEEFDEADBEEFULL ||
-            current_proc()->stack_base[7] != 0xDEADBEEFDEADBEEFULL)
+    if (current->stack_base) {
+        if (current->stack_base[0] != 0xDEADBEEFDEADBEEFULL || current->stack_base[7] != 0xDEADBEEFDEADBEEFULL)
             panic("Stack overflow detected!");
     }
 
@@ -1222,6 +1233,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     ready_queue_push(child);
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
+    scheduler_notify_idle_cpus();
 
     return child->pid;
 }
