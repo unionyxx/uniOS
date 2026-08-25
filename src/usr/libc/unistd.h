@@ -39,6 +39,7 @@ uint64_t get_ticks(void);
 uint64_t get_tsc_freq(void);
 int getrandom(void *buf, size_t len);
 void sleep_ms(uint32_t ms);
+void sleep_until_ticks(uint64_t deadline_ticks);
 int get_meminfo(struct MemInfo *info);
 int get_sysinfo(struct SystemProfile *info);
 

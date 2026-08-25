@@ -134,10 +134,14 @@ uint64_t get_ticks(void)
 
 void sleep_ms(uint32_t ms)
 {
-    uint64_t start = get_ticks();
-    while (get_ticks() < start + ms) {
-        yield();
-    }
+    syscall1(SYS_SLEEP_MS, (uint64_t)ms);
+}
+
+void sleep_until_ticks(uint64_t deadline_ticks)
+{
+    uint64_t now = get_ticks();
+    if (deadline_ticks > now)
+        syscall1(SYS_SLEEP_MS, deadline_ticks - now);
 }
 
 int get_meminfo(struct MemInfo *info)

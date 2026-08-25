@@ -896,6 +896,7 @@ extern "C" int main(int argc, char **argv)
     uint32_t last_sig = dock_visual_signature(registry);
     bool last_theme_dark = (registry->theme_mode != GUI_THEME_LIGHT);
     uint32_t last_blur_generation = registry->dk_blur_generation;
+    uint64_t next_frame_ticks = get_ticks() + 16;
 
     while (1) {
         bool current_theme_dark = (registry->theme_mode != GUI_THEME_LIGHT);
@@ -969,6 +970,10 @@ extern "C" int main(int argc, char **argv)
         }
 
         reap_exited_children();
-        sleep_ms(16);
+        sleep_until_ticks(next_frame_ticks);
+        uint64_t frame_now = get_ticks();
+        next_frame_ticks += 16;
+        if (frame_now > next_frame_ticks)
+            next_frame_ticks = frame_now + 16;
     }
 }

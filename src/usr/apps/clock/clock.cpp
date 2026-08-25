@@ -409,6 +409,7 @@ extern "C" int main()
                                 current_os_time.minute * 60.0 + 
                                 current_os_time.second;
     uint64_t last_ticks = get_ticks();
+    uint64_t next_frame_ticks = last_ticks + 16;
 
     Registry *registry = gui_registry();
     uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
@@ -491,6 +492,10 @@ extern "C" int main()
         memcpy(win.buffer, backbuffer.buffer, (size_t)backbuffer_stride * win.height * sizeof(uint32_t));
         gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
 
-        sleep_ms(16);
+        sleep_until_ticks(next_frame_ticks);
+        uint64_t frame_now = get_ticks();
+        next_frame_ticks += 16;
+        if (frame_now > next_frame_ticks)
+            next_frame_ticks = frame_now + 16;
     }
 }

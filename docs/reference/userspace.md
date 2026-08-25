@@ -17,7 +17,7 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 
 `src/usr/libc/` is a freestanding C/C++ subset:
 
-- **Syscalls**: inline wrappers `syscall0..syscall6` using the System V syscall ABI (number in `rax`, args `rdi/rsi/rdx/r10/r8/r9`). Wrappers exist for the whole syscall surface — files, processes, memory, display, events, sound, shm, network, extended calls (futex/threads/epoll/memfd/mprotect).
+- **Syscalls**: inline wrappers `syscall0..syscall6` using the System V syscall ABI (number in `rax`, args `rdi/rsi/rdx/r10/r8/r9`). Wrappers exist for the whole syscall surface — files, processes, memory, display, events, sound, shm, network, extended calls (futex/threads/epoll/memfd/mprotect). Time helpers: `get_ticks`/`get_uptime`/`get_tsc_freq`, `sleep_ms` (a real `SYS_SLEEP_MS` sleep), and `sleep_until_ticks` for deadline-paced animation loops.
 - **string**: `strlen/strcpy/strcat/strncpy/strncat/strcmp/strncmp/strchr/strrchr/strstr/strtok` (single global strtok state), `memset/memcpy/memmove/memcmp` with 8-byte fast paths, `itoa` (base 2-36, INT64_MIN-safe).
 - **stdio**: `printf/sprintf/snprintf/vsnprintf` into a 4 KiB stack buffer with raw fd writes — supports `%s %d %i %u %o %x %X %p %c`, `-`/`0` flags, widths, `l`/`ll`. No floats, no `FILE*`, no buffering.
 - **stdlib**: a region allocator over `SYS_MMAP` — 64 KiB regions with magic-validated block lists, first-fit + split, coalescing free, fully-free regions unmapped, dedicated blocks above 32 KiB; `calloc` with overflow checks; `realloc` with in-place growth; `atoi`; a simple LCG `rand`.

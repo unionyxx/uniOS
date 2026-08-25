@@ -1806,6 +1806,11 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_YIELD:
             scheduler_yield();
             return 0;
+        case SYS_SLEEP_MS:
+            // Woken early when a signal targets the sleeper; the signal is
+            // delivered on the return-to-user path.
+            scheduler_sleep_ms(arg1);
+            return 0;
         case SYS_SETUID: {
             Process *p = process_get_current();
             if (!p || p->uid != 0)

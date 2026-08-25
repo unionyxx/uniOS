@@ -315,6 +315,7 @@ extern "C" int main()
 
     Registry *registry = gui_registry();
     uint32_t last_settings_gen = registry ? registry->settings_generation : 0;
+    uint64_t next_frame_ticks = get_ticks() + 16;
 
     while (true) {
         Event ev = {};
@@ -373,6 +374,10 @@ extern "C" int main()
             }
         }
 
-        sleep_ms(16);
+        sleep_until_ticks(next_frame_ticks);
+        uint64_t frame_now = get_ticks();
+        next_frame_ticks += 16;
+        if (frame_now > next_frame_ticks)
+            next_frame_ticks = frame_now + 16;
     }
 }
