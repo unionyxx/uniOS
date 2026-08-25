@@ -280,6 +280,27 @@ uint32_t apic_timer_bsp_initcnt()
     return g_lapic_timer_initcnt;
 }
 
+namespace {
+// AP tick divisor: APs take the timer IRQ at tick_rate / 10. Idle cores stop
+// hammering the global scheduler lock 1000x/second, and busy cores only give
+// up 1 ms -> 10 ms forced-preemption granularity (newly-ready work still
+// arrives promptly via the RESCHED IPI).
+constexpr uint32_t LAPIC_AP_TIMER_DIVISOR = 10;
+} // namespace
+
+uint32_t apic_timer_ap_initcnt()
+{
+    if (g_lapic_timer_initcnt == 0)
+        return 0;
+    const uint64_t scaled = static_cast<uint64_t>(g_lapic_timer_initcnt) * LAPIC_AP_TIMER_DIVISOR;
+    return scaled > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(scaled);
+}
+
+uint32_t apic_timer_ap_divisor()
+{
+    return LAPIC_AP_TIMER_DIVISOR;
+}
+
 // Enables the LAPIC on the current core. g_lapic_base is process-global
 // (same physical address on every core), only the MSRs/registers are per-core.
 void apic_enable_this_core()
@@ -453,13 +474,15 @@ extern "C" void irq_handler(void *stack_frame)
         return;
 
     if (vector == kVectorTimer) {
-        timer_handler();
+        // Elapsed scheduler jiffies for this IRQ: 1 on the BSP (1 kHz clock),
+        // the AP divisor on APs (their timer fires that much less often).
+        const uint32_t elapsed_jiffies = timer_handler();
         send_interrupt_eoi(vector);
         Process *curr = process_get_current();
         if (curr && curr->preempt_count > 0) {
             curr->preempt_pending = 1;
         } else {
-            scheduler_schedule();
+            scheduler_schedule_elapsed(elapsed_jiffies);
         }
         return;
     }

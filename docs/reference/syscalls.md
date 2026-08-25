@@ -116,7 +116,7 @@ Socket handles are not file descriptors: handle = `kind << 12 | index`. See [Net
 | 202 | `SYS_GETUPTIME` | Seconds since boot |
 | 203 | `SYS_GETMEMINFO` | Total/free/used memory |
 | 204 | `SYS_GETSYSINFO` | Kernel commit, bootloader, timer Hz, CPU count, debug flag |
-| 213 | `SYS_GET_TSC_FREQ` | Fixed 2000 |
+| 213 | `SYS_GET_TSC_FREQ` | Calibrated TSC frequency in MHz (0 if uncalibrated) |
 | 215 | `SYS_GET_TICKS` | Raw timer ticks |
 | 226 | `SYS_GETVOLUMES` | Volume list (max 16) |
 | 227/228 | `SYS_STORAGE_GET_MODE/SET_MODE` | Storage guard mode; SET is WM-only |

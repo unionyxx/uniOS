@@ -28,7 +28,7 @@ Each AP gets, in order:
 1. Core setup: CR0/CR4/EFER, XSAVE, syscall MSRs (`STAR`/`LSTAR`/`SFMASK`), GS base pointing at its own `PerCpu`.
 2. PAT programming (index 2 = write-combining) — mandatory per core, or `PTE_WC` mappings behave as UC.
 3. Its own GDT + TSS with dedicated rsp0 and IST stacks (#DF, NMI, #PF), then the shared IDT.
-4. LAPIC enable and LAPIC timer start reusing the BSP calibration.
+4. LAPIC enable and LAPIC timer start from the BSP calibration multiplied by the AP divisor (APs tick at 100 Hz, one tenth of the BSP's 1 kHz clock, to keep idle cores off the scheduler lock).
 5. Entry into its private idle task, which publishes the core online only after the LAPIC is enabled — so IPI senders that observe the online flag can actually reach the core.
 
 Each AP also gets a separate bootstrap stack that is abandoned after handoff; it must not share storage with the idle task's stack.
@@ -37,7 +37,7 @@ Each AP also gets a separate bootstrap stack that is abandoned after handoff; it
 
 The runqueue and wait queues are protected by `g_sched_lock`. Each CPU has a private idle task that is never inserted into the global runqueue. A RESCHED IPI wakes idle CPUs after work becomes ready. New executable tasks are fully initialized before publication to the runqueue; this ordering is required for cross-core task pickup.
 
-Address-space changes use the TLB-shootdown IPI protocol described in [Memory management](memory.md). The BSP is the source of the global scheduler clock; AP LAPIC timers service local interrupts but do not increment the global tick counter.
+Address-space changes use the TLB-shootdown IPI protocol described in [Memory management](memory.md). The BSP is the source of the global scheduler clock; AP LAPIC timers run at 100 Hz and service local scheduling interrupts only (each accounting for 10 jiffies), never incrementing the global tick counter.
 
 ## Shutdown
 

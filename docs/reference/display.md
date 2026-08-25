@@ -23,7 +23,7 @@ The KMS-style syscall surface (`include/uapi/display.h`, syscalls 247-262; see [
 - **Buffers**: create/destroy kernel DMA-backed buffers, map them into the caller at `0x340000000` (up to 16 objects), grant WM access.
 - **Present**: copy-path present with caller-supplied damage rects (up to 128), `sfence` semantics, present-sequence tracking.
 - **Compose**: the compositor submits up to 32 layers with up to 32 damage rects; the kernel composites into DMA compose buffers (up to 3) and presents. Layers carry blend/scale/cursor parameters.
-- **Events**: vblank, flip complete, hotplug — waited on with `SYS_DISPLAY_EVENT_WAIT` (blocking or polling), carrying the frame sequence and timestamps. Frame pacing falls back to a deadline timer when no vblank source exists.
+- **Events**: vblank, flip complete, hotplug — waited on with `SYS_DISPLAY_EVENT_WAIT`, carrying the frame sequence and timestamps. The wait argument selects the mode: `0` polls, `UINT64_MAX` blocks indefinitely, any other value is a timeout in milliseconds. Frame pacing falls back to a deadline timer when no vblank source exists; the wait coarse-sleeps to one tick before the deadline and then spins on the tick counter so the frame lands on the deadline rather than a full scheduler round late.
 - **Atomic commit / set mode**: accepted but effectively no-ops unless the requested mode matches the active one.
 
 Legacy framebuffer syscalls (208-214) expose the raw framebuffer: info, WC mapping at `0x200000000`, flush, full and rect blits.

@@ -52,6 +52,7 @@ bool scheduler_fatal_signal_pending(const Process *p);
 
 [[nodiscard]] Process *scheduler_get_process_list();
 
+void scheduler_schedule_elapsed(uint32_t elapsed_jiffies);
 void scheduler_sleep(uint64_t ticks);
 void scheduler_sleep_ms(uint64_t ms);
 

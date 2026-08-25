@@ -614,14 +614,16 @@ Process *process_find_by_pid_locked(uint64_t pid)
     return nullptr;
 }
 
-static void scheduler_schedule_internal()
+static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 1)
 {
     Process *cur = current_proc();
     // This core's private idle task: never queued, never demoted.
     const bool cur_is_idle = (cur == cpu_get_local()->idle);
 
-    cur->cpu_time++;
-    cur->time_slice++;
+    if (elapsed_jiffies == 0)
+        elapsed_jiffies = 1;
+    cur->cpu_time += elapsed_jiffies;
+    cur->time_slice += elapsed_jiffies;
 
     wake_sleeping_processes();
 
@@ -1357,7 +1359,7 @@ void scheduler_notify_input_waiters()
 
 extern "C" uint64_t g_kernel_scratch_rsp;
 
-void scheduler_schedule()
+void scheduler_schedule_elapsed(uint32_t elapsed_jiffies)
 {
     Process *current = current_proc();
     if (!current)
@@ -1369,9 +1371,14 @@ void scheduler_schedule()
 
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
-    scheduler_schedule_internal();
+    scheduler_schedule_internal(elapsed_jiffies);
     interrupts_restore(flags);
     reap_kernel_zombies();
+}
+
+void scheduler_schedule()
+{
+    scheduler_schedule_elapsed(1);
 }
 
 void scheduler_yield()

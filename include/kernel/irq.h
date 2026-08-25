@@ -23,8 +23,12 @@ bool apic_send_sipi(uint8_t dest_apic_id, uint8_t vector);
 void apic_send_resched_ipi_to_others();
 void apic_stop_other_cpus();
 
-// LAPIC timer: the BSP calibrates once (shared PIT channel 2); every core
-// then programs itself with the BSP's count.
+// LAPIC timer: the BSP calibrates once (shared PIT channel 2) and keeps the
+// 1 kHz scheduler clock. APs run the same timer divided down to cut idle
+// wakeups and big-lock traffic; each AP IRQ therefore accounts for
+// apic_timer_ap_divisor() jiffies.
 void apic_timer_start_this_core(uint32_t initcnt);
 [[nodiscard]] uint32_t apic_timer_bsp_initcnt();
+[[nodiscard]] uint32_t apic_timer_ap_initcnt();
+[[nodiscard]] uint32_t apic_timer_ap_divisor();
 void apic_enable_this_core();

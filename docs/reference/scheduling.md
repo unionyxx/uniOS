@@ -12,7 +12,7 @@ The scheduler (`src/kernel/sched/scheduler.cpp`) is a preemptive, priority-based
 
 ## Preemption and Ticks
 
-The timer interrupt fires on vector 32 at 1000 Hz (see Timers below). The handler calls `timer_handler()`, sends EOI, then either records a pending preemption (`preempt_count > 0`) or calls `scheduler_schedule()` directly. `preempt_disable/enable` bracket critical kernel sections; SMP bring-up uses them to wait with ticks advancing but no scheduling.
+The timer interrupt fires on vector 32 (see Timers below). The handler calls `timer_handler()`, which returns the number of scheduler jiffies this interrupt represents, sends EOI, then either records a pending preemption (`preempt_count > 0`) or calls `scheduler_schedule_elapsed(jiffies)`. On the BSP one interrupt is one jiffy (1 ms); on APs the timer fires slower, so one interrupt accounts for the AP divisor's worth of jiffies at once. `preempt_disable/enable` bracket critical kernel sections; SMP bring-up uses them to wait with ticks advancing but no scheduling.
 
 Every `scheduler_schedule()` checks the current task's kernel stack canaries (the first eight qwords must remain `0xDEADBEEFDEADBEEF`) and panics on overflow.
 
@@ -34,9 +34,10 @@ The switch path compares the next task's page table against the CR3 actually loa
 
 ## Timers and Time
 
-- Primary tick: LAPIC timer in periodic mode at 1000 Hz on every core, calibrated once on the BSP against a PIT channel 2 one-shot 10 ms window (divide-by-16). APs reuse the BSP's calibrated count.
-- Only the BSP increments the global tick counter; AP LAPIC timers service local interrupts only. The BSP is therefore the source of the scheduler clock.
+- Primary tick: LAPIC timer in periodic mode, calibrated once on the BSP against a PIT channel 2 one-shot 10 ms window (divide-by-16). The BSP runs it at 1000 Hz; APs program the calibrated count multiplied by the AP divisor (10), so they take scheduling interrupts at 100 Hz and report 10 jiffies per interrupt. Newly-ready work still reaches idle cores promptly through the RESCHED IPI.
+- Only the BSP increments the global tick counter; AP LAPIC timers service local scheduling interrupts only. The BSP is therefore the source of the scheduler clock.
 - Fallback: without an APIC, PIT channel 0 at the requested rate via PIC IRQ0.
+- TSC timebase: at boot the kernel calibrates the TSC against a 50 ms PIT channel 2 window (ACPI PM timer fallback) and exposes `timer_tsc_freq_hz()`, `timer_now_us()` (microsecond monotonic clock), and `udelay()` (busy delay). `SYS_GET_TSC_FREQ` returns the calibrated frequency in MHz (0 when calibration failed); consumers fall back to the tick clock.
 - `timer_poll_wait_ms` busy-waits using PIT channel 2 one-shots in <= 50 ms chunks (used by pid-0 contexts and SMP bring-up delays).
 - Uptime syscalls derive from ticks; wall-clock time comes from the CMOS RTC (BCD/binary and 12/24-hour handling, double-read reconciliation, fallback date when no RTC is detected). See `src/drivers/rtc/rtc.cpp`.
 

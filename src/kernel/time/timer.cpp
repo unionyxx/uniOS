@@ -246,11 +246,12 @@ uint32_t timer_get_frequency()
 
 uint32_t timer_handler()
 {
-    // Every core programs its own LAPIC timer, but only the BSP advances the
-    // global tick: all sleep/deadline math assumes timer_get_frequency() Hz.
-    // Per-core accounting arrives with multi-core scheduling (Phase 4).
+    // Only the BSP advances the global tick: all sleep/deadline math assumes
+    // timer_get_frequency() Hz. APs run their LAPIC timer divided down (see
+    // apic_timer_ap_divisor()); the scheduler accounts for the coarser IRQ
+    // cadence via the returned jiffy count.
     if (cpu_get_local()->cpu_id != 0)
-        return 1;
+        return apic_is_enabled() ? apic_timer_ap_divisor() : 1;
     __sync_add_and_fetch(&ticks, 1);
     return 1;
 }

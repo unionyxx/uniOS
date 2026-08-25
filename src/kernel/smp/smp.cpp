@@ -112,7 +112,12 @@ extern "C" [[gnu::target("no-sse")]] void ap_main(PerCpu *cpu)
     idt_load(); // shared interrupt table
 
     apic_enable_this_core();
-    apic_timer_start_this_core(apic_timer_bsp_initcnt());
+    // APs tick at a divided-down rate; fall back to the BSP count if the
+    // scaled value is unavailable.
+    uint32_t ap_initcnt = apic_timer_ap_initcnt();
+    if (ap_initcnt == 0)
+        ap_initcnt = apic_timer_bsp_initcnt();
+    apic_timer_start_this_core(ap_initcnt);
 
     // Adopt the per-core idle context and start pulling work from the global
     // runqueue. Never returns; the online flag and count are published inside
