@@ -94,6 +94,13 @@ struct AppState
     int menu_h;
     int menu_hovered;
     bool needs_redraw;
+    // Pointer/hover tracking (content-space coordinates).
+    int mouse_x;
+    int mouse_y;
+    bool have_mouse;
+    int dialog_pressed; // 1 = OK held, 2 = Cancel held
+    int selected_volume_row;
+    char window_title[96];
 };
 }
 
@@ -936,11 +943,13 @@ static void draw_volume_home(Surface *win, const GuiAppLayout *layout, AppState 
         if (i < 0)
             continue;
         cache->row_rects[visible] = gui_rect_make(layout->body_rect.x, y, layout->body_rect.w, gui_app_row_h());
+        bool hovered = state->have_mouse && state->menu_kind == MENU_NONE &&
+                       rect_contains(cache->row_rects[visible], state->mouse_x, state->mouse_y);
         gui_app_draw_list_row(
             win, cache->row_rects[visible].x, cache->row_rects[visible].y, cache->row_rects[visible].w,
             cache->row_rects[visible].h, (state->volumes[i].flags & VOLUME_FLAG_SYSTEM_DATA) ? "DATA" : "VOL",
             state->volumes[i].display_name[0] ? state->volumes[i].display_name : state->volumes[i].mount_path,
-            state->volumes[i].mount_path, false, false, false);
+            state->volumes[i].mount_path, visible == state->selected_volume_row, hovered, false);
         y += gui_app_row_h() + gui_space_1();
     }
 }
@@ -950,11 +959,27 @@ static void draw_dialog(Surface *win, AppState *state, LayoutCache *cache)
     if (state->dialog_mode == DIALOG_NONE)
         return;
 
+    int scroll_y = (g_my_window) ? g_my_window->scroll_y : 0;
+    int view_h = (int)win->height;
+
     int box_w = gui_scaled_metric(360);
     int box_h = gui_scaled_metric(152);
-    cache->dialog_box =
-        gui_rect_make((int)(win->width - (uint32_t)box_w) / 2, (int)(win->height - (uint32_t)box_h) / 2, box_w, box_h);
-    gui_fill_rect(win, 0, 0, (int)win->width, (int)win->height, 0x99000000);
+    if (box_w > (int)win->width - gui_space_4())
+        box_w = (int)win->width - gui_space_4();
+    if (box_h > view_h - gui_space_4())
+        box_h = view_h - gui_space_4();
+    // Center on the visible viewport (not the full content), so the dialog is
+    // always reachable regardless of the scroll position.
+    int box_x = ((int)win->width - box_w) / 2;
+    int box_y = scroll_y + (view_h - box_h) / 2;
+    if (box_x < 0)
+        box_x = 0;
+    if (box_y < scroll_y)
+        box_y = scroll_y;
+    cache->dialog_box = gui_rect_make(box_x, box_y, box_w, box_h);
+    // Translucent scrim: dim the content behind the dialog instead of
+    // blanking it to black.
+    gui_fill_rect_blend(win, 0, scroll_y, (int)win->width, view_h, 0x80000000u);
     gui_draw_panel_inset(win, cache->dialog_box.x, cache->dialog_box.y, cache->dialog_box.w, cache->dialog_box.h,
                          g_gui_style.app_surface, g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
     gui_draw_card_header(win, cache->dialog_box.x + 1, cache->dialog_box.y + 1, cache->dialog_box.w - 2,
@@ -972,10 +997,13 @@ static void draw_dialog(Surface *win, AppState *state, LayoutCache *cache)
         cache->dialog_box.y + cache->dialog_box.h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
     cache->dialog_ok = gui_rect_make(cache->dialog_cancel.x + btn_w + gui_space_1(), cache->dialog_cancel.y, btn_w,
                                      gui_app_control_h());
-    gui_app_draw_button(win, cache->dialog_cancel.x, cache->dialog_cancel.y, cache->dialog_cancel.w,
-                        cache->dialog_cancel.h, "Cancel", false, false, false);
-    gui_app_draw_button(win, cache->dialog_ok.x, cache->dialog_ok.y, cache->dialog_ok.w, cache->dialog_ok.h, "OK", true,
-                        false, false);
+    bool hover_ok = state->have_mouse && rect_contains(cache->dialog_ok, state->mouse_x, state->mouse_y);
+    bool hover_cancel = state->have_mouse && rect_contains(cache->dialog_cancel, state->mouse_x, state->mouse_y);
+    gui_app_draw_button_ex(win, cache->dialog_cancel.x, cache->dialog_cancel.y, cache->dialog_cancel.w,
+                           cache->dialog_cancel.h, "Cancel", false, false, hover_cancel,
+                           state->dialog_pressed == 2);
+    gui_app_draw_button_ex(win, cache->dialog_ok.x, cache->dialog_ok.y, cache->dialog_ok.w, cache->dialog_ok.h, "OK",
+                           true, false, hover_ok, state->dialog_pressed == 1);
 }
 
 static void draw_menu(Surface *win, AppState *state, LayoutCache *cache)
@@ -1070,9 +1098,11 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
                 strncpy(detail, "Directory", sizeof(detail) - 1);
             else
                 snprintf(detail, sizeof(detail), "%llu bytes", (unsigned long long)state->rows[i].size);
+            bool hovered = state->have_mouse && state->menu_kind == MENU_NONE &&
+                           rect_contains(cache->row_rects[i], state->mouse_x, state->mouse_y);
             gui_app_draw_list_row(win, cache->row_rects[i].x, cache->row_rects[i].y, cache->row_rects[i].w,
                                   cache->row_rects[i].h, state->rows[i].is_dir ? "DIR" : "FILE", state->rows[i].name,
-                                  detail, i == state->selected_row, false, false);
+                                  detail, i == state->selected_row, hovered, false);
         }
     }
 
@@ -1089,8 +1119,10 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
         for (int i = 0; i < MAX_PLACES; i++) {
             cache->place_rects[i] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(42));
             bool active = !state->volume_home && strcmp(state->current_path, k_places[i].path) == 0;
+            bool hovered = state->have_mouse && state->menu_kind == MENU_NONE && state->dialog_mode == DIALOG_NONE &&
+                           rect_contains(cache->place_rects[i], state->mouse_x, state->mouse_y);
             gui_app_draw_nav_item(win, cache->place_rects[i].x, cache->place_rects[i].y, cache->place_rects[i].w,
-                                  cache->place_rects[i].h, k_places[i].label, k_places[i].detail, active, false);
+                                  cache->place_rects[i].h, k_places[i].label, k_places[i].detail, active, hovered);
             sy += gui_scaled_metric(46);
         }
         sy += gui_space_1();
@@ -1109,11 +1141,13 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
             continue;
         cache->volume_rects[visible] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(44));
         bool active = !state->volume_home && strcmp(state->current_path, state->volumes[i].mount_path) == 0;
+        bool hovered = state->have_mouse && state->menu_kind == MENU_NONE && state->dialog_mode == DIALOG_NONE &&
+                       rect_contains(cache->volume_rects[visible], state->mouse_x, state->mouse_y);
         gui_app_draw_nav_item(win, cache->volume_rects[visible].x, cache->volume_rects[visible].y,
                               cache->volume_rects[visible].w, cache->volume_rects[visible].h,
                               state->volumes[i].display_name[0] ? state->volumes[i].display_name
                                                                 : state->volumes[i].mount_path,
-                              state->volumes[i].mount_path, active, false);
+                              state->volumes[i].mount_path, active, hovered);
         sy += gui_scaled_metric(48);
         visible++;
     }
@@ -1125,6 +1159,20 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
     gui_app_draw_header(win, &layout, "Files",
                         state->volume_home ? "Storage, places and recent volumes" : state->current_path,
                         state->status[0] ? state->status : nullptr);
+
+    // Keep the titlebar in sync with the location being browsed.
+    char title[96];
+    if (state->volume_home)
+        snprintf(title, sizeof(title), "Files — Storage");
+    else if (state->load_failed)
+        snprintf(title, sizeof(title), "Files — %s", state->current_path);
+    else
+        snprintf(title, sizeof(title), "Files — %s", path_basename(state->current_path));
+    if (strcmp(title, state->window_title) != 0) {
+        strncpy(state->window_title, title, sizeof(state->window_title) - 1);
+        state->window_title[sizeof(state->window_title) - 1] = '\0';
+        gui_set_window_title(state->window_title);
+    }
 
     draw_menu(win, state, cache);
     draw_dialog(win, state, cache);
@@ -1181,7 +1229,7 @@ static void activate_row(AppState *state, int index)
 }
 
 static void open_menu(AppState *state, MenuKind kind, int target_row, int target_volume, int mouse_x, int mouse_y,
-                      int canvas_w, int canvas_h)
+                      int canvas_w, int view_y, int view_h)
 {
     if (!state)
         return;
@@ -1204,12 +1252,14 @@ static void open_menu(AppState *state, MenuKind kind, int target_row, int target
     state->menu_y = mouse_y;
     if (state->menu_x + state->menu_w > canvas_w)
         state->menu_x = canvas_w - state->menu_w - gui_space_1();
-    if (state->menu_y + state->menu_h > canvas_h)
-        state->menu_y = canvas_h - state->menu_h - gui_space_1();
+    // Clamp to the visible viewport, not the full content height, so the menu
+    // never opens below the fold.
+    if (state->menu_y + state->menu_h > view_y + view_h)
+        state->menu_y = view_y + view_h - state->menu_h - gui_space_1();
     if (state->menu_x < 0)
         state->menu_x = 0;
-    if (state->menu_y < 0)
-        state->menu_y = 0;
+    if (state->menu_y < view_y)
+        state->menu_y = view_y;
     state->menu_hovered =
         gui_popup_menu_hit_test(items, count, state->menu_x, state->menu_y, state->menu_w, mouse_x, mouse_y);
     state->needs_redraw = true;
@@ -1323,6 +1373,12 @@ extern "C" int main()
     state->volume_home = true;
     state->needs_redraw = true;
     state->storage_mode = STORAGE_MODE_READ_ONLY;
+    state->mouse_x = -1;
+    state->mouse_y = -1;
+    state->have_mouse = false;
+    state->dialog_pressed = 0;
+    state->selected_volume_row = -1;
+    state->window_title[0] = '\0';
     set_status(state, storage_mode_label(state->storage_mode));
     refresh_volumes(state);
     select_default_location(state, true);
@@ -1339,19 +1395,60 @@ extern "C" int main()
         while (poll_event(&ev) > 0) {
             if (ev.type == EVT_WINDOW_CLOSE)
                 return 0;
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0)
+            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
                 state->needs_redraw = true;
+            }
+            if (ev.type == EVT_WINDOW_SCROLL) {
+                // Sticky overlays are positioned from the scroll offset; they
+                // must repaint whenever the WM scrolls the content.
+                state->needs_redraw = true;
+            }
+            if (ev.type == EVT_FOCUS) {
+                state->needs_redraw = true;
+            }
+            if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
+                state->have_mouse = false;
+                state->dialog_pressed = 0;
+                state->needs_redraw = true;
+            }
 
             if (ev.type == EVT_MOUSE_MOVE) {
+                state->mouse_x = ev.mouse.x;
+                state->mouse_y = ev.mouse.y;
+                state->have_mouse = true;
                 update_menu_hover(state, ev.mouse.x, ev.mouse.y);
+                state->needs_redraw = true;
+            }
+
+            if (ev.type == EVT_MOUSE_UP && ev.mouse.button == 1) {
+                if (state->dialog_mode != DIALOG_NONE && state->dialog_pressed != 0) {
+                    int pressed = state->dialog_pressed;
+                    state->dialog_pressed = 0;
+                    bool over_ok = rect_contains(cache->dialog_ok, ev.mouse.x, ev.mouse.y);
+                    bool over_cancel = rect_contains(cache->dialog_cancel, ev.mouse.x, ev.mouse.y);
+                    if (pressed == 1 && over_ok)
+                        confirm_dialog(state);
+                    else if (pressed == 2 && over_cancel)
+                        close_dialog(state);
+                    else
+                        state->needs_redraw = true;
+                }
+                continue;
             }
 
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
+                state->mouse_x = ev.mouse.x;
+                state->mouse_y = ev.mouse.y;
+                state->have_mouse = true;
+
                 if (state->dialog_mode != DIALOG_NONE) {
                     if (rect_contains(cache->dialog_ok, ev.mouse.x, ev.mouse.y))
-                        confirm_dialog(state);
+                        state->dialog_pressed = 1;
                     else if (rect_contains(cache->dialog_cancel, ev.mouse.x, ev.mouse.y))
-                        close_dialog(state);
+                        state->dialog_pressed = 2;
+                    else
+                        close_dialog(state); // click outside dismisses
+                    state->needs_redraw = true;
                     continue;
                 }
 
@@ -1407,6 +1504,8 @@ extern "C" int main()
                     state->last_click_row = i;
                     state->last_click_ticks = now;
                     if (state->volume_home) {
+                        state->selected_volume_row = i;
+                        state->needs_redraw = true;
                         if (double_click)
                             activate_row(state, i);
                     } else {
@@ -1422,13 +1521,16 @@ extern "C" int main()
                 if (state->dialog_mode != DIALOG_NONE)
                     continue;
 
+                int view_y = (g_my_window) ? g_my_window->scroll_y : 0;
+                int view_h = (int)win.height;
+
                 int sidebar_volume_count = visible_volume_count(state);
                 for (int i = 0; i < sidebar_volume_count; i++) {
                     if (!rect_contains(cache->volume_rects[i], ev.mouse.x, ev.mouse.y))
                         continue;
                     int volume_index = visible_volume_index_at(state, i);
-                    open_menu(state, MENU_VOLUME, -1, volume_index, ev.mouse.x, ev.mouse.y, (int)win.width,
-                              (int)win.height);
+                    open_menu(state, MENU_VOLUME, -1, volume_index, ev.mouse.x, ev.mouse.y, (int)win.width, view_y,
+                              view_h);
                     goto handled_right_click;
                 }
 
@@ -1437,7 +1539,7 @@ extern "C" int main()
                         if (!rect_contains(cache->row_rects[i], ev.mouse.x, ev.mouse.y))
                             continue;
                         state->selected_row = i;
-                        open_menu(state, MENU_ENTRY, i, -1, ev.mouse.x, ev.mouse.y, (int)win.width, (int)win.height);
+                        open_menu(state, MENU_ENTRY, i, -1, ev.mouse.x, ev.mouse.y, (int)win.width, view_y, view_h);
                         goto handled_right_click;
                     }
                 } else {
@@ -1445,13 +1547,13 @@ extern "C" int main()
                         if (!rect_contains(cache->row_rects[i], ev.mouse.x, ev.mouse.y))
                             continue;
                         int volume_index = visible_volume_index_at(state, i);
-                        open_menu(state, MENU_VOLUME, -1, volume_index, ev.mouse.x, ev.mouse.y, (int)win.width,
-                                  (int)win.height);
+                        open_menu(state, MENU_VOLUME, -1, volume_index, ev.mouse.x, ev.mouse.y, (int)win.width, view_y,
+                                  view_h);
                         goto handled_right_click;
                     }
                 }
 
-                open_menu(state, MENU_BACKGROUND, -1, -1, ev.mouse.x, ev.mouse.y, (int)win.width, (int)win.height);
+                open_menu(state, MENU_BACKGROUND, -1, -1, ev.mouse.x, ev.mouse.y, (int)win.width, view_y, view_h);
             handled_right_click:
                 state->needs_redraw = true;
             }
@@ -1479,10 +1581,38 @@ extern "C" int main()
                         }
                     }
                 } else if (ev.key.c == '\n' || ev.key.c == '\r') {
-                    if (state->selected_row >= 0)
+                    if (state->volume_home) {
+                        if (state->selected_volume_row >= 0)
+                            activate_row(state, state->selected_volume_row);
+                    } else if (state->selected_row >= 0) {
                         activate_row(state, state->selected_row);
+                    }
                 } else if (ev.key.c == 8 || ev.key.c == 127) {
                     navigate_up(state);
+                } else {
+                    uint8_t key = (uint8_t)ev.key.c;
+                    int row_count = state->volume_home ? visible_volume_count(state) : state->row_count;
+                    int *selection = state->volume_home ? &state->selected_volume_row : &state->selected_row;
+                    if (key == 0x80) { // Up
+                        if (row_count > 0) {
+                            *selection = (*selection <= 0) ? row_count - 1 : *selection - 1;
+                            state->needs_redraw = true;
+                        }
+                    } else if (key == 0x81) { // Down
+                        if (row_count > 0) {
+                            *selection = (*selection >= row_count - 1) ? 0 : *selection + 1;
+                            state->needs_redraw = true;
+                        }
+                    } else if (key == 0x82) { // Left = navigate up
+                        navigate_up(state);
+                    } else if (key == 0x83) { // Right = open selection
+                        if (state->volume_home) {
+                            if (state->selected_volume_row >= 0)
+                                activate_row(state, state->selected_volume_row);
+                        } else if (state->selected_row >= 0) {
+                            activate_row(state, state->selected_row);
+                        }
+                    }
                 }
             }
         }
