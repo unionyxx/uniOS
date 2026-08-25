@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <uapi/display.h>
 #include <uapi/event.h>
@@ -205,19 +206,41 @@ static void collect_about_snapshot(AboutSnapshot *snapshot)
     snapshot->uptime_seconds = get_uptime();
 }
 
-static uint32_t about_signature(const AboutSnapshot *snapshot)
+// Structural signature: excludes the fields that tick every second (time,
+// uptime, process count) so the periodic refresh only repaints the runtime
+// panel instead of the whole window.
+static uint32_t about_static_signature(const AboutSnapshot *snapshot)
 {
     if (!snapshot)
         return 0;
-
-    // Fast FNV-1a hash over the fully zero-initialized snapshot structure
+    AboutSnapshot copy = *snapshot;
+    memset(&copy.now, 0, sizeof(copy.now));
+    copy.uptime_seconds = 0;
+    copy.proc_count = 0;
     uint32_t sig = 2166136261u;
-    const uint8_t *data = reinterpret_cast<const uint8_t *>(snapshot);
+    const uint8_t *data = reinterpret_cast<const uint8_t *>(&copy);
     for (size_t i = 0; i < sizeof(AboutSnapshot); i++) {
         sig ^= data[i];
         sig *= 16777619u;
     }
     return sig;
+}
+
+static void about_copy_rect(const Surface *backbuffer, Surface *win, const Rect &rect)
+{
+    if (gui_rect_is_empty(rect))
+        return;
+    int x = rect.x > 0 ? rect.x : 0;
+    int y = rect.y > 0 ? rect.y : 0;
+    int x2 = rect.x + rect.w < (int)win->width ? rect.x + rect.w : (int)win->width;
+    int y2 = rect.y + rect.h < (int)win->height ? rect.y + rect.h : (int)win->height;
+    if (x2 <= x || y2 <= y)
+        return;
+    uint32_t stride = win->pitch / 4;
+    for (int row = y; row < y2; row++) {
+        memcpy(&win->buffer[(size_t)row * stride + x], &backbuffer->buffer[(size_t)row * stride + x],
+               (size_t)(x2 - x) * sizeof(uint32_t));
+    }
 }
 
 static void draw_summary(Surface *win, int x, int y, int w, int h, const char *kernel_commit, bool debug_build)
@@ -332,10 +355,18 @@ static int compute_about_content_height(int content_w, int row_h, int summary_h)
     return total;
 }
 
-static void draw_about(Surface *win, const AboutSnapshot *snapshot)
+struct AboutPanelRects
+{
+    Rect runtime;
+    Rect memory;
+};
+
+static void draw_about(Surface *win, const AboutSnapshot *snapshot, AboutPanelRects *panel_rects)
 {
     if (!win || !snapshot)
         return;
+    if (panel_rects)
+        *panel_rects = {};
 
     const SystemProfile &profile = snapshot->profile;
     const MemInfo &mem = snapshot->mem;
@@ -405,20 +436,28 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
         int left_x = outer;
         int right_x = outer + col_w + gap;
 
+        if (panel_rects)
+            panel_rects->runtime = gui_rect_make(left_x, y, col_w, h_runtime);
         draw_runtime_panel(win, left_x, y, col_w, h_runtime, row_h, time_buf, uptime_buf, proc_buf);
         draw_display_panel(win, right_x, y, col_w, h_display, row_h, resolution, nominal_refresh, measured_refresh,
                            depth, flags);
 
+        if (panel_rects)
+            panel_rects->memory = gui_rect_make(left_x, y + h_runtime + gap, col_w, h_memory);
         draw_memory_panel(win, left_x, y + h_runtime + gap, col_w, h_memory, row_h, total, used, free_kb, heap_total,
                           heap_used);
         draw_platform_panel(win, right_x, y + h_display + gap, col_w, h_platform, row_h, snapshot->vendor, cores_buf,
                             timer_hz, bootloader);
     } else {
+        if (panel_rects)
+            panel_rects->runtime = gui_rect_make(outer, y, content_w, h_runtime);
         draw_runtime_panel(win, outer, y, content_w, h_runtime, row_h, time_buf, uptime_buf, proc_buf);
         y += h_runtime + gap;
         draw_display_panel(win, outer, y, content_w, h_display, row_h, resolution, nominal_refresh, measured_refresh,
                            depth, flags);
         y += h_display + gap;
+        if (panel_rects)
+            panel_rects->memory = gui_rect_make(outer, y, content_w, h_memory);
         draw_memory_panel(win, outer, y, content_w, h_memory, row_h, total, used, free_kb, heap_total, heap_used);
         y += h_memory + gap;
         draw_platform_panel(win, outer, y, content_w, h_platform, row_h, snapshot->vendor, cores_buf, timer_hz,
@@ -426,7 +465,6 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot)
     }
 
     gui_app_draw_header(win, &layout, "About uniOS", "Hardware, runtime, and display overview", nullptr);
-    gui_blit_to_screen_rect(win, 0, 0, win->width, win->height);
 }
 
 extern "C" int main()
@@ -439,19 +477,48 @@ extern "C" int main()
 
     gui_sync_theme_from_registry();
     gui_request_focus();
+
+    // Double buffer: draw off-screen, then publish whole regions at once so
+    // the compositor never samples a half-drawn frame.
+    uint32_t back_stride = win.pitch / 4;
+    size_t back_capacity = (size_t)back_stride * win.height;
+    uint32_t *back_data = (uint32_t *)malloc(back_capacity * sizeof(uint32_t));
+    if (!back_data)
+        return 1;
+    Surface backbuffer = win;
+    backbuffer.buffer = back_data;
+    backbuffer.owns_buffer = false;
+
     uint64_t last_refresh_tick = 0;
     bool needs_redraw = true;
-    uint32_t last_signature = 0;
+    uint32_t last_static_signature = 0;
     Registry *registry = gui_registry();
     uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
 
     while (true) {
         Event ev = {};
         while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE)
+            if (ev.type == EVT_WINDOW_CLOSE) {
+                free(back_data);
                 return 0;
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0)
+            }
+            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
+                size_t needed = (size_t)(win.pitch / 4) * win.height;
+                if (needed > back_capacity) {
+                    uint32_t *grown = (uint32_t *)realloc(back_data, needed * sizeof(uint32_t));
+                    if (!grown) {
+                        free(back_data);
+                        return 1;
+                    }
+                    back_data = grown;
+                    back_capacity = needed;
+                }
+                back_stride = win.pitch / 4;
+                backbuffer = win;
+                backbuffer.buffer = back_data;
+                backbuffer.owns_buffer = false;
                 needs_redraw = true;
+            }
         }
 
         registry = gui_registry();
@@ -465,10 +532,26 @@ extern "C" int main()
         if (needs_redraw || now_tick - last_refresh_tick >= 1000) {
             AboutSnapshot snapshot = {};
             collect_about_snapshot(&snapshot);
-            uint32_t current_signature = about_signature(&snapshot);
-            if (needs_redraw || current_signature != last_signature) {
-                draw_about(&win, &snapshot);
-                last_signature = current_signature;
+            uint32_t static_sig = about_static_signature(&snapshot);
+            bool full = needs_redraw || static_sig != last_static_signature;
+
+            AboutPanelRects panels = {};
+            draw_about(&backbuffer, &snapshot, &panels);
+
+            if (full) {
+                memcpy(win.buffer, backbuffer.buffer, back_capacity * sizeof(uint32_t));
+                gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
+                last_static_signature = static_sig;
+            } else {
+                // Only time/uptime/process count changed: republish the two
+                // panels that display them.
+                about_copy_rect(&backbuffer, &win, panels.runtime);
+                about_copy_rect(&backbuffer, &win, panels.memory);
+                if (!gui_rect_is_empty(panels.runtime))
+                    gui_blit_to_screen_rect(&win, panels.runtime.x, panels.runtime.y, panels.runtime.w,
+                                            panels.runtime.h);
+                if (!gui_rect_is_empty(panels.memory))
+                    gui_blit_to_screen_rect(&win, panels.memory.x, panels.memory.y, panels.memory.w, panels.memory.h);
             }
             last_refresh_tick = now_tick;
             needs_redraw = false;

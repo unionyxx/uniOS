@@ -83,10 +83,40 @@ static void calendar_next_month(CalendarState *state)
         state->selected_day = dim;
 }
 
+static void calendar_goto_today(CalendarState *state)
+{
+    if (!state)
+        return;
+    state->year = state->today_year;
+    state->month = state->today_month;
+    state->selected_day = state->today_day;
+}
+
+// Move the selection by delta days, crossing month boundaries.
+static void calendar_step_day(CalendarState *state, int delta)
+{
+    if (!state || delta == 0)
+        return;
+    int day = state->selected_day + delta;
+    int guard = 0;
+    while (day < 1 && guard++ < 24) {
+        calendar_prev_month(state);
+        day += days_in_month(state->year, state->month);
+    }
+    int dim = days_in_month(state->year, state->month);
+    while (day > dim && guard++ < 48) {
+        day -= dim;
+        calendar_next_month(state);
+        dim = days_in_month(state->year, state->month);
+    }
+    state->selected_day = day;
+}
+
 struct CalendarRects
 {
     Rect prev_btn;
     Rect next_btn;
+    Rect today_btn;
     Rect day_cells[6][7];
 };
 
@@ -112,7 +142,7 @@ static void draw_chevron(Surface *win, int cx, int cy, int size, bool left, uint
 }
 
 static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rects, int hover_day_row,
-                          int hover_day_col, int hover_arrow)
+                          int hover_day_col, int hover_arrow, bool hover_today, bool today_pressed)
 {
     if (!win || !win->buffer || !state || !rects)
         return;
@@ -130,8 +160,8 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     int line_h = gui_line_height();
 
     static const char *month_names[] = {"January", "February", "March", "April",
-                                        "May", "June", "July", "August",
-                                        "September", "October", "November", "December"};
+                                         "May", "June", "July", "August",
+                                         "September", "October", "November", "December"};
     static const char *day_labels[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
     char header[64];
@@ -151,10 +181,11 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     arrow_color = hover_arrow == 1 ? g_gui_style.text : g_gui_style.text_dim;
     draw_chevron(win, rects->next_btn.x + rects->next_btn.w / 2, arrow_y, arrow_size, false, arrow_color);
 
+    int footer_h = gui_app_control_h() + gui_space_1();
     int grid_y = header_y + line_h + gui_space_2();
     int day_label_h = line_h + gui_space_1();
     int cell_w = (w - pad * 2 - gap * 6) / 7;
-    int cell_h = (h - grid_y - day_label_h - pad - gap * 5) / 6;
+    int cell_h = (h - grid_y - day_label_h - pad - gap * 5 - footer_h) / 6;
     if (cell_h < gui_scaled_metric(32))
         cell_h = gui_scaled_metric(32);
 
@@ -237,6 +268,13 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
             gui_draw_text_clipped(win, def_font, tx, ty, cw, day_str, fg, bg);
         }
     }
+
+    // Footer: jump back to today's date.
+    bool viewing_today_month = state->year == state->today_year && state->month == state->today_month;
+    int today_w = gui_scaled_metric(96);
+    rects->today_btn = gui_rect_make((w - today_w) / 2, h - pad - gui_app_control_h(), today_w, gui_app_control_h());
+    gui_app_draw_button_ex(win, rects->today_btn.x, rects->today_btn.y, rects->today_btn.w, rects->today_btn.h,
+                           viewing_today_month ? "Today" : "Go to Today", false, false, hover_today, today_pressed);
 }
 
 static void find_day_at(CalendarRects *rects, int x, int y, int *out_row, int *out_col)
@@ -283,6 +321,8 @@ extern "C" int main()
 
     int hover_row = -1, hover_col = -1;
     int hover_arrow = 0;
+    bool hover_today = false;
+    bool today_pressed = false;
     bool needs_redraw = true;
 
     Registry *registry = gui_registry();
@@ -314,6 +354,30 @@ extern "C" int main()
                 }
                 continue;
             }
+            if (ev.type == EVT_FOCUS) {
+                needs_redraw = true;
+                continue;
+            }
+            if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
+                hover_row = hover_col = -1;
+                hover_arrow = 0;
+                hover_today = false;
+                today_pressed = false;
+                needs_redraw = true;
+                continue;
+            }
+            if (ev.type == EVT_MOUSE_SCROLL) {
+                if (ev.mouse.scroll_y > 0)
+                    calendar_prev_month(&state);
+                else if (ev.mouse.scroll_y < 0)
+                    calendar_next_month(&state);
+                else
+                    continue;
+                // The cells under the pointer now show different dates.
+                hover_row = hover_col = -1;
+                needs_redraw = true;
+                continue;
+            }
             if (ev.type == EVT_MOUSE_MOVE) {
                 int row = -1, col = -1;
                 find_day_at(&rects, ev.mouse.x, ev.mouse.y, &row, &col);
@@ -322,11 +386,14 @@ extern "C" int main()
                     new_hover_arrow = -1;
                 else if (point_in_rect(rects.next_btn, ev.mouse.x, ev.mouse.y))
                     new_hover_arrow = 1;
+                bool new_hover_today = point_in_rect(rects.today_btn, ev.mouse.x, ev.mouse.y);
 
-                if (row != hover_row || col != hover_col || new_hover_arrow != hover_arrow) {
+                if (row != hover_row || col != hover_col || new_hover_arrow != hover_arrow ||
+                    new_hover_today != hover_today) {
                     hover_row = row;
                     hover_col = col;
                     hover_arrow = new_hover_arrow;
+                    hover_today = new_hover_today;
                     needs_redraw = true;
                 }
                 continue;
@@ -334,11 +401,18 @@ extern "C" int main()
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
                 if (point_in_rect(rects.prev_btn, ev.mouse.x, ev.mouse.y)) {
                     calendar_prev_month(&state);
+                    hover_row = hover_col = -1;
                     needs_redraw = true;
                     continue;
                 }
                 if (point_in_rect(rects.next_btn, ev.mouse.x, ev.mouse.y)) {
                     calendar_next_month(&state);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                    continue;
+                }
+                if (point_in_rect(rects.today_btn, ev.mouse.x, ev.mouse.y)) {
+                    today_pressed = true;
                     needs_redraw = true;
                     continue;
                 }
@@ -348,7 +422,7 @@ extern "C" int main()
                     int start_wd = weekday(state.year, state.month, 1);
                     int clicked_day = row * 7 + col - start_wd + 1;
                     int dim = days_in_month(state.year, state.month);
-                    
+
                     if (clicked_day < 1) {
                         calendar_prev_month(&state);
                         state.selected_day = days_in_month(state.year, state.month) + clicked_day;
@@ -358,6 +432,50 @@ extern "C" int main()
                     } else {
                         state.selected_day = clicked_day;
                     }
+                    needs_redraw = true;
+                }
+                continue;
+            }
+            if (ev.type == EVT_MOUSE_UP && ev.mouse.button == 1) {
+                if (today_pressed) {
+                    today_pressed = false;
+                    if (point_in_rect(rects.today_btn, ev.mouse.x, ev.mouse.y)) {
+                        calendar_goto_today(&state);
+                        hover_row = hover_col = -1;
+                    }
+                    needs_redraw = true;
+                }
+                continue;
+            }
+            if (ev.type == EVT_KEY_DOWN) {
+                uint8_t key = (uint8_t)ev.key.c;
+                if (ev.key.c == 't' || ev.key.c == 'T') {
+                    calendar_goto_today(&state);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                } else if (key == 0x82) { // Left
+                    calendar_step_day(&state, -1);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                } else if (key == 0x83) { // Right
+                    calendar_step_day(&state, 1);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                } else if (key == 0x80) { // Up
+                    calendar_step_day(&state, -7);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                } else if (key == 0x81) { // Down
+                    calendar_step_day(&state, 7);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                } else if (key == 0x87) { // Page Up
+                    calendar_prev_month(&state);
+                    hover_row = hover_col = -1;
+                    needs_redraw = true;
+                } else if (key == 0x88) { // Page Down
+                    calendar_next_month(&state);
+                    hover_row = hover_col = -1;
                     needs_redraw = true;
                 }
                 continue;
@@ -385,7 +503,7 @@ extern "C" int main()
         }
 
         if (needs_redraw && backbuffer_data) {
-            draw_calendar(&backbuffer, &state, &rects, hover_row, hover_col, hover_arrow);
+            draw_calendar(&backbuffer, &state, &rects, hover_row, hover_col, hover_arrow, hover_today, today_pressed);
             memcpy(win.buffer, backbuffer.buffer, win.height * win.pitch);
             gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
             needs_redraw = false;

@@ -63,18 +63,18 @@ static inline void blend_rgba_over_rgb(uint32_t *dst, uint32_t color, uint8_t co
         *dst = 0xFF000000u | (color & 0x00FFFFFFu);
         return;
     }
-    
+
     uint32_t inv_a = 255u - src_a;
     uint32_t s_rb = color & 0x00FF00FFu;
     uint32_t d_rb = d & 0x00FF00FFu;
     uint32_t rb = (s_rb * src_a + d_rb * inv_a + 0x00800080u);
     rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
     rb &= 0x00FF00FFu;
-    
+
     uint32_t s_g = (color >> 8) & 0xFFu;
     uint32_t d_g = (d >> 8) & 0xFFu;
     uint32_t g = (s_g * src_a + d_g * inv_a + 127u) / 255u;
-    
+
     *dst = 0xFF000000u | rb | (g << 8);
 }
 
@@ -101,16 +101,20 @@ static void draw_aa_line_thick(Surface *win, float x1, float y1, float x2, float
     max_x += pad_int;
     max_y += pad_int;
 
-    if (min_x < 0) min_x = 0;
-    if (min_y < 0) min_y = 0;
-    if (max_x >= (int)win->width) max_x = (int)win->width - 1;
-    if (max_y >= (int)win->height) max_y = (int)win->height - 1;
+    if (min_x < 0)
+        min_x = 0;
+    if (min_y < 0)
+        min_y = 0;
+    if (max_x >= (int)win->width)
+        max_x = (int)win->width - 1;
+    if (max_y >= (int)win->height)
+        max_y = (int)win->height - 1;
 
     float dx = x2 - x1;
     float dy = y2 - y1;
     float len_sq = dx * dx + dy * dy;
     float len = fast_sqrt(len_sq);
-    
+
     if (len < 0.5f) {
         if (thickness > 1)
             gui_fill_circle(win, (int)(x1 + 0.5f), (int)(y1 + 0.5f), thickness / 2, color);
@@ -139,20 +143,24 @@ static void draw_aa_line_thick(Surface *win, float x1, float y1, float x2, float
             float bound2 = x1 - 0.5f + val2;
             int bmin = (int)(bound1 < bound2 ? bound1 : bound2) - (int)pad - 1;
             int bmax = (int)(bound1 > bound2 ? bound1 : bound2) + (int)pad + 1;
-            if (bmin > start_x) start_x = bmin;
-            if (bmax < end_x) end_x = bmax;
+            if (bmin > start_x)
+                start_x = bmin;
+            if (bmax < end_x)
+                end_x = bmax;
         }
 
-        if (start_x < min_x) start_x = min_x;
-        if (end_x > max_x) end_x = max_x;
+        if (start_x < min_x)
+            start_x = min_x;
+        if (end_x > max_x)
+            end_x = max_x;
 
         uint32_t *row = &win->buffer[py * pitch];
-        
+
         for (int px = start_x; px <= end_x; px++) {
             float wx = (float)px + 0.5f - x1;
             float dot = wx * nx + wy * ny;
             float dist;
-            
+
             if (dot <= 0.0f) {
                 dist = fast_sqrt(wx * wx + wy * wy);
             } else if (dot >= len) {
@@ -166,7 +174,7 @@ static void draw_aa_line_thick(Surface *win, float x1, float y1, float x2, float
             float coverage = half_t + 0.5f - dist;
             if (coverage <= 0.0f)
                 continue;
-            
+
             if (coverage >= 1.0f) {
                 blend_rgba_over_rgb(&row[px], color, 255);
             } else {
@@ -176,7 +184,8 @@ static void draw_aa_line_thick(Surface *win, float x1, float y1, float x2, float
     }
 }
 
-static void draw_clock_hand(Surface *win, int cx, int cy, float angle, int length, int tail_len, int thickness, uint32_t color, uint32_t shadow_color)
+static void draw_clock_hand(Surface *win, int cx, int cy, float angle, int length, int tail_len, int thickness,
+                            uint32_t color, uint32_t shadow_color)
 {
     if (!win || length <= 0)
         return;
@@ -210,7 +219,7 @@ static void draw_tick_marks(Surface *win, int cx, int cy, int r)
         float dy = fast_sin(angle);
         bool major = (i % 5) == 0;
         bool cardinal = (i % 15) == 0;
-        
+
         if (major) {
             int tick_inner = cardinal ? r - gui_scaled_metric(14) : r - gui_scaled_metric(10);
             int tick_outer = r - gui_scaled_metric(2);
@@ -259,8 +268,8 @@ static void draw_clock_face_hands(Surface *win, int cx, int cy, int r, double co
     uint32_t face_border = g_gui_style.border;
     uint32_t shadow = 0x20000000;
 
-    float sec_angle  = (float)continuous_seconds * 0.10471976f;
-    float min_angle  = (float)(continuous_seconds / 60.0) * 0.10471976f;
+    float sec_angle = (float)continuous_seconds * 0.10471976f;
+    float min_angle = (float)(continuous_seconds / 60.0) * 0.10471976f;
     float hour_angle = (float)(continuous_seconds / 3600.0) * 0.52359878f;
 
     int hour_len = r - gui_scaled_metric(28);
@@ -276,6 +285,37 @@ static void draw_clock_face_hands(Surface *win, int cx, int cy, int r, double co
     gui_fill_circle(win, cx, cy, center_r, center_color);
     if (center_r > 1)
         gui_draw_circle_stroke(win, cx, cy, center_r, 1, face_border);
+}
+
+static double os_dial_seconds(const SysTime *t)
+{
+    return (double)(t->hour % 12) * 3600.0 + (double)t->minute * 60.0 + (double)t->second;
+}
+
+static inline uint64_t clock_read_tsc()
+{
+    uint32_t lo = 0, hi = 0;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return static_cast<uint64_t>(lo) | (static_cast<uint64_t>(hi) << 32);
+}
+
+static double wrap_dial_seconds(double v)
+{
+    while (v < 0.0)
+        v += 43200.0;
+    while (v >= 43200.0)
+        v -= 43200.0;
+    return v;
+}
+
+static double dial_step(double from, double to)
+{
+    double d = to - from;
+    if (d < -21600.0)
+        d += 43200.0;
+    if (d > 21600.0)
+        d -= 43200.0;
+    return d;
 }
 
 static int weekday(uint16_t year, uint8_t month, uint8_t day)
@@ -363,8 +403,9 @@ static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysT
 
     const GuiFont *font = gui_font_title();
     char digital[32];
-    snprintf(digital, sizeof(digital), "%02u:%02u:%02u", (unsigned)time->hour, (unsigned)time->minute, (unsigned)time->second);
-    
+    snprintf(digital, sizeof(digital), "%02u:%02u:%02u", (unsigned)time->hour, (unsigned)time->minute,
+             (unsigned)time->second);
+
     int dig_w = gui_measure_text(font, digital);
     int dig_x = cx - dig_w / 2;
     int dig_y = cy + face_r + gui_scaled_metric(10);
@@ -374,10 +415,11 @@ static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysT
     char date_str[64];
     static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     static const char *weekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    
+
     int wd = weekday(time->year, time->month, time->day);
-    snprintf(date_str, sizeof(date_str), "%s, %s %u, %u", weekdays[wd], months[(time->month - 1) % 12], (unsigned)time->day, (unsigned)time->year);
-    
+    snprintf(date_str, sizeof(date_str), "%s, %s %u, %u", weekdays[wd], months[(time->month - 1) % 12],
+             (unsigned)time->day, (unsigned)time->year);
+
     int date_w = gui_measure_text(sfont, date_str);
     int date_x = cx - date_w / 2;
     int date_y = dig_y + gui_font_line_height(font) + gui_space_1();
@@ -391,25 +433,53 @@ extern "C" int main()
     Surface win = gui_register_window_ex("Clock", (uint32_t)win_w, (uint32_t)win_h, WIN_FLAG_RESIZABLE);
     if (!win.buffer)
         return 1;
-        
+
     gui_window_set_min_size(gui_scaled_metric(280), gui_scaled_metric(320));
     gui_sync_theme_from_registry();
     gui_request_focus();
 
     uint32_t backbuffer_stride = win.pitch / 4;
     uint32_t *backbuffer_data = (uint32_t *)malloc(backbuffer_stride * win.height * sizeof(uint32_t));
+    if (!backbuffer_data)
+        return 1;
     Surface backbuffer = win;
     backbuffer.buffer = backbuffer_data;
     backbuffer.owns_buffer = false;
 
+    SystemProfile profile = {};
+    uint32_t nominal_tick_hz = 1000;
+    if (get_sysinfo(&profile) == 0 && profile.timer_hz != 0)
+        nominal_tick_hz = profile.timer_hz;
+
     SysTime current_os_time = {};
     get_time(&current_os_time);
-    
-    double continuous_seconds = (current_os_time.hour % 12) * 3600.0 + 
-                                current_os_time.minute * 60.0 + 
-                                current_os_time.second;
-    uint64_t last_ticks = get_ticks();
-    uint64_t next_frame_ticks = last_ticks + 16;
+
+    // Smooth clock model. A monotonic counter (TSC preferred: it never stalls
+    // like scheduler ticks can while timer IRQs are masked, and has sub-microsecond
+    // resolution) provides continuous motion; the RTC re-anchors the absolute phase
+    // once per second. Each re-anchor preserves continuity and any residual is bled
+    // off through phase_ramp (rate-limited), so the hands never snap or freeze.
+    uint64_t tsc_mhz = get_tsc_freq();
+    bool use_tsc = tsc_mhz != 0;
+    double base_seconds = os_dial_seconds(&current_os_time);
+    uint64_t base_counter = use_tsc ? clock_read_tsc() : get_ticks();
+    double counter_hz = use_tsc ? (double)tsc_mhz * 1000000.0 : (double)nominal_tick_hz;
+
+    double phase_ramp = 0.0;
+    double prev_rtc_seconds = base_seconds;
+    uint64_t last_counter = base_counter;
+    double candidate_seconds = -1.0;
+    int candidate_reads = 0;
+
+    double ticks_per_second = (double)nominal_tick_hz;
+    bool ticks_calibrated = false;
+    bool have_cross_ticks = false;
+    uint64_t last_cross_ticks = 0;
+
+    uint64_t frame_ticks = (uint64_t)(ticks_per_second * 0.016);
+    if (frame_ticks == 0)
+        frame_ticks = 1;
+    uint64_t next_frame_ticks = get_ticks() + frame_ticks;
 
     Registry *registry = gui_registry();
     uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
@@ -421,7 +491,7 @@ extern "C" int main()
     while (true) {
         Event ev = {};
         bool resized = false;
-        
+
         while (poll_event(&ev) > 0) {
             if (ev.type == EVT_WINDOW_CLOSE) {
                 free(backbuffer_data);
@@ -434,6 +504,10 @@ extern "C" int main()
                 backbuffer_data = (uint32_t *)malloc(backbuffer_stride * win.height * sizeof(uint32_t));
                 backbuffer = win;
                 backbuffer.buffer = backbuffer_data;
+                if (!backbuffer_data) {
+                    free(cache.buffer);
+                    return 1;
+                }
                 continue;
             }
         }
@@ -445,42 +519,115 @@ extern "C" int main()
             theme_changed = gui_sync_theme_from_registry();
         }
 
-        uint64_t now_ticks = get_ticks();
-        double dt = (double)(now_ticks - last_ticks) / 1000.0;
-        last_ticks = now_ticks;
+        uint64_t now_counter = use_tsc ? clock_read_tsc() : get_ticks();
+        uint64_t now_ticks = use_tsc ? get_ticks() : now_counter;
 
-        continuous_seconds += dt;
-        if (continuous_seconds >= 12.0 * 3600.0) {
-            continuous_seconds -= 12.0 * 3600.0;
+        double dt = 0.0;
+        if (now_counter > last_counter)
+            dt = (double)(now_counter - last_counter) / counter_hz;
+        last_counter = now_counter;
+
+        if (get_time(&current_os_time) == 0 &&
+            !(current_os_time.year == 2026 && current_os_time.month == 1 && current_os_time.day == 1 &&
+              current_os_time.hour == 0 && current_os_time.minute == 0 && current_os_time.second == 0)) {
+            double rtc_seconds = os_dial_seconds(&current_os_time);
+
+            if (rtc_seconds == prev_rtc_seconds) {
+                candidate_reads = 0;
+            } else {
+                double step = dial_step(prev_rtc_seconds, rtc_seconds);
+                bool accept;
+
+                if (step == 1.0) {
+                    accept = true;
+                } else {
+                    // Missed boundaries (stalled frames) or a CMOS glitch: trust
+                    // the value only after two consecutive matching reads.
+                    if (rtc_seconds == candidate_seconds)
+                        candidate_reads++;
+                    else {
+                        candidate_seconds = rtc_seconds;
+                        candidate_reads = 1;
+                    }
+                    accept = candidate_reads >= 2;
+                }
+
+                if (accept) {
+                    candidate_reads = 0;
+
+                    // Scheduler ticks per RTC second, measured across boundary
+                    // observations: paces the frame loop at the true rate.
+                    if (have_cross_ticks) {
+                        uint64_t observed = now_ticks - last_cross_ticks;
+                        if (!ticks_calibrated) {
+                            ticks_per_second = (double)observed;
+                            ticks_calibrated = true;
+                        } else if ((double)observed > ticks_per_second * 0.6 &&
+                                   (double)observed < ticks_per_second * 1.5) {
+                            ticks_per_second = ticks_per_second * 0.75 + (double)observed * 0.25;
+                        }
+                        frame_ticks = (uint64_t)(ticks_per_second * 0.016);
+                        if (frame_ticks == 0)
+                            frame_ticks = 1;
+                    }
+                    have_cross_ticks = true;
+                    last_cross_ticks = now_ticks;
+
+                    // Re-anchor at the RTC boundary without a discontinuity: the
+                    // current display position is preserved in phase_ramp and bled
+                    // off smoothly below, so the hands never snap.
+                    double elapsed =
+                        now_counter >= base_counter ? (double)(now_counter - base_counter) / counter_hz : 0.0;
+                    double display_now = wrap_dial_seconds(base_seconds + elapsed + phase_ramp);
+
+                    base_seconds = rtc_seconds;
+                    base_counter = now_counter;
+                    if (!use_tsc)
+                        counter_hz = ticks_per_second;
+
+                    phase_ramp = dial_step(rtc_seconds, display_now);
+                    if (phase_ramp > 30.0 || phase_ramp < -30.0)
+                        phase_ramp = 0.0;
+
+                    prev_rtc_seconds = rtc_seconds;
+                }
+            }
         }
 
-        get_time(&current_os_time);
-        double os_seconds = (current_os_time.hour % 12) * 3600.0 + 
-                            current_os_time.minute * 60.0 + 
-                            current_os_time.second;
-
-        double diff = os_seconds - continuous_seconds;
-        if (diff < -6.0 * 3600.0) diff += 12.0 * 3600.0;
-        if (diff > 6.0 * 3600.0)  diff -= 12.0 * 3600.0;
-
-        if (diff > 2.0 || diff < -2.0) {
-            continuous_seconds = os_seconds;
-        } else {
-            continuous_seconds += diff * 0.01;
+        // Bleed off phase_ramp with a bounded-rate proportional approach: hand
+        // speed stays within [0x, 2x], so motion is always forward and smooth.
+        if (phase_ramp != 0.0) {
+            double rate = phase_ramp * 3.0;
+            if (rate > 1.0)
+                rate = 1.0;
+            else if (rate < -1.0)
+                rate = -1.0;
+            double step = rate * dt;
+            if (phase_ramp > 0.0 && step > phase_ramp)
+                step = phase_ramp;
+            else if (phase_ramp < 0.0 && step < phase_ramp)
+                step = phase_ramp;
+            phase_ramp -= step;
+            if (phase_ramp > -0.0001 && phase_ramp < 0.0001)
+                phase_ramp = 0.0;
         }
+
+        double elapsed_seconds = now_counter >= base_counter ? (double)(now_counter - base_counter) / counter_hz : 0.0;
+        double continuous_seconds = wrap_dial_seconds(base_seconds + elapsed_seconds + phase_ramp);
 
         w = (int)win.width;
         h = (int)win.height;
         int pad = gui_scaled_metric(16);
-        
+
         face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(52));
         if (face_r < gui_scaled_metric(60))
             face_r = gui_scaled_metric(60);
-            
+
         cx = w / 2;
         cy = h / 2 - gui_scaled_metric(12);
 
-        if (needs_full_redraw || resized || theme_changed) {
+        bool full_frame = needs_full_redraw || resized || theme_changed;
+        if (full_frame) {
             rebuild_cache(&cache, &win, cx, cy, face_r);
             needs_full_redraw = false;
         }
@@ -488,14 +635,52 @@ extern "C" int main()
         blit_cache_to_window(&cache, &backbuffer);
         draw_clock_face_hands(&backbuffer, cx, cy, face_r, continuous_seconds);
         draw_clock_text(&backbuffer, cx, cy, face_r, &current_os_time);
-        
-        memcpy(win.buffer, backbuffer.buffer, (size_t)backbuffer_stride * win.height * sizeof(uint32_t));
-        gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
+
+        if (full_frame) {
+            memcpy(win.buffer, backbuffer.buffer, (size_t)backbuffer_stride * win.height * sizeof(uint32_t));
+            gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
+        } else {
+            // Only the face (hands sweep) and the text below it change frame
+            // to frame: publish damage for those regions instead of the whole
+            // window to keep the compositor load low at 60 fps.
+            int fx0 = cx - face_r - 2;
+            int fy0 = cy - face_r - 2;
+            int fx1 = cx + face_r + 2;
+            int fy1 = cy + face_r + 2;
+            if (fx0 < 0)
+                fx0 = 0;
+            if (fy0 < 0)
+                fy0 = 0;
+            if (fx1 > (int)win.width)
+                fx1 = (int)win.width;
+            if (fy1 > (int)win.height)
+                fy1 = (int)win.height;
+            int text_top = cy + face_r + gui_scaled_metric(10);
+            if (text_top < 0)
+                text_top = 0;
+            if (text_top > (int)win.height)
+                text_top = (int)win.height;
+
+            for (int y = fy0; y < fy1; y++) {
+                memcpy(&win.buffer[(size_t)y * backbuffer_stride + fx0],
+                       &backbuffer.buffer[(size_t)y * backbuffer_stride + fx0],
+                       (size_t)(fx1 - fx0) * sizeof(uint32_t));
+            }
+            for (int y = text_top; y < (int)win.height; y++) {
+                memcpy(&win.buffer[(size_t)y * backbuffer_stride], &backbuffer.buffer[(size_t)y * backbuffer_stride],
+                       (size_t)backbuffer_stride * sizeof(uint32_t));
+            }
+
+            if (fx1 > fx0 && fy1 > fy0)
+                gui_blit_to_screen_rect(&win, fx0, fy0, fx1 - fx0, fy1 - fy0);
+            if (text_top < (int)win.height)
+                gui_blit_to_screen_rect(&win, 0, text_top, win.width, win.height - text_top);
+        }
 
         sleep_until_ticks(next_frame_ticks);
         uint64_t frame_now = get_ticks();
-        next_frame_ticks += 16;
+        next_frame_ticks += frame_ticks;
         if (frame_now > next_frame_ticks)
-            next_frame_ticks = frame_now + 16;
+            next_frame_ticks = frame_now + frame_ticks;
     }
 }
