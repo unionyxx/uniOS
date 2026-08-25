@@ -40,9 +40,37 @@ static bool rsdp_checksum_valid(const AcpiRsdp *rsdp)
     return sum == 0;
 }
 
+// ACPI 2.0+ RSDPs carry a second checksum over the whole (larger) structure.
+// A corrupt XSDT pointer in an otherwise-valid RSDP must not be trusted.
+static bool rsdp20_checksum_valid(const AcpiRsdp20 *rsdp20)
+{
+    // The extended structure is 36 bytes; cap the summed region so a garbage
+    // length field cannot walk far into unrelated memory.
+    if (rsdp20->length < sizeof(AcpiRsdp20) || rsdp20->length > 128)
+        return false;
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(rsdp20);
+    uint8_t sum = 0;
+    for (uint32_t i = 0; i < rsdp20->length; i++) {
+        sum += bytes[i];
+    }
+    return sum == 0;
+}
+
+// A table shorter than its header cannot be valid, and an absurd length would
+// make the checksum loop walk megabytes of unrelated memory. Tables larger
+// than this are not legitimate on any platform this OS targets.
+static constexpr uint32_t ACPI_MAX_TABLE_LENGTH = 4 * 1024 * 1024;
+
+static bool acpi_sdt_length_sane(const AcpiSdtHeader *header)
+{
+    return header && header->length >= sizeof(AcpiSdtHeader) && header->length <= ACPI_MAX_TABLE_LENGTH;
+}
+
 // Validate SDT checksum
 static bool sdt_checksum_valid(const AcpiSdtHeader *header)
 {
+    if (!acpi_sdt_length_sane(header))
+        return false;
     const uint8_t *bytes = reinterpret_cast<const uint8_t *>(header);
     uint8_t sum = 0;
     for (uint32_t i = 0; i < header->length; i++) {
@@ -59,9 +87,13 @@ static AcpiRsdp *find_rsdp_in_range(uint64_t start, uint64_t end)
         if (ptr[0] == 'R' && ptr[1] == 'S' && ptr[2] == 'D' && ptr[3] == ' ' && ptr[4] == 'P' && ptr[5] == 'T' &&
             ptr[6] == 'R' && ptr[7] == ' ') {
             AcpiRsdp *rsdp = reinterpret_cast<AcpiRsdp *>(ptr);
-            if (rsdp_checksum_valid(rsdp)) {
-                return rsdp;
-            }
+            if (!rsdp_checksum_valid(rsdp))
+                continue;
+            // ACPI 2.0+ additionally checksums the extended fields; a corrupt
+            // XSDT address must not be handed to the table walker.
+            if (rsdp->revision >= 2 && !rsdp20_checksum_valid(reinterpret_cast<AcpiRsdp20 *>(rsdp)))
+                continue;
+            return rsdp;
         }
     }
     return nullptr;
@@ -194,7 +226,8 @@ void *acpi_find_table(const char *signature)
     if (!sdt_checksum_valid(rsdt))
         return nullptr;
 
-    uint32_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / (use_xsdt ? 8 : 4);
+    const uint32_t entry_size = use_xsdt ? 8 : 4;
+    const uint32_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / entry_size;
     uint8_t *entry_base = reinterpret_cast<uint8_t *>(rsdt) + sizeof(AcpiSdtHeader);
 
     for (uint32_t i = 0; i < entries; i++) {
@@ -206,7 +239,9 @@ void *acpi_find_table(const char *signature)
         }
 
         AcpiSdtHeader *table = reinterpret_cast<AcpiSdtHeader *>(vmm_phys_to_virt(table_phys));
-        if (kstring::strncmp(table->signature, signature, 4) == 0) {
+        // Only trust the signature once the header itself is well-formed; a
+        // garbage entry must not be dereferenced past a bogus length.
+        if (acpi_sdt_length_sane(table) && kstring::strncmp(table->signature, signature, 4) == 0) {
             return static_cast<void *>(table);
         }
     }
@@ -251,7 +286,8 @@ void acpi_init()
     }
 
     // Find FADT in RSDT/XSDT entries
-    uint32_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / (use_xsdt ? 8 : 4);
+    const uint32_t entry_size = use_xsdt ? 8 : 4;
+    const uint32_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / entry_size;
     uint8_t *entry_base = reinterpret_cast<uint8_t *>(rsdt) + sizeof(AcpiSdtHeader);
 
     for (uint32_t i = 0; i < entries; i++) {
@@ -263,21 +299,30 @@ void acpi_init()
         }
 
         AcpiSdtHeader *table = (AcpiSdtHeader *)vmm_phys_to_virt(table_phys);
+        if (!acpi_sdt_length_sane(table))
+            continue;
 
         // Check for FACP (FADT signature in ACPI)
         if (table->signature[0] == 'F' && table->signature[1] == 'A' && table->signature[2] == 'C' &&
             table->signature[3] == 'P') {
             AcpiFadt *fadt = reinterpret_cast<AcpiFadt *>(table);
-            pm1a_cnt = fadt->pm1a_cnt_blk;
-            pm1b_cnt = fadt->pm1b_cnt_blk;
-            smi_cmd_port = fadt->smi_cmd;
-            acpi_enable_val = fadt->acpi_enable;
-            g_reset_reg = fadt->reset_reg;
-            g_reset_value = fadt->reset_value;
+            const uint32_t fadt_len = fadt->header.length;
 
-            // Parse DSDT to find S5 sleep type
-            if (fadt->dsdt) {
-                find_s5_in_dsdt(fadt->dsdt);
+            // The PM control blocks, SMI command port and DSDT pointer all
+            // precede pm_tmr_blk; only read them if the table is long enough.
+            if (fadt_len >= offsetof(AcpiFadt, pm_tmr_blk)) {
+                pm1a_cnt = fadt->pm1a_cnt_blk;
+                pm1b_cnt = fadt->pm1b_cnt_blk;
+                smi_cmd_port = fadt->smi_cmd;
+                acpi_enable_val = fadt->acpi_enable;
+                if (fadt->dsdt)
+                    find_s5_in_dsdt(fadt->dsdt);
+            }
+            // The reset register/value live at the end of the FADT and are
+            // absent from short (ACPI 1.x) tables.
+            if (fadt_len >= sizeof(AcpiFadt)) {
+                g_reset_reg = fadt->reset_reg;
+                g_reset_value = fadt->reset_value;
             }
 
             acpi_available = true;

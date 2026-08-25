@@ -1221,8 +1221,21 @@ static bool gop_candidate_better(const GopModeCandidate &candidate, const GopMod
         return EFI_SUCCESS;
 
     EFI_STATUS status = gop->SetMode(gop, best_mode);
-    if (efi_error(status))
+    if (efi_error(status)) {
+        // Some firmware/monitor combinations reject SetMode even though the
+        // mode already up works fine. Keep the current mode if it is usable
+        // instead of making the machine unbootable.
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = nullptr;
+        UINTN info_size = 0;
+        if (!efi_error(gop->QueryMode(gop, gop->Mode->Mode, &info_size, &info)) && info) {
+            const bool usable = info->HorizontalResolution != 0 && info->VerticalResolution != 0 &&
+                                gop_pixel_format_supported(info->PixelFormat);
+            g_boot_services->FreePool(info);
+            if (usable)
+                return EFI_SUCCESS;
+        }
         return fail_status("failed to switch GOP mode", status);
+    }
     return EFI_SUCCESS;
 }
 
@@ -1594,7 +1607,13 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
 
     for (UINTN offset = 0; offset < memory_map_size; offset += descriptor_size) {
         const auto *descriptor = reinterpret_cast<const EFI_MEMORY_DESCRIPTOR *>(reinterpret_cast<const uint8_t *>(memory_map) + offset);
-        if (descriptor->NumberOfPages == 0 || descriptor->Type == EfiMemoryMappedIOPortSpace)
+        // Never identity/HHDM-map device MMIO as write-back: the kernel maps
+        // those regions itself as uncached, and a WB alias of the same
+        // physical range is architecturally undefined behavior on real
+        // hardware. EfiMemoryMappedIO and EfiMemoryMappedIOPortSpace are
+        // both skipped here.
+        if (descriptor->NumberOfPages == 0 || descriptor->Type == EfiMemoryMappedIOPortSpace ||
+            descriptor->Type == EfiMemoryMappedIO)
             continue;
         if (descriptor->NumberOfPages > UINT64_MAX / k_page_size)
             return false;
