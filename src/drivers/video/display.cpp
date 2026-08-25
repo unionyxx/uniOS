@@ -572,8 +572,26 @@ static void display_fallback_finish_wait(DisplayHead *head, uint64_t target_tick
     uint64_t wait_start = timer_get_ticks();
     if (target_tick != 0 && wait_start > target_tick)
         head->missed_target_vblank_count++;
-    if (target_tick > wait_start)
-        scheduler_sleep(target_tick - wait_start);
+    if (target_tick > wait_start) {
+        const uint64_t coarse_ticks = target_tick - wait_start;
+        const bool fast_tick = timer_get_frequency() >= 500;
+        if (!fast_tick) {
+            scheduler_sleep(coarse_ticks);
+        } else {
+            // Sleep all but the final tick, then spin to the deadline so the
+            // frame lands on the deadline tick itself instead of one
+            // scheduler round later. Whole-tick sleeps add up to a full tick
+            // of wake latency per frame, which reads as judder at 60 Hz.
+            if (coarse_ticks >= 2)
+                scheduler_sleep(coarse_ticks - 1);
+            const uint64_t spin_start_us = timer_now_us();
+            while (timer_get_ticks() < target_tick) {
+                if (timer_now_us() - spin_start_us > 20000ULL)
+                    break; // tick source stalled: never wedge the compositor
+                asm volatile("pause");
+            }
+        }
+    }
     uint64_t wait_end = timer_get_ticks();
     head->last_vblank_wait_ticks = wait_end - wait_start;
     head->total_vblank_wait_ticks += head->last_vblank_wait_ticks;
