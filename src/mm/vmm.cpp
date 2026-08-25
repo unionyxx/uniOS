@@ -549,6 +549,11 @@ void vmm_unmap_page_in(uint64_t *target_pml4, uint64_t virt)
     vmm_invalidate_tlb(virt);
 }
 
+void vmm_unmap_page_no_flush(uint64_t *pml4, uint64_t virt)
+{
+    vmm_unmap_page_no_flush_in(pml4, virt);
+}
+
 uint64_t *vmm_create_address_space()
 {
     void *frame = pmm_alloc_frame();
@@ -718,6 +723,9 @@ void vmm_free_address_space(const uint64_t *target_pml4)
 void vmm_switch_address_space(const uint64_t *new_pml4_phys)
 {
     asm volatile("mov %0, %%cr3" ::"r"(new_pml4_phys) : "memory");
+    PerCpu *cpu = cpu_get_local();
+    if (cpu)
+        cpu->current_cr3_phys = reinterpret_cast<uint64_t>(new_pml4_phys);
 }
 
 void vmm_set_page_flags(uint64_t virt, uint64_t flags)

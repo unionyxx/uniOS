@@ -47,6 +47,7 @@ struct alignas(64) PerCpu
     volatile bool stop_requested;
     volatile uint64_t tlb_ack_sequence;
     volatile uint32_t fault_depth;
+    uint64_t current_cr3_phys;
 };
 
 static_assert(offsetof(PerCpu, kernel_stack) == 0, "usermode.asm ABI: [gs:0]");

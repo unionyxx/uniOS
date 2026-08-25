@@ -37,6 +37,7 @@
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
 #include <kernel/smp.h>
+#include <kernel/sync/futex.h>
 #include <kernel/terminal.h>
 #include <kernel/time/timer.h>
 #include <libk/kstring.h>
@@ -402,6 +403,10 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
 
     extern EventQueue g_event_queue;
     event_init(g_event_queue);
+
+    // Futex buckets must exist before any userspace runs; initializing
+    // lazily from the first syscall raced on SMP.
+    futex_init();
 
     const uint64_t framebuffer_bytes = framebuffer_span_bytes(fb);
     if (framebuffer_bytes != 0)

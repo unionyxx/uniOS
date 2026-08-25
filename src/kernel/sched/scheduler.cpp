@@ -41,22 +41,22 @@ static volatile uint32_t g_shutdown_action = 0;
 WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
 extern "C" void scheduler_unlock_after_switch();
 
-static void process_free_reaped(Process *target)
+// Zombies whose resources are still shared with live threads cannot be freed
+// the moment they are reaped. They are parked here and retried on every
+// kernel-zombie reap pass until the last sharer is gone. queue_next links.
+static Process *g_deferred_frees = nullptr;
+
+// Returns true when `target` was fully destroyed, false when it had to be
+// deferred because live threads still share its address space or its
+// embedded vma lock.
+static bool process_free_reaped(Process *target)
 {
     if (!target)
-        return;
-    if (target->stack_phys) {
-        uintptr_t stack_ptr = target->stack_phys;
-        size_t num_pages = KERNEL_STACK_SIZE / 4096;
-
-        for (size_t i = 0; i < num_pages; i++) {
-            pmm_free_frame(reinterpret_cast<void *>(stack_ptr));
-            stack_ptr += 4096; // Move to the next page frame
-        }
-    }
+        return true;
 
     bool share_page_table = false;
     bool share_vma_list = false;
+    bool share_vma_lock = false;
 
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
@@ -69,22 +69,67 @@ static void process_free_reaped(Process *target)
                     share_page_table = true;
                 if (curr->vma_list == target->vma_list)
                     share_vma_list = true;
-                if (share_page_table && share_vma_list)
+                // Threads lock VMAs through the leader's EMBEDDED spinlock;
+                // freeing the struct while they do is a use-after-free of
+                // the lock itself.
+                if (curr->vma_lock_ptr == &target->vma_lock)
+                    share_vma_lock = true;
+                if (share_page_table && share_vma_list && share_vma_lock)
                     break;
             }
             curr = curr->next;
         } while (curr != g_proc_list);
     }
 
+    if (share_page_table || share_vma_list || share_vma_lock) {
+        target->queue_next = g_deferred_frees;
+        g_deferred_frees = target;
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        return false;
+    }
+
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
 
-    if (target->page_table && !share_page_table)
+    if (target->stack_phys) {
+        uintptr_t stack_ptr = target->stack_phys;
+        size_t num_pages = KERNEL_STACK_SIZE / 4096;
+
+        for (size_t i = 0; i < num_pages; i++) {
+            pmm_free_frame(reinterpret_cast<void *>(stack_ptr));
+            stack_ptr += 4096; // Move to the next page frame
+        }
+    }
+
+    if (target->page_table)
         vmm_free_address_space(target->page_table);
-    if (target->vma_list && !share_vma_list)
+    if (target->vma_list)
         vma_free_all(target->vma_list);
 
     aligned_free(target);
+    return true;
+}
+
+static void retry_deferred_frees()
+{
+    while (true) {
+        const uint64_t flags = interrupts_save_disable();
+        spinlock_acquire(&g_sched_lock);
+        Process *target = g_deferred_frees;
+        if (!target) {
+            spinlock_release(&g_sched_lock);
+            interrupts_restore(flags);
+            return;
+        }
+        g_deferred_frees = target->queue_next;
+        target->queue_next = nullptr;
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+
+        if (!process_free_reaped(target))
+            return; // still shared; re-queued — try the rest next pass
+    }
 }
 
 static Process *detach_kernel_zombie_locked()
@@ -149,6 +194,7 @@ static Process *detach_kernel_zombie_locked()
 
 static void reap_kernel_zombies()
 {
+    retry_deferred_frees();
     while (true) {
         const uint64_t flags = interrupts_save_disable();
         spinlock_acquire(&g_sched_lock);
@@ -167,16 +213,25 @@ static void process_release_private_fds(Process *proc)
     if (!proc)
         return;
 
+    // A concurrent sys_fd_transfer from another process may still be
+    // installing fds into this table while it dies; detach under fd_lock and
+    // drop the vnode references outside of it (fs close can do real work).
+    VNode *nodes[MAX_OPEN_FILES];
+    int node_count = 0;
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&proc->fd_lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (!proc->fd_table[i].used)
             continue;
-
-        VNode *node = proc->fd_table[i].vnode;
+        if (proc->fd_table[i].vnode && node_count < MAX_OPEN_FILES)
+            nodes[node_count++] = proc->fd_table[i].vnode;
         proc->fd_table[i].used = false;
         proc->fd_table[i].vnode = nullptr;
-        if (node)
-            vfs_close_vnode(node);
     }
+    spinlock_release_irqrestore(&proc->fd_lock, sl_flags);
+
+    for (int i = 0; i < node_count; i++)
+        vfs_close_vnode(nodes[i]);
 }
 
 #define NUM_PRIORITY_LEVELS 3
@@ -337,13 +392,10 @@ bool scheduler_ready_queue_self_test()
     return ok;
 }
 
-void scheduler_boost_process_priority(Process *p, uint8_t new_priority)
+static void scheduler_boost_process_priority_locked(Process *p, uint8_t new_priority)
 {
     if (!p)
         return;
-    const uint64_t flags = interrupts_save_disable();
-    spinlock_acquire(&g_sched_lock);
-
     if (p->priority > new_priority) {
         scheduler_remove_from_ready_queue_locked(p);
         p->priority = new_priority;
@@ -355,9 +407,23 @@ void scheduler_boost_process_priority(Process *p, uint8_t new_priority)
             ready_queue_push(p);
         }
     }
+}
 
+void scheduler_boost_process_priority(Process *p, uint8_t new_priority)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    scheduler_boost_process_priority_locked(p, new_priority);
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
+}
+
+// Variant for callers already holding the big lock.
+void scheduler_boost_process_priority_under_lock(Process *p, uint8_t new_priority)
+{
+    scheduler_boost_process_priority_locked(p, new_priority);
 }
 
 static void sleep_queue_push(Process *p, uint64_t ticks)
@@ -497,6 +563,57 @@ static void scheduler_wake_process_locked(Process *p)
     }
 }
 
+// Wakes a signal's target regardless of where the scheduler parked it.
+// Must be called with g_sched_lock held (callers do the find-and-signal
+// atomically so the target cannot be reaped between lookup and wake).
+void scheduler_wake_for_signal_locked(Process *p)
+{
+    if (!p)
+        return;
+
+    if (p->state == ProcessState_Sleeping) {
+        // Unlink from the delta-encoded sleep queue, handing our remaining
+        // time to the next sleeper.
+        Process *prev = nullptr;
+        Process *cur = g_sleep_queue;
+        while (cur && cur != p) {
+            prev = cur;
+            cur = cur->queue_next;
+        }
+        if (cur) {
+            if (prev)
+                prev->queue_next = cur->queue_next;
+            else
+                g_sleep_queue = cur->queue_next;
+            if (cur->queue_next)
+                cur->queue_next->wake_time += cur->wake_time;
+            cur->queue_next = nullptr;
+            cur->state = ProcessState_Ready;
+            interactive_boost_if_needed(cur);
+            ready_queue_push(cur);
+        }
+        return;
+    }
+
+    scheduler_wake_process_locked(p);
+}
+
+// Finds a process while g_sched_lock is ALREADY held. The returned pointer
+// is only valid under the lock; callers must finish their business with it
+// before releasing.
+Process *process_find_by_pid_locked(uint64_t pid)
+{
+    Process *p = g_proc_list;
+    if (!p)
+        return nullptr;
+    do {
+        if (p->pid == pid)
+            return p;
+        p = p->next;
+    } while (p != g_proc_list);
+    return nullptr;
+}
+
 static void scheduler_schedule_internal()
 {
     Process *cur = current_proc();
@@ -579,10 +696,14 @@ static void scheduler_schedule_internal()
                                     : reinterpret_cast<uint64_t>(vmm_get_kernel_pml4());
         return reinterpret_cast<uint64_t *>(pt - vmm_get_hhdm_offset());
     };
-    uint64_t *prev_cr3 = get_cr3(prev);
     uint64_t *next_cr3 = get_cr3(current_proc());
 
-    if (prev_cr3 != next_cr3) {
+    // Compare against the CR3 actually loaded on this core, not the previous
+    // task's: process_exit() switches to the kernel page tables before
+    // scheduling, and a sibling thread of the exiting task has the SAME
+    // page_table — comparing prev vs next would skip the switch and return
+    // the sibling to user mode on kernel mappings.
+    if (cpu_get_local()->current_cr3_phys != reinterpret_cast<uint64_t>(next_cr3)) {
         vmm_switch_address_space(next_cr3);
     }
 
@@ -674,6 +795,19 @@ void scheduler_wake_all(WaitQueue *q)
     scheduler_notify_idle_cpus();
 }
 
+// Same as scheduler_wake_all() but for callers that already hold the big
+// lock (find-and-act sequences). Does not notify idle CPUs; the caller does
+// that after releasing the lock.
+void scheduler_wake_all_locked(WaitQueue *q)
+{
+    if (!q)
+        return;
+    wait_queue_wake_all(q);
+    if (q != &g_epoll_wait_queue) {
+        wait_queue_wake_all(&g_epoll_wait_queue);
+    }
+}
+
 void scheduler_wake_one(WaitQueue *q)
 {
     if (!q)
@@ -740,6 +874,37 @@ void scheduler_wake_process(Process *p)
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
     scheduler_notify_idle_cpus();
+}
+
+// Fatal-signal escape hatch for kernel wait loops: a pending SIGKILL-class
+// default-fatal signal should break an otherwise endless block instead of
+// being delivered only when some unrelated event wakes the process.
+bool scheduler_fatal_signal_pending(const Process *p)
+{
+    if (!p)
+        return false;
+    const uint64_t pending = __atomic_load_n(&p->signals.pending, __ATOMIC_ACQUIRE);
+    for (int i = 1; i < 32; i++) {
+        if (!(pending & (1ULL << i)))
+            continue;
+        if (p->signals.handlers[i] == SIG_DFL &&
+            (i == SIGINT || i == SIGTERM || i == SIGQUIT || i == SIGKILL || i == SIGSEGV))
+            return true;
+    }
+    return false;
+}
+
+uint64_t scheduler_big_lock_irqsave()
+{
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    return flags;
+}
+
+void scheduler_big_unlock_irqrestore(uint64_t flags)
+{
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
 }
 
 static void halt_forever()
@@ -1185,6 +1350,9 @@ void scheduler_notify_input_waiters()
 
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
+    // Parked idle cores only learn about newly-ready work through the RESCHED
+    // IPI; without it an input event waits up to a full tick for a core.
+    scheduler_notify_idle_cpus();
 }
 
 extern "C" uint64_t g_kernel_scratch_rsp;
@@ -1244,20 +1412,30 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     spinlock_release(&current_proc()->fd_lock);
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
+
+    // Clone under the address-space lock: sibling threads may mmap/munmap or
+    // fault concurrently, and the clone downgrades writable PTEs for COW. A
+    // concurrent munmap between the clone's read and its refcount bump would
+    // free a frame the child is about to map.
+    uint64_t clone_flags = spinlock_acquire_irqsave(current_proc()->vma_lock_ptr);
     child->page_table = vmm_clone_address_space(current_proc()->page_table);
+    spinlock_release_irqrestore(current_proc()->vma_lock_ptr, clone_flags);
     if (!child->page_table) {
         process_release_private_fds(child);
         aligned_free(child);
         return static_cast<uint64_t>(-1);
     }
 
-    asm volatile("mov %%cr3, %%rax\n\tmov %%rax, %%cr3" ::: "rax", "memory");
+    // The COW downgrade cleared W on the parent's PTEs; other cores running
+    // the parent's threads may still cache writable translations. Invalidate
+    // the whole user range everywhere before the child becomes runnable.
+    vmm_invalidate_tlb_range(0, 0x0000800000000000ULL / 4096ULL);
 
     spinlock_init(&child->vma_lock);
     child->vma_lock_ptr = &child->vma_lock;
-    spinlock_acquire(&current_proc()->vma_lock);
+    uint64_t vma_clone_flags = spinlock_acquire_irqsave(current_proc()->vma_lock_ptr);
     child->vma_list = vma_clone(current_proc()->vma_list);
-    spinlock_release(&current_proc()->vma_lock);
+    spinlock_release_irqrestore(current_proc()->vma_lock_ptr, vma_clone_flags);
 
     if (current_proc()->vma_list && !child->vma_list) {
         process_release_private_fds(child);
@@ -1300,6 +1478,10 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     child_context->rip = reinterpret_cast<uint64_t>(fork_ret);
     child->sp = stack_top_hhdm;
 
+    // Capture before publishing: once the child is queued another core can
+    // run and exit it (and reap can free the struct) before we return.
+    const uint64_t child_pid = child->pid;
+
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     g_proc_tail->next = child;
@@ -1315,7 +1497,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     interrupts_restore(flags);
     scheduler_notify_idle_cpus();
 
-    return child->pid;
+    return child_pid;
 }
 
 void process_exit(int32_t status)
@@ -1356,6 +1538,29 @@ void process_exit(int32_t status)
             }
             last->sibling_next = init->children_list;
             init->children_list = current_proc()->children_list;
+        } else {
+            // No init (early boot / ktest / init crashed): reparent to the
+            // pid-0 kernel task so the orphans' zombies are still reaped by
+            // the kernel-zombie path instead of leaking forever.
+            Process *kernel = g_proc_list;
+            if (kernel) {
+                do {
+                    if (kernel->pid == 0)
+                        break;
+                    kernel = kernel->next;
+                } while (kernel != g_proc_list);
+            }
+            if (kernel && kernel->pid == 0) {
+                Process *last = current_proc()->children_list;
+                while (true) {
+                    last->parent_pid = 0;
+                    if (!last->sibling_next)
+                        break;
+                    last = last->sibling_next;
+                }
+                last->sibling_next = kernel->children_list;
+                kernel->children_list = current_proc()->children_list;
+            }
         }
         current_proc()->children_list = nullptr;
     }
@@ -1623,6 +1828,10 @@ extern "C" void thread_ret();
     kstring::strncpy(thread->name, parent->name, 24);
     kstring::strncat(thread->name, "/thr", 7);
 
+    // Capture before publishing (see process_fork): the thread may run and
+    // exit on another core before this function returns.
+    const int64_t thread_pid = static_cast<int64_t>(thread->pid);
+
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     g_proc_tail->next = thread;
@@ -1636,8 +1845,9 @@ extern "C" void thread_ret();
     ready_queue_push(thread);
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
+    scheduler_notify_idle_cpus();
 
-    return static_cast<int64_t>(thread->pid);
+    return thread_pid;
 }
 
 void preempt_disable()

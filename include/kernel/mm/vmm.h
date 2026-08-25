@@ -37,6 +37,11 @@ Result<void> vmm_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys, uint6
 /** @brief Unmaps a virtual address from a specific PML4. */
 void vmm_unmap_page_in(uint64_t *pml4, uint64_t virt);
 
+/** @brief Unmaps without any TLB invalidation; the caller batches one
+ *  vmm_invalidate_tlb_range() after the whole range is cleared (and
+ *  BEFORE freeing the underlying frames). */
+void vmm_unmap_page_no_flush(uint64_t *pml4, uint64_t virt);
+
 /** @brief Translates a virtual address to its physical address in the current address space. */
 [[nodiscard]] uint64_t vmm_virt_to_phys(uint64_t virt);
 
