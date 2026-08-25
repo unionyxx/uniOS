@@ -297,6 +297,13 @@ void gui_app_draw_list_row(Surface *s, int x, int y, int w, int h, const char *b
                            const char *detail, bool active, bool hovered, bool muted);
 void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, const char *label, const char *detail, bool on,
                              bool active, bool hovered);
+// Slider row: label left, percent value right, track along the bottom.
+// Track geometry for hit-testing comes from gui_app_slider_track_rect; map a
+// pointer x position to a value with gui_app_slider_value_from_x.
+Rect gui_app_slider_track_rect(int x, int y, int w, int h);
+uint32_t gui_app_slider_value_from_x(int mouse_x, const Rect *track, uint32_t max_value);
+void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *label, uint32_t value, uint32_t max_value,
+                         bool hovered);
 void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const char *const *labels, int count,
                                    int selected, int hovered_index);
 void gui_app_draw_text_field(Surface *s, int x, int y, int w, int h, const char *value, bool focused, bool hovered);

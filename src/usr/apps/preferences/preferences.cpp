@@ -40,6 +40,7 @@ enum HoverTarget
     HOVER_WALLPAPER_DEFAULT,
     HOVER_GRID_TOGGLE,
     HOVER_SECONDS_TOGGLE,
+    HOVER_VOLUME_SLIDER,
     HOVER_ETHERNET_TOGGLE,
     HOVER_ETHERNET_DHCP_TOGGLE,
     HOVER_TERMINAL_TOGGLE,
@@ -65,6 +66,7 @@ struct PreferencesState
     int section;
     HoverTarget hovered;
     bool field_focused;
+    bool volume_dragging;
 };
 
 struct PreferencesRects
@@ -76,6 +78,7 @@ struct PreferencesRects
     Rect wallpaper_default_btn;
     Rect grid_toggle;
     Rect seconds_toggle;
+    Rect volume_slider;
     Rect ethernet_toggle;
     Rect ethernet_dhcp_toggle;
     Rect animations_toggle;
@@ -436,6 +439,8 @@ static Rect hover_target_rect(const PreferencesRects &rects, int section, HoverT
             return section == PREF_SECTION_DESKTOP ? inflate_rect(rects.grid_toggle, 1) : gui_rect_make(0, 0, 0, 0);
         case HOVER_SECONDS_TOGGLE:
             return section == PREF_SECTION_DESKTOP ? inflate_rect(rects.seconds_toggle, 1) : gui_rect_make(0, 0, 0, 0);
+        case HOVER_VOLUME_SLIDER:
+            return section == PREF_SECTION_DESKTOP ? inflate_rect(rects.volume_slider, 1) : gui_rect_make(0, 0, 0, 0);
         case HOVER_ETHERNET_TOGGLE:
             return section == PREF_SECTION_NETWORK ? inflate_rect(rects.ethernet_toggle, 1) : gui_rect_make(0, 0, 0, 0);
         case HOVER_ETHERNET_DHCP_TOGGLE:
@@ -484,7 +489,7 @@ static int compute_preferences_content_height(PreferencesState *state, int detai
         section_h += gui_space_2() + gui_line_height();
     } else if (state->section == PREF_SECTION_DESKTOP) {
         int row_h = gui_scaled_metric(40);
-        section_h += row_h * 2 + gui_scaled_metric(12);
+        section_h += row_h * 2 + gui_scaled_metric(56) + gui_scaled_metric(12) * 2;
     } else if (state->section == PREF_SECTION_NETWORK) {
         int row_h = gui_scaled_metric(40);
         section_h += row_h * 2 + gui_scaled_metric(12);
@@ -617,6 +622,8 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
         int row_h = gui_scaled_metric(40);
         rects->grid_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
         rects->seconds_toggle = gui_rect_make(content_x, content_y + row_h + gui_scaled_metric(12), content_w, row_h);
+        int slider_y = rects->seconds_toggle.y + rects->seconds_toggle.h + gui_scaled_metric(12);
+        rects->volume_slider = gui_rect_make(content_x, slider_y, content_w, gui_scaled_metric(56));
         gui_app_draw_toggle_row(win, rects->grid_toggle.x, rects->grid_toggle.y, rects->grid_toggle.w,
                                 rects->grid_toggle.h, "Show desktop grid", nullptr,
                                 (state->system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) != 0, false,
@@ -625,6 +632,9 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
                                 rects->seconds_toggle.h, "Show seconds in menu bar clock", nullptr,
                                 (state->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0, false,
                                 state->hovered == HOVER_SECONDS_TOGGLE);
+        gui_app_draw_slider(win, rects->volume_slider.x, rects->volume_slider.y, rects->volume_slider.w,
+                            rects->volume_slider.h, "Volume", state->volume_level, 100,
+                            state->hovered == HOVER_VOLUME_SLIDER || state->volume_dragging);
     } else if (state->section == PREF_SECTION_NETWORK) {
         int row_h = gui_scaled_metric(40);
         rects->ethernet_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
@@ -739,6 +749,8 @@ static HoverTarget update_hover_target(const PreferencesRects &rects, int sectio
             return HOVER_GRID_TOGGLE;
         if (point_in_rect(rects.seconds_toggle, x, y))
             return HOVER_SECONDS_TOGGLE;
+        if (point_in_rect(rects.volume_slider, x, y))
+            return HOVER_VOLUME_SLIDER;
     } else if (section == PREF_SECTION_NETWORK) {
         if (point_in_rect(rects.ethernet_toggle, x, y))
             return HOVER_ETHERNET_TOGGLE;
@@ -805,6 +817,15 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_MOUSE_MOVE) {
+                if (state.volume_dragging && !gui_rect_is_empty(rects.volume_slider)) {
+                    Rect track = gui_app_slider_track_rect(rects.volume_slider.x, rects.volume_slider.y,
+                                                           rects.volume_slider.w, rects.volume_slider.h);
+                    uint32_t next = gui_app_slider_value_from_x(ev.mouse.x, &track, 100);
+                    if (next != state.volume_level) {
+                        state.volume_level = next;
+                        publish_system_settings(state, registry);
+                    }
+                }
                 HoverTarget previous_hovered = state.hovered;
                 HoverTarget hovered = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
                 if (hovered != state.hovered) {
@@ -856,6 +877,12 @@ extern "C" int main()
                     state.system_flags ^= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
                     apply_system_settings(&state, registry, "Clock setting updated",
                                           "Clock setting applied for this session");
+                } else if (hovered == HOVER_VOLUME_SLIDER) {
+                    state.volume_dragging = true;
+                    Rect track = gui_app_slider_track_rect(rects.volume_slider.x, rects.volume_slider.y,
+                                                           rects.volume_slider.w, rects.volume_slider.h);
+                    state.volume_level = gui_app_slider_value_from_x(ev.mouse.x, &track, 100);
+                    publish_system_settings(state, registry);
                 } else if (hovered == HOVER_ETHERNET_TOGGLE) {
                     state.ethernet_enabled = !state.ethernet_enabled;
                     apply_network_settings(&state, registry, "Ethernet updated",
@@ -879,6 +906,12 @@ extern "C" int main()
                         snprintf(state.status, sizeof(state.status), "Failed to update Storage Mode");
                     }
                 }
+                request_redraw(true, gui_rect_make(0, 0, 0, 0));
+                continue;
+            }
+            if (ev.type == EVT_MOUSE_UP && state.volume_dragging) {
+                state.volume_dragging = false;
+                apply_system_settings(&state, registry, "Volume updated", "Volume applied for this session");
                 request_redraw(true, gui_rect_make(0, 0, 0, 0));
                 continue;
             }

@@ -2196,6 +2196,85 @@ void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, const char 
     gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, knob_bg);
 }
 
+Rect gui_app_slider_track_rect(int x, int y, int w, int h)
+{
+    const int pad = gui_space_2();
+    const int track_h = gui_scaled_metric(16);
+    int track_y = y + h - pad - track_h;
+    if (track_y < y + pad)
+        track_y = y + pad;
+    int track_w = w - pad * 2;
+    if (track_w < 0)
+        track_w = 0;
+    return gui_rect_make(x + pad, track_y, track_w, track_h);
+}
+
+uint32_t gui_app_slider_value_from_x(int mouse_x, const Rect *track, uint32_t max_value)
+{
+    if (!track || track->w <= 0 || max_value == 0)
+        return 0;
+    int rel = mouse_x - track->x;
+    if (rel < 0)
+        rel = 0;
+    if (rel > track->w)
+        rel = track->w;
+    uint64_t value = ((uint64_t)rel * max_value + (uint32_t)track->w / 2u) / (uint32_t)track->w;
+    return value > max_value ? max_value : (uint32_t)value;
+}
+
+void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *label, uint32_t value, uint32_t max_value,
+                         bool hovered)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    if (max_value == 0)
+        max_value = 1;
+    if (value > max_value)
+        value = max_value;
+
+    const int space_2 = gui_space_2();
+    uint32_t bg = hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface;
+    gui_fill_rounded_rect(s, x, y, w, h, gui_radius_md(), bg);
+    gui_draw_rounded_rect(s, x, y, w, h, gui_radius_md(), hovered ? g_gui_style.border_hover : g_gui_style.border);
+
+    char value_text[16];
+    uint32_t percent = (value * 100u + max_value / 2u) / max_value;
+    snprintf(value_text, sizeof(value_text), "%u%%", percent);
+    int label_y = y + space_2;
+    int value_w = gui_measure_text(gui_font_default(), value_text);
+    gui_draw_text_clipped(s, gui_font_default(), x + space_2, label_y, w - value_w - space_2 * 3, label ? label : "",
+                          g_gui_style.text, bg);
+    gui_draw_text_clipped(s, gui_font_default(), x + w - space_2 - value_w, label_y, value_w, value_text,
+                          g_gui_style.text_dim, bg);
+
+    Rect track = gui_app_slider_track_rect(x, y, w, h);
+    if (track.w <= 0 || track.h <= 0)
+        return;
+    int track_r = track.h / 2;
+    gui_fill_rounded_rect(s, track.x, track.y, track.w, track.h, track_r, g_gui_style.chrome_bg_alt);
+    gui_draw_rounded_rect(s, track.x, track.y, track.w, track.h, track_r, g_gui_style.border);
+
+    uint64_t fill_w64 = ((uint64_t)value * track.w + max_value / 2u) / max_value;
+    int fill_w = (int)fill_w64;
+    if (value > 0 && fill_w < track.h)
+        fill_w = track.h; // keep the fill cap round at small values
+    if (fill_w > track.w)
+        fill_w = track.w;
+    if (fill_w > 0)
+        gui_fill_rounded_rect(s, track.x, track.y, fill_w, track.h, track_r, g_gui_style.accent);
+
+    int knob_d = track.h + gui_scaled_metric(6);
+    int knob_x = track.x + fill_w - knob_d / 2;
+    if (knob_x < track.x)
+        knob_x = track.x;
+    if (knob_x + knob_d > track.x + track.w)
+        knob_x = track.x + track.w - knob_d;
+    int knob_y = track.y + (track.h - knob_d) / 2;
+    gui_fill_rounded_rect(s, knob_x, knob_y + 1, knob_d, knob_d, knob_d / 2, 0x28000000u);
+    gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, 0xFFFFFFFFu);
+    gui_draw_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, g_gui_style.border_hover);
+}
+
 void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const char *const *labels, int count,
                                    int selected, int hovered_index)
 {
