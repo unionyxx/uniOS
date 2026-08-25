@@ -144,6 +144,12 @@ typedef struct Registry
     char wallpaper_requested[256];
     char wallpaper_active[256];
 
+    // App -> WM toast notification request: write title/message behind store
+    // fences, then bump notify_generation. The WM consumes each generation.
+    volatile uint32_t notify_generation;
+    char notify_title[64];
+    char notify_message[128];
+
     volatile uint32_t window_count;
     WindowEntry windows[MAX_WINDOWS];
 } Registry;

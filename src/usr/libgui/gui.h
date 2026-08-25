@@ -196,6 +196,8 @@ Surface gui_init_framebuffer(void);
 Surface gui_register_window(const char *title, uint32_t width, uint32_t height);
 Surface gui_register_window_ex(const char *title, uint32_t width, uint32_t height, uint32_t flags);
 int gui_set_window_owner_pid(uint32_t pid);
+int gui_set_window_title(const char *title);
+void gui_notify(const char *title, const char *message);
 int gui_request_focus(void);
 int gui_sync_window_size(Surface *s);
 int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h);
@@ -217,6 +219,9 @@ bool gui_surface_import_display(const Surface *s, uint32_t dirty_generation, uin
 void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color);
 void gui_draw_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
 void gui_fill_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
+// Alpha-blending fill (color's alpha channel is respected), unlike gui_fill_rect
+// which overwrites. Used for dimming scrims over content.
+void gui_fill_rect_blend(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
 void gui_fill_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_t color);
 void gui_draw_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_t color);
 void gui_fill_circle(Surface *s, int32_t x, int32_t y, int32_t r, uint32_t color);
@@ -310,6 +315,10 @@ void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const
 void gui_app_draw_text_field(Surface *s, int x, int y, int w, int h, const char *value, bool focused, bool hovered);
 void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *label, bool primary, bool focused,
                          bool hovered);
+// Button with an explicit pressed state (darker fill, no drop shadow, label
+// nudged down) for click feedback.
+void gui_app_draw_button_ex(Surface *s, int x, int y, int w, int h, const char *label, bool primary, bool focused,
+                            bool hovered, bool pressed);
 int gui_popup_menu_item_h(void);
 int gui_popup_menu_height(const GuiMenuItem *items, int count);
 int gui_popup_menu_width(const GuiMenuItem *items, int count, int min_width);

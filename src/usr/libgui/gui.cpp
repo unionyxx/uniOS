@@ -644,6 +644,29 @@ static inline void paint_pixel_coverage(uint32_t *dst, uint32_t color, uint8_t c
         *dst = blend_pixel(*dst, color, coverage);
 }
 
+void gui_fill_rect_blend(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
+{
+    if (!s || !s->buffer || w <= 0 || h <= 0)
+        return;
+    if (!gui_clip_rect_to_bounds(&x, &y, &w, &h, static_cast<int32_t>(s->width), static_cast<int32_t>(s->height)))
+        return;
+
+    uint8_t alpha = static_cast<uint8_t>((color >> 24) & 0xFFu);
+    if (alpha == 255) {
+        gui_fill_rect(s, x, y, w, h, color);
+        return;
+    }
+    if (alpha == 0)
+        return;
+
+    const uint32_t stride = s->pitch / 4;
+    for (int32_t row = y; row < y + h; row++) {
+        uint32_t *dst = &s->buffer[static_cast<size_t>(row) * stride + x];
+        for (int32_t col = 0; col < w; col++)
+            dst[col] = blend_pixel(dst[col], color, 255);
+    }
+}
+
 static void paint_solid_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 {
     if (!s || !s->buffer || w <= 0 || h <= 0)
@@ -1865,6 +1888,30 @@ int gui_set_content_size(Surface *s, int content_w, int content_h)
     return 0;
 }
 
+int gui_set_window_title(const char *title)
+{
+    if (!g_my_window || !title)
+        return -1;
+    strncpy(const_cast<char *>(g_my_window->title), title, sizeof(g_my_window->title) - 1);
+    g_my_window->title[sizeof(g_my_window->title) - 1] = '\0';
+    asm volatile("sfence" ::: "memory");
+    return 0;
+}
+
+void gui_notify(const char *title, const char *message)
+{
+    Registry *registry = gui_registry();
+    if (!registry)
+        return;
+    strncpy(registry->notify_title, title ? title : "", sizeof(registry->notify_title) - 1);
+    registry->notify_title[sizeof(registry->notify_title) - 1] = '\0';
+    strncpy(registry->notify_message, message ? message : "", sizeof(registry->notify_message) - 1);
+    registry->notify_message[sizeof(registry->notify_message) - 1] = '\0';
+    asm volatile("sfence" ::: "memory");
+    __sync_fetch_and_add(&registry->notify_generation, 1u);
+    asm volatile("sfence" ::: "memory");
+}
+
 Registry *gui_registry(void)
 {
     if (!g_registry) {
@@ -2342,26 +2389,51 @@ void gui_app_draw_text_field(Surface *s, int x, int y, int w, int h, const char 
                               g_gui_style.chrome_bg);
     const char *text = value ? value : "";
     int text_y = gui_align_text_y(gui_font_default(), y, h);
-    gui_draw_text_clipped(s, gui_font_default(), x + space_1, text_y, w - space_2, text, g_gui_style.text, bg);
-    if (focused) {
-        int text_w = gui_measure_text(gui_font_default(), text);
-        int max_text_w = w - space_2 - space_1;
-        if (max_text_w < 0)
-            max_text_w = 0;
+    const GuiFont *font = gui_font_default();
+    int caret_w = gui_scaled_metric(1);
+    if (caret_w < 1)
+        caret_w = 1;
+    int caret_h = h - space_1 * 2;
+    if (caret_h < 4)
+        caret_h = 4;
+    int max_text_w = w - space_2 - space_1;
+    if (max_text_w < 0)
+        max_text_w = 0;
+    int text_w = gui_measure_text(font, text);
+
+    if (!focused || text_w <= max_text_w) {
+        gui_draw_text_clipped(s, font, x + space_1, text_y, w - space_2, text, g_gui_style.text, bg);
+    } else {
+        // Overflow while editing at the end: reveal the tail so the caret and
+        // the most recently typed characters stay visible.
+        int budget = max_text_w - caret_w - 2;
+        if (budget < 0)
+            budget = 0;
+        size_t len = strlen(text);
+        size_t start = len;
+        while (start > 0 && gui_measure_text_n(font, text + start - 1, len - (start - 1)) <= budget)
+            start--;
+        const char *shown = text + start;
+        gui_draw_text_clipped(s, font, x + space_1, text_y, max_text_w, shown, g_gui_style.text, bg);
+        text_w = gui_measure_text(font, shown);
         if (text_w > max_text_w)
             text_w = max_text_w;
-        int caret_w = gui_scaled_metric(1);
-        if (caret_w < 1)
-            caret_w = 1;
-        int caret_h = h - space_1 * 2;
-        if (caret_h < 4)
-            caret_h = 4;
+    }
+    if (focused) {
+        if (text_w > max_text_w)
+            text_w = max_text_w;
         gui_fill_rect(s, x + space_1 + text_w + 1, y + (h - caret_h) / 2, caret_w, caret_h, g_gui_style.accent);
     }
 }
 
 void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *label, bool primary, bool focused,
                          bool hovered)
+{
+    gui_app_draw_button_ex(s, x, y, w, h, label, primary, focused, hovered, false);
+}
+
+void gui_app_draw_button_ex(Surface *s, int x, int y, int w, int h, const char *label, bool primary, bool focused,
+                            bool hovered, bool pressed)
 {
     if (!s || w <= 0 || h <= 0)
         return;
@@ -2372,11 +2444,14 @@ void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *lab
         bg = g_gui_style.app_surface_alt;
     if (primary && hovered)
         bg = g_gui_style.border_hover;
+    if (pressed)
+        bg = blend_pixel(bg, 0xFF000000u, primary ? 56 : 36);
     uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
     int r = gui_corner_radius(w, h, gui_radius_md());
 
-    // Shadow (only if not maximized/fullscreen logic, but here simple)
-    gui_fill_rounded_rect(s, x, y + 1, w, h, r, primary ? 0x18000000u : 0x10000000u);
+    // A pressed button sits flush with the surface: no drop shadow.
+    if (!pressed)
+        gui_fill_rounded_rect(s, x, y + 1, w, h, r, primary ? 0x18000000u : 0x10000000u);
 
     // Main surface
     gui_fill_rounded_rect(s, x, y, w, h, r, bg);
@@ -2391,7 +2466,7 @@ void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *lab
         uint32_t highlight = primary ? 0x20FFFFFFu : g_gui_style.chrome_bg;
         gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, ir, highlight);
     }
-    int text_y = gui_align_text_y(gui_font_default(), y, h);
+    int text_y = gui_align_text_y(gui_font_default(), y, h) + (pressed ? 1 : 0);
     gui_draw_text_clipped(s, gui_font_default(), x + space_1, text_y, w - space_2, label ? label : "",
                           primary ? COLOR_WHITE : g_gui_style.text, bg);
 }

@@ -32,12 +32,13 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 `src/usr/libgui/` is an immediate-mode GUI toolkit — no retained widget tree, no internal event loop:
 
 - **Surfaces**: `Surface` wraps a BGRA buffer with width/height/pitch and an optional display-buffer handle.
-- **Primitives**: pixels, rectangles, rounded rectangles (8x8 supersampled corner masks), circles, alpha blits.
-- **App widgets**: header/nav/list/toggle/slider/segmented-control/text-field/button helpers, popup menus, cards/badges/metrics — the building blocks the apps compose.
+- **Primitives**: pixels, rectangles, rounded rectangles (8x8 supersampled corner masks), circles, alpha blits, `gui_fill_rect_blend` (alpha-aware fill for dimming scrims).
+- **App widgets**: header/nav/list/toggle/slider/segmented-control/text-field/button helpers, popup menus, cards/badges/metrics — the building blocks the apps compose. Buttons have a pressed variant (`gui_app_draw_button_ex`); text fields reveal the text tail while focused so the caret stays visible past the field width.
 - **Theming**: dark/light palettes synced from the shared registry, UI scaling helpers.
 - **Fonts** (`.uof`): atlas-based bitmap fonts with per-size loading, ASCII fast tables, alpha LUTs, measurement and clipped text drawing, built-in bitmap fallback.
 - **Images**: `.uoic` icon, `.uocu` cursor, and `.uowp` wallpaper loaders with entry selection by size/scale/variant, including a QOI decoder and scaled-cover blitting.
 - **Window protocol**: registration, resize handling, damage commits — see [Window manager](wm.md).
+- **System integration**: `gui_set_window_title` updates the window's titlebar live (the WM recomposes it on change); `gui_notify` posts a toast through the registry (`notify_generation`) that the WM displays like its own notifications.
 - **Frame waits**: `gui_wait_frame/gui_poll_frame` wrap display event waits for FLIP_COMPLETE/VBLANK.
 
 Apps poll kernel events themselves with `poll_event/wait_event` (`SYS_GET_EVENT`).

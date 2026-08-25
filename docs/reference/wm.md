@@ -9,7 +9,7 @@ The protocol is a shared-memory `Registry` (`include/uapi/gui.h`) — no sockets
 1. The WM allocates the first shared-memory block at boot (id 0), maps it, and calls `SYS_GUI_REGISTER_WM` (which records the WM pid and boosts its priority).
 2. Clients map block 0 and spin until `magic == REGISTRY_MAGIC` (`0x52454749`).
 
-The registry carries: mouse state, menubar/dock canvas block ids and click flags (plus `cp_toggle_requested`, which any shell component can set to make the WM toggle the control center), focus (window index + owner pid), theme mode, settings generation + system flags, network/animation/transparency/volume settings, storage mode + request generation, wallpaper generation/status/requested/active paths, window count, and 32 `WindowEntry` slots.
+The registry carries: mouse state, menubar/dock canvas block ids and click flags (plus `cp_toggle_requested`, which any shell component can set to make the WM toggle the control center), focus (window index + owner pid), theme mode, settings generation + system flags, network/animation/transparency/volume settings, storage mode + request generation, wallpaper generation/status/requested/active paths, a toast-notification request slot (`notify_title`/`notify_message` + `notify_generation`, written by `gui_notify` and consumed once per generation by the WM), window count, and 32 `WindowEntry` slots.
 
 ## Windows
 

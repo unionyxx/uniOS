@@ -1047,6 +1047,7 @@ extern "C" int main(int argc, char **argv)
 
     uint32_t last_settings_gen = registry->settings_generation;
     uint32_t last_storage_gen = registry->storage_request_generation;
+    uint32_t last_notify_gen = registry->notify_generation;
     GuiThemeMode applied_theme_mode = runtime_settings.theme_mode;
     sync_control_center_state_from_registry(registry);
     Event ev;
@@ -1611,6 +1612,18 @@ extern "C" int main(int argc, char **argv)
             registry->cp_toggle_requested = false;
             smp_wmb();
             toggle_control_center();
+        }
+
+        if (registry->notify_generation != last_notify_gen) {
+            last_notify_gen = registry->notify_generation;
+            char notify_title[sizeof(registry->notify_title)];
+            char notify_message[sizeof(registry->notify_message)];
+            memcpy(notify_title, (const void *)registry->notify_title, sizeof(notify_title));
+            memcpy(notify_message, (const void *)registry->notify_message, sizeof(notify_message));
+            notify_title[sizeof(notify_title) - 1] = '\0';
+            notify_message[sizeof(notify_message) - 1] = '\0';
+            if (notify_title[0] || notify_message[0])
+                wm_push_notification(notify_title, notify_message);
         }
 
         registry->mouse_x = g_input.mouse_x;
