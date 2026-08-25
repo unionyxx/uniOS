@@ -519,18 +519,28 @@ static inline uint32_t blend_rgb888(uint32_t dst, uint32_t src, uint8_t alpha)
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-static inline float gfx_sqrtf(float n)
+// Integer square root (digit-by-digit). The kernel is built with
+// -mgeneral-regs-only: no FPU/SSE in kernel code, so all rounded-corner math
+// is fixed-point.
+static inline uint64_t gfx_isqrt_u64(uint64_t value)
 {
-    if (n <= 0.0f)
-        return 0.0f;
+    if (value == 0)
+        return 0;
 
-    float x = n;
-    float y = 1.0f;
-    while (x - y > 0.000001f) {
-        x = (x + y) * 0.5f;
-        y = n / x;
+    uint64_t op = value;
+    uint64_t res = 0;
+    uint64_t one = 1ULL << 62;
+    while (one > op)
+        one >>= 2;
+    while (one != 0) {
+        if (op >= res + one) {
+            op -= res + one;
+            res += one << 1;
+        }
+        res >>= 1;
+        one >>= 2;
     }
-    return x;
+    return res;
 }
 
 static bool rounded_row_span_local(int32_t w, int32_t h, int32_t r, int32_t row, int32_t *left, int32_t *right,
@@ -561,17 +571,17 @@ static bool rounded_row_span_local(int32_t w, int32_t h, int32_t r, int32_t row,
         return true;
     }
 
-    float center = (float)r - 0.5f;
-    float py = (float)local_row + 0.5f;
-    float dy = center - py;
-    float term = (float)r * (float)r - dy * dy;
-    if (term < 0.0f)
-        term = 0.0f;
-    float dx = gfx_sqrtf(term);
-    float edge = center - dx;
-    int32_t inset = (int32_t)edge;
-    if ((float)inset < edge)
-        inset++;
+    // Fixed-point equivalent of the float edge computation, in 1/256 pixel
+    // units: center = r - 0.5, py = local_row + 0.5, so dy = r - row - 1 is
+    // integral. edge = center - sqrt(r^2 - dy^2).
+    const int64_t dy = (int64_t)r - local_row - 1;
+    int64_t term = (int64_t)r * r - dy * dy;
+    if (term < 0)
+        term = 0;
+    const int64_t dx_q = (int64_t)gfx_isqrt_u64((uint64_t)term << 16);
+    const int64_t edge_q = (int64_t)r * 256 - 128 - dx_q;
+
+    int32_t inset = (int32_t)((edge_q + 255) / 256); // ceil(edge)
     if (inset < 0)
         inset = 0;
     if (inset > r)
@@ -580,12 +590,12 @@ static bool rounded_row_span_local(int32_t w, int32_t h, int32_t r, int32_t row,
     *left = inset;
     *right = w - inset - 1;
     if (edge_alpha) {
-        float frac = (float)inset - edge;
-        if (frac < 0.0f)
-            frac = 0.0f;
-        if (frac > 1.0f)
-            frac = 1.0f;
-        *edge_alpha = (uint8_t)(frac * 255.0f);
+        int64_t frac_q = (int64_t)inset * 256 - edge_q;
+        if (frac_q < 0)
+            frac_q = 0;
+        if (frac_q > 256)
+            frac_q = 256;
+        *edge_alpha = (uint8_t)((frac_q * 255 + 128) / 256);
     }
     return *left <= *right;
 }
@@ -713,10 +723,12 @@ void gfx_draw_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r
             if (lx >= 0 && lx < (int32_t)target_width) {
                 uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)lx];
                 dst = blend_rgb888(dst, color, outer_edge);
+                mark_dirty_if_backbuffer(lx, py);
             }
             if (rx >= 0 && rx < (int32_t)target_width) {
                 uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)rx];
                 dst = blend_rgb888(dst, color, outer_edge);
+                mark_dirty_if_backbuffer(rx, py);
             }
         }
     }

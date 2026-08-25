@@ -90,6 +90,10 @@ kernel_common_args = [
   '-fcf-protection=none',
   '-mcmodel=kernel',
   '-mno-red-zone',
+  # Interrupt/exception handlers run with the interrupted context's FPU/SSE
+  # state live and unsaved. The kernel must never touch vector registers, or
+  # every IRQ would silently corrupt user (and kernel) xmm state.
+  '-mgeneral-regs-only',
   '-march=x86-64',
   '-mtune=generic',
   '-fno-strict-aliasing',

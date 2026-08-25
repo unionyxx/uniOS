@@ -23,7 +23,9 @@ static int ansi_param_at(const char *buf, int wanted, int fallback)
     for (int i = 0;; i++) {
         char c = buf[i];
         if (c >= '0' && c <= '9') {
-            value = value * 10 + (c - '0');
+            // Saturate: garbage like ESC[99999999999H must not overflow.
+            if (value <= 65535)
+                value = value * 10 + (c - '0');
             have = true;
         } else if (c == ';' || c == '\0') {
             if (index == wanted)
@@ -92,8 +94,12 @@ void Terminal::init(uint32_t fg, uint32_t bg)
     if (screen_w == 0 || screen_h == 0)
         return;
 
-    m_width_chars = (static_cast<int>(screen_w) - MARGIN_LEFT * 2) / CHAR_WIDTH;
-    m_height_chars = (static_cast<int>(screen_h) - MARGIN_TOP - MARGIN_BOTTOM) / CHAR_HEIGHT;
+    const int width_chars = (static_cast<int>(screen_w) - MARGIN_LEFT * 2) / CHAR_WIDTH;
+    const int height_chars = (static_cast<int>(screen_h) - MARGIN_TOP - MARGIN_BOTTOM) / CHAR_HEIGHT;
+    if (width_chars < 1 || height_chars < 1)
+        return; // display too small for a console
+    m_width_chars = width_chars;
+    m_height_chars = height_chars;
     m_buffer_size = m_width_chars * m_height_chars;
 
     m_text_buffer.reset(static_cast<Cell *>(malloc(m_buffer_size * sizeof(Cell))));
@@ -164,11 +170,11 @@ void Terminal::put_char(char c)
         if (c == '[') {
             m_ansi_state = AnsiState::CSI;
             m_ansi_idx = 0;
-        } else {
-            m_ansi_state = AnsiState::Normal;
-            // Fallthrough to normal printing if not a CSI
+            return;
         }
-        return;
+        // Not a CSI sequence: re-dispatch the character as normal input
+        // instead of swallowing it.
+        m_ansi_state = AnsiState::Normal;
     } else if (m_ansi_state == AnsiState::CSI) {
         if (c >= '0' && c <= '9') {
             if (m_ansi_idx < 31)
@@ -182,8 +188,18 @@ void Terminal::put_char(char c)
             m_ansi_buffer[m_ansi_idx] = '\0';
             // Final character of the sequence
             if (c == 'J') {
-                if (kstring::strcmp(m_ansi_buffer, "2") == 0)
+                const int mode = ansi_param_at(m_ansi_buffer, 0, 0);
+                if (mode == 2 || mode == 3) {
                     clear();
+                } else if (mode == 0) {
+                    clear_chars(m_cursor_col, m_cursor_row, m_width_chars - m_cursor_col);
+                    for (int row = m_cursor_row + 1; row < m_height_chars; row++)
+                        clear_chars(0, row, m_width_chars);
+                } else if (mode == 1) {
+                    for (int row = 0; row < m_cursor_row; row++)
+                        clear_chars(0, row, m_width_chars);
+                    clear_chars(0, m_cursor_row, m_cursor_col + 1);
+                }
             } else if (c == 'H') {
                 set_cursor_pos(0, 0);
             } else if (c == 'K') {

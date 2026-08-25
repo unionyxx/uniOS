@@ -56,15 +56,21 @@ isr_common_stub:
 .handler:
     mov rdi, rsp
     add rdi, 8   ; Adjust RDI to point to the saved registers (skip the flag)
+    mov rbx, rsp ; rbx is callee-saved and its slot is in the frame: use it
+    and rsp, -16 ; SysV requires RSP % 16 == 0 at CALL
     call exception_handler
+    mov rsp, rbx ; exact original frame, whatever the handler did to rsp
 
     ; Check if returning to userspace
     test qword [rsp + 152], 3
     jz .skip_signals_isr
     mov rdi, rsp
     add rdi, 8
+    mov rbx, rsp
+    and rsp, -16
     extern signal_check_interrupt
     call signal_check_interrupt
+    mov rsp, rbx
 .skip_signals_isr:
 
     ; Restore GS if we swapped it
@@ -174,15 +180,21 @@ irq_common_stub:
 .handler:
     mov rdi, rsp
     add rdi, 8
+    mov rbx, rsp ; rbx is callee-saved and its slot is in the frame: use it
+    and rsp, -16 ; SysV requires RSP % 16 == 0 at CALL
     call irq_handler
+    mov rsp, rbx ; exact original frame, whatever the handler did to rsp
 
     ; Check if returning to userspace
     test qword [rsp + 152], 3
     jz .skip_signals_irq
     mov rdi, rsp
     add rdi, 8
+    mov rbx, rsp
+    and rsp, -16
     extern signal_check_interrupt
     call signal_check_interrupt
+    mov rsp, rbx
 .skip_signals_irq:
 
     ; Restore GS if we swapped it

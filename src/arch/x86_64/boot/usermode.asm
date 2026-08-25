@@ -120,8 +120,10 @@ syscall_entry:
     push rax            ; Save return value
     mov rdi, rsp
     add rdi, 8          ; RDI = SyscallFrame* (it's above the saved RAX)
+    sub rsp, 8          ; re-align: the saved RAX slot broke the 16-byte RSP
     extern signal_check
     call signal_check
+    add rsp, 8
     pop rax             ; Restore return value
 
     ; 6. Disable interrupts before stack restore and sysret
@@ -143,11 +145,22 @@ syscall_entry:
     pop qword [gs:8] ; Pop user RSP directly into scratch storage, PRESERVING r12!
     add rsp, 8 ; Skip SS
 
+    ; sysret with a non-canonical RCX raises #GP while still in ring 0 ON THE
+    ; USER STACK — a fatal/privileged crash a user process can trigger at
+    ; will (e.g. via a bogus signal handler). Canonicality is bit 47 sign
+    ; extension; anything else takes the iretq route so a fault lands on the
+    ; kernel stack instead.
+    mov rdx, rcx
+    shl rdx, 16
+    sar rdx, 16
+    cmp rdx, rcx
+    jne .iret_fallback
+
     cli             ; Disable interrupts before switching to user RSP
     mov rsp, [gs:8]
 
     ; Clear volatile registers to prevent kernel state leakage
-    ; RCX and R11 are already holding user RIP and RFLAGS for sysret
+    ; RCX and R11 are already holding user RIP and user RFLAGS for sysret
     xor edx, edx
     xor esi, esi
     xor edi, edi
@@ -158,6 +171,26 @@ syscall_entry:
     ; 7. Final swap back to user GS and return
     swapgs
     o64 sysret
+
+.iret_fallback:
+    cli
+    ; Build an iretq frame on the kernel stack. Segments match the STAR
+    ; encoding used on entry (CS 0x23, SS 0x1B).
+    push qword 0x1B
+    push qword [gs:8]
+    push r11
+    push qword 0x23
+    push rcx
+
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+
+    swapgs
+    iretq
 
 
 ; =============================================================================
