@@ -137,8 +137,9 @@ void hda_init()
         return;
     }
 
-    hda_info.corb_entry = 1;
-    hda_info.rirb_entry = 1;
+    // CORBWP is reset to 0 below, so slot 0 is the first free CORB entry.
+    hda_info.corb_entry = 0;
+    hda_info.rirb_entry = 0;
 
     uint64_t bdl_size = sizeof(HdAudioBufferEntry) * HDA_BUFFER_ENTRY_COUNT;
     hda_info.buffer_entries_dma = vmm_alloc_dma((bdl_size + 4095) / 4096);
@@ -599,33 +600,34 @@ uint32_t hda_send_command(uint32_t codec, uint32_t node, uint32_t verb, uint32_t
     hda_info.corb[hda_info.corb_entry] = (codec << HDA_NODE_COMMAND_CODEC) | (node << HDA_NODE_COMMAND_NODE_INDEX) |
                                          (verb << HDA_NODE_COMMAND_COMMAND) | (command << HDA_NODE_COMMAND_DATA);
 
-    // Update current CORB write pointer.
-    mmio_write16((void *)(hda_info.base + HDA_CORB_WRITE_POINTER), hda_info.corb_entry);
+    // CORBWP holds the index of the next FREE entry; the DMA engine fetches
+    // everything from CORBRP up to CORBWP-1. Writing the pointer to the slot
+    // we just filled would therefore exclude our command — advance past it.
+    const uint32_t next_wp = (hda_info.corb_entry + 1) % HDA_CORB_ENTRY_COUNT;
+    mmio_write16((void *)(hda_info.base + HDA_CORB_WRITE_POINTER), next_wp);
 
-    // Wait for response with timeout to prevent deadlocks.
+    // RIRBWP counts responses; snapshot it, then wait for a new response to
+    // arrive instead of comparing against our CORB slot index.
+    const uint16_t rirb_before = mmio_read16((void *)(hda_info.base + HDA_RIRB_WRITE_POINTER)) & 0xFF;
+
     uint32_t timeout = 100000;
-    while (mmio_read16((void *)(hda_info.base + HDA_RIRB_WRITE_POINTER)) != hda_info.corb_entry) {
+    while ((mmio_read16((void *)(hda_info.base + HDA_RIRB_WRITE_POINTER)) & 0xFF) == rirb_before) {
         io_wait();
         if (--timeout == 0) {
             DEBUG_WARN("hda command timeout (codec %d, node %d, verb 0x%x)", codec, node, verb);
+            hda_info.corb_entry = next_wp;
             return 0;
         }
     }
 
-    // Read response.
-    uint32_t response = hda_info.rirb[hda_info.rirb_entry * 2];
+    // The most recent response was written at (RIRBWP - 1).
+    const uint16_t rirb_wp = mmio_read16((void *)(hda_info.base + HDA_RIRB_WRITE_POINTER)) & 0xFF;
+    const uint32_t resp_index = (rirb_wp + HDA_RIRB_ENTRY_COUNT - 1) % HDA_RIRB_ENTRY_COUNT;
+    uint32_t response = hda_info.rirb[resp_index * 2];
 
-    // Move to next CORB entry and make sure it does not exceed number of entries.
-    hda_info.corb_entry++;
-    if (hda_info.corb_entry >= HDA_CORB_ENTRY_COUNT) {
-        hda_info.corb_entry = 0;
-    }
-
-    // Move to next RIRB entry and make sure it does not exceed number of entries.
-    hda_info.rirb_entry++;
-    if (hda_info.rirb_entry >= HDA_RIRB_ENTRY_COUNT) {
-        hda_info.rirb_entry = 0;
-    }
+    // Advance our CORB slot and keep the RIRB bookkeeping in sync.
+    hda_info.corb_entry = next_wp;
+    hda_info.rirb_entry = resp_index;
 
     return response;
 }
@@ -1125,23 +1127,34 @@ void hda_record_start(uint8_t *buffer, uint32_t size)
     mmio_write8((void *)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1),
                 HDA_STREAM_CONTROL_STREAM_IN_RESET);
 
+    uint32_t rec_timeout = 100000;
     while (!(mmio_read8((void *)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1)) &
              HDA_STREAM_CONTROL_STREAM_IN_RESET)) {
         io_wait();
+        if (--rec_timeout == 0) {
+            DEBUG_WARN("hda: input stream reset timeout");
+            return;
+        }
     }
 
     mmio_write8((void *)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1),
                 HDA_STREAM_CONTROL_STREAM_STOPPED);
 
+    rec_timeout = 100000;
     while (mmio_read8((void *)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1)) &
            HDA_STREAM_CONTROL_STREAM_IN_RESET) {
         io_wait();
+        if (--rec_timeout == 0) {
+            DEBUG_WARN("hda: input stream stop timeout");
+            return;
+        }
     }
 
     // Set buffer.
     hda_info.input_data = buffer;
     hda_info.input_data_size = size;
     hda_info.recorded_bytes = 0;
+    hda_info.record_ring_pos = 0;
 
     // Setup BDL for input.
     mmio_write64((void *)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_BDL_BASE_ADDRESS),
@@ -1185,24 +1198,44 @@ void hda_record_stop()
     DEBUG_INFO("recording stopped, recorded %d bytes", hda_info.recorded_bytes);
 }
 
-// Poll recording status and copy data.
+// Poll recording status and copy newly written ring data to the destination.
+// Copies only the bytes produced since the last poll and handles the ring
+// wrapping, instead of re-copying from the start of the ring every time
+// (which duplicated stale bytes once the ring wrapped).
 void hda_record_poll()
 {
     if (!hda_info.is_recording)
         return;
 
-    // Get current position in input buffer.
+    const uint32_t ring_size = HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * HDA_BUFFER_ENTRY_COUNT;
     uint32_t pos = mmio_read32((void *)(hda_info.input_stream + HDA_STREAM_DESCRIPTOR_BUFFER_ENTRY_POSITION));
+    if (pos > ring_size)
+        pos = ring_size;
 
-    // Copy recorded data to user buffer.
-    if (hda_info.recorded_bytes < hda_info.input_data_size && pos > 0) {
-        size_t to_copy = pos;
-        if (hda_info.recorded_bytes + to_copy > hda_info.input_data_size) {
-            to_copy = hda_info.input_data_size - hda_info.recorded_bytes;
+    if (pos == hda_info.record_ring_pos)
+        return; // No new data.
+
+    const uint8_t *ring = reinterpret_cast<const uint8_t *>(hda_info.input_buffers_dma.virt);
+    auto copy_chunk = [&](uint32_t ring_off, uint32_t bytes) {
+        while (bytes > 0 && hda_info.recorded_bytes < hda_info.input_data_size) {
+            uint32_t to_copy = bytes;
+            if (hda_info.recorded_bytes + to_copy > hda_info.input_data_size)
+                to_copy = hda_info.input_data_size - hda_info.recorded_bytes;
+            memcpy(hda_info.input_data + hda_info.recorded_bytes, ring + ring_off, to_copy);
+            hda_info.recorded_bytes += to_copy;
+            ring_off += to_copy;
+            bytes -= to_copy;
         }
-        memcpy(hda_info.input_data + hda_info.recorded_bytes, (void *)hda_info.input_buffers_dma.virt, to_copy);
-        hda_info.recorded_bytes += to_copy;
+    };
+
+    if (pos > hda_info.record_ring_pos) {
+        copy_chunk(hda_info.record_ring_pos, pos - hda_info.record_ring_pos);
+    } else {
+        // The write position wrapped around the end of the ring.
+        copy_chunk(hda_info.record_ring_pos, ring_size - hda_info.record_ring_pos);
+        copy_chunk(0, pos);
     }
+    hda_info.record_ring_pos = pos;
 
     // Auto-stop if buffer full.
     if (hda_info.recorded_bytes >= hda_info.input_data_size) {

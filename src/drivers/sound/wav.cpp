@@ -40,6 +40,14 @@ bool wav_open(const char *filename, uint8_t **data, uint32_t *data_size, uint32_
         return false;
     }
 
+    // Ensure the RIFF descriptor and fmt chunk are actually present before
+    // dereferencing them; a truncated header must not be read past the buffer.
+    if (st.size < sizeof(WavRiffDescriptor) + sizeof(WavFmtChunk)) {
+        free(file_data);
+        DEBUG_ERROR("%s: wav file too small for header", filename);
+        return false;
+    }
+
     WavHeader wav_header;
     wav_header.riff_descriptor = (WavRiffDescriptor *)file_data;
     wav_header.fmt_chunk = (WavFmtChunk *)(file_data + sizeof(WavRiffDescriptor));
@@ -90,9 +98,28 @@ bool wav_open(const char *filename, uint8_t **data, uint32_t *data_size, uint32_
         return false;
     }
 
+    // Clamp the data size to what actually exists in the file: the data_size
+    // field is attacker/file-controlled, and a truncated file claiming a large
+    // size would otherwise make the audio driver read past the buffer.
+    uint64_t data_offset = (uint64_t)((uint8_t *)&data_chunk->data_ - file_data);
+    if (data_offset >= (uint64_t)st.size) {
+        free(file_data);
+        DEBUG_ERROR("%s: data chunk offset beyond end of file", filename);
+        return false;
+    }
+    uint64_t available = (uint64_t)st.size - data_offset;
+    uint32_t clamped_size = data_chunk->data_size;
+    if ((uint64_t)clamped_size > available)
+        clamped_size = (uint32_t)available;
+    if (clamped_size == 0) {
+        free(file_data);
+        DEBUG_ERROR("%s: no audio data present", filename);
+        return false;
+    }
+
     // Set output data.
     *data = (uint8_t *)&data_chunk->data_;
-    *data_size = data_chunk->data_size;
+    *data_size = clamped_size;
     *sample_rate = fmt_chunk->samples;
     *channels = fmt_chunk->channels;
     *buffer_out = file_data;

@@ -233,6 +233,7 @@ struct HdAudioDevice
     uint32_t input_data_size;                 // Size of recorded data.
     bool is_recording;                        // Is currently recording?
     uint32_t recorded_bytes;                  // Total amount of recorded bytes.
+    uint32_t record_ring_pos;                 // Last position consumed from the input ring.
 };
 
 bool hda_is_initialized();

@@ -48,6 +48,14 @@ void ac97_init()
     ac97_info.nam = pci_get_bar(&pci_dev, 0, nullptr);
     ac97_info.nabm = pci_get_bar(&pci_dev, 1, nullptr);
 
+    // This driver drives the NAM/NABM through I/O-port instructions. If the
+    // controller exposes them as memory-mapped BARs those instructions would
+    // poke unrelated I/O ports, so refuse to drive such a controller.
+    if (pci_bar_is_mmio(&pci_dev, 0) || pci_bar_is_mmio(&pci_dev, 1)) {
+        DEBUG_WARN("ac97: memory-mapped BARs are not supported by this driver");
+        return;
+    }
+
     outl(ac97_info.nabm + AC97_NABM_GLOBAL_CONTROL, (0b00 << AC97_NABM_GLOBAL_CONTROL_PCM_OUT_SAMPLES) |
                                                         (0b00 << AC97_NABM_GLOBAL_CONTROL_PCM_OUT_CHANNELS) |
                                                         (1 << AC97_NABM_GLOBAL_CONTROL_COLD_RESET));
@@ -277,8 +285,16 @@ void ac97_play(uint8_t *data, uint32_t size)
     DEBUG_INFO("waiting for reset");
 
     // Wait for reset.
-    while (inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) {
-        io_wait();
+    {
+        // Bounded wait: a wedged codec must not hang playback/stop forever.
+        uint32_t reset_tries = 100000;
+        while ((inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) &&
+               reset_tries > 0) {
+            io_wait();
+            reset_tries--;
+        }
+        if (reset_tries == 0)
+            DEBUG_WARN("ac97: stream reset timed out");
     }
 
     // Clear status.
@@ -391,8 +407,16 @@ void ac97_stop()
     DEBUG_INFO("waiting for reset");
 
     // Wait for reset.
-    while (inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) {
-        io_wait();
+    {
+        // Bounded wait: a wedged codec must not hang playback/stop forever.
+        uint32_t reset_tries = 100000;
+        while ((inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) &&
+               reset_tries > 0) {
+            io_wait();
+            reset_tries--;
+        }
+        if (reset_tries == 0)
+            DEBUG_WARN("ac97: stream reset timed out");
     }
 
     // Reset playback info.

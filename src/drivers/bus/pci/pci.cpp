@@ -3,6 +3,7 @@
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/debug.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/sync/spinlock.h>
 
 struct EcamEntry
 {
@@ -13,6 +14,11 @@ struct EcamEntry
 
 static EcamEntry g_ecam_entries[4];
 static int g_num_ecam_entries = 0;
+
+// The legacy CF8/CFC configuration mechanism is a single global index/data
+// register pair; concurrent accesses from different cores would clobber each
+// other's selected address. ECAM (MMIO) is per-address and needs no lock.
+static Spinlock g_pci_cfg_lock = SPINLOCK_INIT;
 
 namespace {
 
@@ -165,11 +171,17 @@ static uint64_t pci_bar_size_from_probe(uint32_t probe_low, uint32_t probe_high,
         }
     }
 
+    // A full-size BAR reads back all zeros when probed with all ones. For a
+    // 32-bit BAR that is 4 GiB; a 64-bit 2^64 BAR is unrepresentable, so it
+    // is reported as unusable.
     if (mask == 0)
-        return 0;
+        return is_64bit ? 0 : 0x100000000ULL;
 
-    // Find the alignment/size: the lowest set bit determines the size.
-    uint64_t size = mask & (~mask + 1ULL);
+    // Size is the two's complement of the writable size bits, taken at the
+    // BAR's width. (The lowest-set-bit shortcut only matched naturally aligned
+    // BARs and mis-sized anything else.)
+    uint64_t inv = is_64bit ? (~mask) : ((~mask) & 0xFFFFFFFFULL);
+    uint64_t size = inv + 1ULL;
 
     // Sanity check: 32-bit memory BARs cannot be larger than 4GB.
     if (!is_64bit && !is_io && size > 0x100000000ULL) {
@@ -186,8 +198,11 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t device, uint8_t func, uint8_t of
     if (volatile uint32_t *ptr = pci_ecam_ptr<uint32_t>(bus, device, func, offset & 0xFCu))
         return *ptr;
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDR, pci_make_address(bus, device, func, offset));
-    return inl(PCI_CONFIG_DATA);
+    uint32_t value = inl(PCI_CONFIG_DATA);
+    spinlock_release_irqrestore(&g_pci_cfg_lock, flags);
+    return value;
 }
 
 uint16_t pci_config_read16(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset)
@@ -195,8 +210,11 @@ uint16_t pci_config_read16(uint8_t bus, uint8_t device, uint8_t func, uint8_t of
     if (volatile uint16_t *ptr = pci_ecam_ptr<uint16_t>(bus, device, func, offset))
         return *ptr;
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDR, pci_make_address(bus, device, func, offset));
-    return (uint16_t)(inl(PCI_CONFIG_DATA) >> ((offset & 2u) * 8u));
+    uint16_t value = (uint16_t)(inl(PCI_CONFIG_DATA) >> ((offset & 2u) * 8u));
+    spinlock_release_irqrestore(&g_pci_cfg_lock, flags);
+    return value;
 }
 
 uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset)
@@ -204,8 +222,11 @@ uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t func, uint8_t offs
     if (volatile uint8_t *ptr = pci_ecam_ptr<uint8_t>(bus, device, func, offset))
         return *ptr;
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDR, pci_make_address(bus, device, func, offset));
-    return (uint8_t)(inl(PCI_CONFIG_DATA) >> ((offset & 3u) * 8u));
+    uint8_t value = (uint8_t)(inl(PCI_CONFIG_DATA) >> ((offset & 3u) * 8u));
+    spinlock_release_irqrestore(&g_pci_cfg_lock, flags);
+    return value;
 }
 
 void pci_config_write32(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint32_t value)
@@ -215,8 +236,10 @@ void pci_config_write32(uint8_t bus, uint8_t device, uint8_t func, uint8_t offse
         return;
     }
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDR, pci_make_address(bus, device, func, offset));
     outl(PCI_CONFIG_DATA, value);
+    spinlock_release_irqrestore(&g_pci_cfg_lock, flags);
 }
 
 void pci_config_write16(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint16_t value)
@@ -226,12 +249,14 @@ void pci_config_write16(uint8_t bus, uint8_t device, uint8_t func, uint8_t offse
         return;
     }
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDR, pci_make_address(bus, device, func, offset));
     uint32_t tmp = inl(PCI_CONFIG_DATA);
     uint32_t shift = (offset & 2u) * 8u;
     tmp &= ~(0xFFFFu << shift);
     tmp |= (uint32_t)value << shift;
     outl(PCI_CONFIG_DATA, tmp);
+    spinlock_release_irqrestore(&g_pci_cfg_lock, flags);
 }
 
 void pci_config_write8(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint8_t value)
@@ -241,12 +266,14 @@ void pci_config_write8(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset
         return;
     }
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDR, pci_make_address(bus, device, func, offset));
     uint32_t tmp = inl(PCI_CONFIG_DATA);
     uint32_t shift = (offset & 3u) * 8u;
     tmp &= ~(0xFFu << shift);
     tmp |= (uint32_t)value << shift;
     outl(PCI_CONFIG_DATA, tmp);
+    spinlock_release_irqrestore(&g_pci_cfg_lock, flags);
 }
 
 bool pci_find_device_by_class(uint8_t class_code, uint8_t subclass, PciDevice *out)
