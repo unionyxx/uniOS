@@ -459,8 +459,12 @@ extern "C" void klog_dump_buffer()
     uint64_t flags = spinlock_acquire_irqsave(&g_debug_lock);
     size_t length = (g_klog_total_written > KLOG_BUFFER_SIZE) ? KLOG_BUFFER_SIZE : g_klog_total_written;
     size_t start = (g_klog_total_written > KLOG_BUFFER_SIZE) ? g_klog_head : 0;
+    // Hide the cursor for the whole dump: put_char would otherwise erase and
+    // repaint it twice per character.
+    g_terminal.set_cursor_visible(false);
     for (size_t i = 0; i < length; i++)
         g_terminal.put_char(g_klog_buffer[(start + i) % KLOG_BUFFER_SIZE]);
+    g_terminal.set_cursor_visible(true);
     spinlock_release_irqrestore(&g_debug_lock, flags);
 }
 

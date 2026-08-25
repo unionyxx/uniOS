@@ -6,6 +6,7 @@ namespace {
 static bool s_active = false;
 static bool s_full_redraw = true;
 static uint32_t s_progress_percent = 0;
+static int s_last_fill_w = -1;
 
 static constexpr uint32_t k_background = 0xFF000000;
 static constexpr uint32_t k_bar_border = 0xFF4D4D4D;
@@ -56,6 +57,12 @@ static void draw_frame(void)
     if (fill_w > inner_w)
         fill_w = inner_w;
 
+    // Skip redundant frames: repeated progress updates that map to the same
+    // bar width would otherwise clear and repaint the bar every time.
+    if (!s_full_redraw && fill_w == s_last_fill_w)
+        return;
+    s_last_fill_w = fill_w;
+
     if (s_full_redraw) {
         gfx_clear(k_background);
         s_full_redraw = false;
@@ -82,11 +89,13 @@ void boot_splash_init(void)
 #ifdef DEBUG
     s_active = false;
     s_progress_percent = 0;
+    s_last_fill_w = -1;
     return;
 #else
     s_active = gfx_get_width() > 0 && gfx_get_height() > 0;
     s_full_redraw = true;
     s_progress_percent = 0;
+    s_last_fill_w = -1;
     draw_frame();
 #endif
 }

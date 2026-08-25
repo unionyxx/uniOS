@@ -575,7 +575,9 @@ private:
         m_history_count++;
         m_history_cursor_col = 0;
         m_scroll_offset = 0;
-        m_needs_full_redraw = true;
+        // No full redraw here: the grid diff in render_all() repaints the
+        // shifted cells. Forcing a full redraw on every newline made bursty
+        // command output redraw the whole window per line.
     }
 
     void append_history_char(char c)
@@ -949,24 +951,32 @@ extern "C" int main(int argc, char **argv)
             }
         }
 
-        // 2. Poll/Read shell output if alive
+        // 2. Poll/Read shell output if alive. Drain everything the pipe
+        //    holds before rendering so bursty output costs one redraw, not
+        //    one redraw per chunk (the visible "word-by-word" effect).
         if (shell_alive) {
             int timeout = (needs_render || saw_event) ? 0 : 50;
             struct epoll_event events[1];
             int n = epoll_wait(epfd, events, 1, timeout);
-            if (n > 0) {
-                char read_buf[2048];
+            char read_buf[4096];
+            for (int drain = 0; shell_alive && n > 0 && drain < 16; drain++) {
                 int bytes_read = read(pipe_from_shell[0], read_buf, sizeof(read_buf));
                 if (bytes_read > 0) {
                     term.write_bytes(read_buf, (size_t)bytes_read);
                     needs_render = true;
                     saw_event = true;
-                } else if (bytes_read == 0) {
+                    // read() blocks on an empty pipe: only keep draining
+                    // while epoll says more data is already pending.
+                    n = epoll_wait(epfd, events, 1, 0);
+                    continue;
+                }
+                if (bytes_read == 0) {
                     shell_alive = false;
                     term.write_string("\r\n[Process completed]\r\n");
                     needs_render = true;
                     saw_event = true;
                 }
+                break;
             }
         }
 

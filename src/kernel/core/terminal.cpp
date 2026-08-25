@@ -316,13 +316,11 @@ void Terminal::scroll_up()
         m_text_buffer[last_row_idx + col] = {' ', m_fg_color, m_bg_color};
     }
 
-    // Before double-buffering is enabled, avoid expensive VRAM memmove in gfx_scroll_up.
-    // Instead, redraw the entire screen from the text buffer (which is in RAM).
-    if (!gfx_is_double_buffered()) {
-        redraw_screen();
-    } else {
-        gfx_scroll_up(CHAR_HEIGHT, m_bg_color);
-    }
+    // Scroll the text region in place with one memmove. A full-screen
+    // redraw per scrolled line (glyph-by-glyph) was far slower, and the
+    // region-based dirty rect keeps any double-buffered swap partial.
+    gfx_scroll_up_rect(MARGIN_LEFT, MARGIN_TOP, m_width_chars * CHAR_WIDTH, m_height_chars * CHAR_HEIGHT, CHAR_HEIGHT,
+                       m_bg_color);
 }
 
 void Terminal::redraw_screen()

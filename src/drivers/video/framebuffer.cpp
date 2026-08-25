@@ -1017,13 +1017,12 @@ void gfx_scroll_up_buffer(uint32_t *buf, int pixels, uint32_t fill_color)
         return;
     }
     uint32_t rows = height - static_cast<uint32_t>(pixels);
-    uint64_t move_words = (uint64_t)rows * pitch;
-    if (move_words > ((uint64_t)SIZE_MAX / sizeof(uint32_t)))
-        return;
-    uint32_t *dst = buf;
-    uint32_t *src = buf + (static_cast<uint64_t>(pixels) * pitch);
-
-    kstring::memmove(dst, src, (size_t)(move_words * sizeof(uint32_t)));
+    // Row-wise WC-aware copy: the boot-log front buffer lives in
+    // write-combined VRAM, where non-temporal stores beat a plain memmove.
+    // Rows are copied forward; dst < src keeps each row copy disjoint.
+    for (uint32_t row = 0; row < rows; row++) {
+        gfx_copy_line_wc_aware(buf + (size_t)row * pitch, buf + ((size_t)row + pixels) * pitch, pitch);
+    }
     gfx_fill_rect_to_buffer(buf, 0, (int32_t)rows, (int32_t)framebuffer->width, pixels, fill_color);
 }
 
