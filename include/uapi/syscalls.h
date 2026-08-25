@@ -98,6 +98,7 @@
 #define SYS_FTRUNCATE      277
 #define SYS_FD_TRANSFER    278
 #define SYS_FSIZE          279
+#define SYS_SYNC           280
 
 /* Futex Opcodes */
 #define FUTEX_WAIT         0

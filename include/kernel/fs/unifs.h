@@ -6,7 +6,7 @@ struct VNode;
 
 #define UNIFS_MAGIC "UNIFS v1"
 
-void unifs_init(void *start_addr);
+void unifs_init(void *start_addr, uint64_t image_size);
 
 struct VNode *unifs_get_root();
 

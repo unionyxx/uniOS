@@ -51,23 +51,32 @@ static bool vfs_is_same_file(const VNode *a, const VNode *b) {
     return false;
 }
 
+// Scans every fd table for another open vnode naming the same file. The
+// process list and the fd tables are only stable under the scheduler lock:
+// an unlocked walk raced process teardown and followed freed memory.
 static VNode *vfs_find_open_vnode_for(const VNode *like_node) {
+    const uint64_t sched_flags = scheduler_big_lock_irqsave();
     Process *start = scheduler_get_process_list();
-    if (!start)
-        return nullptr;
-    Process *curr = start;
-    do {
-        for (int i = 0; i < MAX_OPEN_FILES; i++) {
-            if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
-                VNode *other = curr->fd_table[i].vnode;
-                if (other != like_node && other->ref_count > 0 && vfs_is_same_file(other, like_node)) {
-                    return other;
+    VNode *result = nullptr;
+    if (start) {
+        Process *curr = start;
+        do {
+            for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
+                    VNode *other = curr->fd_table[i].vnode;
+                    if (other != like_node && other->ref_count > 0 && vfs_is_same_file(other, like_node)) {
+                        result = other;
+                        break;
+                    }
                 }
             }
-        }
-        curr = curr->next;
-    } while (curr != start);
-    return nullptr;
+            if (result)
+                break;
+            curr = curr->next;
+        } while (curr != start);
+    }
+    scheduler_big_unlock_irqrestore(sched_flags);
+    return result;
 }
 
 static bool pc_match(const PageCacheEntry &entry, const VNode *node) {
@@ -100,45 +109,52 @@ static PageCacheEntry *pc_find_locked(const VNode *node, uint64_t page_index) {
     return nullptr;
 }
 
-static void pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags) {
+// Writes back a dirty entry. The entry itself holds a reference on the node
+// (dropped only on eviction/purge), so the node stays alive across the write
+// even though g_pc_lock is released while I/O is in flight. `dirty` clears
+// only on success: a failed write keeps the data cached for a later retry
+// instead of dropping it on the floor.
+static bool pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags) {
     if (!entry->valid || !entry->dirty)
-        return;
-        
+        return true;
+
     VNode *node = entry->vnode;
     uint64_t offset = entry->page_index * 4096;
     if (offset >= node->size) {
         entry->dirty = false;
-        return;
+        return true;
     }
-    
+
     uint64_t to_write = 4096;
     if (offset + to_write > node->size) {
         to_write = node->size - offset;
     }
-    
+
     uint8_t *write_buf = static_cast<uint8_t *>(malloc(4096));
     if (!write_buf)
-        return;
+        return false;
     kstring::memcpy(write_buf, entry->data, 4096);
-    
-    entry->dirty = false;
-    
-    // Pin the node
-    __sync_fetch_and_add(&node->ref_count, 1);
-    
+
     spinlock_release_irqrestore(&g_pc_lock, flags);
-    
-    node->ops->write(node, write_buf, to_write, offset, nullptr);
+
+    int64_t wres = node->ops->write(node, write_buf, to_write, offset, nullptr);
     free(write_buf);
-    
-    // Unpin node (use vfs_close_vnode to safely free if ref_count hits 0)
-    vfs_close_vnode(node);
-    
+
     flags = spinlock_acquire_irqsave(&g_pc_lock);
+    if (wres < 0)
+        return false;
+    entry->dirty = false;
+    return true;
 }
 
-static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_index, uint64_t &flags) {
-    while (true) {
+// Evicts a victim and installs `node`. A replaced entry's reference on its
+// vnode is recorded in `dropped` and released by the caller AFTER g_pc_lock
+// is dropped (a close can recurse back into the page cache). Bounded: an
+// unflushable dirty victim (I/O error, OOM) is aged and skipped instead of
+// re-selecting it forever.
+static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_index, uint64_t &flags,
+                                                    VNode **dropped, size_t dropped_cap, size_t &dropped_count) {
+    for (uint32_t attempts = 0; attempts < MAX_CACHE_PAGES; attempts++) {
         PageCacheEntry *best_victim = nullptr;
         for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
             if (!g_page_cache[i].valid) {
@@ -146,7 +162,7 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
                 break;
             }
         }
-        
+
         if (!best_victim) {
             uint64_t oldest_access = -1ULL;
             for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
@@ -156,16 +172,24 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
                 }
             }
         }
-        
+
         if (!best_victim) {
             return nullptr;
         }
-        
+
         if (best_victim->valid && best_victim->dirty) {
-            pc_flush_entry_unlocked(best_victim, flags);
+            if (!pc_flush_entry_unlocked(best_victim, flags)) {
+                best_victim->last_access = ++g_page_cache_tick;
+                continue;
+            }
             continue;
         }
-        
+
+        if (best_victim->valid && best_victim->vnode) {
+            if (dropped && dropped_count < dropped_cap)
+                dropped[dropped_count++] = best_victim->vnode;
+        }
+
         best_victim->valid = false;
         best_victim->vnode = node;
         best_victim->ops = node->ops;
@@ -185,9 +209,14 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
         best_victim->page_index = page_index;
         best_victim->dirty = false;
         best_victim->last_access = ++g_page_cache_tick;
-        
+
+        // The cache entry holds a reference on the node until it is evicted
+        // or purged; this is what keeps the node alive across flushes.
+        __sync_fetch_and_add(&node->ref_count, 1);
+
         return best_victim;
     }
+    return nullptr;
 }
 
 static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
@@ -199,12 +228,12 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
         return entry;
     }
     spinlock_release_irqrestore(&g_pc_lock, flags);
-    
+
     uint8_t *temp_buf = static_cast<uint8_t *>(malloc(4096));
     if (!temp_buf)
         return nullptr;
     kstring::zero_memory(temp_buf, 4096);
-    
+
     uint64_t offset = page_index * 4096;
     if (offset < node->size) {
         uint64_t to_read = 4096;
@@ -220,7 +249,10 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
             kstring::zero_memory(temp_buf + bytes_read, 4096 - bytes_read);
         }
     }
-    
+
+    VNode *dropped[4];
+    size_t dropped_count = 0;
+
     flags = spinlock_acquire_irqsave(&g_pc_lock);
     entry = pc_find_locked(node, page_index);
     if (entry) {
@@ -229,49 +261,69 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
         free(temp_buf);
         return entry;
     }
-    
-    entry = pc_evict_and_allocate_locked(node, page_index, flags);
+
+    entry = pc_evict_and_allocate_locked(node, page_index, flags, dropped, 4, dropped_count);
     if (!entry) {
         spinlock_release_irqrestore(&g_pc_lock, flags);
         free(temp_buf);
+        for (size_t i = 0; i < dropped_count; i++)
+            vfs_close_vnode(dropped[i]);
         return nullptr;
     }
-    
+
     kstring::memcpy(entry->data, temp_buf, 4096);
     entry->valid = true;
     spinlock_release_irqrestore(&g_pc_lock, flags);
-    
+
     free(temp_buf);
+    for (size_t i = 0; i < dropped_count; i++)
+        vfs_close_vnode(dropped[i]);
     return entry;
 }
 
 void pc_purge_vnode(VNode *node) {
-    if (node->ops != &fat32_file_ops && node->ops != &unifs_file_ops)
+    if (!node || (node->ops != &fat32_file_ops && node->ops != &unifs_file_ops))
         return;
 
-    uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
-    
     VNode *alternate = vfs_find_open_vnode_for(node);
     if (alternate) {
         __sync_fetch_and_add(&alternate->ref_count, 1);
     }
-    
+
+    VNode *dropped[MAX_CACHE_PAGES];
+    size_t dropped_count = 0;
+
+    uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
+
     for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+        if (!g_page_cache[i].valid || !pc_match(g_page_cache[i], node))
+            continue;
+        if (g_page_cache[i].dirty) {
+            if (!pc_flush_entry_unlocked(&g_page_cache[i], flags)) {
+                // Writeback failed: keep the page dirty and pinned rather than
+                // discarding data that never reached the device.
+                continue;
+            }
+        }
         if (g_page_cache[i].valid && pc_match(g_page_cache[i], node)) {
-            if (g_page_cache[i].dirty) {
-                pc_flush_entry_unlocked(&g_page_cache[i], flags);
+            if (alternate) {
+                // Repoint the cache at the still-open vnode for this file;
+                // the entry takes a reference on it and releases the one on
+                // the closing node (deferred until after the lock drops).
+                g_page_cache[i].vnode = alternate;
+                __sync_fetch_and_add(&alternate->ref_count, 1);
+            } else {
+                g_page_cache[i].valid = false;
             }
-            if (g_page_cache[i].valid && pc_match(g_page_cache[i], node)) {
-                if (alternate) {
-                    g_page_cache[i].vnode = alternate;
-                } else {
-                    g_page_cache[i].valid = false;
-                }
-            }
+            if (dropped_count < MAX_CACHE_PAGES)
+                dropped[dropped_count++] = node;
         }
     }
     spinlock_release_irqrestore(&g_pc_lock, flags);
-    
+
+    for (size_t i = 0; i < dropped_count; i++)
+        vfs_close_vnode(dropped[i]);
+
     if (alternate) {
         vfs_close_vnode(alternate);
     }
@@ -584,11 +636,9 @@ void vfs_close_vnode(VNode *node)
     if (!node)
         return;
 
-    if (node->ref_count == 1) {
-        pc_purge_vnode(node);
-    }
-
     if (__sync_sub_and_fetch(&node->ref_count, 1) == 0) {
+        // No fd and no cache entry references it any more (cache entries
+        // hold their own references), so it is safe to destroy.
         bool is_mount_root = false;
         uint64_t flags = spinlock_acquire_irqsave(&g_mount_lock);
         for (const Mount *m = g_mount_list; m; m = m->next) {
@@ -604,7 +654,14 @@ void vfs_close_vnode(VNode *node)
                 node->ops->close(node);
             free(node);
         }
+        return;
     }
+
+    // Last fd for this file closed while cache entries still reference it:
+    // flush dirty pages to disk and drop those entries so the node can be
+    // released. If another fd is still open, keep the cache warm for it.
+    if ((node->ops == &fat32_file_ops || node->ops == &unifs_file_ops) && !vfs_find_open_vnode_for(node))
+        pc_purge_vnode(node);
 }
 
 Mount *vfs_get_mounts()
@@ -679,6 +736,13 @@ int vfs_open(const char *path, int flags, uint16_t mode)
     }
 
     if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) {
+        // Truncating a file another fd still reads/writes frees its storage
+        // under that fd. This runs before the new fd is installed, so a file
+        // only open by the caller's other fds is still caught.
+        if (vfs_find_open_vnode_for(node)) {
+            vfs_close_vnode(node);
+            return -1;
+        }
         if (node->ops->truncate) {
             node->ops->truncate(node, 0);
         }
@@ -697,6 +761,8 @@ int vfs_open(const char *path, int flags, uint16_t mode)
             p->fd_table[i].flags = guarded_mount ? FD_FLAG_STORAGE_GUARDED : 0;
             if (guarded_mount && write_like)
                 p->fd_table[i].flags |= FD_FLAG_STORAGE_GUARDED_WRITE;
+            if (flags & O_APPEND)
+                p->fd_table[i].flags |= FD_FLAG_APPEND;
             kstring::zero_memory(p->fd_table[i].reserved, sizeof(p->fd_table[i].reserved));
             p->fd_table[i].vnode = node;
             p->fd_table[i].offset = (flags & O_APPEND) ? node->size : 0;
@@ -736,175 +802,255 @@ int vfs_close(int fd)
 int64_t vfs_read(int fd, void *buf, uint64_t size)
 {
     Process *p = process_get_current();
-    if (!p || fd < 0 || fd >= MAX_OPEN_FILES || !p->fd_table[fd].used)
-        return -1;
-    FileDescriptor *f = &p->fd_table[fd];
-    if (!f->vnode->ops->read)
-        return -1;
-    if ((f->flags & FD_FLAG_STORAGE_GUARDED) != 0 && !storage_reads_allowed())
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    if ((f->vnode->ops == &fat32_file_ops || f->vnode->ops == &unifs_file_ops) && !f->vnode->is_dir) {
-        uint64_t offset = f->offset;
+    // Snapshot the descriptor and pin the vnode under fd_lock: a concurrent
+    // close in another thread must not free the node mid-read.
+    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
+    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+        return -1;
+    }
+    FileDescriptor desc = p->fd_table[fd];
+    VNode *vn = desc.vnode;
+    __sync_fetch_and_add(&vn->ref_count, 1);
+    spinlock_release_irqrestore(&p->fd_lock, fl);
+
+    int64_t res = -1;
+    if (!vn->ops->read) {
+        res = -1;
+    } else if ((desc.flags & FD_FLAG_STORAGE_GUARDED) != 0 && !storage_reads_allowed()) {
+        res = -1;
+    } else if ((vn->ops == &fat32_file_ops || vn->ops == &unifs_file_ops) && !vn->is_dir) {
+        uint64_t offset = desc.offset;
         uint64_t bytes_to_read = size;
-        if (offset >= f->vnode->size) {
-            return 0; // EOF
-        }
-        if (offset + bytes_to_read > f->vnode->size) {
-            bytes_to_read = f->vnode->size - offset;
-        }
-        
-        uint8_t *dest = static_cast<uint8_t *>(buf);
-        uint64_t total_read = 0;
-        
-        while (total_read < bytes_to_read) {
-            uint64_t curr_offset = offset + total_read;
-            uint64_t page_index = curr_offset / 4096;
-            uint64_t page_offset = curr_offset % 4096;
-            uint64_t page_bytes = 4096 - page_offset;
-            if (page_bytes > (bytes_to_read - total_read)) {
-                page_bytes = bytes_to_read - total_read;
+        if (offset >= vn->size) {
+            res = 0; // EOF
+        } else {
+            if (offset + bytes_to_read > vn->size) {
+                bytes_to_read = vn->size - offset;
             }
-            
-            PageCacheEntry *entry = pc_get_page(f->vnode, page_index);
-            if (!entry) {
-                if (total_read > 0) break;
-                return -1;
+
+            uint8_t *dest = static_cast<uint8_t *>(buf);
+            uint64_t total_read = 0;
+
+            while (total_read < bytes_to_read) {
+                uint64_t curr_offset = offset + total_read;
+                uint64_t page_index = curr_offset / 4096;
+                uint64_t page_offset = curr_offset % 4096;
+                uint64_t page_bytes = 4096 - page_offset;
+                if (page_bytes > (bytes_to_read - total_read)) {
+                    page_bytes = bytes_to_read - total_read;
+                }
+
+                PageCacheEntry *entry = pc_get_page(vn, page_index);
+                if (!entry) {
+                    if (total_read > 0)
+                        break;
+                    total_read = static_cast<uint64_t>(-1);
+                    break;
+                }
+
+                kstring::memcpy(dest + total_read, entry->data + page_offset, page_bytes);
+                total_read += page_bytes;
             }
-            
-            kstring::memcpy(dest + total_read, entry->data + page_offset, page_bytes);
-            total_read += page_bytes;
+
+            res = static_cast<int64_t>(total_read);
+            if (res > 0)
+                desc.offset += static_cast<uint64_t>(res);
         }
-        
-        if (total_read > 0) {
-            f->offset += total_read;
-        }
-        return total_read;
+    } else {
+        res = vn->ops->read(vn, buf, size, desc.offset, nullptr);
+        if (res > 0)
+            desc.offset += static_cast<uint64_t>(res);
     }
 
-    int64_t res = f->vnode->ops->read(f->vnode, buf, size, f->offset, f);
-    if (res > 0)
-        f->offset += static_cast<uint64_t>(res);
+    if (res >= 0) {
+        fl = spinlock_acquire_irqsave(&p->fd_lock);
+        if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
+            p->fd_table[fd].offset = desc.offset;
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+    }
+    vfs_close_vnode(vn);
     return res;
+}
+
+// Updates the size of every open vnode naming the same file. The walk needs
+// the scheduler lock: process teardown frees fd tables out from under an
+// unlocked scan.
+static void vfs_sync_file_size_locked(VNode *like_node, uint64_t new_size)
+{
+    const uint64_t sched_flags = scheduler_big_lock_irqsave();
+    Process *start = scheduler_get_process_list();
+    if (start) {
+        Process *curr = start;
+        do {
+            for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
+                    VNode *other = curr->fd_table[i].vnode;
+                    if (other != like_node && other->ref_count > 0 && vfs_is_same_file(other, like_node)) {
+                        other->size = new_size;
+                    }
+                }
+            }
+            curr = curr->next;
+        } while (curr != start);
+    }
+    scheduler_big_unlock_irqrestore(sched_flags);
 }
 
 int64_t vfs_write(int fd, const void *buf, uint64_t size)
 {
     Process *p = process_get_current();
-    if (!p || fd < 0 || fd >= MAX_OPEN_FILES || !p->fd_table[fd].used)
-        return -1;
-    FileDescriptor *f = &p->fd_table[fd];
-    if (!f->vnode->ops->write)
-        return -1;
-    if ((f->flags & FD_FLAG_STORAGE_GUARDED_WRITE) != 0 && !storage_writes_allowed())
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    if ((f->vnode->ops == &fat32_file_ops || f->vnode->ops == &unifs_file_ops) && !f->vnode->is_dir) {
-        uint64_t offset = f->offset;
+    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
+    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+        return -1;
+    }
+    FileDescriptor desc = p->fd_table[fd];
+    VNode *vn = desc.vnode;
+    __sync_fetch_and_add(&vn->ref_count, 1);
+    spinlock_release_irqrestore(&p->fd_lock, fl);
+
+    int64_t res = -1;
+    if (!vn->ops->write) {
+        res = -1;
+    } else if ((desc.flags & FD_FLAG_STORAGE_GUARDED_WRITE) != 0 && !storage_writes_allowed()) {
+        res = -1;
+    } else if ((vn->ops == &fat32_file_ops || vn->ops == &unifs_file_ops) && !vn->is_dir) {
+        // O_APPEND must anchor every write at the current end; honoring it
+        // only at open() made the second append overwrite the first.
+        uint64_t offset = (desc.flags & FD_FLAG_APPEND) ? vn->size : desc.offset;
         uint64_t bytes_to_write = size;
-        if (bytes_to_write == 0)
-            return 0;
-            
-        const uint8_t *src = static_cast<const uint8_t *>(buf);
-        uint64_t total_written = 0;
-        
-        while (total_written < bytes_to_write) {
-            uint64_t curr_offset = offset + total_written;
-            uint64_t page_index = curr_offset / 4096;
-            uint64_t page_offset = curr_offset % 4096;
-            uint64_t page_bytes = 4096 - page_offset;
-            if (page_bytes > (bytes_to_write - total_written)) {
-                page_bytes = bytes_to_write - total_written;
-            }
-            
-            PageCacheEntry *entry = pc_get_page(f->vnode, page_index);
-            if (!entry) {
-                if (total_written > 0) break;
-                return -1;
-            }
-            
-            kstring::memcpy(entry->data + page_offset, src + total_written, page_bytes);
-            
-            uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
-            entry->dirty = true;
-            entry->last_access = ++g_page_cache_tick;
-            spinlock_release_irqrestore(&g_pc_lock, flags);
-            
-            total_written += page_bytes;
-        }
-        
-        if (total_written > 0) {
-            f->offset += total_written;
-            if (f->offset > f->vnode->size) {
-                uint64_t new_size = f->offset;
-                f->vnode->size = new_size;
-                
-                // Synchronize size across other open vnodes representing this file
-                Process *start = scheduler_get_process_list();
-                if (start) {
-                    Process *curr = start;
-                    do {
-                        for (int i = 0; i < MAX_OPEN_FILES; i++) {
-                            if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
-                                VNode *other = curr->fd_table[i].vnode;
-                                if (other != f->vnode && other->ref_count > 0 && vfs_is_same_file(other, f->vnode)) {
-                                    other->size = new_size;
-                                }
-                            }
-                        }
-                        curr = curr->next;
-                    } while (curr != start);
+        if (bytes_to_write == 0) {
+            res = 0;
+        } else {
+            const uint8_t *src = static_cast<const uint8_t *>(buf);
+            uint64_t total_written = 0;
+            bool io_error = false;
+
+            while (total_written < bytes_to_write) {
+                uint64_t curr_offset = offset + total_written;
+                uint64_t page_index = curr_offset / 4096;
+                uint64_t page_offset = curr_offset % 4096;
+                uint64_t page_bytes = 4096 - page_offset;
+                if (page_bytes > (bytes_to_write - total_written)) {
+                    page_bytes = bytes_to_write - total_written;
                 }
+
+                PageCacheEntry *entry = pc_get_page(vn, page_index);
+                if (!entry) {
+                    io_error = true;
+                    break;
+                }
+
+                kstring::memcpy(entry->data + page_offset, src + total_written, page_bytes);
+
+                uint64_t pc_flags = spinlock_acquire_irqsave(&g_pc_lock);
+                entry->dirty = true;
+                entry->last_access = ++g_page_cache_tick;
+                spinlock_release_irqrestore(&g_pc_lock, pc_flags);
+
+                total_written += page_bytes;
+            }
+
+            if (total_written == 0 && io_error) {
+                res = -1;
+            } else {
+                desc.offset = offset + total_written;
+                if (desc.offset > vn->size) {
+                    uint64_t new_size = desc.offset;
+                    vn->size = new_size;
+                    vfs_sync_file_size_locked(vn, new_size);
+                }
+                res = static_cast<int64_t>(total_written);
             }
         }
-        return total_written;
+    } else {
+        uint64_t offset = (desc.flags & FD_FLAG_APPEND) ? vn->size : desc.offset;
+        res = vn->ops->write(vn, buf, size, offset, nullptr);
+        if (res > 0)
+            desc.offset = offset + static_cast<uint64_t>(res);
     }
 
-    int64_t res = f->vnode->ops->write(f->vnode, buf, size, f->offset, f);
-    if (res > 0)
-        f->offset += static_cast<uint64_t>(res);
+    if (res >= 0) {
+        fl = spinlock_acquire_irqsave(&p->fd_lock);
+        if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
+            p->fd_table[fd].offset = desc.offset;
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+    }
+    vfs_close_vnode(vn);
     return res;
 }
 
 int64_t vfs_seek(int fd, int64_t offset, int whence)
 {
     Process *p = process_get_current();
-    if (!p || fd < 0 || fd >= MAX_OPEN_FILES || !p->fd_table[fd].used)
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
-    FileDescriptor *f = &p->fd_table[fd];
 
-    int64_t new_offset = (int64_t)f->offset;
+    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
+    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+        return -1;
+    }
+    FileDescriptor desc = p->fd_table[fd];
+    VNode *vn = desc.vnode;
+    __sync_fetch_and_add(&vn->ref_count, 1);
+    spinlock_release_irqrestore(&p->fd_lock, fl);
+
+    int64_t new_offset = (int64_t)desc.offset;
     if (whence == SEEK_SET)
         new_offset = offset;
     else if (whence == SEEK_CUR)
         new_offset += offset;
     else if (whence == SEEK_END)
-        new_offset = (int64_t)f->vnode->size + offset;
+        new_offset = (int64_t)vn->size + offset;
 
-    if (new_offset < 0)
-        return -1;
-    f->offset = static_cast<uint64_t>(new_offset);
-    return (int64_t)f->offset;
+    if (new_offset >= 0) {
+        desc.offset = static_cast<uint64_t>(new_offset);
+        fl = spinlock_acquire_irqsave(&p->fd_lock);
+        if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
+            p->fd_table[fd].offset = desc.offset;
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+    }
+    vfs_close_vnode(vn);
+    return new_offset < 0 ? -1 : new_offset;
 }
 
 int vfs_readdir(int fd, char *name_out)
 {
     Process *p = process_get_current();
-    if (!p || fd < 0 || fd >= MAX_OPEN_FILES || !p->fd_table[fd].used)
-        return -1;
-    FileDescriptor *f = &p->fd_table[fd];
-    if (!f->vnode->ops->readdir)
-        return -1;
-    if ((f->flags & FD_FLAG_STORAGE_GUARDED) != 0 && !storage_reads_allowed())
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    uint64_t pos = f->dir_pos;
-    int res = f->vnode->ops->readdir(f->vnode, pos, name_out);
+    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
+    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
+        spinlock_release_irqrestore(&p->fd_lock, fl);
+        return -1;
+    }
+    FileDescriptor desc = p->fd_table[fd];
+    VNode *vn = desc.vnode;
+    __sync_fetch_and_add(&vn->ref_count, 1);
+    spinlock_release_irqrestore(&p->fd_lock, fl);
 
-    // DEBUG_TRACE("vfs_readdir: fd %d, pos %llu -> res %d, name '%s'", fd, pos, res, res == 0 ? name_out : "");
-
-    if (res == 0)
-        f->dir_pos++;
+    int res = -1;
+    if (vn->ops->readdir &&
+        ((desc.flags & FD_FLAG_STORAGE_GUARDED) == 0 || storage_reads_allowed())) {
+        res = vn->ops->readdir(vn, desc.dir_pos, name_out);
+        if (res == 0) {
+            desc.dir_pos++;
+            fl = spinlock_acquire_irqsave(&p->fd_lock);
+            if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
+                p->fd_table[fd].dir_pos = desc.dir_pos;
+            spinlock_release_irqrestore(&p->fd_lock, fl);
+        }
+    }
+    vfs_close_vnode(vn);
     return res;
 }
 
@@ -985,6 +1131,12 @@ int vfs_unlink(const char *path)
     bool is_dir = target->is_dir;
     vfs_close_vnode(target);
     if (is_dir)
+        return -1;
+
+    // Refuse to delete a file that is still open: the filesystems would free
+    // its clusters while dirty cache pages (or the open fd) keep writing to
+    // them, corrupting whatever gets those clusters next.
+    if (is_file_open(path))
         return -1;
 
     char parent_path[512];
@@ -1117,14 +1269,18 @@ bool is_file_open(const char *path)
     if (!target)
         return false;
 
+    // Compare by file identity, not vnode pointer: filesystems allocate a
+    // fresh vnode per lookup, so pointer equality never matches and the old
+    // check made every "is this file open?" guard silently pass.
     bool found = false;
-    // Iterate all processes
+    const uint64_t sched_flags = scheduler_big_lock_irqsave();
     Process *start = scheduler_get_process_list();
     if (start) {
         const Process *curr = start;
         do {
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
-                if (curr->fd_table[i].used && curr->fd_table[i].vnode == target) {
+                if (curr->fd_table[i].used && curr->fd_table[i].vnode &&
+                    vfs_is_same_file(curr->fd_table[i].vnode, target)) {
                     found = true;
                     break;
                 }
@@ -1134,6 +1290,7 @@ bool is_file_open(const char *path)
             curr = curr->next;
         } while (curr != start);
     }
+    scheduler_big_unlock_irqrestore(sched_flags);
 
     vfs_close_vnode(target);
     return found;

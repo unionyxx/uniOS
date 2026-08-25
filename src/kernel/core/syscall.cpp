@@ -3061,6 +3061,11 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_fd_transfer(arg1, static_cast<int>(arg2));
         case SYS_FSIZE:
             return sys_fsize(static_cast<int>(arg1));
+        case SYS_SYNC:
+            // Push every dirty cache page to disk; without this, dirty data
+            // survives only until close/eviction and is lost on power cut.
+            vfs_sync();
+            return 0;
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

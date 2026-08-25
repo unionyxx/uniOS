@@ -20,6 +20,7 @@ struct FileDescriptor
 
 #define FD_FLAG_STORAGE_GUARDED_WRITE 0x01
 #define FD_FLAG_STORAGE_GUARDED 0x02
+#define FD_FLAG_APPEND 0x04
 
 struct SyscallFrame
 {

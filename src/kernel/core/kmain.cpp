@@ -455,7 +455,7 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     vfs_init();
     volume_reset();
     if (boot_info->module_count > 0 && boot_info->modules && boot_info->modules[0].address) {
-        unifs_init(boot_info->modules[0].address);
+        unifs_init(boot_info->modules[0].address, boot_info->modules[0].size);
         vfs_mount("/", unifs_get_root());
         volume_register("System", "/", "unifs", VOLUME_FLAG_MOUNTED | VOLUME_FLAG_WRITABLE);
     }

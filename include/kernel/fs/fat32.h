@@ -1,5 +1,6 @@
 #pragma once
 #include <kernel/fs/block_dev.h>
+#include <kernel/sync/spinlock.h>
 #include <stdint.h>
 
 struct FAT32Filesystem
@@ -16,6 +17,10 @@ struct FAT32Filesystem
     uint32_t cluster_count;
     uint32_t next_free_cluster;
     uint32_t free_cluster_count;
+    // Serializes every FAT/directory mutation (and the read-modify-write
+    // walks behind them). Zero-initialized mounts are valid: {0} ==
+    // SPINLOCK_INIT.
+    Spinlock lock;
     char volume_label[64];
 };
 

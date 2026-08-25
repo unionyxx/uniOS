@@ -352,3 +352,13 @@ int fd_transfer(uint64_t target_pid, int fd)
     return (int)syscall2(SYS_FD_TRANSFER, target_pid, (uint64_t)fd);
 }
 
+int64_t fsize(int fd)
+{
+    return (int64_t)syscall1(SYS_FSIZE, (uint64_t)fd);
+}
+
+void sync(void)
+{
+    syscall0(SYS_SYNC);
+}
+

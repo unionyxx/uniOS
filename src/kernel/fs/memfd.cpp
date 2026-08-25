@@ -18,45 +18,58 @@ struct MemFd
     size_t size;
 };
 
+// Copies happen in bounded chunks under the lock: holding an irqsave
+// spinlock across a multi-megabyte transfer masked timer and input
+// interrupts for milliseconds on real hardware.
+static constexpr uint64_t MEMFD_LOCK_CHUNK = 16384;
+
 static int64_t memfd_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t offset, FileDescriptor *)
 {
     if (!node || !node->fs_data || !buf)
         return -1;
 
     MemFd *mfd = static_cast<MemFd *>(node->fs_data);
-    uint64_t flags = spinlock_acquire_irqsave(&mfd->lock);
-
-    if (offset >= mfd->size) {
-        spinlock_release_irqrestore(&mfd->lock, flags);
-        return 0;
-    }
-
-    uint64_t to_read = size;
-    if (offset + to_read > mfd->size) {
-        to_read = mfd->size - offset;
-    }
-
     uint64_t read_bytes = 0;
-    while (read_bytes < to_read) {
-        uint64_t curr_offset = offset + read_bytes;
-        uint64_t page_idx = curr_offset / 4096;
-        uint64_t page_off = curr_offset % 4096;
-        uint64_t chunk = 4096 - page_off;
-        if (chunk > to_read - read_bytes) {
-            chunk = to_read - read_bytes;
+
+    while (read_bytes < size) {
+        const uint64_t flags = spinlock_acquire_irqsave(&mfd->lock);
+
+        const uint64_t pos = offset + read_bytes;
+        if (pos >= mfd->size) {
+            spinlock_release_irqrestore(&mfd->lock, flags);
+            break; // EOF
         }
 
-        if (page_idx >= mfd->page_count || !mfd->pages[page_idx]) {
-            kstring::zero_memory(static_cast<char *>(buf) + read_bytes, chunk);
-        } else {
-            uint64_t page_phys = reinterpret_cast<uint64_t>(mfd->pages[page_idx]);
-            uint64_t page_virt = vmm_phys_to_virt(page_phys);
-            kstring::memcpy(static_cast<char *>(buf) + read_bytes, reinterpret_cast<const void *>(page_virt + page_off), chunk);
+        uint64_t chunk = size - read_bytes;
+        if (pos + chunk > mfd->size)
+            chunk = mfd->size - pos;
+        if (chunk > MEMFD_LOCK_CHUNK)
+            chunk = MEMFD_LOCK_CHUNK;
+
+        uint64_t done = 0;
+        while (done < chunk) {
+            uint64_t curr_offset = pos + done;
+            uint64_t page_idx = curr_offset / 4096;
+            uint64_t page_off = curr_offset % 4096;
+            uint64_t piece = 4096 - page_off;
+            if (piece > chunk - done)
+                piece = chunk - done;
+
+            if (page_idx >= mfd->page_count || !mfd->pages[page_idx]) {
+                kstring::zero_memory(static_cast<char *>(buf) + read_bytes + done, piece);
+            } else {
+                uint64_t page_phys = reinterpret_cast<uint64_t>(mfd->pages[page_idx]);
+                uint64_t page_virt = vmm_phys_to_virt(page_phys);
+                kstring::memcpy(static_cast<char *>(buf) + read_bytes + done,
+                                reinterpret_cast<const void *>(page_virt + page_off), piece);
+            }
+            done += piece;
         }
+
+        spinlock_release_irqrestore(&mfd->lock, flags);
         read_bytes += chunk;
     }
 
-    spinlock_release_irqrestore(&mfd->lock, flags);
     return static_cast<int64_t>(read_bytes);
 }
 
@@ -66,48 +79,62 @@ static int64_t memfd_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         return -1;
 
     MemFd *mfd = static_cast<MemFd *>(node->fs_data);
-    uint64_t flags = spinlock_acquire_irqsave(&mfd->lock);
 
     uint64_t end_offset = offset + size;
-    if (end_offset > MEMFD_MAX_PAGES * 4096) {
-        spinlock_release_irqrestore(&mfd->lock, flags);
+    if (end_offset > MEMFD_MAX_PAGES * 4096)
         return -1;
-    }
-
-    uint64_t needed_pages = (end_offset + 4095) / 4096;
-    while (mfd->page_count < needed_pages) {
-        void *new_frame = pmm_alloc_frame();
-        if (!new_frame) {
-            spinlock_release_irqrestore(&mfd->lock, flags);
-            return -1;
-        }
-        kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame))), 4096);
-        mfd->pages[mfd->page_count++] = new_frame;
-    }
 
     uint64_t written_bytes = 0;
     while (written_bytes < size) {
-        uint64_t curr_offset = offset + written_bytes;
-        uint64_t page_idx = curr_offset / 4096;
-        uint64_t page_off = curr_offset % 4096;
-        uint64_t chunk = 4096 - page_off;
-        if (chunk > size - written_bytes) {
-            chunk = size - written_bytes;
+        const uint64_t flags = spinlock_acquire_irqsave(&mfd->lock);
+
+        const uint64_t pos = offset + written_bytes;
+        uint64_t chunk = size - written_bytes;
+        if (chunk > MEMFD_LOCK_CHUNK)
+            chunk = MEMFD_LOCK_CHUNK;
+
+        // Allocate the pages this chunk needs (pmm_alloc_frame zeroes them and
+        // only touches the pmm lock, which legitimately nests here).
+        uint64_t needed_pages = (pos + chunk + 4095) / 4096;
+        bool alloc_ok = true;
+        while (mfd->page_count < needed_pages) {
+            void *new_frame = pmm_alloc_frame();
+            if (!new_frame) {
+                alloc_ok = false;
+                break;
+            }
+            mfd->pages[mfd->page_count++] = new_frame;
+        }
+        if (!alloc_ok) {
+            spinlock_release_irqrestore(&mfd->lock, flags);
+            return written_bytes > 0 ? static_cast<int64_t>(written_bytes) : -1;
         }
 
-        uint64_t page_phys = reinterpret_cast<uint64_t>(mfd->pages[page_idx]);
-        uint64_t page_virt = vmm_phys_to_virt(page_phys);
-        kstring::memcpy(reinterpret_cast<void *>(page_virt + page_off), static_cast<const char *>(buf) + written_bytes, chunk);
+        uint64_t done = 0;
+        while (done < chunk) {
+            uint64_t curr_offset = pos + done;
+            uint64_t page_idx = curr_offset / 4096;
+            uint64_t page_off = curr_offset % 4096;
+            uint64_t piece = 4096 - page_off;
+            if (piece > chunk - done)
+                piece = chunk - done;
 
+            uint64_t page_phys = reinterpret_cast<uint64_t>(mfd->pages[page_idx]);
+            uint64_t page_virt = vmm_phys_to_virt(page_phys);
+            kstring::memcpy(reinterpret_cast<void *>(page_virt + page_off),
+                            static_cast<const char *>(buf) + written_bytes + done, piece);
+            done += piece;
+        }
+
+        if (pos + chunk > mfd->size) {
+            mfd->size = pos + chunk;
+            node->size = mfd->size;
+        }
+
+        spinlock_release_irqrestore(&mfd->lock, flags);
         written_bytes += chunk;
     }
 
-    if (end_offset > mfd->size) {
-        mfd->size = end_offset;
-        node->size = end_offset;
-    }
-
-    spinlock_release_irqrestore(&mfd->lock, flags);
     return static_cast<int64_t>(written_bytes);
 }
 

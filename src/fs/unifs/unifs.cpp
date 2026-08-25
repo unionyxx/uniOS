@@ -802,7 +802,7 @@ VNode *unifs_get_root()
     return vfs_create_vnode(0, 0, true, &unifs_dir_ops, root_prefix);
 }
 
-void unifs_init(void *start_addr)
+void unifs_init(void *start_addr, uint64_t image_size)
 {
     for (auto &file : g_ram_files) {
         file.used = false;
@@ -821,10 +821,28 @@ void unifs_init(void *start_addr)
     g_boot_header = reinterpret_cast<UniFSHeader *>(g_fs_start);
     g_boot_entries = reinterpret_cast<UniFSEntry *>(g_fs_start + sizeof(UniFSHeader));
     g_mounted = (kstring::memcmp(g_boot_header->magic, UNIFS_MAGIC, 8) == 0);
-    if (g_mounted) {
-        for (uint64_t i = 0; i < g_boot_header->file_count; i++)
-            normalize_boot_entry_name(g_boot_entries[i].name);
+    if (!g_mounted)
+        return;
+
+    // Validate the image before trusting any of its arithmetic: a torn or
+    // corrupt unifs.img must not send lookups/reads out of bounds.
+    uint64_t table_bytes = 0;
+    if (__builtin_mul_overflow(g_boot_header->file_count, sizeof(UniFSEntry), &table_bytes) ||
+        sizeof(UniFSHeader) + table_bytes > image_size || g_boot_header->file_count > MAX_FILES * 4) {
+        g_mounted = false;
+        return;
     }
+    for (uint64_t i = 0; i < g_boot_header->file_count; i++) {
+        const UniFSEntry &e = g_boot_entries[i];
+        uint64_t end = 0;
+        if (__builtin_add_overflow(e.offset, e.size, &end) || end > image_size) {
+            g_mounted = false;
+            return;
+        }
+    }
+
+    for (uint64_t i = 0; i < g_boot_header->file_count; i++)
+        normalize_boot_entry_name(g_boot_entries[i].name);
 }
 
 bool unifs_is_mounted()
