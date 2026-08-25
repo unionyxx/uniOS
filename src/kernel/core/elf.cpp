@@ -11,6 +11,10 @@
 
 static constexpr uint64_t k_user_stack_top = 0x0000700000000000ULL;
 static constexpr uint64_t k_page_size = 0x1000ULL;
+// Everything loadable must stay in the user half of the address space; a
+// segment reaching into the kernel half could remap kernel pages through
+// load_segment's flag-merge path.
+static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
 
 [[nodiscard]] static bool add_overflow_u64(uint64_t a, uint64_t b, uint64_t *out)
 {
@@ -39,6 +43,8 @@ static constexpr uint64_t k_page_size = 0x1000ULL;
         return false;
     if (ehdr->e_phentsize != sizeof(Elf64_Phdr) || ehdr->e_phnum == 0)
         return false;
+    if (ehdr->e_entry >= k_user_address_limit)
+        return false;
 
     uint64_t phdr_bytes = 0;
     if (mul_overflow_u64(ehdr->e_phnum, sizeof(Elf64_Phdr), &phdr_bytes))
@@ -61,6 +67,8 @@ static constexpr uint64_t k_page_size = 0x1000ULL;
             return false;
         uint64_t mem_end = 0;
         if (add_overflow_u64(phdr[i].p_vaddr, phdr[i].p_memsz, &mem_end))
+            return false;
+        if (phdr[i].p_vaddr >= k_user_address_limit || mem_end > k_user_address_limit)
             return false;
     }
 

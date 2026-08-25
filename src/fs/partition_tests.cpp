@@ -73,6 +73,126 @@ KTEST(partition_parse_mbr_primary_entries)
     KTEST_EXPECT_EQ(parsed[1].block_count, 2048u);
 }
 
+KTEST(partition_parse_mbr_rejects_malformed_entries)
+{
+    uint8_t sector[512];
+    kstring::zero_memory(sector, sizeof(sector));
+    PartitionScanEntry parsed[4];
+
+    // Missing 0x55AA signature.
+    KTEST_EXPECT_EQ(partition_parse_mbr_entries(sector, parsed, 4), 0);
+
+    sector[510] = 0x55;
+    sector[511] = 0xAA;
+    auto *entries = reinterpret_cast<TestMbrPartitionEntry *>(sector + 446);
+
+    // Extended partitions and LBA 0 (the MBR sector) must be skipped.
+    entries[0].type = 0x05; // CHS extended
+    entries[0].first_lba = 2048;
+    entries[0].sector_count = 4096;
+    entries[1].type = 0x0F; // LBA extended
+    entries[1].first_lba = 8192;
+    entries[1].sector_count = 4096;
+    entries[2].type = 0x83;
+    entries[2].first_lba = 0;
+    entries[2].sector_count = 4096;
+    entries[3].type = 0x83;
+    entries[3].first_lba = 16384;
+    entries[3].sector_count = 2048;
+    KTEST_EXPECT_EQ(partition_parse_mbr_entries(sector, parsed, 4), 1);
+    KTEST_EXPECT_EQ(parsed[0].start_lba, 16384u);
+
+    // Buffer/output guards.
+    KTEST_EXPECT_EQ(partition_parse_mbr_entries(nullptr, parsed, 4), 0);
+    KTEST_EXPECT_EQ(partition_parse_mbr_entries(sector, nullptr, 4), 0);
+    KTEST_EXPECT_EQ(partition_parse_mbr_entries(sector, parsed, 0), 0);
+}
+
+KTEST(partition_parse_gpt_header_rejects_malformed)
+{
+    uint8_t sector[512];
+    kstring::zero_memory(sector, sizeof(sector));
+    auto *header = reinterpret_cast<TestGptHeader *>(sector);
+    header->signature = 0x5452415020494645ULL;
+    header->partition_entries_lba = 2;
+    header->partition_entry_count = 4;
+    header->partition_entry_size = sizeof(TestGptEntry);
+
+    PartitionGptInfo info = {};
+    KTEST_EXPECT(partition_parse_gpt_header(sector, 512, &info));
+
+    TestGptHeader bad;
+
+    bad = *header;
+    bad.signature = 0; // wrong magic
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
+
+    bad = *header;
+    bad.partition_entries_lba = 1; // collides with MBR/GPT header
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
+
+    bad = *header;
+    bad.partition_entry_count = 0;
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
+
+    bad = *header;
+    bad.partition_entry_count = 100000; // unbounded-scan guard
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
+
+    bad = *header;
+    bad.partition_entry_size = 64; // below the minimum entry size
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
+
+    bad = *header;
+    bad.partition_entry_size = 1024; // larger than the block size
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
+
+    KTEST_EXPECT(!partition_parse_gpt_header(nullptr, 512, &info));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 256, &info)); // block too small
+}
+
+KTEST(partition_parse_gpt_entry_rejects_malformed)
+{
+    uint8_t entry_bytes[128];
+    kstring::zero_memory(entry_bytes, sizeof(entry_bytes));
+    auto *entry = reinterpret_cast<TestGptEntry *>(entry_bytes);
+    entry->type_guid[0] = 0xA2;
+    entry->first_lba = 4096;
+    entry->last_lba = 8191;
+
+    PartitionScanEntry parsed = {};
+    KTEST_EXPECT(partition_parse_gpt_entry(entry_bytes, sizeof(TestGptEntry), 1, &parsed));
+
+    TestGptEntry bad;
+
+    bad = *entry;
+    kstring::zero_memory(bad.type_guid, sizeof(bad.type_guid)); // empty slot
+    kstring::memcpy(entry_bytes, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_entry(entry_bytes, sizeof(TestGptEntry), 1, &parsed));
+
+    bad = *entry;
+    bad.first_lba = 8192;
+    bad.last_lba = 4096; // inverted range
+    kstring::memcpy(entry_bytes, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_entry(entry_bytes, sizeof(TestGptEntry), 1, &parsed));
+
+    bad = *entry;
+    bad.first_lba = 1; // inside MBR/GPT header area
+    bad.last_lba = 4096;
+    kstring::memcpy(entry_bytes, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_entry(entry_bytes, sizeof(TestGptEntry), 1, &parsed));
+
+    KTEST_EXPECT(!partition_parse_gpt_entry(entry_bytes, sizeof(TestGptEntry) - 1, 1, &parsed));
+    KTEST_EXPECT(!partition_parse_gpt_entry(entry_bytes, sizeof(TestGptEntry), 0, &parsed));
+    KTEST_EXPECT(!partition_parse_gpt_entry(nullptr, sizeof(TestGptEntry), 1, &parsed));
+}
+
 KTEST(partition_parse_gpt_header_and_entry)
 {
     uint8_t sector[512];

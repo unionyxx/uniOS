@@ -228,7 +228,10 @@ int partition_parse_mbr_entries(const uint8_t *sector, PartitionScanEntry *out, 
     auto *entries = reinterpret_cast<const MbrPartitionEntry *>(sector + 446);
     int count = 0;
     for (uint32_t i = 0; i < 4 && count < max_entries; i++) {
-        if (entries[i].type == 0 || entries[i].sector_count == 0 || entries[i].type == 0xEE)
+        // Skip empty, protective (GPT), and extended entries; a partition
+        // cannot start at LBA 0 (the MBR sector itself).
+        if (entries[i].type == 0 || entries[i].sector_count == 0 || entries[i].type == 0xEE ||
+            entries[i].type == 0x05 || entries[i].type == 0x0F || entries[i].type == 0x85 || entries[i].first_lba == 0)
             continue;
         out[count] = {};
         out[count].partition_index = i + 1;
@@ -246,8 +249,13 @@ bool partition_parse_gpt_header(const uint8_t *sector, uint32_t block_size, Part
         return false;
     auto *header = reinterpret_cast<const GptHeader *>(sector);
     static constexpr uint64_t GPT_SIGNATURE = 0x5452415020494645ULL;
+    // Entry tables start at LBA 2 at the earliest (LBA 0 = MBR, LBA 1 = GPT
+    // header). The entry count is capped far above any real table (spec
+    // minimum is 128) so a crafted header cannot force an unbounded scan.
+    static constexpr uint32_t MAX_GPT_ENTRIES = 4096;
     if (header->signature != GPT_SIGNATURE || header->partition_entry_size < sizeof(GptPartitionEntry) ||
-        header->partition_entry_count == 0 || header->partition_entry_size > block_size)
+        header->partition_entry_count == 0 || header->partition_entry_count > MAX_GPT_ENTRIES ||
+        header->partition_entry_size > block_size || header->partition_entries_lba < 2)
         return false;
     out->entries_lba = header->partition_entries_lba;
     out->entry_count = header->partition_entry_count;
@@ -261,7 +269,8 @@ bool partition_parse_gpt_entry(const uint8_t *entry_bytes, uint32_t entry_size, 
     if (!entry_bytes || !out || entry_size < sizeof(GptPartitionEntry) || partition_index == 0)
         return false;
     auto *entry = reinterpret_cast<const GptPartitionEntry *>(entry_bytes);
-    if (guid_all_zero(entry->type_guid) || entry->last_lba < entry->first_lba)
+    // LBA 0/1 hold the MBR and GPT header, so no partition can start there.
+    if (guid_all_zero(entry->type_guid) || entry->last_lba < entry->first_lba || entry->first_lba < 2)
         return false;
 
     *out = {};

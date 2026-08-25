@@ -41,3 +41,6 @@ void dns_init();
 uint32_t dns_resolve(const char *hostname); // Returns IP or 0 on failure
 bool dns_is_ip_address(const char *str);    // Check if string is already an IP
 uint32_t dns_parse_ip(const char *str);     // Parse IP string to uint32_t
+// Pure response parser (ktest-hookable): returns the first A-record address
+// in the response or 0 when id/flags/format checks reject the packet.
+uint32_t dns_parse_response_id(const uint8_t *buffer, uint16_t length, uint16_t expected_id);

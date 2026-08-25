@@ -140,28 +140,27 @@ static int dns_build_query(const char *hostname, uint8_t *buffer)
     return pos;
 }
 
-static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
+// Pure response parser: no global state, safe to call from ktest. Returns
+// the first A-record IPv4 address or 0 on any format rejection.
+uint32_t dns_parse_response_id(const uint8_t *buffer, uint16_t length, uint16_t expected_id)
 {
-    if (length < DNS_HEADER_SIZE) {
+    if (!buffer || length < DNS_HEADER_SIZE) {
         return 0;
     }
 
     const DnsHeader *hdr = (const DnsHeader *)buffer;
 
-    if (ntohs(hdr->id) != dns_transaction_id) {
-        DEBUG_WARN("dns: transaction ID mismatch");
+    if (ntohs(hdr->id) != expected_id) {
         return 0;
     }
 
     uint16_t flags = ntohs(hdr->flags);
     if (!(flags & DNS_FLAG_QR)) {
-        DEBUG_WARN("dns: not a response");
         return 0;
     }
 
     uint8_t rcode = flags & DNS_FLAG_RCODE;
     if (rcode != 0) {
-        DEBUG_WARN("dns: error response code %d", rcode);
         return 0;
     }
 
@@ -169,7 +168,6 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
     uint16_t ancount = ntohs(hdr->ancount);
 
     if (ancount == 0) {
-        DEBUG_WARN("dns: no answers");
         return 0;
     }
 
@@ -225,9 +223,6 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
 
         // Read type and class
         uint16_t type = (buffer[pos] << 8) | buffer[pos + 1];
-        // uint16_t class_ = (buffer[pos + 2] << 8) | buffer[pos + 3];
-        // uint32_t ttl = (buffer[pos + 4] << 24) | (buffer[pos + 5] << 16) |
-        //                (buffer[pos + 6] << 8) | buffer[pos + 7];
         uint16_t rdlength = (buffer[pos + 8] << 8) | buffer[pos + 9];
         pos += 10;
 
@@ -243,6 +238,14 @@ static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
     }
 
     return 0;
+}
+
+static uint32_t dns_parse_response(const uint8_t *buffer, uint16_t length)
+{
+    uint32_t ip = dns_parse_response_id(buffer, length, dns_transaction_id);
+    if (ip == 0)
+        DEBUG_WARN("dns: response rejected (id/flags/format)");
+    return ip;
 }
 
 void dns_receive(const void *data, uint16_t length)

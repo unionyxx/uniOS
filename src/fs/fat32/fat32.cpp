@@ -1392,8 +1392,12 @@ bool fat32_parse_boot_sector(const uint8_t *boot_sector, FAT32Filesystem *fs_out
         return false;
 
     auto *bs = reinterpret_cast<const FAT32BootSector *>(boot_sector);
-    if ((bs->bytes_per_sector != 512 && bs->bytes_per_sector != 4096) || bs->sectors_per_cluster == 0 ||
-        bs->sectors_per_fat_32 == 0 || bs->root_cluster < 2 || bs->fat_count == 0) {
+    // FAT32 requires a power-of-two cluster size of at most 128 sectors and
+    // at least one reserved sector (the boot sector itself).
+    const uint32_t spc = bs->sectors_per_cluster;
+    if ((bs->bytes_per_sector != 512 && bs->bytes_per_sector != 4096) || spc == 0 || spc > 128 ||
+        (spc & (spc - 1)) != 0 || bs->sectors_per_fat_32 == 0 || bs->root_cluster < 2 || bs->fat_count == 0 ||
+        bs->reserved_sectors == 0) {
         return false;
     }
 
@@ -1406,10 +1410,15 @@ bool fat32_parse_boot_sector(const uint8_t *boot_sector, FAT32Filesystem *fs_out
     fs_out->root_dir_cluster = bs->root_cluster;
     fs_out->fsinfo_sector = bs->fsinfo_sector;
     fs_out->total_sectors = (bs->total_sectors_16 != 0) ? bs->total_sectors_16 : bs->total_sectors_32;
-    uint32_t data_start = fs_out->reserved_sectors + (fs_out->fat_count * fs_out->sectors_per_fat);
-    if (fs_out->total_sectors <= data_start)
+    // Compute in 64-bit: crafted fat_count/sectors_per_fat could wrap u32.
+    const uint64_t data_start64 = fs_out->reserved_sectors + (uint64_t)fs_out->fat_count * fs_out->sectors_per_fat;
+    if (data_start64 > UINT32_MAX || fs_out->total_sectors <= (uint32_t)data_start64)
         return false;
+    const uint32_t data_start = (uint32_t)data_start64;
     fs_out->cluster_count = (fs_out->total_sectors - data_start) / fs_out->sectors_per_cluster;
+    // Cluster numbers run from 2; anything past the last cluster is invalid.
+    if (fs_out->root_dir_cluster >= fs_out->cluster_count + 2)
+        return false;
     fs_out->next_free_cluster = 2;
     fs_out->free_cluster_count = FAT32_FSINFO_UNKNOWN;
     kstring::memcpy(fs_out->volume_label, bs->volume_label, 11);
