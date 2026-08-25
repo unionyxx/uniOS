@@ -454,7 +454,10 @@ static bool icr_send_to(uint8_t dest_apic_id, uint32_t icr_low)
 
     lapic_write(LAPIC_ICR_HI, static_cast<uint32_t>(dest_apic_id) << 24);
     lapic_write(LAPIC_ICR_LO, icr_low);
-    return true;
+    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
+        asm volatile("pause");
+    }
+    return (lapic_read(LAPIC_ICR_LO) & (1u << 12)) == 0;
 }
 
 bool apic_send_init_ipi(uint8_t dest_apic_id)

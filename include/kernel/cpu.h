@@ -45,6 +45,7 @@ struct alignas(64) PerCpu
     uint32_t apic_id;
     volatile bool online;
     volatile bool stop_requested;
+    volatile uint64_t tlb_ack_sequence;
 };
 
 static_assert(offsetof(PerCpu, kernel_stack) == 0, "usermode.asm ABI: [gs:0]");

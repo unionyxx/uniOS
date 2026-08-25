@@ -37,7 +37,7 @@ struct TlbShootdown
     Spinlock lock = SPINLOCK_INIT;
     volatile uint64_t target_addr;
     volatile uint64_t num_pages;
-    volatile int active_cores;
+    volatile uint64_t sequence;
 };
 
 static TlbShootdown g_tlb_shootdown;
@@ -49,6 +49,7 @@ static void tlb_shootdown_handler(uint8_t vector, void *ctx)
     (void)ctx;
     uint64_t addr = g_tlb_shootdown.target_addr;
     uint64_t pages = g_tlb_shootdown.num_pages;
+    uint64_t sequence = __atomic_load_n(&g_tlb_shootdown.sequence, __ATOMIC_ACQUIRE);
     if (addr) {
         if (pages == 1) {
             asm volatile("invlpg (%0)" ::"r"(addr) : "memory");
@@ -60,7 +61,28 @@ static void tlb_shootdown_handler(uint8_t vector, void *ctx)
             }
         }
     }
-    __sync_sub_and_fetch(&g_tlb_shootdown.active_cores, 1);
+    __atomic_store_n(&cpu_get_local()->tlb_ack_sequence, sequence, __ATOMIC_RELEASE);
+}
+
+static bool tlb_shootdown_acked(uint64_t sequence, uint32_t sender_id)
+{
+    for (uint32_t i = 0; i < CONFIG_SMP_MAX_CPUS; i++) {
+        if (!__atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) || g_cpus[i].apic_id == sender_id)
+            continue;
+        if (__atomic_load_n(&g_cpus[i].tlb_ack_sequence, __ATOMIC_ACQUIRE) < sequence)
+            return false;
+    }
+    return true;
+}
+
+static void send_tlb_shootdown_to_lagging_cpus(uint64_t sequence, uint32_t sender_id)
+{
+    for (uint32_t i = 0; i < CONFIG_SMP_MAX_CPUS; i++) {
+        if (!__atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) || g_cpus[i].apic_id == sender_id)
+            continue;
+        if (__atomic_load_n(&g_cpus[i].tlb_ack_sequence, __ATOMIC_ACQUIRE) < sequence)
+            apic_send_ipi_to(static_cast<uint8_t>(g_cpus[i].apic_id), g_tlb_shootdown_vector);
+    }
 }
 
 void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages)
@@ -87,22 +109,30 @@ void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages)
 
             g_tlb_shootdown.target_addr = virt_start;
             g_tlb_shootdown.num_pages = pages;
-            g_tlb_shootdown.active_cores = 0;
+            const uint64_t sequence = __atomic_add_fetch(&g_tlb_shootdown.sequence, 1, __ATOMIC_ACQ_REL);
 
             if (g_tlb_shootdown_vector != 0) {
                 const uint32_t sender_id = apic_get_current_id();
-                for (uint32_t i = 0; i < CONFIG_SMP_MAX_CPUS; i++) {
-                    if (!__atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) || g_cpus[i].apic_id == sender_id)
-                        continue;
-                    __sync_fetch_and_add(&g_tlb_shootdown.active_cores, 1);
-                    if (!apic_send_ipi_to(static_cast<uint8_t>(g_cpus[i].apic_id), g_tlb_shootdown_vector))
-                        __sync_fetch_and_sub(&g_tlb_shootdown.active_cores, 1);
-                }
-            }
+                send_tlb_shootdown_to_lagging_cpus(sequence, sender_id);
 
-            // Spin-wait until all other cores have processed the invalidation
-            while (g_tlb_shootdown.active_cores > 0) {
-                asm volatile("pause");
+                constexpr uint32_t kMaxShootdownPolls = 10000000u;
+                for (int attempt = 0; attempt < 2 && !tlb_shootdown_acked(sequence, sender_id); attempt++) {
+                    uint32_t polls = 0;
+                    while (!tlb_shootdown_acked(sequence, sender_id) && polls++ < kMaxShootdownPolls)
+                        asm volatile("pause");
+                    if (!tlb_shootdown_acked(sequence, sender_id))
+                        send_tlb_shootdown_to_lagging_cpus(sequence, sender_id);
+                }
+                if (!tlb_shootdown_acked(sequence, sender_id)) {
+                    // A virtual LAPIC can lose an IPI while an AP is inside
+                    // a non-maskable startup/transition window. Do not make
+                    // the BSP desktop unrecoverable: flush this CPU now and
+                    // let the next CR3 switch refresh any lagging address
+                    // space on the AP. The sequence remains monotonic so a
+                    // late handler cannot acknowledge a future shootdown.
+                    DEBUG_WARN("TLB shootdown timeout on cpu %u; continuing with local flush", apic_get_current_id());
+                    vmm_flush_tlb_all();
+                }
             }
 
             g_tlb_shootdown.target_addr = 0;
