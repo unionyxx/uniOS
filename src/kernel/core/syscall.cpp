@@ -2268,11 +2268,12 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_DISPLAY_WAIT:
             return display_wait();
         case SYS_DISPLAY_EVENT_WAIT: {
+            // arg2: 0 = poll, UINT64_MAX = block forever, else timeout in ms.
             if (!validate_user_ptr(reinterpret_cast<void *>(arg1), sizeof(DisplayEvent), true))
                 return static_cast<uint64_t>(-1);
 
             DisplayEvent event = {};
-            if (!display_event_wait(&event, arg2 != 0))
+            if (!display_event_wait_timeout(&event, arg2))
                 return static_cast<uint64_t>(-1);
 
             STAC();

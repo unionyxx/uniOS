@@ -192,5 +192,6 @@ bool display_buffer_destroy(DisplayBufferHandle handle);
 uint32_t display_present(const DisplayPresentRequest &request);
 uint32_t display_compose_submit(const DisplayComposeRequest &request);
 bool display_event_wait(DisplayEvent *out_event, bool block);
+bool display_event_wait_timeout(DisplayEvent *out_event, uint64_t timeout_ms);
 uint32_t display_wait(void);
 uint32_t display_get_completed_sequence(void);

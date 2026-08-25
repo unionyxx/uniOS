@@ -2993,6 +2993,32 @@ bool display_event_wait(DisplayEvent *out_event, bool block)
     }
 }
 
+bool display_event_wait_timeout(DisplayEvent *out_event, uint64_t timeout_ms)
+{
+    if (!out_event)
+        return false;
+    if (timeout_ms == 0)
+        return display_pop_event(out_event);
+    if (timeout_ms == UINT64_MAX)
+        return display_event_wait(out_event, true);
+
+    // Bounded wait. Event pushes wake s_display_event_wait_queue but not
+    // the sleep queue, so poll the ring once per tick while genuinely
+    // sleeping between polls: no busy-wait, wake latency bounded by the
+    // tick rate.
+    const uint64_t deadline_ticks = timer_get_ticks() + timer_ms_to_ticks(timeout_ms);
+    const Process *p = process_get_current();
+    for (;;) {
+        if (display_pop_event(out_event))
+            return true;
+        if (timer_get_ticks() >= deadline_ticks)
+            return false;
+        if (scheduler_fatal_signal_pending(p))
+            return false;
+        scheduler_sleep(1);
+    }
+}
+
 uint32_t display_wait(void)
 {
     if (!s_device.ops)

@@ -2104,7 +2104,9 @@ extern "C" int main(int argc, char **argv)
                 yield();
             }
         } else {
-            // Non-blocking Swapchain present-wait implementation
+            // Swapchain present-wait: park on the display event queue instead
+            // of polling, so completion wakes us within a tick instead of
+            // after an arbitrary 1 ms poll interval.
             if (g_wait_start_ticks == 0) {
                 g_wait_start_ticks = get_ticks();
             }
@@ -2114,7 +2116,9 @@ extern "C" int main(int argc, char **argv)
                 if (g_wait_warn_interval < 4000)
                     g_wait_warn_interval *= 2;
             }
-            sleep_ms(1);
+            DisplayEvent wait_event = {};
+            if (display_wait_event_timeout_ms(&wait_event, 4) == 0)
+                apply_display_event(wait_event);
             continue; // Wait without releasing ownership of an in-flight present buffer.
         }
     }

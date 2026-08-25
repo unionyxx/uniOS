@@ -237,7 +237,14 @@ uint32_t display_wait(void)
 
 int display_wait_event(struct DisplayEvent *event)
 {
-    return (int)syscall2(SYS_DISPLAY_EVENT_WAIT, (uint64_t)event, 1);
+    return (int)syscall2(SYS_DISPLAY_EVENT_WAIT, (uint64_t)event, (uint64_t)-1);
+}
+
+int display_wait_event_timeout_ms(struct DisplayEvent *event, uint32_t timeout_ms)
+{
+    if (timeout_ms == 0)
+        timeout_ms = 1;
+    return (int)syscall2(SYS_DISPLAY_EVENT_WAIT, (uint64_t)event, (uint64_t)timeout_ms);
 }
 
 int display_poll_event(struct DisplayEvent *event)

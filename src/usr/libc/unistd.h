@@ -60,6 +60,7 @@ uint32_t display_present(const struct DisplayPresentRequest *req);
 uint32_t display_compose_submit(const struct DisplayComposeRequest *req);
 uint32_t display_wait(void);
 int display_wait_event(struct DisplayEvent *event);
+int display_wait_event_timeout_ms(struct DisplayEvent *event, uint32_t timeout_ms);
 int display_poll_event(struct DisplayEvent *event);
 uint64_t get_tsc_freq(void);
 int get_event(struct Event *ev);
