@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,17 @@ UEFI_PLATFORM_ID = 0xEF
 
 def ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
+
+
+def build_timestamp() -> datetime:
+    # Honor SOURCE_DATE_EPOCH so repeated builds produce byte-identical ISOs.
+    epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    if epoch is None:
+        return datetime.now(timezone.utc)
+    try:
+        return datetime.fromtimestamp(int(epoch), tz=timezone.utc)
+    except ValueError as exc:
+        raise SystemExit(f"create_iso: SOURCE_DATE_EPOCH must be an integer, got {epoch!r}") from exc
 
 
 def pad_to_sector(data: bytes) -> bytes:
@@ -182,7 +194,11 @@ def volume_terminator() -> bytes:
 
 
 def build_iso(efi_image: Path, bootloader: Path, kernel: Path, unifs: Path, output: Path) -> None:
-    timestamp = datetime.now(timezone.utc)
+    for path in (efi_image, bootloader, kernel, unifs):
+        if not path.is_file():
+            raise SystemExit(f"create_iso: input not found: {path}")
+
+    timestamp = build_timestamp()
     visible_bootloader = bootloader.read_bytes()
     kernel_bytes = kernel.read_bytes()
     unifs_bytes = unifs.read_bytes()
@@ -238,7 +254,7 @@ def build_iso(efi_image: Path, bootloader: Path, kernel: Path, unifs: Path, outp
             path_table_record(b"BOOT", BOOT_DIR_SECTOR, 2, False),
         )))
 
-    image = b"".join((
+    metadata_parts = (
         b"\x00" * (SYSTEM_AREA_SECTORS * SECTOR_SIZE),
         pvd_record(volume_space_size, 34, root_dir_record, timestamp),
         boot_record(BOOT_CATALOG_SECTOR),
@@ -249,17 +265,25 @@ def build_iso(efi_image: Path, bootloader: Path, kernel: Path, unifs: Path, outp
         root_directory,
         efi_directory,
         boot_directory,
-        pad_to_sector(visible_bootloader),
-        pad_to_sector(kernel_bytes),
-        pad_to_sector(unifs_bytes),
-        pad_to_sector(boot_image),
-    ))
+    )
+    # Written straight from the source buffers; padded to a sector boundary on the fly.
+    file_blobs = (visible_bootloader, kernel_bytes, unifs_bytes, boot_image)
 
-    if len(image) != volume_space_size * SECTOR_SIZE:
+    expected_size = volume_space_size * SECTOR_SIZE
+    padded_blob_sizes = sum(len(blob) + (-len(blob)) % SECTOR_SIZE for blob in file_blobs)
+    total_size = sum(len(part) for part in metadata_parts) + padded_blob_sizes
+    if total_size != expected_size:
         raise ValueError("internal ISO layout error: computed size does not match generated image")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(image)
+    with output.open("wb") as handle:
+        for part in metadata_parts:
+            handle.write(part)
+        for blob in file_blobs:
+            handle.write(blob)
+            padding = (-len(blob)) % SECTOR_SIZE
+            if padding:
+                handle.write(b"\x00" * padding)
     print(f"[Tool] UEFI ISO created at {output}")
 
 

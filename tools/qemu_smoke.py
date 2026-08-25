@@ -54,8 +54,10 @@ def run_once(args: argparse.Namespace, iteration: int) -> int:
                 break
             with lock:
                 output.extend(chunk)
-            sys.stdout.write(chunk.decode("utf-8", errors="replace"))
-            sys.stdout.flush()
+            # Pass bytes through untouched: line-by-line decoding can split
+            # multi-byte UTF-8 sequences and garble kernel log output.
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
 
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
@@ -64,32 +66,36 @@ def run_once(args: argparse.Namespace, iteration: int) -> int:
     success_seen = False
     failure_seen = None
 
-    while time.monotonic() < deadline:
-        with lock:
-            text = output.decode("utf-8", errors="replace")
+    try:
+        while time.monotonic() < deadline:
+            with lock:
+                text = output.decode("utf-8", errors="replace")
 
-        failure_seen = next((pattern for pattern in args.fail if pattern in text), None)
-        if failure_seen:
-            break
+            failure_seen = next((pattern for pattern in args.fail if pattern in text), None)
+            if failure_seen:
+                break
 
-        if all(pattern in text for pattern in args.success):
-            success_seen = True
-            if args.hold > 0:
-                hold_deadline = time.monotonic() + args.hold
-                while time.monotonic() < hold_deadline and proc.poll() is None:
-                    with lock:
-                        hold_text = output.decode("utf-8", errors="replace")
-                    failure_seen = next((pattern for pattern in args.fail if pattern in hold_text), None)
-                    if failure_seen:
-                        break
-                    time.sleep(0.1)
-            break
+            if all(pattern in text for pattern in args.success):
+                success_seen = True
+                if args.hold > 0:
+                    hold_deadline = time.monotonic() + args.hold
+                    while time.monotonic() < hold_deadline and proc.poll() is None:
+                        with lock:
+                            hold_text = output.decode("utf-8", errors="replace")
+                        failure_seen = next((pattern for pattern in args.fail if pattern in hold_text), None)
+                        if failure_seen:
+                            break
+                        time.sleep(0.1)
+                break
 
-        if proc.poll() is not None:
-            break
+            if proc.poll() is not None:
+                break
 
-        time.sleep(0.1)
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print(f"\nqemu-smoke[{iteration}]: interrupted", file=sys.stderr)
 
+    exit_before_cleanup = proc.poll()
     terminate_process(proc)
     thread.join(timeout=2.0)
 
@@ -103,7 +109,13 @@ def run_once(args: argparse.Namespace, iteration: int) -> int:
 
     missing = [pattern for pattern in args.success if pattern not in text]
     if missing:
-        print(f"\nqemu-smoke[{iteration}]: missing success marker(s): {', '.join(missing)}", file=sys.stderr)
+        detail = (
+            f"QEMU exited early with status {exit_before_cleanup}"
+            if exit_before_cleanup is not None
+            else "timed out waiting for markers"
+        )
+        print(f"\nqemu-smoke[{iteration}]: missing success marker(s): {', '.join(missing)} ({detail})",
+              file=sys.stderr)
         return 1
 
     print(f"\nqemu-smoke[{iteration}]: success markers observed")
@@ -123,4 +135,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)

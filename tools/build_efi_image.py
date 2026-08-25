@@ -268,7 +268,7 @@ class Fat16Builder:
         self.image[first_fat_offset:first_fat_offset + len(self.fat)] = self.fat
         second_fat_offset = first_fat_offset + len(self.fat)
         self.image[second_fat_offset:second_fat_offset + len(self.fat)] = self.fat
-        return bytes(self.image)
+        return self.image
 
 
 def compute_fat32_sectors_per_fat(total_sectors: int, sectors_per_cluster: int) -> tuple[int, int]:
@@ -454,7 +454,7 @@ class Fat32Builder:
         self.image[first_fat_offset:first_fat_offset + len(self.fat)] = self.fat
         second_fat_offset = first_fat_offset + len(self.fat)
         self.image[second_fat_offset:second_fat_offset + len(self.fat)] = self.fat
-        return bytes(self.image)
+        return self.image
 
 
 def patch_hidden_sectors(volume: bytearray, hidden_sectors: int) -> None:
@@ -520,6 +520,9 @@ def read_existing_partition_by_label(image_path: Path, label: str, sector_count:
 
 
 def create_fat_image(output: Path, bootloader: Path, kernel: Path, unifs: Path, label: str) -> None:
+    for path in (bootloader, kernel, unifs):
+        if not path.is_file():
+            raise SystemExit(f"build_efi_image: input not found: {path}")
     files = {
         ("EFI", "BOOT", "BOOTX64.EFI"): bootloader.read_bytes(),
         ("KERNEL.ELF",): kernel.read_bytes(),
@@ -540,6 +543,8 @@ def create_blank_data_volume(size_bytes: int, label: str, hidden_sectors: int) -
 
 
 def create_disk_image(output: Path, fat_image_path: Path, data_size_bytes: int, include_data_partition: bool) -> None:
+    if not fat_image_path.is_file():
+        raise SystemExit(f"build_efi_image: EFI image not found: {fat_image_path}")
     volume = bytearray(fat_image_path.read_bytes())
     patch_hidden_sectors(volume, DISK_PARTITION_LBA)
 

@@ -252,9 +252,8 @@ def render_svg_with_qt(svg_bytes: bytes, render_size: int) -> Image.Image:
     return qimage_to_pillow_rgba(image)
 
 
-def render_svg(svg_path: Path, size: int, supersample: int, renderer: str, sanitize: bool) -> Image.Image:
+def render_svg(svg_name: str, svg_bytes: bytes, size: int, supersample: int, renderer: str) -> Image.Image:
     render_size = max(size, size * max(1, supersample))
-    svg_bytes = read_svg_bytes(svg_path, sanitize=sanitize)
 
     if renderer == "cairo":
         return render_svg_with_cairo(svg_bytes, render_size)
@@ -267,7 +266,7 @@ def render_svg(svg_path: Path, size: int, supersample: int, renderer: str, sanit
         try:
             return render_svg_with_cairo(svg_bytes, render_size)
         except Exception as exc:
-            print(f"[warn] CairoSVG failed for {svg_path.name}: {exc}; falling back to Qt", file=sys.stderr)
+            print(f"[warn] CairoSVG failed for {svg_name}: {exc}; falling back to Qt", file=sys.stderr)
 
     return render_svg_with_qt(svg_bytes, render_size)
 
@@ -334,19 +333,9 @@ def downsample_rgba(
         return Image.fromarray(out_u8, "RGBA")
 
     # Fallback: premultiply in byte/sRGB space before filtering.
-    r, g, b, a = image.split()
-    pm = Image.merge(
-        "RGBA",
-        (
-            Image.eval(Image.merge("L", (r,)), lambda v: v),  # dummy to keep old Pillow happy
-            Image.eval(Image.merge("L", (g,)), lambda v: v),
-            Image.eval(Image.merge("L", (b,)), lambda v: v),
-            a,
-        ),
-    )
-    # Manual premultiply using point math keeps Pillow-only fallback dependency-free.
     import PIL.ImageChops as ImageChops
 
+    r, g, b, a = image.split()
     pm = Image.merge("RGBA", (ImageChops.multiply(r, a), ImageChops.multiply(g, a), ImageChops.multiply(b, a), a))
     reduced = pm.resize((target_size, target_size), filt)
 
@@ -401,15 +390,21 @@ def qoi_hash(px: Tuple[int, int, int, int]) -> int:
 def qoi_encode_rgba(image: Image.Image) -> bytes:
     image = image.convert("RGBA")
     width, height = image.size
-    pixels = list(image.getdata())
+    pixels = image.tobytes()
     out = bytearray(struct.pack(">4sIIBB", b"qoif", width, height, 4, 0))
 
     index = [(0, 0, 0, 0)] * 64
-    prev = (0, 0, 0, 255)
+    pr = pg = pb = 0
+    pa = 255
     run = 0
 
-    for px in pixels:
-        if px == prev:
+    for i in range(0, len(pixels), 4):
+        r = pixels[i]
+        g = pixels[i + 1]
+        b = pixels[i + 2]
+        a = pixels[i + 3]
+
+        if r == pr and g == pg and b == pb and a == pa:
             run += 1
             if run == 62:
                 out.append(0xC0 | (run - 1))
@@ -420,13 +415,11 @@ def qoi_encode_rgba(image: Image.Image) -> bytes:
             out.append(0xC0 | (run - 1))
             run = 0
 
-        index_pos = qoi_hash(px)
-        if index[index_pos] == px:
+        index_pos = qoi_hash((r, g, b, a))
+        if index[index_pos] == (r, g, b, a):
             out.append(index_pos)
         else:
-            index[index_pos] = px
-            r, g, b, a = px
-            pr, pg, pb, pa = prev
+            index[index_pos] = (r, g, b, a)
             if a == pa:
                 dr = r - pr
                 dg = g - pg
@@ -443,7 +436,7 @@ def qoi_encode_rgba(image: Image.Image) -> bytes:
             else:
                 out.extend((0xFF, r, g, b, a))
 
-        prev = px
+        pr, pg, pb, pa = r, g, b, a
 
     if run:
         out.append(0xC0 | (run - 1))
@@ -525,14 +518,16 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
 
     for svg_path in sorted(source_root.glob("*.svg")):
+        # Read and sanitize once per icon; rendering repeats per size.
+        svg_bytes = read_svg_bytes(svg_path, sanitize=not args.no_sanitize_svg)
         frames: list[Tuple[int, Image.Image]] = []
         for size in sizes:
             high_res = render_svg(
-                svg_path,
+                svg_path.name,
+                svg_bytes,
                 size=size,
                 supersample=args.supersample,
                 renderer=args.renderer,
-                sanitize=not args.no_sanitize_svg,
             )
             frame_alpha = "straight" if background is not None or args.alpha == "opaque" else args.alpha
             image = downsample_rgba(
@@ -559,8 +554,6 @@ def main() -> int:
             if args.emit_png_preview:
                 size_dir = output_root / str(size)
                 size_dir.mkdir(parents=True, exist_ok=True)
-
-            if args.emit_png_preview:
                 preview_path = size_dir / f"{svg_path.stem}.png"
                 # PNGs should be straight-alpha for accurate inspection in normal viewers.
                 if args.alpha == "premultiplied" and background is None:

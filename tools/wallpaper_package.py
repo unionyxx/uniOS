@@ -27,6 +27,14 @@ UOWP_VARIANT_DARK = 2
 UOWP_COLOR_SRGB = 1
 UOWP_TRANSFER_SDR = 1
 
+try:
+    RESAMPLE = Image.Resampling
+except AttributeError:  # Pillow < 9.1
+    class _Resample:
+        LANCZOS = Image.LANCZOS
+
+    RESAMPLE = _Resample()
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Package SVG wallpapers into a UOWP wallpaper container.")
@@ -42,9 +50,9 @@ def parse_args() -> argparse.Namespace:
 
 def render_svg(svg_path: Path, width: int, height: int, variant: int) -> Image.Image:
     if cairosvg is None:
-        # Fallback to a gradient if CairoSVG is missing
-        image = Image.new("RGBA", (width, height))
-        pixels = image.load()
+        # Fallback to a gradient if CairoSVG is missing. Each row is a constant
+        # color, so build it from one repeated pixel instead of a per-pixel loop.
+        rows = bytearray()
         for y in range(height):
             t = y / max(1, height - 1)
             if variant == UOWP_VARIANT_LIGHT:
@@ -57,23 +65,23 @@ def render_svg(svg_path: Path, width: int, height: int, variant: int) -> Image.I
                 r = int(20 + 30 * t)
                 g = int(25 + 40 * t)
                 b = int(40 + 60 * t)
-            for x in range(width):
-                pixels[x, y] = (r, g, b, 255)
-        return image
-    png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=width, output_height=height)
+            rows.extend(bytes((r, g, b, 255)) * width)
+        return Image.frombytes("RGBA", (width, height), bytes(rows))
+    # Pass the SVG as bytes: cairosvg's url= handling is fragile with
+    # non-URI paths (especially Windows drive letters).
+    svg_bytes = svg_path.read_bytes()
+    png_bytes = cairosvg.svg2png(bytestring=svg_bytes, output_width=width, output_height=height)
     return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
 
 
 def raw_bgra_bytes(image: Image.Image) -> bytes:
     image = image.convert("RGBA")
-    raw = bytearray()
-    for r, g, b, a in image.getdata():
-        raw.extend((b, g, r, a))
-    return bytes(raw)
+    # Pillow's raw encoder swaps the channels in C; same bytes as a Python loop.
+    return image.tobytes("raw", "BGRA", 0, 1)
 
 
 def png_preview_bytes(image: Image.Image, width: int, height: int) -> bytes:
-    preview = image.convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
+    preview = image.convert("RGBA").resize((width, height), RESAMPLE.LANCZOS)
     out = io.BytesIO()
     preview.save(out, format="PNG", optimize=True)
     return out.getvalue()
@@ -154,6 +162,9 @@ def main() -> int:
         raise SystemExit("wallpaper dimensions must be positive")
     if args.preview_width <= 0 or args.preview_height <= 0:
         raise SystemExit("preview dimensions must be positive")
+    for source in (light_path, dark_path):
+        if not source.is_file():
+            raise SystemExit(f"wallpaper SVG not found: {source}")
 
     sources = [
         (UOWP_VARIANT_LIGHT, "light", light_path),

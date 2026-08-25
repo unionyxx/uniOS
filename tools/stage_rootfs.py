@@ -33,17 +33,24 @@ def main() -> int:
     build_rootfs = Path(args.build_rootfs).resolve()
     stamp = Path(args.stamp).resolve()
 
+    if not source_rootfs.is_dir():
+        raise SystemExit(f"stage_rootfs: source rootfs not found: {source_rootfs}")
+
     build_rootfs.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_rootfs, build_rootfs, dirs_exist_ok=True)
 
     for rel_dest, source in args.overlay:
         src = Path(source).resolve()
+        if not src.is_file():
+            raise SystemExit(f"stage_rootfs: overlay source not found: {src} (dest {rel_dest})")
         dest = build_rootfs / Path(rel_dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
 
     for rel_dest, source_dir in args.overlay_tree:
         src = Path(source_dir).resolve()
+        if not src.is_dir():
+            raise SystemExit(f"stage_rootfs: overlay tree source not found: {src} (dest {rel_dest})")
         dest = build_rootfs / Path(rel_dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dest, dirs_exist_ok=True)

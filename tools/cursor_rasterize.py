@@ -90,6 +90,30 @@ def load_metadata(path: Path) -> list[dict]:
     return data
 
 
+def qimage_to_pillow_rgba(image: "QImage") -> Image.Image:
+    image = image.convertToFormat(QImage.Format_RGBA8888)
+    width = image.width()
+    height = image.height()
+    bytes_per_line = image.bytesPerLine()
+    expected_stride = width * 4
+
+    bits = image.constBits()
+    try:
+        bits.setsize(image.sizeInBytes())  # PyQt compatibility
+    except AttributeError:
+        pass
+    data = bytes(bits)
+
+    if bytes_per_line == expected_stride:
+        return Image.frombytes("RGBA", (width, height), data)
+
+    rows = bytearray()
+    for y in range(height):
+        start = y * bytes_per_line
+        rows.extend(data[start : start + expected_stride])
+    return Image.frombytes("RGBA", (width, height), bytes(rows))
+
+
 def render_svg(svg_path: Path, size: int) -> Image.Image:
     global _qt_app
 
@@ -106,17 +130,15 @@ def render_svg(svg_path: Path, size: int) -> Image.Image:
         renderer.render(painter, QRectF(0, 0, size, size))
         painter.end()
 
-        out = Image.new("RGBA", (size, size))
-        for y in range(size):
-            for x in range(size):
-                color = image.pixelColor(x, y)
-                out.putpixel((x, y), (color.red(), color.green(), color.blue(), color.alpha()))
-        return out
+        return qimage_to_pillow_rgba(image)
 
     if cairosvg is None:
         raise RuntimeError("No SVG renderer is available. Install PySide6 QtSvg or CairoSVG with native Cairo.")
 
-    png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=size, output_height=size)
+    # Pass the SVG as bytes: cairosvg's url= handling is fragile with
+    # non-URI paths (especially Windows drive letters).
+    svg_bytes = svg_path.read_bytes()
+    png_bytes = cairosvg.svg2png(bytestring=svg_bytes, output_width=size, output_height=size)
     return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
 
 
@@ -156,18 +178,24 @@ def qoi_hash(px: tuple[int, int, int, int]) -> int:
 def qoi_encode_rgba(image: Image.Image) -> bytes:
     image = image.convert("RGBA")
     width, height = image.size
-    pixels = list(image.getdata())
+    pixels = image.tobytes()
     out = bytearray()
     out.extend(b"qoif")
     out.extend(struct.pack(">II", width, height))
     out.extend(bytes((4, 0)))
 
     index = [(0, 0, 0, 0)] * 64
-    prev = (0, 0, 0, 255)
+    pr = pg = pb = 0
+    pa = 255
     run = 0
 
-    for px in pixels:
-        if px == prev:
+    for i in range(0, len(pixels), 4):
+        r = pixels[i]
+        g = pixels[i + 1]
+        b = pixels[i + 2]
+        a = pixels[i + 3]
+
+        if r == pr and g == pg and b == pb and a == pa:
             run += 1
             if run == 62:
                 out.append(0xC0 | (run - 1))
@@ -178,13 +206,11 @@ def qoi_encode_rgba(image: Image.Image) -> bytes:
             out.append(0xC0 | (run - 1))
             run = 0
 
-        idx = qoi_hash(px)
-        if index[idx] == px:
+        idx = qoi_hash((r, g, b, a))
+        if index[idx] == (r, g, b, a):
             out.append(idx)
         else:
-            index[idx] = px
-            r, g, b, a = px
-            pr, pg, pb, pa = prev
+            index[idx] = (r, g, b, a)
             if a == pa:
                 dr = r - pr
                 dg = g - pg
@@ -201,7 +227,7 @@ def qoi_encode_rgba(image: Image.Image) -> bytes:
             else:
                 out.extend((0xFF, r, g, b, a))
 
-        prev = px
+        pr, pg, pb, pa = r, g, b, a
 
     if run:
         out.append(0xC0 | (run - 1))

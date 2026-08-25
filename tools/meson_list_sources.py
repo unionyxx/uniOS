@@ -26,6 +26,8 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parent.parent
     root = (repo_root / args.root).resolve()
+    if not root.is_dir():
+        raise SystemExit(f"meson_list_sources: root not found: {root}")
     globs = args.globs or ["*"]
     exclude_prefixes = [prefix.replace("\\", "/").rstrip("/") for prefix in args.exclude_prefixes]
 
