@@ -290,6 +290,7 @@ struct WmInputState
     bool have_pending_move = false;
     int pending_mouse_x = 0;
     int pending_mouse_y = 0;
+    bool alt_down = false;
     int snap_edges = RESIZE_NONE;
     DirtyRect snap_preview = {};
 };

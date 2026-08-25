@@ -227,6 +227,21 @@ static bool sample_stable_window_entry(const WindowEntry &entry, WindowEntrySnap
     return true;
 }
 
+static void cycle_user_window_focus(Registry *registry)
+{
+    if (!registry || g_window_count <= WM_FIRST_USER_WINDOW)
+        return;
+    int current = find_registry_focused_user_window(registry);
+    int count = g_window_count - WM_FIRST_USER_WINDOW;
+    for (int step = 1; step <= count; step++) {
+        int index = WM_FIRST_USER_WINDOW + ((current - WM_FIRST_USER_WINDOW + step) % count);
+        if (is_window_visible(g_windows[index]) && is_user_window(g_windows[index])) {
+            focus_window(index, true);
+            return;
+        }
+    }
+}
+
 static bool cursor_backend_allowed()
 {
     // Re-enable cursor backend if display copy path is no longer active
@@ -1253,6 +1268,14 @@ extern "C" int main(int argc, char **argv)
                     }
                 }
             } else if (ev.type == EVT_KEY_DOWN) {
+                if (ev.key.scancode == 56 || ev.key.scancode == 184) {
+                    g_input.alt_down = true;
+                    continue;
+                }
+                if (g_input.alt_down && ev.key.scancode == 15) {
+                    cycle_user_window_focus(registry);
+                    continue;
+                }
                 if (ev.key.c == 29) {
                     if (g_index.active)
                         close_index();
@@ -1309,6 +1332,9 @@ extern "C" int main(int argc, char **argv)
                 if (focus >= WM_FIRST_USER_WINDOW) {
                     post_key_event_to_window(g_windows[focus], EVT_KEY_DOWN, ev.key.c, ev.key.scancode);
                 }
+            } else if (ev.type == EVT_KEY_UP) {
+                if (ev.key.scancode == 56 || ev.key.scancode == 184)
+                    g_input.alt_down = false;
             } else if (ev.type == EVT_MOUSE_SCROLL) {
                 if (g_index.active) {
                     if (g_index.result_count > 0) {
@@ -1888,7 +1914,8 @@ extern "C" int main(int argc, char **argv)
                 if (has_compose_union) {
                     capture_shell_backdrop_for_rect(compose_union, const_cast<Registry *>(registry));
                 }
-                flush_shell_blur_updates(registry);
+                if (!g_display_copy_path)
+                    flush_shell_blur_updates(registry);
 
                 if (draw_cursor) {
                     // Clear previous cursor position from presentbuffer by re-blitting from backbuffer
