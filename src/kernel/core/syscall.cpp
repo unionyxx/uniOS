@@ -2593,13 +2593,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 
             // Push-and-wake under the scheduler lock so the target cannot be
             // reaped between the lookup and the use of its event queue.
+            // event_enqueue, not event_push: the latter would re-enter
+            // g_sched_lock via scheduler_notify_input_waiters() and deadlock.
             const uint64_t sched_flags = scheduler_big_lock_irqsave();
             Process *target = process_find_by_pid_locked(arg1);
             if (!target) {
                 scheduler_big_unlock_irqrestore(sched_flags);
                 return static_cast<uint64_t>(-1);
             }
-            event_push(target->event_queue, ev);
+            event_enqueue(target->event_queue, ev);
             scheduler_wake_all_locked(&target->event_wait_queue);
             scheduler_big_unlock_irqrestore(sched_flags);
             scheduler_notify_idle_cpus();

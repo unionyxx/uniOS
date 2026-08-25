@@ -13,6 +13,10 @@ struct EventQueue
 };
 
 void event_init(EventQueue &q);
+/// Enqueue without waking waiters. Safe under g_sched_lock; the caller must
+/// wake the target itself (see scheduler_wake_all_locked).
+bool event_enqueue(EventQueue &q, const Event &e);
+/// Enqueue and wake all event waiters. Never call while holding g_sched_lock.
 void event_push(EventQueue &q, const Event &e);
 bool event_poll(EventQueue &q, Event &out);
 bool event_empty(const EventQueue &q);

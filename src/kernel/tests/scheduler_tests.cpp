@@ -1,4 +1,6 @@
 #include <kernel/ktest.h>
+#include <kernel/event.h>
+#include <kernel/process.h>
 #include <kernel/scheduler.h>
 #include <kernel/time/timer.h>
 
@@ -44,4 +46,31 @@ KTEST(sched_enqueue_runs_task_exactly_once)
     scheduler_sleep(100);
     scheduler_yield();
     KTEST_EXPECT_EQ(g_once_runs, started);
+}
+
+// Regression: SYS_POST_EVENT pushes an event while holding g_sched_lock.
+// event_push() re-enters g_sched_lock via scheduler_notify_input_waiters()
+// and self-deadlocks, silently freezing the system the first time the WM
+// posts a mouse event (cursor crossing a window border). Mirror the syscall
+// sequence with the notify-free enqueue; any scheduler re-entry added back
+// into this sequence hangs the boot and fails the smoke suite.
+KTEST(sched_event_post_sequence_under_big_lock_does_not_deadlock)
+{
+    EventQueue q;
+    event_init(q);
+    WaitQueue waiters = {};
+
+    Event ev = {};
+    ev.type = EVT_MOUSE_MOVE;
+
+    const uint64_t flags = scheduler_big_lock_irqsave();
+    const bool enqueued = event_enqueue(q, ev);
+    scheduler_wake_all_locked(&waiters);
+    scheduler_big_unlock_irqrestore(flags);
+    KTEST_EXPECT(enqueued);
+
+    Event out = {};
+    KTEST_EXPECT(event_poll(q, out));
+    KTEST_EXPECT_EQ(out.type, EVT_MOUSE_MOVE);
+    KTEST_EXPECT(!event_poll(q, out));
 }

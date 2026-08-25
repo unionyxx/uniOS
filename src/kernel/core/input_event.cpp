@@ -16,19 +16,31 @@ void event_init(EventQueue &q)
     spinlock_init(&q.lock);
 }
 
-// Producers run in IRQ context (HID handlers) and syscall context; the WM
-// consumes from another core once SMP starts. IRQ-safe lock is mandatory.
-void event_push(EventQueue &q, const Event &e)
+// Enqueue only, no scheduler wake. Safe to call with g_sched_lock held:
+// it touches just the queue's own leaf lock. Callers that already hold the
+// scheduler lock (find-and-act sequences) must use this and wake through the
+// *_locked scheduler helpers instead of event_push(), which would re-enter
+// g_sched_lock via scheduler_notify_input_waiters() and self-deadlock.
+bool event_enqueue(EventQueue &q, const Event &e)
 {
     const uint64_t flags = spinlock_acquire_irqsave(&q.lock);
     int next = (q.tail + 1) % EVENT_QUEUE_SIZE;
     if (next == q.head) {
         spinlock_release_irqrestore(&q.lock, flags);
-        return;
+        return false;
     }
     q.events[q.tail] = e;
     q.tail = next;
     spinlock_release_irqrestore(&q.lock, flags);
+    return true;
+}
+
+// Producers run in IRQ context (HID handlers) and syscall context; the WM
+// consumes from another core once SMP starts. IRQ-safe lock is mandatory.
+void event_push(EventQueue &q, const Event &e)
+{
+    if (!event_enqueue(q, e))
+        return;
 
     extern void scheduler_notify_input_waiters();
     scheduler_notify_input_waiters();
