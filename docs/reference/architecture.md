@@ -29,7 +29,9 @@ Upon entry, the kernel initializes core subsystems in order:
 - Device drivers and VFS.
 - `unifs.img` mount (system root).
 - `/data` mount (persistent storage from FAT32 volume).
-- Userspace `init` launch.
+- Kernel tests (debug builds only).
+- SMP bring-up of application processors.
+- Deferred services (networking, etc.) and userspace `init` launch.
 
 Debug builds retain framebuffer and serial boot logs and run registered kernel tests. Release builds boot directly to the desktop session.
 
@@ -39,7 +41,7 @@ Debug builds retain framebuffer and serial boot logs and run registered kernel t
 Uses a bitmap-backed frame allocator initialized from the UEFI memory map. It tracks frame references for address space accounting and DMA safety.
 
 ### Virtual Memory Manager (VMM)
-Implements x86-64 four-level paging with higher-half kernel mappings. User processes occupy isolated lower-half address spaces. Supports MMIO, DMA, and page-level protection.
+Implements x86-64 four-level paging with higher-half kernel mappings. User processes occupy isolated lower-half address spaces. Supports MMIO, DMA, and page-level protection. Address-space invalidations across cores use a TLB-shootdown IPI with monotonic sequence acknowledgements, retry, and a bounded timeout.
 
 ### Kernel Heap
 Provides bucketed allocation for small objects and page-backed ranges for large buffers, protected by kernel spinlocks.
@@ -48,10 +50,10 @@ Provides bucketed allocation for small objects and page-backed ranges for large 
 
 Userspace programs are ELF binaries loaded from the VFS. The syscall interface provides:
 
-- Process lifecycle (fork, exec, exit, wait).
-- File and directory operations (open, read, write, stat).
+- Process lifecycle (fork, exec, exit, wait) and threads.
+- File and directory operations (open, read, write, stat), pipes, and memfd.
 - Display and GUI composition.
-- Shared memory and inter-process signals.
+- Shared memory, futexes, epoll, and inter-process signals.
 - TCP/UDP networking and DNS.
 - System power control (reboot, poweroff).
 
@@ -59,9 +61,9 @@ Userspace programs are ELF binaries loaded from the VFS. The syscall interface p
 
 `/bin/init.elf` initializes the graphical environment:
 
-- **Window Manager**: Desktop composition, window metadata, input focus, damage tracking, and wallpaper loading.
+- **Window Manager**: Desktop composition, window metadata, input focus, damage tracking, wallpaper loading, and Alt+Tab focus cycling.
 - **System Services**: Menubar, Dock, and Desktop launcher.
-- **Applications**: Terminal, Files, Preferences, and Latitude.
+- **Applications**: Terminal, Files, Preferences, Latitude, Clock, Calendar, Calculator, and About.
 
 ## Display & Graphics
 
@@ -81,6 +83,12 @@ Supports PS/2 keyboard/mouse (including IntelliMouse scroll) and USB HID keyboar
 ## Networking
 
 Full-stack networking including Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, and DNS. Native drivers for e1000 and RTL8139 are included.
+
+TCP uses a windowed send path with multiple segments in flight and RFC 5681-style congestion control: slow start, congestion avoidance, fast retransmit/recovery on duplicate ACKs, and retransmission timeouts with exponential backoff. Round-trip time follows a Jacobson/Karels estimate with Karn's rule. The effective send window is the tightest of the congestion window, the peer's advertised window, and the socket's send buffer.
+
+## SMP
+
+uniOS supports multi-core x86-64 operation; see [SMP](smp.md) for AP bring-up, scheduling, shutdown, and validation details.
 
 ## Audio
 

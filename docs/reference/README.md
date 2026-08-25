@@ -1,6 +1,7 @@
 # uniOS Reference
 
 - [Architecture](architecture.md)
+- [SMP](smp.md)
 - [Shell scripting](scripting.md)
 - [Asset formats](formats/)
 

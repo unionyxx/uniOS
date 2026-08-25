@@ -83,7 +83,8 @@ Before opening a pull request:
 3. Run the smoke test when the change touches boot, kernel startup, display, userspace init, or the desktop session.
 4. Test both serial and graphical paths when changing boot, display, panic, or logging code.
 5. Test persistent `/data` behavior when changing storage, FAT32, USB mass storage, rootfs staging, or image generation.
-6. Include the exact commands you ran in the pull request.
+6. Run the SMP suites (`--suite smoke-smp`, or `--suite smoke-smp4` / `smp-soak` for scheduler changes) when touching scheduling, boot, or locking.
+7. Include the exact commands you ran in the pull request.
 
 ## Pull Request Notes
 

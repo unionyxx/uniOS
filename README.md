@@ -14,10 +14,11 @@
 - **Boot handoff**: Repo-owned `BootInfo` structure passed from Meridian to the kernel.
 - **Build system**: Meson + LLVM using `toolchains/llvm.ini`.
 - **Default boot image**: `boot.img`, a raw disk image with an EFI system partition and a writable `UNI_DATA` FAT32 partition.
+- **SMP**: Multi-core scheduling with per-core idle contexts, RESCHED IPIs, and sequence-acknowledged TLB shootdowns.
 - **Desktop session**: `/bin/init.elf` launches the window manager, menubar, dock, and userspace applications.
 - **Userspace**: Native ELF programs under `src/usr/`, with libc wrappers, a GUI library, shell, terminal, and desktop apps.
 - **Filesystems**: Boot content from `unifs.img`; persistent data from FAT32 mounted at `/data` when available.
-- **Drivers and subsystems**: Paging, heap allocation, preemptive scheduling, syscalls, VFS, PCI, ACPI/APIC, PS/2 input, USB/xHCI, USB HID, USB mass storage, e1000, RTL8139, IPv4, TCP, UDP, DHCP, DNS, AC97, HDA, and framebuffer display output.
+- **Drivers and subsystems**: Paging, heap allocation, preemptive scheduling, syscalls, VFS, PCI, ACPI/APIC, PS/2 input, USB/xHCI, USB HID, USB mass storage, e1000, RTL8139, IPv4, TCP (windowed send with congestion control and RTT estimation), UDP, DHCP, DNS, AC97, HDA, and framebuffer display output.
 
 ## Repository Layout
 
@@ -105,6 +106,7 @@ For real hardware, write `boot.img` to a USB drive as a raw disk image.
 ## Documentation
 
 - [Architecture](docs/reference/architecture.md)
+- [SMP](docs/reference/smp.md)
 - [Shell scripting](docs/reference/scripting.md)
 - [Asset formats](docs/reference/formats/)
 
