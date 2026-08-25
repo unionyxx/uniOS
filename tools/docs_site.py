@@ -220,7 +220,7 @@ nav {
     position: relative;
     background: var(--surface);
     border: 1px solid var(--surface-border);
-    padding: 4px;
+    padding: 3px;
     border-radius: var(--radius-pill);
     transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
@@ -228,9 +228,10 @@ nav {
 .theme-switch-mini button {
     position: relative;
     z-index: 2;
-    padding: 0.4rem 1.1rem;
+    padding: 0.15rem 0.85rem;
     border-radius: var(--radius-pill);
-    font-size: 0.8rem;
+    font-size: 0.7rem;
+    line-height: 1;
     font-weight: 500;
     font-family: inherit;
     color: var(--muted);
@@ -247,10 +248,10 @@ nav {
 .theme-switch-mini::before {
     content: '';
     position: absolute;
-    top: 4px;
-    left: 4px;
-    width: calc(50% - 4px);
-    height: calc(100% - 8px);
+    top: 3px;
+    left: 3px;
+    width: calc(50% - 3px);
+    height: calc(100% - 6px);
     background: var(--bg);
     border-radius: var(--radius-pill);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
@@ -274,8 +275,8 @@ nav {
 
 .docs-sidebar {
     position: sticky;
-    top: 84px;
-    max-height: calc(100vh - 104px);
+    top: 70px;
+    max-height: calc(100vh - 90px);
     overflow-y: auto;
     padding-bottom: 1rem;
     padding-right: 0.6rem;
@@ -444,21 +445,21 @@ article h2 {
     font-size: 1.4rem;
     font-weight: 600;
     margin: 2.5rem 0 0.9rem;
-    scroll-margin-top: 90px;
+    scroll-margin-top: 76px;
 }
 
 article h3 {
     font-size: 1.12rem;
     font-weight: 600;
     margin: 1.9rem 0 0.7rem;
-    scroll-margin-top: 90px;
+    scroll-margin-top: 76px;
 }
 
 article h4, article h5, article h6 {
     font-size: 0.98rem;
     font-weight: 600;
     margin: 1.5rem 0 0.5rem;
-    scroll-margin-top: 90px;
+    scroll-margin-top: 76px;
 }
 
 article p {
@@ -571,8 +572,8 @@ article img {
 
 .toc {
     position: sticky;
-    top: 84px;
-    max-height: calc(100vh - 104px);
+    top: 70px;
+    max-height: calc(100vh - 90px);
     overflow-y: auto;
     font-size: 0.8rem;
 }
@@ -608,17 +609,19 @@ article img {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1rem;
+    max-width: 760px;
     margin-top: 3.5rem;
     padding-top: 1.5rem;
     border-top: 1px solid var(--surface-border);
 }
 
 .pager a {
-    display: block;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
     border: 1px solid var(--surface-border);
     border-radius: var(--radius-sm);
-    padding: 0.8rem 1rem;
+    padding: 0.9rem 1.1rem;
     text-decoration: none;
     color: var(--text);
     font-size: 0.9rem;
@@ -631,25 +634,40 @@ article img {
 }
 
 .pager .label {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
     font-size: 0.68rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--muted);
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.4rem;
+}
+
+.pager .chevron {
+    font-size: 0.9rem;
+    line-height: 1;
+    transition: transform 0.2s var(--ease);
+}
+
+.pager a.prev:hover .chevron {
+    transform: translateX(-3px);
+}
+
+.pager a.next:hover .chevron {
+    transform: translateX(3px);
 }
 
 .pager .title {
     display: block;
     font-weight: 500;
     line-height: 1.4;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 
 .pager .next {
     text-align: right;
+    align-items: flex-end;
 }
 
 .docs-footer-wrap {
@@ -700,7 +718,7 @@ article img {
     }
 
     .nav-content {
-        padding: 0.9rem 1.25rem;
+        padding: 1rem 1.25rem;
     }
 
     .nav-links {
@@ -992,6 +1010,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
             <article>
 {article}
             </article>
+            {toc}
             {pager}
         </main>
     </div>
@@ -1338,13 +1357,15 @@ def build_pager(order, index, base):
         return ""
     parts = ['<div class="pager">']
     if prev_link:
-        parts.append('<a class="prev" href="%s"><span class="label">Previous</span>'
+        parts.append('<a class="prev" href="%s"><span class="label">'
+                     '<span class="chevron">&lsaquo;</span>Previous</span>'
                      '<span class="title">%s</span></a>'
                      % (base + prev_link.rel_html, html.escape(prev_link.nav_title)))
     else:
         parts.append("<span></span>")
     if next_link:
-        parts.append('<a class="next" href="%s"><span class="label">Next</span>'
+        parts.append('<a class="next" href="%s"><span class="label">'
+                     'Next<span class="chevron">&rsaquo;</span></span>'
                      '<span class="title">%s</span></a>'
                      % (base + next_link.rel_html, html.escape(next_link.nav_title)))
     else:
@@ -1486,6 +1507,7 @@ def main():
             sidebar=sidebar,
             toc_class=" has-toc" if toc else "",
             article=page.html,
+            toc=toc,
             pager=pager,
         )
         out_path = os.path.join(dest, *page.rel_html.split("/"))
