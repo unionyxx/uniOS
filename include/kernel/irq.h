@@ -17,6 +17,7 @@ void apic_send_eoi();
 void apic_send_ipi_all_excluding_self(uint8_t vector);
 bool apic_send_ipi_to(uint8_t dest_apic_id, uint8_t vector);
 bool apic_send_init_ipi(uint8_t dest_apic_id);
+bool apic_send_init_deassert_ipi(uint8_t dest_apic_id);
 bool apic_send_sipi(uint8_t dest_apic_id, uint8_t vector);
 // Broadcasts the RESCHED vector to all other online cores.
 void apic_send_resched_ipi_to_others();

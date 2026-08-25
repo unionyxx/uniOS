@@ -47,8 +47,11 @@ constexpr uint32_t LAPIC_DIVIDE_16 = 0x3;   // xAPIC divide-by-16 encoding
 constexpr uint32_t PIT_10MS_RELOAD = 11931; // 1.193182 MHz / 100
 
 // ICR low dword layouts: delivery mode sits in bits [10:8], level assert in
-// bit 14. INIT = 101b, STARTUP = 110b — both require the assert bit.
+// bit 14, trigger mode in bit 15. INIT = 101b, STARTUP = 110b — both require
+// the assert bit. INIT de-assert (MP spec) is level-triggered INIT with the
+// level bit cleared.
 constexpr uint32_t ICR_DELIVERY_INIT = 0x00004500;
+constexpr uint32_t ICR_DELIVERY_INIT_DEASSERT = 0x00008500;
 constexpr uint32_t ICR_DELIVERY_SIPI = 0x00004600;
 
 inline volatile uint32_t *lapic_reg(uint32_t off)
@@ -465,6 +468,11 @@ bool apic_send_init_ipi(uint8_t dest_apic_id)
     return icr_send_to(dest_apic_id, ICR_DELIVERY_INIT);
 }
 
+bool apic_send_init_deassert_ipi(uint8_t dest_apic_id)
+{
+    return icr_send_to(dest_apic_id, ICR_DELIVERY_INIT_DEASSERT);
+}
+
 bool apic_send_sipi(uint8_t dest_apic_id, uint8_t vector)
 {
     return icr_send_to(dest_apic_id, ICR_DELIVERY_SIPI | vector);
@@ -477,21 +485,28 @@ bool apic_send_ipi_to(uint8_t dest_apic_id, uint8_t vector)
 
 void apic_send_ipi_all_excluding_self(uint8_t vector)
 {
-    if (g_apic_enabled && g_lapic_base) {
-        // Clear Destination Field in ICR High
-        lapic_write(LAPIC_ICR_HI, 0);
+    if (!g_apic_enabled || !g_lapic_base)
+        return;
 
-        // Destination Shorthand: All Excluding Self (0xC0000)
-        // Delivery Mode: Fixed (0x000)
-        // Level: Assert (0x4000)
-        // Vector: vector
-        lapic_write(LAPIC_ICR_LO, 0x000C0000 | 0x4000 | vector);
+    // Bound the waits: panic/shutdown must never wedge forever on a virtual
+    // or faulty LAPIC with sticky delivery status.
+    constexpr uint32_t kMaxStatusPolls = 100000000u;
 
-        // Bound the wait: panic/shutdown must never wedge forever on a
-        // virtual or faulty LAPIC with sticky delivery status.
-        constexpr uint32_t kMaxStatusPolls = 100000000u;
-        for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
-            asm volatile("pause");
-        }
+    // Writing the ICR while a previous IPI is still in flight drops that IPI;
+    // wait it out first (this path carries stop-IPIs and resched broadcasts).
+    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
+        asm volatile("pause");
+    }
+
+    // Clear Destination Field in ICR High
+    lapic_write(LAPIC_ICR_HI, 0);
+
+    // Destination Shorthand: All Excluding Self (0xC0000), Fixed delivery.
+    // The Level bit only applies to INIT delivery and must stay 0 here — some
+    // LAPIC implementations flag it on Fixed IPIs.
+    lapic_write(LAPIC_ICR_LO, 0x000C0000 | vector);
+
+    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
+        asm volatile("pause");
     }
 }

@@ -3,6 +3,7 @@
 #include <drivers/apic/ioapic.h>
 #include <kernel/arch/x86_64/gdt.h>
 #include <kernel/arch/x86_64/idt.h>
+#include <kernel/arch/x86_64/pat.h>
 #include <kernel/cpu.h>
 #include <kernel/debug.h>
 #include <kernel/irq.h>
@@ -100,21 +101,50 @@ extern "C" [[gnu::target("no-sse")]] void ap_main(PerCpu *cpu)
     // Control registers, FPU, per-core syscall MSRs, GS -> this PerCpu.
     cpu_core_setup(cpu->cpu_id, cpu->apic_id);
 
-    idt_load();                // shared interrupt table
-    gdt_init_cpu(cpu->cpu_id); // per-core GDT/TSS with private IST stacks
+    // IA32_PAT is per-core; without this an AP keeps the reset-default PAT
+    // and interprets PTE_WC as UC.
+    pat_init();
+
+    // Load the per-core GDT/TSS (and with it the IST stacks) BEFORE the IDT:
+    // an NMI/#DF/#PF arriving in between would otherwise resolve IST against
+    // the trampoline GDT, which has no TSS.
+    gdt_init_cpu(cpu->cpu_id);
+    idt_load(); // shared interrupt table
 
     apic_enable_this_core();
     apic_timer_start_this_core(apic_timer_bsp_initcnt());
 
-    __atomic_store_n(&cpu->online, true, __ATOMIC_RELEASE);
-
     // Adopt the per-core idle context and start pulling work from the global
-    // runqueue. Never returns; the online count is incremented inside the
-    // scheduler handoff while the sched lock is held.
+    // runqueue. Never returns; the online flag and count are published inside
+    // the scheduler handoff (under the sched lock) so this core is only
+    // visible to IPI/shootdown senders once its LAPIC is enabled.
     scheduler_enter_idle(cpu->idle);
 }
 
 namespace {
+
+// Preference for low page sources:
+//  1. BOOTLOADER_RECLAIMABLE — the loader asked the firmware for a page below
+//     1 MiB, so this is firmware-blessed RAM.
+//  2. USABLE — conventional low RAM (QEMU/OVMF exposes some).
+//  3. RESERVED/ACPI_RECLAIMABLE — real UEFI firmware rarely reports any
+//     usable RAM below 1 MiB; conventional low RAM usually shows up as
+//     reserved. The ceiling keeps clear of VGA/option-ROM space, and the
+//     trampoline's own scratch stack lives in this same region already.
+int low_page_rank(uint64_t type)
+{
+    switch (type) {
+        case BOOT_MEM_BOOTLOADER_RECLAIMABLE:
+            return 3;
+        case BOOT_MEM_USABLE:
+            return 2;
+        case BOOT_MEM_RESERVED:
+        case BOOT_MEM_ACPI_RECLAIMABLE:
+            return 1;
+        default:
+            return 0;
+    }
+}
 
 bool find_low_trampoline_page(uint64_t &out_phys)
 {
@@ -123,9 +153,11 @@ bool find_low_trampoline_page(uint64_t &out_phys)
         return false;
 
     uint64_t best = 0;
+    int best_rank = 0;
     for (uint64_t i = 0; i < bi->memory_map_count; i++) {
         const BootMemoryMapEntry *e = &bi->memory_map[i];
-        if (e->type != BOOT_MEM_USABLE)
+        const int rank = low_page_rank(e->type);
+        if (rank == 0)
             continue;
 
         uint64_t start = (e->base + 0xFFFULL) & ~0xFFFULL;
@@ -142,8 +174,12 @@ bool find_low_trampoline_page(uint64_t &out_phys)
             continue;
 
         const uint64_t candidate = ((ceiling - 1) & ~0xFFFULL); // last full page
-        if (candidate >= start && candidate > best && (candidate >> 12) < SMP_TRAMPOLINE_VECTOR_LIMIT)
+        if (candidate < start || (candidate >> 12) >= SMP_TRAMPOLINE_VECTOR_LIMIT)
+            continue;
+        if (rank > best_rank || (rank == best_rank && candidate > best)) {
             best = candidate;
+            best_rank = rank;
+        }
     }
 
     if (best == 0)
@@ -269,13 +305,28 @@ bool start_ap(uint32_t slot, uint32_t apic_id, uint8_t sipi_vector, uint8_t *tra
 
     // Full INIT-SIPI protocol: under OVMF the APs are parked inside firmware
     // (long-mode) loops, not in classic wait-for-SIPI, so the INIT must put
-    // them back into real mode before the SIPI can take effect.
+    // them back into real mode before the SIPI can take effect. Real chipsets
+    // occasionally lose the first SIPI (SMM interference, posted IPIs), so
+    // the sequence is INIT, deassert, SIPI, short wait, second SIPI.
     BOOT_LOG("SMP: sending INIT to AP %u", apic_id);
     apic_send_init_ipi(static_cast<uint8_t>(apic_id));
     timer_poll_wait_ms(SMP_INIT_DELAY_MS);
+    apic_send_init_deassert_ipi(static_cast<uint8_t>(apic_id));
 
     BOOT_LOG("SMP: sending SIPI vector 0x%x to AP %u", sipi_vector, apic_id);
     apic_send_sipi(static_cast<uint8_t>(apic_id), sipi_vector);
+
+    // Brief poll (~200 us or more) before the second SIPI; it is ignored by
+    // an AP that already left wait-for-SIPI state.
+    for (uint32_t i = 0; i < 1000000; i++) {
+        if (__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE))
+            break;
+        asm volatile("pause");
+    }
+    if (!__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE)) {
+        BOOT_LOG("SMP: sending second SIPI to AP %u", apic_id);
+        apic_send_sipi(static_cast<uint8_t>(apic_id), sipi_vector);
+    }
     interrupts_restore(flags);
     BOOT_LOG("SMP: waiting for AP %u online flag", apic_id);
 
@@ -301,7 +352,23 @@ bool start_ap(uint32_t slot, uint32_t apic_id, uint8_t sipi_vector, uint8_t *tra
     preempt_enable();
 
     if (!online) {
-        BOOT_WARN("SMP: AP %u did not come online in time", apic_id);
+        // Last chance: the AP may have crossed the finish line just past the
+        // deadline. Checking again matters because the recovery below INITs
+        // the core, which must never hit an already-running AP.
+        if (__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE))
+            return true;
+
+        // Re-park the late AP before this function returns: the trampoline
+        // param block is rewritten for the NEXT AP, and a straggler waking up
+        // afterwards would otherwise consume another core's stack/PerCpu.
+        // INIT puts it back into wait-for-SIPI (no further SIPI is sent to
+        // it), so it stays parked.
+        BOOT_WARN("SMP: AP %u did not come online in time, re-parking", apic_id);
+        const uint64_t park_flags = interrupts_save_disable();
+        apic_send_init_ipi(static_cast<uint8_t>(apic_id));
+        timer_poll_wait_ms(1);
+        apic_send_init_deassert_ipi(static_cast<uint8_t>(apic_id));
+        interrupts_restore(park_flags);
         return false;
     }
     return true;

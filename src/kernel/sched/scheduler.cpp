@@ -626,6 +626,10 @@ void scheduler_enter_idle(Process *idle)
     tss_set_rsp0(idle->sp); // pid 0 tasks run on their saved sp
     cpu_get_local()->kernel_stack = idle->sp;
     cpu_get_local()->idle = idle;
+    // Publish online only now: the LAPIC is enabled and this is the last stop
+    // before the idle loop enables interrupts, so IPI/shootdown senders that
+    // observe this flag can actually reach the core.
+    __atomic_store_n(&cpu_get_local()->online, true, __ATOMIC_RELEASE);
     __sync_fetch_and_add(&g_cpu_online_count, 1);
     BOOT_SUCCESS("SMP: core %u online (%d CPUs total)", cpu_get_local()->cpu_id,
                  __atomic_load_n(&g_cpu_online_count, __ATOMIC_ACQUIRE));

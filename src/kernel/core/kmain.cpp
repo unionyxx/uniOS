@@ -491,13 +491,20 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
 
     smp_init();
 
-    if (Process *deferred = scheduler_create_task(deferred_boot_services_task, "DeferredInit")) {
+    // APs are online from here on, so tasks must be fully configured BEFORE
+    // they become runnable — scheduler_create_task_deferred() + explicit
+    // enqueue publishes atomically instead of mutating a queued Process.
+    if (Process *deferred = scheduler_create_task_deferred(deferred_boot_services_task, "DeferredInit")) {
         deferred->priority = 0;
-        deferred->state = ProcessState_Ready;
+        scheduler_enqueue_task(deferred);
+    } else {
+        BOOT_ERROR("failed to create DeferredInit task");
     }
-    if (Process *init_launcher = scheduler_create_task(launch_init_task, "InitLaunch")) {
+    if (Process *init_launcher = scheduler_create_task_deferred(launch_init_task, "InitLaunch")) {
         init_launcher->priority = 1;
-        init_launcher->state = ProcessState_Ready;
+        scheduler_enqueue_task(init_launcher);
+    } else {
+        BOOT_ERROR("failed to create InitLaunch task");
     }
 
     asm volatile("sti" ::: "memory");

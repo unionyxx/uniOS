@@ -1767,6 +1767,14 @@ extern "C" EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE 
     if (efi_error(status))
         return fail_status("failed to allocate kernel stack", status);
 
+    // The kernel's SMP trampoline must live below 1 MiB. Real UEFI firmware
+    // rarely reports any usable RAM there, so claim a page through the
+    // firmware while boot services still exist (it surfaces in the memory map
+    // as BOOT_MEM_BOOTLOADER_RECLAIMABLE). Best effort: the kernel has a
+    // reserved-low-RAM fallback if the firmware cannot provide one.
+    EFI_PHYSICAL_ADDRESS smp_trampoline_page = 0x8F000;
+    g_boot_services->AllocatePages(AllocateMaxAddress, EfiLoaderData, 1, &smp_trampoline_page);
+
     auto *payload = reinterpret_cast<BootPayload *>(payload_phys);
     auto *memory_map = reinterpret_cast<EFI_MEMORY_DESCRIPTOR *>(memory_map_buffer_phys);
     const uint64_t rsdp_phys = find_acpi_rsdp(system_table);

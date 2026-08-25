@@ -264,16 +264,24 @@ bool pmm_reserve_range(uint64_t phys, size_t pages)
     const uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
     for (size_t i = 0; i < pages; i++) {
-        if (g_pmm_bitmap[first + i]) {
+        // Accept frames the firmware already reserves (marked in-use with no
+        // owner) so the kernel can pin special-purpose pages like the SMP
+        // trampoline out of reserved low RAM. Frames with a live owner are
+        // still rejected.
+        if (g_pmm_bitmap[first + i] && g_pmm_refcounts[first + i] != 0) {
             spinlock_release_irqrestore(&g_pmm_lock, flags);
             return false;
         }
     }
 
     for (size_t i = 0; i < pages; i++) {
-        g_pmm_bitmap.set(first + i, true);
-        g_pmm_refcounts[first + i] = 1;
-        g_free_memory -= k_frame_size;
+        const size_t idx = first + i;
+        const bool was_free = !g_pmm_bitmap[idx];
+        g_pmm_bitmap.set(idx, true);
+        if (g_pmm_refcounts[idx] == 0)
+            g_pmm_refcounts[idx] = 1;
+        if (was_free)
+            g_free_memory -= k_frame_size;
     }
 
     spinlock_release_irqrestore(&g_pmm_lock, flags);

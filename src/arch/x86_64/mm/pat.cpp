@@ -39,7 +39,10 @@ bool pat_is_supported()
     return (edx & (1 << 16)) != 0;
 }
 
-void pat_init()
+// Must run on EVERY core: IA32_PAT is per-logical-processor, and an AP left
+// with the reset-default PAT would interpret PTE_WC (PAT index 2) as UC
+// instead of WC, silently wrecking framebuffer/rendering performance.
+[[gnu::target("no-sse")]] void pat_init()
 {
     if (!pat_is_supported()) {
         DEBUG_WARN("PAT not supported by CPU");
@@ -47,19 +50,29 @@ void pat_init()
     }
 
     uint64_t old_pat = rdmsr(IA32_PAT_MSR);
-    if (pat_entry(old_pat, 2) == PAT_WC) {
-        DEBUG_INFO("PAT entry 2 already configured as Write-Combining");
+    if (pat_entry(old_pat, 2) == PAT_WC)
         return;
-    }
 
-    uint64_t new_pat = pat_with_entry(old_pat, 2, PAT_WC);
-    wrmsr(IA32_PAT_MSR, new_pat);
+    // SDM-mandated sequence for changing PAT: interrupts off, caches disabled
+    // and flushed around the MSR write, then flush again before re-enabling.
+    uint64_t flags;
+    asm volatile("pushfq\npopq %0" : "=r"(flags));
+    asm volatile("cli");
+
+    uint64_t cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    asm volatile("mov %0, %%cr0" ::"r"(cr0 | (1ULL << 30)) : "memory"); // CR0.CD
+    asm volatile("wbinvd");
+
+    wrmsr(IA32_PAT_MSR, pat_with_entry(old_pat, 2, PAT_WC));
+
+    asm volatile("wbinvd");
+    asm volatile("mov %0, %%cr0" ::"r"(cr0) : "memory");
+
+    if ((flags & (1ULL << 9)) != 0)
+        asm volatile("sti");
 
     uint64_t verify_pat = rdmsr(IA32_PAT_MSR);
-    if (pat_entry(verify_pat, 2) != PAT_WC) {
+    if (pat_entry(verify_pat, 2) != PAT_WC)
         DEBUG_WARN("PAT configuration verify failed for entry 2");
-        return;
-    }
-
-    DEBUG_INFO("PAT configured: entry 2 = Write-Combining");
 }
