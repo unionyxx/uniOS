@@ -163,6 +163,13 @@ struct AppState
     uint64_t last_editor_click_ticks;
     int last_editor_click_line;
 
+    // Transient interaction state: brief pressed flash for the toolbar
+    // buttons and a two-step confirm before discarding unsaved changes.
+    int button_pressed; // 0 none, 1 new, 2 save, 3 reload
+    uint64_t button_pressed_ticks;
+    int pending_confirm; // 0 none, 1 new, 2 reload
+    uint64_t pending_confirm_ticks;
+
     char status[MAX_STATUS_LEN];
     uint32_t last_settings_generation;
     bool needs_redraw;
@@ -1100,6 +1107,7 @@ static bool save_file(AppState *state)
     char status[160];
     snprintf(status, sizeof(status), "Saved %s", state->buffer->title);
     set_status(state, status);
+    gui_notify("Latitude", status);
     sync_path_input(state);
     char folder[512];
     parent_path(state->buffer->path, folder, sizeof(folder));
@@ -1855,9 +1863,10 @@ static void find_next(AppState *state)
     state->needs_redraw = true;
 }
 
-static void draw_button_or_field(Surface *win, Rect rect, const char *label, bool primary, bool active, bool hovered)
+static void draw_button_or_field(Surface *win, Rect rect, const char *label, bool primary, bool active, bool hovered,
+                                 bool pressed)
 {
-    gui_app_draw_button(win, rect.x, rect.y, rect.w, rect.h, label, primary, active, hovered);
+    gui_app_draw_button_ex(win, rect.x, rect.y, rect.w, rect.h, label, primary, active, hovered, pressed);
 }
 
 static uint32_t editor_bg()
@@ -2183,9 +2192,12 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     rects->reload_button = gui_rect_make(rects->save_button.x + rects->save_button.w + gui_space_1(), button_y,
                                          gui_scaled_metric(70), gui_app_control_h());
 
-    draw_button_or_field(win, rects->new_button, "New", false, false, state->hovered == HOVER_NEW_FILE);
-    draw_button_or_field(win, rects->save_button, "Save", true, false, state->hovered == HOVER_SAVE);
-    draw_button_or_field(win, rects->reload_button, "Reload", false, false, state->hovered == HOVER_RELOAD);
+    draw_button_or_field(win, rects->new_button, "New", false, false, state->hovered == HOVER_NEW_FILE,
+                         state->button_pressed == 1);
+    draw_button_or_field(win, rects->save_button, "Save", true, false, state->hovered == HOVER_SAVE,
+                         state->button_pressed == 2);
+    draw_button_or_field(win, rects->reload_button, "Reload", false, false, state->hovered == HOVER_RELOAD,
+                         state->button_pressed == 3);
 
     int search_w = min_int(gui_scaled_metric(210), max_int(gui_scaled_metric(120), panel_w / 5));
     if (state->search_focused) {
@@ -2644,6 +2656,21 @@ extern "C" int main()
                 state->needs_redraw = true;
                 continue;
             }
+            if (ev.type == EVT_FOCUS) {
+                state->needs_redraw = true;
+                continue;
+            }
+            if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
+                bool changed = state->hovered != HOVER_NONE || state->project_hovered >= 0 ||
+                               state->outline_hovered >= 0;
+                state->hovered = HOVER_NONE;
+                state->project_hovered = -1;
+                state->outline_hovered = -1;
+                state->button_pressed = 0;
+                if (changed)
+                    state->needs_redraw = true;
+                continue;
+            }
             if (ev.type == EVT_MOUSE_MOVE) {
                 HoverTarget previous = state->hovered;
                 int previous_project_hovered = state->project_hovered;
@@ -2660,7 +2687,12 @@ extern "C" int main()
             if (ev.type == EVT_MOUSE_SCROLL) {
                 if (point_in_rect(rects->editor_rect, ev.mouse.x, ev.mouse.y)) {
                     state->first_line += ev.mouse.scroll_y < 0 ? 3 : -3;
-                    state->first_line = clamp_int(state->first_line, 0, max_int(0, state->buffer->line_count - 1));
+                    // Stop at the point where the last line is at the bottom of
+                    // the view, not when only one line remains.
+                    int max_first = state->visible_lines > 1
+                                        ? max_int(0, state->buffer->line_count - state->visible_lines)
+                                        : max_int(0, state->buffer->line_count - 1);
+                    state->first_line = clamp_int(state->first_line, 0, max_first);
                     state->needs_redraw = true;
                 } else if (point_in_rect(rects->sidebar_rect, ev.mouse.x, ev.mouse.y)) {
                     int side_header_h = gui_scaled_metric(34);
@@ -2689,16 +2721,52 @@ extern "C" int main()
                 state->hovered = target;
                 if (target == HOVER_NEW_FILE) {
                     clear_field_focus(state);
-                    new_file(state);
+                    state->button_pressed = 1;
+                    state->button_pressed_ticks = get_ticks();
+                    if (state->buffer->modified) {
+                        // Destructive: require a second confirming click.
+                        if (state->pending_confirm == 1 &&
+                            get_ticks() - state->pending_confirm_ticks < 3000) {
+                            state->pending_confirm = 0;
+                            new_file(state);
+                        } else {
+                            state->pending_confirm = 1;
+                            state->pending_confirm_ticks = get_ticks();
+                            set_status(state, "Unsaved changes — click New again to discard");
+                            state->needs_redraw = true;
+                        }
+                    } else {
+                        state->pending_confirm = 0;
+                        new_file(state);
+                    }
                 } else if (target == HOVER_SAVE) {
                     bool path_ok = !state->path_focused || set_buffer_path_from_input(state, false);
                     clear_field_focus(state);
+                    state->button_pressed = 2;
+                    state->button_pressed_ticks = get_ticks();
+                    state->pending_confirm = 0;
                     if (path_ok)
                         save_file(state);
                 } else if (target == HOVER_RELOAD) {
                     clear_field_focus(state);
-                    if (state->buffer->path[0])
-                        load_file(state, state->buffer->path);
+                    state->button_pressed = 3;
+                    state->button_pressed_ticks = get_ticks();
+                    if (state->buffer->modified && state->buffer->path[0]) {
+                        if (state->pending_confirm == 2 &&
+                            get_ticks() - state->pending_confirm_ticks < 3000) {
+                            state->pending_confirm = 0;
+                            load_file(state, state->buffer->path);
+                        } else {
+                            state->pending_confirm = 2;
+                            state->pending_confirm_ticks = get_ticks();
+                            set_status(state, "Unsaved changes — click Reload again to discard");
+                            state->needs_redraw = true;
+                        }
+                    } else {
+                        state->pending_confirm = 0;
+                        if (state->buffer->path[0])
+                            load_file(state, state->buffer->path);
+                    }
                 } else if (target == HOVER_PATH) {
                     sync_path_input(state);
                     state->path_focused = true;
@@ -2745,6 +2813,17 @@ extern "C" int main()
                 state->needs_redraw = true;
         }
 
+        uint64_t loop_ticks = get_ticks();
+        if (state->button_pressed != 0 && loop_ticks - state->button_pressed_ticks >= 150) {
+            state->button_pressed = 0;
+            state->needs_redraw = true;
+        }
+        if (state->pending_confirm != 0 && loop_ticks - state->pending_confirm_ticks >= 3000) {
+            state->pending_confirm = 0;
+            set_status(state, state->buffer->modified ? "Unsaved changes" : "Ready");
+            state->needs_redraw = true;
+        }
+
         if (state->needs_redraw) {
             if (ensure_render_surface(&frame, win.width, win.height)) {
                 draw_latitude(&frame, state, rects);
@@ -2754,6 +2833,15 @@ extern "C" int main()
                 gui_blit_to_screen_rect(&win, 0, 0, (int)win.width, (int)win.height);
             }
             state->needs_redraw = false;
+
+            // Keep the titlebar in sync with the open file.
+            char title[128];
+            if (state->buffer->title[0])
+                snprintf(title, sizeof(title), "%s%s — Latitude", state->buffer->modified ? "* " : "",
+                         state->buffer->title);
+            else
+                snprintf(title, sizeof(title), "%suntitled — Latitude", state->buffer->modified ? "* " : "");
+            gui_set_window_title(title);
         } else {
             sleep_ms(10);
         }
