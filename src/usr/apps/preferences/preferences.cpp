@@ -65,6 +65,7 @@ struct PreferencesState
     char status[128];
     int section;
     HoverTarget hovered;
+    HoverTarget pressed;
     bool field_focused;
     bool volume_dragging;
 };
@@ -597,11 +598,12 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
         gui_app_draw_text_field(win, rects->wallpaper_field.x, rects->wallpaper_field.y, rects->wallpaper_field.w,
                                 rects->wallpaper_field.h, state->wallpaper_path, state->field_focused,
                                 state->hovered == HOVER_WALLPAPER_FIELD);
-        gui_app_draw_button(win, rects->wallpaper_apply.x, rects->wallpaper_apply.y, rects->wallpaper_apply.w,
-                            rects->wallpaper_apply.h, "Apply", true, false, state->hovered == HOVER_WALLPAPER_APPLY);
-        gui_app_draw_button(win, rects->wallpaper_default_btn.x, rects->wallpaper_default_btn.y,
-                            rects->wallpaper_default_btn.w, rects->wallpaper_default_btn.h, "Default", false, false,
-                            state->hovered == HOVER_WALLPAPER_DEFAULT);
+        gui_app_draw_button_ex(win, rects->wallpaper_apply.x, rects->wallpaper_apply.y, rects->wallpaper_apply.w,
+                               rects->wallpaper_apply.h, "Apply", true, false,
+                               state->hovered == HOVER_WALLPAPER_APPLY, state->pressed == HOVER_WALLPAPER_APPLY);
+        gui_app_draw_button_ex(win, rects->wallpaper_default_btn.x, rects->wallpaper_default_btn.y,
+                               rects->wallpaper_default_btn.w, rects->wallpaper_default_btn.h, "Default", false, false,
+                               state->hovered == HOVER_WALLPAPER_DEFAULT, state->pressed == HOVER_WALLPAPER_DEFAULT);
 
         int anim_y = rects->wallpaper_default_btn.y + rects->wallpaper_default_btn.h + gui_space_3();
         rects->animations_toggle = gui_rect_make(content_x, anim_y, content_w, gui_scaled_metric(40));
@@ -816,6 +818,23 @@ extern "C" int main()
                 request_redraw(true, gui_rect_make(0, 0, 0, 0));
                 continue;
             }
+            if (ev.type == EVT_WINDOW_SCROLL) {
+                // Sticky nav/detail headers track the scroll offset.
+                request_redraw(true, gui_rect_make(0, 0, 0, 0));
+                continue;
+            }
+            if (ev.type == EVT_FOCUS) {
+                request_redraw(true, gui_rect_make(0, 0, 0, 0));
+                continue;
+            }
+            if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
+                HoverTarget previous_hovered = state.hovered;
+                state.hovered = HOVER_NONE;
+                state.pressed = HOVER_NONE;
+                if (previous_hovered != HOVER_NONE)
+                    request_redraw(false, hover_target_rect(rects, state.section, previous_hovered));
+                continue;
+            }
             if (ev.type == EVT_MOUSE_MOVE) {
                 if (state.volume_dragging && !gui_rect_is_empty(rects.volume_slider)) {
                     Rect track = gui_app_slider_track_rect(rects.volume_slider.x, rects.volume_slider.y,
@@ -857,10 +876,10 @@ extern "C" int main()
                     }
                     apply_system_settings(&state, registry, "Theme updated", "Theme applied for this session");
                     gui_sync_theme_from_registry();
-                } else if (hovered == HOVER_WALLPAPER_APPLY) {
-                    apply_wallpaper(&state, registry, state.wallpaper_path);
-                } else if (hovered == HOVER_WALLPAPER_DEFAULT) {
-                    apply_wallpaper(&state, registry, wallpaper_default_path_for_theme(state.theme_mode));
+                } else if (hovered == HOVER_WALLPAPER_APPLY || hovered == HOVER_WALLPAPER_DEFAULT) {
+                    // Release-to-apply: the wallpaper change fires on mouse-up
+                    // so a drag away cancels it.
+                    state.pressed = hovered;
                 } else if (hovered == HOVER_ANIMATIONS_TOGGLE) {
                     state.animations_enabled = !state.animations_enabled;
                     apply_system_settings(&state, registry, "Animations updated",
@@ -909,10 +928,27 @@ extern "C" int main()
                 request_redraw(true, gui_rect_make(0, 0, 0, 0));
                 continue;
             }
-            if (ev.type == EVT_MOUSE_UP && state.volume_dragging) {
-                state.volume_dragging = false;
-                apply_system_settings(&state, registry, "Volume updated", "Volume applied for this session");
-                request_redraw(true, gui_rect_make(0, 0, 0, 0));
+            if (ev.type == EVT_MOUSE_UP && ev.mouse.button == 1) {
+                bool changed = false;
+                if (state.volume_dragging) {
+                    state.volume_dragging = false;
+                    apply_system_settings(&state, registry, "Volume updated", "Volume applied for this session");
+                    changed = true;
+                }
+                if (state.pressed != HOVER_NONE) {
+                    HoverTarget pressed = state.pressed;
+                    state.pressed = HOVER_NONE;
+                    HoverTarget over = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
+                    if (over == pressed) {
+                        if (pressed == HOVER_WALLPAPER_APPLY)
+                            apply_wallpaper(&state, registry, state.wallpaper_path);
+                        else if (pressed == HOVER_WALLPAPER_DEFAULT)
+                            apply_wallpaper(&state, registry, wallpaper_default_path_for_theme(state.theme_mode));
+                    }
+                    changed = true;
+                }
+                if (changed)
+                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
                 continue;
             }
             if (ev.type == EVT_KEY_DOWN && state.field_focused && ev.key.c != 0) {
@@ -921,6 +957,9 @@ extern "C" int main()
                 if (c == '\n' || c == '\r') {
                     apply_wallpaper(&state, registry, state.wallpaper_path);
                     request_redraw(true, gui_rect_make(0, 0, 0, 0));
+                } else if (c == 27) {
+                    state.field_focused = false;
+                    request_redraw(false, inflate_rect(rects.wallpaper_field, 2));
                 } else if ((c == '\b' || c == 127) && len > 0) {
                     state.wallpaper_path[len - 1] = '\0';
                     request_redraw(false, inflate_rect(rects.wallpaper_field, 1));
