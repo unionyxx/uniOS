@@ -18,6 +18,11 @@ static inline float fabs_float(float x)
     return x < 0.0f ? -x : x;
 }
 
+static inline double fabs_double(double x)
+{
+    return x < 0.0 ? -x : x;
+}
+
 static float fast_sqrt(float x)
 {
     if (x <= 0.0f)
@@ -292,6 +297,11 @@ static double os_dial_seconds(const SysTime *t)
     return (double)(t->hour % 12) * 3600.0 + (double)t->minute * 60.0 + (double)t->second;
 }
 
+static bool clock_rtc_fallback(const SysTime *t)
+{
+    return t->year == 2026 && t->month == 1 && t->day == 1 && t->hour == 0 && t->minute == 0 && t->second == 0;
+}
+
 static inline uint64_t clock_read_tsc()
 {
     uint32_t lo = 0, hi = 0;
@@ -452,27 +462,34 @@ extern "C" int main()
         nominal_tick_hz = profile.timer_hz;
 
     SysTime current_os_time = {};
-    get_time(&current_os_time);
 
-    // Smooth clock model. A monotonic counter (TSC preferred: it never stalls
-    // like scheduler ticks can while timer IRQs are masked, and has sub-microsecond
-    // resolution) provides continuous motion; the RTC re-anchors the absolute phase
-    // once per second. Each re-anchor preserves continuity and any residual is bled
-    // off through phase_ramp (rate-limited), so the hands never snap or freeze.
+    // Smooth clock model. A monotonic counter (TSC when available: it keeps
+    // running even while scheduler-timer IRQs are masked) free-runs the hands,
+    // and an RTC phase servo trims it into alignment. Each RTC second boundary
+    // feeds a rate-limited correction, so the hands sweep continuously and
+    // never snap, freeze, or reverse.
     uint64_t tsc_mhz = get_tsc_freq();
     bool use_tsc = tsc_mhz != 0;
-    double base_seconds = os_dial_seconds(&current_os_time);
-    uint64_t base_counter = use_tsc ? clock_read_tsc() : get_ticks();
-    double counter_hz = use_tsc ? (double)tsc_mhz * 1000000.0 : (double)nominal_tick_hz;
+    bool rtc_valid = get_time(&current_os_time) == 0 && !clock_rtc_fallback(&current_os_time);
 
-    double phase_ramp = 0.0;
-    double prev_rtc_seconds = base_seconds;
-    uint64_t last_counter = base_counter;
+    double counter_hz = use_tsc ? (double)tsc_mhz * 1000000.0 : (double)nominal_tick_hz;
+    uint64_t anchor_counter = use_tsc ? clock_read_tsc() : get_ticks();
+    double anchor_seconds = rtc_valid ? os_dial_seconds(&current_os_time) : 0.0;
+    bool anchored = rtc_valid;
+
+    double correction = 0.0;
+    double correction_target = 0.0;
+    double prev_rtc_seconds = anchor_seconds;
+    uint64_t prev_obs_counter = anchor_counter;
+    uint64_t last_counter = anchor_counter;
     double candidate_seconds = -1.0;
     int candidate_reads = 0;
 
     double ticks_per_second = (double)nominal_tick_hz;
-    bool ticks_calibrated = false;
+    bool ticks_rate_locked = false;
+    int seed_rejects = 0;
+    double relock_candidate = 0.0;
+    int relock_reads = 0;
     bool have_cross_ticks = false;
     uint64_t last_cross_ticks = 0;
 
@@ -527,9 +544,11 @@ extern "C" int main()
             dt = (double)(now_counter - last_counter) / counter_hz;
         last_counter = now_counter;
 
-        if (get_time(&current_os_time) == 0 &&
-            !(current_os_time.year == 2026 && current_os_time.month == 1 && current_os_time.day == 1 &&
-              current_os_time.hour == 0 && current_os_time.minute == 0 && current_os_time.second == 0)) {
+        bool rtc_ok = get_time(&current_os_time) == 0 && !clock_rtc_fallback(&current_os_time);
+        uint64_t after_counter = use_tsc ? clock_read_tsc() : get_ticks();
+        uint64_t obs_counter = now_counter + (after_counter - now_counter) / 2;
+
+        if (rtc_ok) {
             double rtc_seconds = os_dial_seconds(&current_os_time);
 
             if (rtc_seconds == prev_rtc_seconds) {
@@ -556,15 +575,33 @@ extern "C" int main()
                     candidate_reads = 0;
 
                     // Scheduler ticks per RTC second, measured across boundary
-                    // observations: paces the frame loop at the true rate.
-                    if (have_cross_ticks) {
-                        uint64_t observed = now_ticks - last_cross_ticks;
-                        if (!ticks_calibrated) {
-                            ticks_per_second = (double)observed;
-                            ticks_calibrated = true;
-                        } else if ((double)observed > ticks_per_second * 0.6 &&
-                                   (double)observed < ticks_per_second * 1.5) {
-                            ticks_per_second = ticks_per_second * 0.75 + (double)observed * 0.25;
+                    // observations: paces the frame loop at the true rate (and is
+                    // the tick-clock rate estimate when TSC is unavailable).
+                    if (have_cross_ticks && step > 0.0 && now_ticks > last_cross_ticks) {
+                        double per_second = (double)(now_ticks - last_cross_ticks) / step;
+                        if (!ticks_rate_locked) {
+                            if ((per_second >= ticks_per_second * 0.5 && per_second <= ticks_per_second * 2.0) ||
+                                ++seed_rejects >= 3) {
+                                ticks_per_second = per_second;
+                                ticks_rate_locked = true;
+                            }
+                        } else if (per_second >= ticks_per_second * 0.75 && per_second <= ticks_per_second * 1.3334) {
+                            ticks_per_second = ticks_per_second * 0.5 + per_second * 0.5;
+                            relock_reads = 0;
+                        } else {
+                            // A single corrupted interval (e.g. scheduler ticks
+                            // paused) must not re-lock the rate outright; require
+                            // several consistent readings first.
+                            if (relock_reads > 0 && fabs_double(per_second - relock_candidate) <= per_second * 0.15)
+                                relock_reads++;
+                            else {
+                                relock_candidate = per_second;
+                                relock_reads = 1;
+                            }
+                            if (relock_reads >= 3) {
+                                ticks_per_second = per_second;
+                                relock_reads = 0;
+                            }
                         }
                         frame_ticks = (uint64_t)(ticks_per_second * 0.016);
                         if (frame_ticks == 0)
@@ -573,47 +610,99 @@ extern "C" int main()
                     have_cross_ticks = true;
                     last_cross_ticks = now_ticks;
 
-                    // Re-anchor at the RTC boundary without a discontinuity: the
-                    // current display position is preserved in phase_ramp and bled
-                    // off smoothly below, so the hands never snap.
-                    double elapsed =
-                        now_counter >= base_counter ? (double)(now_counter - base_counter) / counter_hz : 0.0;
-                    double display_now = wrap_dial_seconds(base_seconds + elapsed + phase_ramp);
+                    if (!anchored) {
+                        anchor_seconds = rtc_seconds;
+                        anchor_counter = obs_counter;
+                        anchored = true;
+                        correction = 0.0;
+                        correction_target = 0.0;
+                        if (!use_tsc && ticks_per_second > 0.0)
+                            counter_hz = ticks_per_second;
+                    } else {
+                        double display_at_obs =
+                            anchor_seconds + ((double)obs_counter - (double)anchor_counter) / counter_hz + correction;
+                        double err_now = dial_step(rtc_seconds, display_at_obs);
 
-                    base_seconds = rtc_seconds;
-                    base_counter = now_counter;
-                    if (!use_tsc)
-                        counter_hz = ticks_per_second;
+                        if (err_now > 2.0 || err_now < -2.0) {
+                            // A genuine wall-clock discontinuity (RTC was set,
+                            // resume from suspend): a single visible step is the
+                            // only sane response.
+                            anchor_seconds = rtc_seconds;
+                            anchor_counter = obs_counter;
+                            correction = 0.0;
+                            correction_target = 0.0;
+                            if (!use_tsc && ticks_per_second > 0.0)
+                                counter_hz = ticks_per_second;
+                        } else {
+                            double bracket_seconds = (double)(obs_counter - prev_obs_counter) / counter_hz;
+                            if (bracket_seconds > 0.0 && bracket_seconds <= 0.1 && step == 1.0) {
+                                // The RTC boundary is bracketed by the previous and
+                                // current observations; servo out the residual phase
+                                // without any discontinuity.
+                                double boundary_counter =
+                                    (double)prev_obs_counter + (double)(obs_counter - prev_obs_counter) * 0.5;
+                                double display_at_boundary = anchor_seconds +
+                                                             (boundary_counter - (double)anchor_counter) / counter_hz +
+                                                             correction;
+                                double err = dial_step(rtc_seconds, display_at_boundary);
+                                correction_target = correction - err;
+                                if (correction_target > 5.0)
+                                    correction_target = 5.0;
+                                else if (correction_target < -5.0)
+                                    correction_target = -5.0;
+                            }
+                            // Wide bracket (missed frames): the free-running counter
+                            // already keeps true time and the boundary cannot be
+                            // localized (err_now is contaminated by the sub-second
+                            // phase), so leave the correction alone; the next tight
+                            // bracket re-measures any residual.
+                        }
 
-                    phase_ramp = dial_step(rtc_seconds, display_now);
-                    if (phase_ramp > 30.0 || phase_ramp < -30.0)
-                        phase_ramp = 0.0;
+                        {
+                            // Re-anchor to the current counter so the elapsed math
+                            // stays precise and the accumulated correction is folded
+                            // into the anchor (it integrates any counter-rate bias,
+                            // so it must not grow unbounded); continuity preserved.
+                            double display_now = anchor_seconds +
+                                                 ((double)now_counter - (double)anchor_counter) / counter_hz +
+                                                 correction;
+                            anchor_seconds = wrap_dial_seconds(display_now);
+                            anchor_counter = now_counter;
+                            correction_target -= correction;
+                            correction = 0.0;
+                            if (!use_tsc && ticks_per_second > 0.0)
+                                counter_hz = ticks_per_second;
+                        }
+                    }
 
                     prev_rtc_seconds = rtc_seconds;
                 }
             }
+            prev_obs_counter = obs_counter;
         }
 
-        // Bleed off phase_ramp with a bounded-rate proportional approach: hand
-        // speed stays within [0x, 2x], so motion is always forward and smooth.
-        if (phase_ramp != 0.0) {
-            double rate = phase_ramp * 3.0;
-            if (rate > 1.0)
-                rate = 1.0;
-            else if (rate < -1.0)
-                rate = -1.0;
-            double step = rate * dt;
-            if (phase_ramp > 0.0 && step > phase_ramp)
-                step = phase_ramp;
-            else if (phase_ramp < 0.0 && step < phase_ramp)
-                step = phase_ramp;
-            phase_ramp -= step;
-            if (phase_ramp > -0.0001 && phase_ramp < 0.0001)
-                phase_ramp = 0.0;
+        // Apply the RTC correction at a bounded rate: hand speed stays within
+        // [0.7x, 1.3x], so motion is always forward and smooth.
+        double corr_diff = correction_target - correction;
+        if (corr_diff != 0.0) {
+            double rate = corr_diff * 2.0;
+            if (rate > 0.3)
+                rate = 0.3;
+            else if (rate < -0.3)
+                rate = -0.3;
+            double dc = rate * dt;
+            if (corr_diff > 0.0 && dc > corr_diff)
+                dc = corr_diff;
+            else if (corr_diff < 0.0 && dc < corr_diff)
+                dc = corr_diff;
+            correction += dc;
+            if (correction_target - correction > -0.0001 && correction_target - correction < 0.0001)
+                correction = correction_target;
         }
 
-        double elapsed_seconds = now_counter >= base_counter ? (double)(now_counter - base_counter) / counter_hz : 0.0;
-        double continuous_seconds = wrap_dial_seconds(base_seconds + elapsed_seconds + phase_ramp);
+        double elapsed_seconds =
+            now_counter >= anchor_counter ? (double)(now_counter - anchor_counter) / counter_hz : 0.0;
+        double continuous_seconds = wrap_dial_seconds(anchor_seconds + elapsed_seconds + correction);
 
         w = (int)win.width;
         h = (int)win.height;
