@@ -16,9 +16,9 @@
 #define ATA_PRIMARY_COMMAND 0x1F7
 
 #define ATA_CMD_IDENTIFY 0xEC
-#define ATA_CMD_READ_PIO 0x20
-#define ATA_CMD_WRITE_PIO 0x30
-#define ATA_CMD_CACHE_FLUSH 0xE7
+#define ATA_CMD_READ_PIO_EXT 0x24
+#define ATA_CMD_WRITE_PIO_EXT 0x34
+#define ATA_CMD_CACHE_FLUSH_EXT 0xEA
 
 #define ATA_STATUS_BSY 0x80
 #define ATA_STATUS_DRQ 0x08
@@ -44,9 +44,16 @@ static void ata_extract_model(const uint16_t *identify, char *out, size_t out_si
     out[pos] = '\0';
 }
 
+#include <kernel/sync/spinlock.h>
+
+// Serializes register access, PIO transfers and the sector cache: the IDE
+// task-file is a single global resource and concurrent callers would corrupt
+// each other's commands mid-flight.
+static Spinlock g_ata_lock = SPINLOCK_INIT;
+
 static bool ata_wait_bsy()
 {
-    uint32_t timeout = 100000;
+    uint32_t timeout = 1000000;
     while (timeout > 0) {
         if (!(inb(ATA_PRIMARY_STATUS) & ATA_STATUS_BSY))
             return true;
@@ -57,9 +64,12 @@ static bool ata_wait_bsy()
 
 static bool ata_wait_drq()
 {
-    uint32_t timeout = 100000;
+    uint32_t timeout = 1000000;
     while (timeout > 0) {
-        if (inb(ATA_PRIMARY_STATUS) & ATA_STATUS_DRQ)
+        uint8_t status = inb(ATA_PRIMARY_STATUS);
+        if ((status & ATA_STATUS_ERR) || (status & ATA_STATUS_DF))
+            return false;
+        if (status & ATA_STATUS_DRQ)
             return true;
         timeout--;
     }
@@ -102,17 +112,26 @@ static bool ata_identify(uint16_t identify[256])
     return true;
 }
 
-static int64_t ata_pio_read_sector(uint32_t lba, uint8_t *out)
+// 48-bit LBA PIO: the old 28-bit commands silently wrapped LBAs above
+// 2^28, reading/writing the wrong sectors on any disk larger than 128 GB.
+// Callers must hold g_ata_lock.
+static int64_t ata_pio_read_sector(uint64_t lba, uint8_t *out)
 {
+    if (lba >= (1ULL << 48))
+        return -1;
     if (!ata_wait_bsy())
         return -1;
 
-    outb(ATA_PRIMARY_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(ATA_PRIMARY_DRIVE, 0xE0); // LBA mode, drive 0; 48-bit commands take the full LBA
+    outb(ATA_PRIMARY_SECCOUNT, 0); // count high: 0 in 48-bit means 65536; write low after
+    outb(ATA_PRIMARY_LBA_LO, (lba >> 24) & 0xFF);
+    outb(ATA_PRIMARY_LBA_MID, (lba >> 32) & 0xFF);
+    outb(ATA_PRIMARY_LBA_HI, (lba >> 40) & 0xFF);
     outb(ATA_PRIMARY_SECCOUNT, 1);
     outb(ATA_PRIMARY_LBA_LO, lba & 0xFF);
     outb(ATA_PRIMARY_LBA_MID, (lba >> 8) & 0xFF);
     outb(ATA_PRIMARY_LBA_HI, (lba >> 16) & 0xFF);
-    outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_PIO);
+    outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_PIO_EXT);
 
     if (!ata_wait_bsy())
         return -1;
@@ -120,7 +139,7 @@ static int64_t ata_pio_read_sector(uint32_t lba, uint8_t *out)
         return -1;
 
     if (inb(ATA_PRIMARY_STATUS) & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
-        DEBUG_ERROR("ATA: read error at LBA %d", lba);
+        DEBUG_ERROR("ATA: read error at LBA %llu", lba);
         return -1;
     }
 
@@ -131,17 +150,25 @@ static int64_t ata_pio_read_sector(uint32_t lba, uint8_t *out)
     return 1;
 }
 
-static int64_t ata_pio_write_sector(uint32_t lba, const uint8_t *in)
+// Callers must hold g_ata_lock. Does NOT flush the device cache; batch
+// flushes with ata_pio_flush() instead of paying one flush per sector.
+static int64_t ata_pio_write_sector(uint64_t lba, const uint8_t *in)
 {
+    if (lba >= (1ULL << 48))
+        return -1;
     if (!ata_wait_bsy())
         return -1;
 
-    outb(ATA_PRIMARY_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(ATA_PRIMARY_DRIVE, 0xE0);
+    outb(ATA_PRIMARY_SECCOUNT, 0);
+    outb(ATA_PRIMARY_LBA_LO, (lba >> 24) & 0xFF);
+    outb(ATA_PRIMARY_LBA_MID, (lba >> 32) & 0xFF);
+    outb(ATA_PRIMARY_LBA_HI, (lba >> 40) & 0xFF);
     outb(ATA_PRIMARY_SECCOUNT, 1);
     outb(ATA_PRIMARY_LBA_LO, lba & 0xFF);
     outb(ATA_PRIMARY_LBA_MID, (lba >> 8) & 0xFF);
     outb(ATA_PRIMARY_LBA_HI, (lba >> 16) & 0xFF);
-    outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_PIO);
+    outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_PIO_EXT);
 
     if (!ata_wait_bsy())
         return -1;
@@ -153,15 +180,21 @@ static int64_t ata_pio_write_sector(uint32_t lba, const uint8_t *in)
         outw(ATA_PRIMARY_DATA, in16[j]);
     }
 
-    outb(ATA_PRIMARY_COMMAND, ATA_CMD_CACHE_FLUSH);
     if (!ata_wait_bsy())
         return -1;
-
     if (inb(ATA_PRIMARY_STATUS) & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
-        DEBUG_ERROR("ATA: write error at LBA %d", lba);
+        DEBUG_ERROR("ATA: write error at LBA %llu", lba);
         return -1;
     }
     return 1;
+}
+
+static bool ata_pio_flush()
+{
+    if (!ata_wait_bsy())
+        return false;
+    outb(ATA_PRIMARY_COMMAND, ATA_CMD_CACHE_FLUSH_EXT);
+    return ata_wait_bsy();
 }
 
 // Block Cache Implementation
@@ -170,7 +203,7 @@ static int64_t ata_pio_write_sector(uint32_t lba, const uint8_t *in)
 
 struct CacheEntry
 {
-    uint32_t lba;
+    uint64_t lba;
     uint8_t data[512];
     bool valid;
     bool dirty;
@@ -207,9 +240,9 @@ static void lru_push_front(CacheEntry *entry)
         g_lru_tail = entry;
 }
 
-static CacheEntry *cache_lookup(uint32_t lba)
+static CacheEntry *cache_lookup(uint64_t lba)
 {
-    uint32_t bucket = lba % HASH_BUCKETS;
+    uint32_t bucket = static_cast<uint32_t>(lba % HASH_BUCKETS);
     CacheEntry *cur = g_hash_table[bucket];
     while (cur) {
         if (cur->valid && cur->lba == lba) {
@@ -234,7 +267,7 @@ static CacheEntry *cache_evict()
             entry->dirty = false;
         }
         // Remove from hash table
-        uint32_t bucket = entry->lba % HASH_BUCKETS;
+        uint32_t bucket = static_cast<uint32_t>(entry->lba % HASH_BUCKETS);
         CacheEntry **ptr = &g_hash_table[bucket];
         while (*ptr) {
             if (*ptr == entry) {
@@ -249,7 +282,7 @@ static CacheEntry *cache_evict()
     return entry;
 }
 
-static CacheEntry *cache_insert(uint32_t lba, const uint8_t *data, bool dirty)
+static CacheEntry *cache_insert(uint64_t lba, const uint8_t *data, bool dirty)
 {
     CacheEntry *entry = cache_lookup(lba);
     if (!entry) {
@@ -259,7 +292,7 @@ static CacheEntry *cache_insert(uint32_t lba, const uint8_t *data, bool dirty)
 
         entry->valid = true;
         entry->lba = lba;
-        uint32_t bucket = lba % HASH_BUCKETS;
+        uint32_t bucket = static_cast<uint32_t>(lba % HASH_BUCKETS);
         entry->hash_next = g_hash_table[bucket];
         g_hash_table[bucket] = entry;
     }
@@ -282,33 +315,43 @@ void ata_cache_init()
 
 void ata_cache_flush_all()
 {
+    uint64_t flags = spinlock_acquire_irqsave(&g_ata_lock);
     for (int i = 0; i < CACHE_ENTRIES; i++) {
         if (g_cache[i].valid && g_cache[i].dirty) {
             ata_pio_write_sector(g_cache[i].lba, g_cache[i].data);
             g_cache[i].dirty = false;
         }
     }
+    ata_pio_flush();
+    spinlock_release_irqrestore(&g_ata_lock, flags);
 }
 
 static int64_t ata_read_blocks(BlockDevice *dev, uint64_t lba, uint32_t count, void *buffer)
 {
-    (void)dev;
+    if (!dev || count == 0)
+        return -1;
+    // Range-check the full request: an out-of-bounds LBA must fail loudly, not
+    // wrap around into unrelated sectors.
+    if (lba >= dev->total_blocks || static_cast<uint64_t>(count) > dev->total_blocks - lba)
+        return -1;
     uint8_t *out = (uint8_t *)buffer;
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_ata_lock);
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t current_lba = (uint32_t)lba + i;
+        uint64_t current_lba = lba + i;
         CacheEntry *entry = cache_lookup(current_lba);
 
         if (entry) {
             kstring::memcpy(out + (i * 512), entry->data, 512);
         } else {
-            if (ata_pio_read_sector(current_lba, out + (i * 512)) < 0)
-                return -1;
+            if (ata_pio_read_sector(current_lba, out + (i * 512)) < 0) {
+                spinlock_release_irqrestore(&g_ata_lock, flags);
+                return i != 0 ? static_cast<int64_t>(i) : -1;
+            }
             cache_insert(current_lba, out + (i * 512), false);
 
-            // Read-ahead simple logic
-            if (i == count - 1) {
-                // Prefetch next 8 sectors in background? We don't have async yet, just prefetch 1 synchronously
+            // Read-ahead one sector synchronously (bounded to the device).
+            if (i == count - 1 && current_lba + 1 < dev->total_blocks) {
                 CacheEntry *next_entry = cache_lookup(current_lba + 1);
                 if (!next_entry) {
                     uint8_t temp[512];
@@ -319,22 +362,33 @@ static int64_t ata_read_blocks(BlockDevice *dev, uint64_t lba, uint32_t count, v
             }
         }
     }
+    spinlock_release_irqrestore(&g_ata_lock, flags);
     return count;
 }
 
 static int64_t ata_write_blocks(BlockDevice *dev, uint64_t lba, uint32_t count, const void *buffer)
 {
-    (void)dev;
+    if (!dev || count == 0)
+        return -1;
     if (!storage_writes_allowed())
+        return -1;
+    if (lba >= dev->total_blocks || static_cast<uint64_t>(count) > dev->total_blocks - lba)
         return -1;
     const uint8_t *in = (const uint8_t *)buffer;
 
+    uint64_t flags = spinlock_acquire_irqsave(&g_ata_lock);
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t current_lba = (uint32_t)lba + i;
-        if (ata_pio_write_sector(current_lba, in + (i * 512)) < 0)
+        uint64_t current_lba = lba + i;
+        if (ata_pio_write_sector(current_lba, in + (i * 512)) < 0) {
+            spinlock_release_irqrestore(&g_ata_lock, flags);
             return i != 0 ? static_cast<int64_t>(i) : -1;
+        }
         cache_insert(current_lba, in + (i * 512), false);
     }
+    // One device-cache flush per request instead of per sector: the old
+    // per-sector flush serialized every 512 bytes behind a full drive flush.
+    ata_pio_flush();
+    spinlock_release_irqrestore(&g_ata_lock, flags);
     return count;
 }
 

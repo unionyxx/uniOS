@@ -42,6 +42,25 @@ struct [[gnu::packed]] TestGptEntry
     uint16_t name[36];
 };
 
+uint32_t test_crc32(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+// Fills header_size and a valid header CRC so the parser accepts the header.
+void finalize_gpt_header(TestGptHeader *header)
+{
+    header->header_size = sizeof(TestGptHeader);
+    header->header_crc32 = 0;
+    header->header_crc32 = test_crc32(reinterpret_cast<const uint8_t *>(header), header->header_size);
+}
+
 } // namespace
 
 KTEST(partition_parse_mbr_primary_entries)
@@ -117,11 +136,19 @@ KTEST(partition_parse_gpt_header_rejects_malformed)
     header->partition_entries_lba = 2;
     header->partition_entry_count = 4;
     header->partition_entry_size = sizeof(TestGptEntry);
+    finalize_gpt_header(header);
 
     PartitionGptInfo info = {};
     KTEST_EXPECT(partition_parse_gpt_header(sector, 512, &info));
 
     TestGptHeader bad;
+
+    // A header whose CRC no longer matches its contents must be rejected even
+    // when every structural field is otherwise valid.
+    bad = *header;
+    bad.partition_entries_lba = 40; // valid range, but CRC now stale
+    kstring::memcpy(sector, &bad, sizeof(bad));
+    KTEST_EXPECT(!partition_parse_gpt_header(sector, 512, &info));
 
     bad = *header;
     bad.signature = 0; // wrong magic
@@ -202,6 +229,7 @@ KTEST(partition_parse_gpt_header_and_entry)
     header->partition_entries_lba = 2;
     header->partition_entry_count = 4;
     header->partition_entry_size = sizeof(TestGptEntry);
+    finalize_gpt_header(header);
 
     PartitionGptInfo info = {};
     KTEST_EXPECT(partition_parse_gpt_header(sector, 512, &info));

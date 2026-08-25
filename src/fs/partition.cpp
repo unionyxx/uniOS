@@ -60,6 +60,18 @@ static bool guid_all_zero(const uint8_t *guid)
     return true;
 }
 
+static uint32_t crc32_ieee(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
 static int64_t partition_read_blocks(BlockDevice *dev, uint64_t lba, uint32_t count, void *buffer)
 {
     if (!dev || !dev->private_data || !dev->parent)
@@ -112,6 +124,10 @@ static bool register_partition(BlockDevice *parent, uint32_t partition_index, ui
                                const char *label)
 {
     if (!parent || block_count == 0)
+        return false;
+    // A corrupt table must never register a partition that reaches past the
+    // end of the disk: every read/write would then wrap into foreign sectors.
+    if (start_lba >= parent->total_blocks || block_count > parent->total_blocks - start_lba)
         return false;
 
     auto *part = static_cast<BlockDevice *>(malloc(sizeof(BlockDevice)));
@@ -178,24 +194,47 @@ static bool scan_gpt(BlockDevice *dev)
     if (entries_per_sector == 0)
         return false;
 
-    uint32_t registered = 0;
-    auto *entry_sector = static_cast<uint8_t *>(malloc(static_cast<size_t>(dev->block_size)));
-    if (!entry_sector)
+    // Read the whole entry table contiguously so its CRC32 can be verified
+    // before any entry is trusted. The cap keeps the buffer bounded even for
+    // a crafted (but CRC-valid-sized) header.
+    const uint64_t table_bytes = static_cast<uint64_t>(info.entry_count) * info.entry_size;
+    static constexpr uint64_t MAX_GPT_TABLE_BYTES = 256 * 1024;
+    if (table_bytes == 0 || table_bytes > MAX_GPT_TABLE_BYTES)
         return false;
-    for (uint32_t idx = 0; idx < info.entry_count; idx++) {
-        if ((idx % entries_per_sector) == 0) {
-            uint64_t lba = info.entries_lba + (idx / entries_per_sector);
-            if (dev->read_blocks(dev, lba, 1, entry_sector) < 0)
-                break;
+    const uint64_t table_sectors = (table_bytes + dev->block_size - 1) / dev->block_size;
+    if (info.entries_lba > dev->total_blocks || table_sectors > dev->total_blocks - info.entries_lba)
+        return false;
+
+    auto *table = static_cast<uint8_t *>(malloc(static_cast<size_t>(table_bytes)));
+    if (!table)
+        return false;
+
+    uint64_t copied = 0;
+    for (uint64_t s = 0; s < table_sectors && copied < table_bytes; s++) {
+        uint64_t lba = info.entries_lba + s;
+        if (dev->read_blocks(dev, lba, 1, table + copied) < 0) {
+            free(table);
+            return false;
         }
+        copied += dev->block_size;
+    }
+
+    if (crc32_ieee(table, static_cast<size_t>(table_bytes)) != info.entries_crc32) {
+        DEBUG_WARN("partition: GPT entry table CRC mismatch, ignoring table");
+        free(table);
+        return false;
+    }
+
+    uint32_t registered = 0;
+    for (uint32_t idx = 0; idx < info.entry_count; idx++) {
         PartitionScanEntry parsed = {};
-        const uint8_t *entry_ptr = entry_sector + (idx % entries_per_sector) * info.entry_size;
+        const uint8_t *entry_ptr = table + static_cast<uint64_t>(idx) * info.entry_size;
         if (!partition_parse_gpt_entry(entry_ptr, info.entry_size, idx + 1, &parsed))
             continue;
         if (register_partition(dev, parsed.partition_index, parsed.start_lba, parsed.block_count, parsed.label))
             registered++;
     }
-    free(entry_sector);
+    free(table);
     return registered != 0;
 }
 
@@ -257,9 +296,25 @@ bool partition_parse_gpt_header(const uint8_t *sector, uint32_t block_size, Part
         header->partition_entry_count == 0 || header->partition_entry_count > MAX_GPT_ENTRIES ||
         header->partition_entry_size > block_size || header->partition_entries_lba < 2)
         return false;
+
+    // Validate the header CRC32 over header_size bytes with the CRC field
+    // itself zeroed, per the UEFI spec. A torn or crafted header is rejected
+    // before its entry table pointer is trusted. Real headers are 92 bytes;
+    // the 1 KiB cap bounds the stack copy against crafted values.
+    static constexpr uint32_t MAX_GPT_HEADER_SIZE = 1024;
+    if (header->header_size < sizeof(GptHeader) || header->header_size > block_size ||
+        header->header_size > MAX_GPT_HEADER_SIZE)
+        return false;
+    uint8_t crc_buf[MAX_GPT_HEADER_SIZE];
+    kstring::memcpy(crc_buf, sector, header->header_size);
+    reinterpret_cast<GptHeader *>(crc_buf)->header_crc32 = 0;
+    if (crc32_ieee(crc_buf, header->header_size) != header->header_crc32)
+        return false;
+
     out->entries_lba = header->partition_entries_lba;
     out->entry_count = header->partition_entry_count;
     out->entry_size = header->partition_entry_size;
+    out->entries_crc32 = header->partition_entries_crc32;
     return true;
 }
 

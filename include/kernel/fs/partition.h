@@ -14,6 +14,7 @@ struct PartitionGptInfo
     uint64_t entries_lba;
     uint32_t entry_count;
     uint32_t entry_size;
+    uint32_t entries_crc32;
 };
 
 int partition_parse_mbr_entries(const uint8_t *sector, PartitionScanEntry *out, int max_entries);

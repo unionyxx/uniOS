@@ -398,12 +398,15 @@ static bool ahci_exec(AhciPortState *state, uint8_t command, uint64_t lba, uint3
 
     header->cfl = sizeof(AhciFisRegH2D) / sizeof(uint32_t);
     header->flags = write ? (1u << 6) : 0u;
-    header->prdtl = 1;
+    // Commands like FLUSH CACHE EXT transfer no data: no PRDT entries.
+    header->prdtl = byte_count ? 1 : 0;
     header->ctba = static_cast<uint32_t>(state->table_dma.phys);
     header->ctbau = static_cast<uint32_t>(state->table_dma.phys >> 32);
-    table->prdt[0].dba = static_cast<uint32_t>(state->bounce_dma.phys);
-    table->prdt[0].dbau = static_cast<uint32_t>(state->bounce_dma.phys >> 32);
-    table->prdt[0].dbc = (byte_count - 1) | (1u << 31);
+    if (byte_count) {
+        table->prdt[0].dba = static_cast<uint32_t>(state->bounce_dma.phys);
+        table->prdt[0].dbau = static_cast<uint32_t>(state->bounce_dma.phys >> 32);
+        table->prdt[0].dbc = (byte_count - 1) | (1u << 31);
+    }
 
     auto *fis = reinterpret_cast<AhciFisRegH2D *>(table->cfis);
     fis->fis_type = 0x27;
@@ -427,8 +430,14 @@ static bool ahci_exec(AhciPortState *state, uint8_t command, uint64_t lba, uint3
     while ((port->ci & (1u << AHCI_CMD_SLOT)) != 0) {
         if ((port->is & HBA_PxIS_TFES) != 0)
             return false;
-        if (waited_ms >= AHCI_CMD_TIMEOUT_MS)
+        if (waited_ms >= AHCI_CMD_TIMEOUT_MS) {
+            // The command is still in flight. Stop the engine so the DMA
+            // cannot keep writing into the command table/bounce buffer after
+            // the next exec overwrites them; the recovery path restarts it.
+            port_stop_engine(port);
+            port->is = 0xFFFFFFFFu;
             return false;
+        }
         ahci_delay_ms(1);
         waited_ms++;
     }
@@ -474,6 +483,20 @@ static bool ahci_recover_port(AhciPortState *state)
     return ahci_identify(state);
 }
 
+// Flush the device's volatile write cache. Without this every "successful"
+// write could still be lost on power cut. Same locking rationale as
+// ahci_port_io: keep interrupts enabled across the (potentially slow) flush.
+static bool ahci_flush_cache(AhciPortState *state)
+{
+    if (!state || !state->present)
+        return false;
+
+    spinlock_acquire(&state->lock);
+    bool ok = ahci_exec(state, 0xEA /* FLUSH CACHE EXT */, 0, 0, false, 0);
+    spinlock_release(&state->lock);
+    return ok;
+}
+
 static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, void *buffer, bool write)
 {
     if (!state || !buffer || count == 0 || !state->present)
@@ -481,7 +504,13 @@ static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, 
     if (lba + count > state->sector_count)
         return -1;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&state->lock);
+    // Serialize concurrent users of the port but keep INTERRUPTS ENABLED for
+    // the whole transfer: the DMA wait can run for seconds on a flaky link,
+    // and masking IRQs that long stalls the timer, scheduler and input on
+    // every core. The controller is polled (its interrupts are disabled at
+    // the PCI device), so no IRQ handler can contend for this lock, which
+    // makes a preemption-only lock safe here.
+    spinlock_acquire(&state->lock);
     uint8_t *cursor = static_cast<uint8_t *>(buffer);
     uint32_t done = 0;
 
@@ -501,7 +530,7 @@ static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, 
                                                        lba + done, chunk, write, bytes);
         }
         if (!ok) {
-            spinlock_release_irqrestore(&state->lock, sl_flags);
+            spinlock_release(&state->lock);
             return -1;
         }
 
@@ -510,7 +539,7 @@ static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, 
         done += chunk;
     }
 
-    spinlock_release_irqrestore(&state->lock, sl_flags);
+    spinlock_release(&state->lock);
     return count;
 }
 
@@ -523,8 +552,11 @@ static int64_t ahci_write_blocks(BlockDevice *dev, uint64_t lba, uint32_t count,
 {
     if (!storage_writes_allowed())
         return -1;
-    return ahci_port_io(static_cast<AhciPortState *>(dev ? dev->private_data : nullptr), lba, count,
-                        const_cast<void *>(buffer), true);
+    AhciPortState *state = static_cast<AhciPortState *>(dev ? dev->private_data : nullptr);
+    int64_t res = ahci_port_io(state, lba, count, const_cast<void *>(buffer), true);
+    if (res > 0)
+        ahci_flush_cache(state);
+    return res;
 }
 
 static void ahci_firmware_handoff(volatile HbaMem *abar)

@@ -444,8 +444,13 @@ void usb_msc_device_disconnected(const UsbDeviceInfo *usb)
         return;
     for (auto &dev : g_msc_devices) {
         if (dev.used && dev.usb && dev.usb->slot_id == usb->slot_id) {
+            // Take the device lock so an in-flight read/write finishes (and
+            // sees dev->usb cleared) before we detach; transfers check
+            // dev->usb under this same mutex and fail cleanly afterwards.
+            mutex_lock(&dev.lock);
             dev.ready = false;
             dev.usb = nullptr;
+            mutex_unlock(&dev.lock);
         }
     }
 }
