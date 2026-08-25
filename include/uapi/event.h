@@ -16,6 +16,12 @@ typedef enum
     EVT_KEY_UP,
     EVT_WINDOW_RESIZE,
     EVT_WINDOW_CLOSE,
+    // Lifecycle events posted by the WM so clients can keep hover/focus state
+    // consistent without polling the registry.
+    EVT_FOCUS,        // window's owner became the keyboard focus
+    EVT_UNFOCUS,      // window's owner lost the keyboard focus
+    EVT_MOUSE_LEAVE,  // pointer left the window's client area (or the WM took over a drag)
+    EVT_WINDOW_SCROLL // WM-side scroll offset changed; scroll data carries new offsets
 } EventType;
 
 typedef struct EventMouseData
@@ -44,6 +50,11 @@ typedef struct EventWindowData
     int window_id;
 } EventWindowData;
 
+typedef struct EventScrollData
+{
+    int32_t scroll_x, scroll_y;
+} EventScrollData;
+
 struct Event
 {
     EventType type;
@@ -53,6 +64,7 @@ struct Event
         EventKeyData key;
         EventResizeData resize;
         EventWindowData window;
+        EventScrollData scroll;
     };
 };
 

@@ -4,13 +4,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <uapi/event.h>
 #include <uapi/fs.h>
 #include <uapi/gui.h>
 #include <uapi/signal.h>
 #include <uapi/syscalls.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <wm/interaction_policy.h>
 
 #include "../libc/config_utils.h"
@@ -297,6 +297,15 @@ struct WmInputState
     bool alt_down = false;
     int snap_edges = RESIZE_NONE;
     DirtyRect snap_preview = {};
+    // Client pointer grab: set while a user window holds an active button
+    // press. While grabbed, moves and the release are delivered to the
+    // grabbed window even when the pointer leaves its client area, so
+    // in-window drags (sliders, scrollbars, selections) keep working.
+    WindowEntry *client_grab_entry = nullptr;
+    uint8_t client_grab_button = 0;
+    // Window that last received a forwarded EVT_MOUSE_MOVE; used to post
+    // EVT_MOUSE_LEAVE when the pointer exits the client area.
+    WindowEntry *move_target_entry = nullptr;
     // Titlebar double-click tracking (maximize/restore). The shm_id/owner
     // pair guards against the registry slot being reused by a different
     // window within the double-click window (ABA).
@@ -587,7 +596,6 @@ static inline int window_effective_h(const Window &w)
     return w.h;
 }
 
-
 static inline DirtyRect window_visible_client_bounds(const Window &w)
 {
     int eff_w = window_effective_w(w);
@@ -723,6 +731,8 @@ int system_window_hit(int px, int py);
 bool pointer_blocked_by_shell_overlay(int px, int py);
 void post_mouse_event_to_window(const Window &w, EventType type, int px, int py, uint8_t button, int8_t scroll_y = 0);
 void post_key_event_to_window(const Window &w, EventType type, char c, uint8_t scancode);
+void post_plain_event_to_window(const Window &w, EventType type);
+void post_scroll_event_to_window(const Window &w);
 void mark_window_frame_damage(const Window &w);
 void mark_window_chrome_damage(const Window &w);
 void invalidate_window_decoration_cache(Window &w);

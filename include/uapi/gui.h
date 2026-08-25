@@ -120,6 +120,7 @@ typedef struct Registry
     volatile bool mb_clicked;
     volatile uint32_t mb_click_x, mb_click_y;
     volatile bool mb_menu_dismiss_requested;
+    volatile bool cp_toggle_requested;
     volatile bool dk_clicked;
     volatile uint32_t dk_click_x, dk_click_y;
     volatile bool cp_open;

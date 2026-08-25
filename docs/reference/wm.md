@@ -9,7 +9,7 @@ The protocol is a shared-memory `Registry` (`include/uapi/gui.h`) — no sockets
 1. The WM allocates the first shared-memory block at boot (id 0), maps it, and calls `SYS_GUI_REGISTER_WM` (which records the WM pid and boosts its priority).
 2. Clients map block 0 and spin until `magic == REGISTRY_MAGIC` (`0x52454749`).
 
-The registry carries: mouse state, menubar/dock canvas block ids and click flags, focus (window index + owner pid), theme mode, settings generation + system flags, network/animation/transparency/volume settings, storage mode + request generation, wallpaper generation/status/requested/active paths, window count, and 32 `WindowEntry` slots.
+The registry carries: mouse state, menubar/dock canvas block ids and click flags (plus `cp_toggle_requested`, which any shell component can set to make the WM toggle the control center), focus (window index + owner pid), theme mode, settings generation + system flags, network/animation/transparency/volume settings, storage mode + request generation, wallpaper generation/status/requested/active paths, window count, and 32 `WindowEntry` slots.
 
 ## Windows
 
@@ -38,6 +38,8 @@ For resizable windows:
 ## Focus and Z-Order
 
 Z-order is the window array order; focusing raises. `SYS_GUI_SET_FOCUS` (WM-only) records the focused pid and boosts its scheduling priority. Alt+Tab cycles visible user windows; the mouse wheel over empty desktop rotates stacking; titlebar double-click toggles maximize (ABA-guarded).
+
+On every focus transition the WM posts `EVT_FOCUS`/`EVT_UNFOCUS` to the affected owners, posts `EVT_MOUSE_LEAVE` when the pointer leaves a client area (or a drag/overlay takes over), and posts `EVT_WINDOW_SCROLL` when it scrolls a window's content. A mouse-down delivered to a client grabs the pointer for that window until the matching release, so moves and the release reach it even outside the frame. See [Input](input.md#client-lifecycle-events).
 
 ## Damage and Composition
 

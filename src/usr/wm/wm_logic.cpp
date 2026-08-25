@@ -94,6 +94,9 @@ static int resolve_context_menu_target_index();
 static bool context_menu_targets_window_entry(const WindowEntry *entry);
 static bool ensure_context_menu_target_valid();
 static void launch_or_focus_app(Registry *registry, const char *title, const char *path);
+static void post_plain_event_to_pid(uint32_t pid, EventType type);
+static void post_focus_change_events(uint32_t prev_pid, uint32_t next_pid);
+static void clear_move_target_with_leave();
 static bool g_applying_pending_bounds = false;
 
 static void copy_dirty_rects_to_policy(wm::DirtyRect *dst, int count)
@@ -334,8 +337,7 @@ static void apply_window_move_snap(const Window &w, int *x, int *y, int width, i
         enqueue_damage_rect(nx, ny, width, height);
     } else if (g_input.snap_edges != RESIZE_NONE) {
         int escape = wm_snap_escape();
-        if (wm_abs(*x - g_input.snap_preview.x) > escape ||
-            wm_abs(*y - g_input.snap_preview.y) > escape) {
+        if (wm_abs(*x - g_input.snap_preview.x) > escape || wm_abs(*y - g_input.snap_preview.y) > escape) {
             DirtyRect old_preview = g_input.snap_preview;
             g_input.snap_edges = RESIZE_NONE;
             g_input.snap_preview = {};
@@ -437,7 +439,8 @@ DirtyRect window_opaque_bounds(const Window &w)
     if (radius < side_inset)
         radius = side_inset;
 
-    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, eff_w - side_inset * 2, eff_h + title_h - radius - radius};
+    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, eff_w - side_inset * 2,
+                      eff_h + title_h - radius - radius};
     if (main.w > 0 && main.h > 0)
         return main;
 
@@ -723,14 +726,31 @@ void publish_focus(Registry *registry, const Window *w)
 {
     if (!registry)
         return;
+    uint32_t prev_pid = registry->focused_owner_pid;
+    uint32_t next_pid = 0;
+    const WindowEntry *next_entry = nullptr;
     if (!w || !w->entry || !is_user_window(*w) || !is_window_visible(*w)) {
         registry->focused_window = -1;
         registry->focused_owner_pid = 0;
     } else {
         registry->focused_window = window_slot(registry, *w);
         registry->focused_owner_pid = w->owner_pid;
+        next_pid = w->owner_pid;
+        next_entry = w->entry;
     }
     asm volatile("sfence" ::: "memory");
+    post_focus_change_events(prev_pid, next_pid);
+
+    // Move tracking is keyed on the focused (or grabbed) window; a focus
+    // transition invalidates it. Deliver the pending leave so clients drop
+    // stale hover state when the pointer is no longer theirs.
+    if (g_input.move_target_entry && g_input.move_target_entry != next_entry &&
+        g_input.move_target_entry != g_input.client_grab_entry) {
+        int target = find_window_by_entry(g_input.move_target_entry);
+        if (target >= 0)
+            post_plain_event_to_window(g_windows[target], EVT_MOUSE_LEAVE);
+        g_input.move_target_entry = nullptr;
+    }
 }
 
 void clear_window_focus(Registry *registry)
@@ -757,6 +777,12 @@ static void remap_interaction_indices(WindowEntry *drag_entry, WindowEntry *hove
         g_input.drag_index = find_window_by_entry(drag_entry);
     if (hover_entry)
         g_input.hover_frame_index = find_window_by_entry(hover_entry);
+    // Entry pointers survive z-order reshuffles; nothing to remap for the
+    // grab/move targets, but drop them if the window disappeared entirely.
+    if (g_input.client_grab_entry && find_window_by_entry(g_input.client_grab_entry) < 0)
+        g_input.client_grab_entry = nullptr;
+    if (g_input.move_target_entry && find_window_by_entry(g_input.move_target_entry) < 0)
+        g_input.move_target_entry = nullptr;
 }
 
 int bring_window_to_front(int index)
@@ -766,10 +792,10 @@ int bring_window_to_front(int index)
     WindowEntry *drag_entry = (g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count)
                                   ? g_windows[g_input.drag_index].entry
                                   : nullptr;
-    WindowEntry *hover_entry = (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW &&
-                                g_input.hover_frame_index < g_window_count)
-                                   ? g_windows[g_input.hover_frame_index].entry
-                                   : nullptr;
+    WindowEntry *hover_entry =
+        (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_frame_index < g_window_count)
+            ? g_windows[g_input.hover_frame_index].entry
+            : nullptr;
     Window temp = g_windows[index];
     for (int i = index; i < g_window_count - 1; i++)
         g_windows[i] = g_windows[i + 1];
@@ -785,10 +811,10 @@ int send_window_to_back(int index)
     WindowEntry *drag_entry = (g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count)
                                   ? g_windows[g_input.drag_index].entry
                                   : nullptr;
-    WindowEntry *hover_entry = (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW &&
-                                g_input.hover_frame_index < g_window_count)
-                                   ? g_windows[g_input.hover_frame_index].entry
-                                   : nullptr;
+    WindowEntry *hover_entry =
+        (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_frame_index < g_window_count)
+            ? g_windows[g_input.hover_frame_index].entry
+            : nullptr;
     Window temp = g_windows[index];
     for (int i = index; i > WM_FIRST_USER_WINDOW; i--)
         g_windows[i] = g_windows[i - 1];
@@ -858,11 +884,10 @@ static void mark_window_decoration_damage(const Window &w)
     mark_window_chrome_damage(w);
 
     bool interactive = g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW;
-    int shadow_extent = interactive ? (wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y()
-                                            ? wm_frame_shadow_offset_x()
-                                            : wm_frame_shadow_offset_y())
-                                    : gui_scaled_metric(8) + gui_scaled_metric(3) + gui_scaled_metric(2) +
-                                          gui_scaled_metric(1);
+    int shadow_extent = interactive
+                            ? (wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y() ? wm_frame_shadow_offset_x()
+                                                                                       : wm_frame_shadow_offset_y())
+                            : gui_scaled_metric(8) + gui_scaled_metric(3) + gui_scaled_metric(2) + gui_scaled_metric(1);
     if (shadow_extent < CURSOR_DAMAGE_PAD)
         shadow_extent = CURSOR_DAMAGE_PAD;
 
@@ -896,15 +921,17 @@ static void mark_exposed_transition_damage(const DirtyRect &old_outer, const Dir
 
 void mark_window_transition_damage(const Window &old_w, const Window &new_w)
 {
-    int pad = (g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW)
-                  ? wm_window_damage_pad_interactive()
-                  : wm_window_damage_pad();
+    int pad = (g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW) ? wm_window_damage_pad_interactive()
+                                                                                   : wm_window_damage_pad();
     DirtyRect last_rendered_outer;
     if (old_w.transparent) {
-        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y, old_w.last_rendered_w, old_w.last_rendered_h};
+        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y, old_w.last_rendered_w,
+                               old_w.last_rendered_h};
     } else {
         int t_h = wm_title_bar_h();
-        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y - t_h, old_w.last_rendered_w + wm_frame_shadow_offset_x(), old_w.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
+        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y - t_h,
+                               old_w.last_rendered_w + wm_frame_shadow_offset_x(),
+                               old_w.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
     }
     DirtyRect o = rect_expand(last_rendered_outer, pad);
     DirtyRect n = rect_expand(window_outer_bounds(new_w), pad);
@@ -923,7 +950,8 @@ void mark_window_transition_damage(const Window &old_w, const Window &new_w)
     if (o.x < overlap.x)
         enqueue_damage_rect(o.x, overlap.y, overlap.x - o.x, overlap.h);
     if (overlap.x + overlap.w < o.x + o.w)
-        enqueue_damage_rect(overlap.x + overlap.w, overlap.y, o.x + o.w - (overlap.x + overlap.w), overlap.y + o.h - overlap.y);
+        enqueue_damage_rect(overlap.x + overlap.w, overlap.y, o.x + o.w - (overlap.x + overlap.w),
+                            overlap.y + o.h - overlap.y);
 }
 
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
@@ -997,6 +1025,7 @@ bool scroll_window_content(Window &w, int delta_x, int delta_y)
         return false;
 
     publish_window_scroll(w);
+    post_scroll_event_to_window(w);
 
     DirtyRect client = window_visible_client_bounds(w);
     enqueue_damage_rect(client.x, client.y, client.w, client.h);
@@ -1074,7 +1103,8 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
 
     bool defer_interactive_resize = !g_applying_pending_bounds && size_changed && g_input.pointer_down &&
                                     g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= WM_FIRST_USER_WINDOW &&
-                                    g_input.drag_index < g_window_count && g_windows[g_input.drag_index].entry == w.entry;
+                                    g_input.drag_index < g_window_count &&
+                                    g_windows[g_input.drag_index].entry == w.entry;
     if (defer_interactive_resize) {
         w.entry->active = true;
         close_context_menu();
@@ -1132,15 +1162,17 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
                                                                                      : wm_frame_shadow_offset_y();
             enqueue_damage_rect_expanded(window_outer_bounds(old), shadow_pad);
         } else if (size_changed) {
-            int pad = (g_input.pointer_down && g_input.drag_edges != RESIZE_NONE)
-                          ? wm_window_damage_pad_interactive()
-                          : wm_window_damage_pad();
+            int pad = (g_input.pointer_down && g_input.drag_edges != RESIZE_NONE) ? wm_window_damage_pad_interactive()
+                                                                                  : wm_window_damage_pad();
             DirtyRect last_rendered_outer;
             if (old.transparent) {
-                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y, old.last_rendered_w, old.last_rendered_h};
+                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y, old.last_rendered_w,
+                                       old.last_rendered_h};
             } else {
                 int t_h = wm_title_bar_h();
-                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y - t_h, old.last_rendered_w + wm_frame_shadow_offset_x(), old.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
+                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y - t_h,
+                                       old.last_rendered_w + wm_frame_shadow_offset_x(),
+                                       old.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
             }
             DirtyRect full_bounds = rect_expand(rect_union(last_rendered_outer, window_outer_bounds(w)), pad);
             enqueue_damage_rect(full_bounds.x, full_bounds.y, full_bounds.w, full_bounds.h);
@@ -1303,6 +1335,12 @@ void minimize_window(int index)
         g_input.hover_resize_edges = RESIZE_NONE;
         g_input.hover_button = -1;
     }
+    if (g_input.client_grab_entry == w.entry)
+        g_input.client_grab_entry = nullptr;
+    if (g_input.move_target_entry == w.entry) {
+        post_plain_event_to_window(w, EVT_MOUSE_LEAVE);
+        g_input.move_target_entry = nullptr;
+    }
 
     close_context_menu();
     invalidate_window_visibility_cache();
@@ -1376,6 +1414,11 @@ void close_window(int index, bool kill_owner)
         g_input.hover_button = -1;
     } else if (g_input.hover_frame_index > index)
         g_input.hover_frame_index--;
+
+    if (g_input.client_grab_entry == doomed.entry)
+        g_input.client_grab_entry = nullptr;
+    if (g_input.move_target_entry == doomed.entry)
+        g_input.move_target_entry = nullptr;
 
     invalidate_window_visibility_cache();
     int focus_idx = find_top_visible_user_window();
@@ -1537,6 +1580,53 @@ void post_key_event_to_window(const Window &w, EventType type, char c, uint8_t s
     ev.key.c = c;
     ev.key.scancode = scancode;
     syscall2(SYS_POST_EVENT, w.owner_pid, (uintptr_t)&ev);
+}
+
+void post_plain_event_to_window(const Window &w, EventType type)
+{
+    if (!is_user_window(w) || !w.owner_pid)
+        return;
+    Event ev = {};
+    ev.type = type;
+    syscall2(SYS_POST_EVENT, w.owner_pid, (uintptr_t)&ev);
+}
+
+void post_scroll_event_to_window(const Window &w)
+{
+    if (!is_user_window(w) || !is_window_visible(w) || !w.owner_pid)
+        return;
+    Event ev = {};
+    ev.type = EVT_WINDOW_SCROLL;
+    ev.scroll.scroll_x = w.scroll_x;
+    ev.scroll.scroll_y = w.scroll_y;
+    syscall2(SYS_POST_EVENT, w.owner_pid, (uintptr_t)&ev);
+}
+
+static void clear_move_target_with_leave()
+{
+    if (!g_input.move_target_entry)
+        return;
+    int target = find_window_by_entry(g_input.move_target_entry);
+    if (target >= 0)
+        post_plain_event_to_window(g_windows[target], EVT_MOUSE_LEAVE);
+    g_input.move_target_entry = nullptr;
+}
+
+static void post_plain_event_to_pid(uint32_t pid, EventType type)
+{
+    if (!pid)
+        return;
+    Event ev = {};
+    ev.type = type;
+    syscall2(SYS_POST_EVENT, pid, (uintptr_t)&ev);
+}
+
+static void post_focus_change_events(uint32_t prev_pid, uint32_t next_pid)
+{
+    if (prev_pid == next_pid)
+        return;
+    post_plain_event_to_pid(prev_pid, EVT_UNFOCUS);
+    post_plain_event_to_pid(next_pid, EVT_FOCUS);
 }
 
 static void copy_cstr(char *dst, size_t dst_size, const char *src)
@@ -2865,12 +2955,16 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
     g_input.last_cursor_y = g_input.mouse_y;
 
     if (update_control_center_drag(g_input.mouse_x, g_input.mouse_y)) {
+        clear_move_target_with_leave();
         mark_cursor_transition_damage(g_input.old_mouse_x, g_input.old_mouse_y, g_input.cursor_kind, g_input.mouse_x,
                                       g_input.mouse_y, g_input.cursor_kind);
         return;
     }
 
     if (g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW && g_input.drag_index < g_window_count) {
+        // The WM owns the pointer during window moves/resizes; clients must
+        // not keep hover state from before the drag started.
+        clear_move_target_with_leave();
         Window &w = g_windows[g_input.drag_index];
         if (g_input.drag_edges == RESIZE_NONE) {
             int nx = g_input.mouse_x - g_input.drag_offset_x;
@@ -2920,28 +3014,60 @@ void apply_mouse_move(Registry *registry, int new_x, int new_y)
     mark_cursor_transition_damage(g_input.old_mouse_x, g_input.old_mouse_y, g_input.cursor_kind, g_input.mouse_x,
                                   g_input.mouse_y, g_input.cursor_kind);
     update_storage_prompt_hover(g_input.mouse_x, g_input.mouse_y);
-    if (g_storage_prompt.visible)
+    if (g_storage_prompt.visible) {
+        clear_move_target_with_leave();
         return;
+    }
     update_index_hover(g_input.mouse_x, g_input.mouse_y);
-    if (g_index.active)
+    if (g_index.active) {
+        clear_move_target_with_leave();
         return;
+    }
     update_control_center_hover(g_input.mouse_x, g_input.mouse_y);
-    if (g_control_center.open)
+    if (g_control_center.open) {
+        clear_move_target_with_leave();
         return;
+    }
     update_context_menu_hover(registry, g_input.mouse_x, g_input.mouse_y);
-    if (pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y))
+    if (pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y)) {
+        clear_move_target_with_leave();
+        return;
+    }
+
+    if (g_input.drag_index >= WM_FIRST_USER_WINDOW)
         return;
 
-    if (g_input.drag_index < WM_FIRST_USER_WINDOW) {
-        int focus = find_registry_focused_user_window(registry);
-        if (focus >= WM_FIRST_USER_WINDOW) {
-            const Window &fw = g_windows[focus];
-            bool hit = fw.transparent ? point_hits_window_visible_pixel(fw, g_input.mouse_x, g_input.mouse_y)
-                                      : point_in_client(fw, g_input.mouse_x, g_input.mouse_y);
-            if (hit)
-                post_mouse_event_to_window(fw, EVT_MOUSE_MOVE, g_input.mouse_x, g_input.mouse_y, 0);
+    // Client pointer grab: a window holding a button press receives every move
+    // even outside its client area so in-window drags (sliders, scrollbars,
+    // selections) continue seamlessly past the frame.
+    if (g_input.client_grab_entry) {
+        int grabbed = find_window_by_entry(g_input.client_grab_entry);
+        if (grabbed >= WM_FIRST_USER_WINDOW && is_window_visible(g_windows[grabbed])) {
+            post_mouse_event_to_window(g_windows[grabbed], EVT_MOUSE_MOVE, g_input.mouse_x, g_input.mouse_y, 0);
+            return;
+        }
+        g_input.client_grab_entry = nullptr;
+    }
+
+    int focus = find_registry_focused_user_window(registry);
+    if (focus >= WM_FIRST_USER_WINDOW) {
+        const Window &fw = g_windows[focus];
+        bool hit = fw.transparent ? point_hits_window_visible_pixel(fw, g_input.mouse_x, g_input.mouse_y)
+                                  : point_in_client(fw, g_input.mouse_x, g_input.mouse_y);
+        if (hit) {
+            if (g_input.move_target_entry != fw.entry) {
+                if (g_input.move_target_entry) {
+                    int prev = find_window_by_entry(g_input.move_target_entry);
+                    if (prev >= 0)
+                        post_plain_event_to_window(g_windows[prev], EVT_MOUSE_LEAVE);
+                }
+                g_input.move_target_entry = fw.entry;
+            }
+            post_mouse_event_to_window(fw, EVT_MOUSE_MOVE, g_input.mouse_x, g_input.mouse_y, 0);
+            return;
         }
     }
+    clear_move_target_with_leave();
 }
 
 void update_hover_feedback()

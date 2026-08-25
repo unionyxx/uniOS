@@ -33,7 +33,7 @@ bool g_window_visible_region_overflow[MAX_WINDOWS] = {};
 int g_dirty_count = 0;
 bool g_window_visibility_cache_dirty = true;
 bool g_dirty_frame_ready = false;
-static uint64_t g_wait_start_ticks = 0;   // Non-blocking wait timer
+static uint64_t g_wait_start_ticks = 0;     // Non-blocking wait timer
 static uint64_t g_wait_warn_interval = 250; // backs off so a wedged display does not log-flood
 
 ContextMenuState g_context_menu = {};
@@ -107,7 +107,7 @@ static void reap_exited_children()
         for (int i = 0; i < g_window_count; i++) {
             if (g_windows[i].owner_pid == (uint32_t)pid) {
                 close_window(i, false); // owner already dead: do not kill by (possibly recycled) PID
-                i--; // Adjust index as close_window compacts the array by shifting elements down
+                i--;                    // Adjust index as close_window compacts the array by shifting elements down
             }
         }
     }
@@ -551,7 +551,8 @@ static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwr
     int stale_count = clamp_dirty_rect_count(dst.stale_count);
 
     // Dynamic Pruning: Discard stale repair rects that will be completely overwritten by the new frame's dirty regions.
-    // Bypass during active window manipulation to prevent aggressive pruning from dropping essential shadow/border repair rects.
+    // Bypass during active window manipulation to prevent aggressive pruning from dropping essential shadow/border
+    // repair rects.
     bool manip = g_input.pointer_down && g_input.drag_index >= 2;
     if (!manip) {
         for (int i = 0; i < stale_count; i++) {
@@ -673,36 +674,30 @@ static uint32_t present_frame(const Surface *source, const DirtyRect *rects, int
         return 0;
 
     if (g_presentbuffer_handle != 0) {
-        DisplayComposeLayer layer = {
-            .buffer_handle = g_presentbuffer_handle,
-            .src_rect = gui_rect_make(0, 0, source->width, source->height),
-            .dst_rect = gui_rect_make(0, 0, source->width, source->height),
-            .flags = DISPLAY_COMPOSE_LAYER_OPAQUE,
-            .alpha = 255u
-        };
+        DisplayComposeLayer layer = {.buffer_handle = g_presentbuffer_handle,
+                                     .src_rect = gui_rect_make(0, 0, source->width, source->height),
+                                     .dst_rect = gui_rect_make(0, 0, source->width, source->height),
+                                     .flags = DISPLAY_COMPOSE_LAYER_OPAQUE,
+                                     .alpha = 255u};
 
-        DisplayComposeRequest req = {
-            .layers = &layer,
-            .layer_count = 1,
-            .damage_rects = present_rects,
-            .damage_rect_count = static_cast<uint32_t>(present_count),
-            .frame_sequence = frame_sequence,
-            .flags = DISPLAY_PRESENT_VBLANK,
-            .cursor_buffer_handle = cursor_handle,
-            .cursor_x = cursor_x,
-            .cursor_y = cursor_y
-        };
+        DisplayComposeRequest req = {.layers = &layer,
+                                     .layer_count = 1,
+                                     .damage_rects = present_rects,
+                                     .damage_rect_count = static_cast<uint32_t>(present_count),
+                                     .frame_sequence = frame_sequence,
+                                     .flags = DISPLAY_PRESENT_VBLANK,
+                                     .cursor_buffer_handle = cursor_handle,
+                                     .cursor_x = cursor_x,
+                                     .cursor_y = cursor_y};
         return display_compose_submit(&req);
     }
 
-    DisplayPresentRequest req = {
-        .buffer = source->buffer,
-        .stride = source->pitch / 4,
-        .rects = present_rects,
-        .rect_count = static_cast<uint32_t>(present_count),
-        .frame_sequence = frame_sequence,
-        .flags = DISPLAY_PRESENT_VBLANK
-    };
+    DisplayPresentRequest req = {.buffer = source->buffer,
+                                 .stride = source->pitch / 4,
+                                 .rects = present_rects,
+                                 .rect_count = static_cast<uint32_t>(present_count),
+                                 .frame_sequence = frame_sequence,
+                                 .flags = DISPLAY_PRESENT_VBLANK};
     return display_present(&req);
 }
 
@@ -1030,8 +1025,7 @@ extern "C" int main(int argc, char **argv)
     // Ensure deferred shell blur is built on the next compositor frame even
     // when no input or application damage arrives after boot.
     enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), menubar_h);
-    enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
-                        registry->windows[1].h);
+    enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w, registry->windows[1].h);
 
     smp_wmb();
     registry->magic = REGISTRY_MAGIC;
@@ -1280,8 +1274,11 @@ extern "C" int main(int argc, char **argv)
                 }
                 if (hit_idx >= 0) {
                     if (hit_idx >= 2 && fwd_client) {
-                        post_mouse_event_to_window(g_windows[focus_window(hit_idx, true)], EVT_MOUSE_DOWN,
-                                                   g_input.mouse_x, g_input.mouse_y, ev.mouse.button);
+                        int focused_idx = focus_window(hit_idx, true);
+                        post_mouse_event_to_window(g_windows[focused_idx], EVT_MOUSE_DOWN, g_input.mouse_x,
+                                                   g_input.mouse_y, ev.mouse.button);
+                        g_input.client_grab_entry = g_windows[focused_idx].entry;
+                        g_input.client_grab_button = ev.mouse.button;
                     }
                 } else {
                     clear_window_focus(registry);
@@ -1302,8 +1299,11 @@ extern "C" int main(int argc, char **argv)
                             if (!point_targets_window_client_for_input(g_windows[i], g_input.mouse_x, g_input.mouse_y))
                                 continue;
                             if (is_user_window(g_windows[i])) {
-                                post_mouse_event_to_window(g_windows[focus_window(i, true)], EVT_MOUSE_DOWN,
-                                                           g_input.mouse_x, g_input.mouse_y, ev.mouse.button);
+                                int focused_idx = focus_window(i, true);
+                                post_mouse_event_to_window(g_windows[focused_idx], EVT_MOUSE_DOWN, g_input.mouse_x,
+                                                           g_input.mouse_y, ev.mouse.button);
+                                g_input.client_grab_entry = g_windows[focused_idx].entry;
+                                g_input.client_grab_button = ev.mouse.button;
                                 opened = true;
                             }
                             break;
@@ -1313,8 +1313,11 @@ extern "C" int main(int argc, char **argv)
 
                         if (point_in_client(g_windows[i], g_input.mouse_x, g_input.mouse_y)) {
                             if (is_user_window(g_windows[i])) {
-                                post_mouse_event_to_window(g_windows[focus_window(i, true)], EVT_MOUSE_DOWN,
-                                                           g_input.mouse_x, g_input.mouse_y, ev.mouse.button);
+                                int focused_idx = focus_window(i, true);
+                                post_mouse_event_to_window(g_windows[focused_idx], EVT_MOUSE_DOWN, g_input.mouse_x,
+                                                           g_input.mouse_y, ev.mouse.button);
+                                g_input.client_grab_entry = g_windows[focused_idx].entry;
+                                g_input.client_grab_button = ev.mouse.button;
                                 opened = true;
                             }
                             break;
@@ -1352,12 +1355,25 @@ extern "C" int main(int argc, char **argv)
                     enqueue_damage_rect(outer.x, outer.y, outer.w, title_h);
                 }
                 if (c_idx < 2) {
-                    int focus = find_registry_focused_user_window(registry);
-                    if (focus >= 2 && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y) &&
-                        point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y)) {
-                        post_mouse_event_to_window(g_windows[focus], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,
+                    int grabbed = g_input.client_grab_entry ? find_window_by_entry(g_input.client_grab_entry) : -1;
+                    if (g_input.client_grab_button == 1 && grabbed >= WM_FIRST_USER_WINDOW &&
+                        is_window_visible(g_windows[grabbed])) {
+                        // Grabbed release: deliver even outside the client area so
+                        // in-window drags terminate cleanly.
+                        post_mouse_event_to_window(g_windows[grabbed], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,
                                                    ev.mouse.button);
+                    } else {
+                        int focus = find_registry_focused_user_window(registry);
+                        if (focus >= 2 && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y) &&
+                            point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y)) {
+                            post_mouse_event_to_window(g_windows[focus], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,
+                                                       ev.mouse.button);
+                        }
                     }
+                }
+                if (g_input.client_grab_button == 1) {
+                    g_input.client_grab_entry = nullptr;
+                    g_input.client_grab_button = 0;
                 }
             } else if (ev.type == EVT_KEY_DOWN) {
                 if (ev.key.scancode == 56 || ev.key.scancode == 184) {
@@ -1497,11 +1513,26 @@ extern "C" int main(int argc, char **argv)
                     focus_window(find_top_visible_user_window(), false);
                 }
             } else if (ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) {
+                if (ev.type == EVT_MOUSE_UP && g_input.client_grab_entry &&
+                    g_input.client_grab_button == ev.mouse.button) {
+                    int grabbed = find_window_by_entry(g_input.client_grab_entry);
+                    if (grabbed >= WM_FIRST_USER_WINDOW && is_window_visible(g_windows[grabbed])) {
+                        post_mouse_event_to_window(g_windows[grabbed], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,
+                                                   ev.mouse.button);
+                    }
+                    g_input.client_grab_entry = nullptr;
+                    g_input.client_grab_button = 0;
+                    continue;
+                }
                 int focus = find_registry_focused_user_window(registry);
                 if (focus >= 2 && !pointer_blocked_by_shell_overlay(g_input.mouse_x, g_input.mouse_y) &&
                     point_targets_window_client_for_input(g_windows[focus], g_input.mouse_x, g_input.mouse_y)) {
                     post_mouse_event_to_window(g_windows[focus], ev.type, g_input.mouse_x, g_input.mouse_y,
                                                ev.mouse.button);
+                    if (ev.type == EVT_MOUSE_DOWN) {
+                        g_input.client_grab_entry = g_windows[focus].entry;
+                        g_input.client_grab_button = ev.mouse.button;
+                    }
                 }
             }
         }
@@ -1562,6 +1593,12 @@ extern "C" int main(int argc, char **argv)
             registry->wallpaper_reload_requested = false;
             reload_wallpaper(registry, true);
             enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
+        }
+
+        if (registry->cp_toggle_requested) {
+            registry->cp_toggle_requested = false;
+            smp_wmb();
+            toggle_control_center();
         }
 
         registry->mouse_x = g_input.mouse_x;
@@ -1633,8 +1670,10 @@ extern "C" int main(int argc, char **argv)
                 }
                 int bw = entry_snapshot.buffer_w > 0 ? entry_snapshot.buffer_w : entry_snapshot.w;
                 int bh = entry_snapshot.buffer_h > 0 ? entry_snapshot.buffer_h : entry_snapshot.h;
-                if (bw > 8192) bw = 8192;
-                if (bh > 8192) bh = 8192;
+                if (bw > 8192)
+                    bw = 8192;
+                if (bh > 8192)
+                    bh = 8192;
 
                 if (gui_shm_id_is_valid(entry_snapshot.shm_id)) {
                     if (entry_snapshot.shm_id != w.shm_id) {
@@ -1705,7 +1744,8 @@ extern "C" int main(int argc, char **argv)
                         if (!is_memfd) {
                             // Legacy System V Shared Memory Path
                             uint64_t actual_shm_size = syscall1(SYS_SHM_INFO, static_cast<uint64_t>(w.shm_id));
-                            uint64_t required_bytes = static_cast<uint64_t>(bw) * static_cast<uint64_t>(bh) * sizeof(uint32_t);
+                            uint64_t required_bytes =
+                                static_cast<uint64_t>(bw) * static_cast<uint64_t>(bh) * sizeof(uint32_t);
                             if (actual_shm_size != static_cast<uint64_t>(-1) && required_bytes <= actual_shm_size) {
                                 size_change_valid = true;
                             } else {
