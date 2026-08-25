@@ -127,18 +127,24 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
         spinlock_release_irqrestore(&p->fd_lock, flags);
         return -22; // EINVAL: Not an epoll file descriptor
     }
+    // Pin the instance's vnode for the whole syscall: a concurrent close of
+    // epfd in another thread must not free the EpollInstance under us.
+    __sync_fetch_and_add(&ep_vnode->ref_count, 1);
     EpollInstance *inst = static_cast<EpollInstance *>(ep_vnode->fs_data);
 
     if (fd < 0 || fd >= MAX_OPEN_FILES || !p->fd_table[fd].used) {
         spinlock_release_irqrestore(&p->fd_lock, flags);
+        vfs_close_vnode(ep_vnode);
         return -9; // EBADF
     }
     spinlock_release_irqrestore(&p->fd_lock, flags);
 
     struct epoll_event local_event = {0, {0}};
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
-        if (!event)
+        if (!event) {
+            vfs_close_vnode(ep_vnode);
             return -14; // EFAULT
+        }
     }
 
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
@@ -148,18 +154,22 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
     }
 
     uint64_t inst_flags = spinlock_acquire_irqsave(&inst->lock);
+    int64_t result = -22; // EINVAL: Invalid operation
 
     if (op == EPOLL_CTL_ADD) {
+        result = -17; // EEXIST
         for (EpollItem *curr = inst->items; curr; curr = curr->next) {
             if (curr->fd == fd) {
                 spinlock_release_irqrestore(&inst->lock, inst_flags);
-                return -17; // EEXIST
+                vfs_close_vnode(ep_vnode);
+                return result;
             }
         }
 
         EpollItem *item = static_cast<EpollItem *>(malloc(sizeof(EpollItem)));
         if (!item) {
             spinlock_release_irqrestore(&inst->lock, inst_flags);
+            vfs_close_vnode(ep_vnode);
             return -12; // ENOMEM
         }
         item->fd = fd;
@@ -167,40 +177,37 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
         item->data = local_event.data;
         item->next = inst->items;
         inst->items = item;
-
-        spinlock_release_irqrestore(&inst->lock, inst_flags);
-        return 0;
+        result = 0;
     }
     else if (op == EPOLL_CTL_MOD) {
+        result = -2; // ENOENT
         for (EpollItem *curr = inst->items; curr; curr = curr->next) {
             if (curr->fd == fd) {
                 curr->events = local_event.events;
                 curr->data = local_event.data;
-                spinlock_release_irqrestore(&inst->lock, inst_flags);
-                return 0;
+                result = 0;
+                break;
             }
         }
-        spinlock_release_irqrestore(&inst->lock, inst_flags);
-        return -2; // ENOENT
     }
     else if (op == EPOLL_CTL_DEL) {
+        result = -2; // ENOENT
         EpollItem **link = &inst->items;
         while (*link) {
             if ((*link)->fd == fd) {
                 EpollItem *target = *link;
                 *link = target->next;
                 free(target);
-                spinlock_release_irqrestore(&inst->lock, inst_flags);
-                return 0;
+                result = 0;
+                break;
             }
             link = &(*link)->next;
         }
-        spinlock_release_irqrestore(&inst->lock, inst_flags);
-        return -2; // ENOENT
     }
 
     spinlock_release_irqrestore(&inst->lock, inst_flags);
-    return -22; // EINVAL: Invalid operation
+    vfs_close_vnode(ep_vnode);
+    return result;
 }
 
 int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
@@ -225,6 +232,10 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         spinlock_release_irqrestore(&current->fd_lock, flags);
         return -22; // EINVAL
     }
+    // Pin the instance's vnode for the whole (possibly blocking) syscall: a
+    // concurrent close of epfd in another thread must not free the
+    // EpollInstance while we are queued on it.
+    __sync_fetch_and_add(&ep_vnode->ref_count, 1);
     EpollInstance *inst = static_cast<EpollInstance *>(ep_vnode->fs_data);
     spinlock_release_irqrestore(&current->fd_lock, flags);
 
@@ -262,6 +273,14 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         spinlock_release_irqrestore(&inst->lock, inst_flags);
 
         if (num_ready > 0 || timeout == 0 || !event_empty(current->event_queue)) {
+            break;
+        }
+
+        // A pending fatal signal must break the block; otherwise a process
+        // parked on a quiet epoll set is effectively unkillable. The signal
+        // itself is delivered on the return-to-user path.
+        if (scheduler_fatal_signal_pending(current)) {
+            num_ready = -4; // -EINTR
             break;
         }
 
@@ -307,7 +326,12 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         // scheduler_wait re-acquires the lock raw before returning, so we must release it raw
         // so that the next loop iteration's spinlock_acquire_irqsave succeeds.
         spinlock_release(&inst->lock);
+        // scheduler_wait leaves this core with interrupts disabled; without
+        // restoring the caller's flags every subsequent iteration (and the
+        // rest of the syscall) would run with IRQs masked.
+        interrupts_restore(inst_flags2);
     }
 
+    vfs_close_vnode(ep_vnode);
     return num_ready;
 }

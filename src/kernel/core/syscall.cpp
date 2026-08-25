@@ -333,27 +333,41 @@ static bool shm_unmap_from_process(Process *p, int id)
 
     const uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     VMA *mapping = vma_find(p->vma_list, virt_start);
     if (!mapping || mapping->start != virt_start || mapping->type != VMAType::Shared) {
-        spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+        spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
     }
 
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
     vma_remove(&p->vma_list, mapping_start, mapping_end);
-    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
+
+    // Two passes: collect the frames while unmapping without flushing,
+    // invalidate on all cores, and only then drop the references (a dec to
+    // zero returns the frame to the pool — remote TLBs must be gone first).
+    const size_t num_pages = (mapping_end - mapping_start) / 4096;
+    uint64_t *phys_list = static_cast<uint64_t *>(malloc(num_pages * sizeof(uint64_t)));
+    size_t phys_count = 0;
 
     for (uint64_t virt = mapping_start; virt < mapping_end; virt += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
         if (!phys)
             continue;
-        vmm_unmap_page_in(p->page_table, virt);
-        pmm_refcount_dec(reinterpret_cast<void *>(phys));
+        vmm_unmap_page_no_flush(p->page_table, virt);
+        if (phys_list && phys_count < num_pages)
+            phys_list[phys_count++] = phys;
     }
 
-    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+    vmm_invalidate_tlb_range(mapping_start, num_pages);
+
+    if (phys_list) {
+        for (size_t i = 0; i < phys_count; i++)
+            pmm_refcount_dec(reinterpret_cast<void *>(phys_list[i]));
+        free(phys_list);
+    }
     return true;
 }
 
@@ -388,16 +402,40 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     }
     spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
-    // Unmap matching physical pages from page tables
+    // Unmap matching physical pages WITHOUT flushing, collect the frames,
+    // flush every core once, and only then return the frames to the pool:
+    // a remote TLB entry must never survive into a reallocated frame, and a
+    // per-page shootdown IPI made large munmaps O(n) round trips.
+    const size_t num_pages = length / 4096;
+    uint64_t *freed_phys = static_cast<uint64_t *>(malloc(num_pages * sizeof(uint64_t)));
+
+    if (!freed_phys) {
+        // No scratch memory: slow path, still flush-before-free per page.
+        for (uint64_t virt = addr; virt < end_addr; virt += 4096) {
+            uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
+            if (!phys)
+                continue;
+            vmm_unmap_page_in(p->page_table, virt);
+            pmm_free_frame(reinterpret_cast<void *>(phys));
+        }
+        return true;
+    }
+
+    size_t freed_count = 0;
     for (uint64_t virt = addr; virt < end_addr; virt += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
         if (!phys)
             continue;
-        vmm_unmap_page_in(p->page_table, virt);
-        pmm_free_frame(reinterpret_cast<void *>(phys));
+        vmm_unmap_page_no_flush(p->page_table, virt);
+        freed_phys[freed_count++] = phys;
     }
 
-    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+    vmm_invalidate_tlb_range(addr, num_pages);
+
+    for (size_t i = 0; i < freed_count; i++)
+        pmm_free_frame(reinterpret_cast<void *>(freed_phys[i]));
+    free(freed_phys);
+
     return true;
 }
 
@@ -487,6 +525,18 @@ void signal_send(Process *p, int sig)
     }
 }
 
+// Variant for cross-process delivery: the caller holds the scheduler lock so
+// the target cannot be reaped between lookup and wake, and the state check +
+// wake happen atomically (an unlocked state read raced scheduler_wait and
+// lost the wakeup, leaving blocked processes unkillable).
+static void signal_send_locked(Process *p, int sig)
+{
+    if (!p || sig <= 0 || sig > 31)
+        return;
+    __sync_or_and_fetch(&p->signals.pending, 1ULL << sig);
+    scheduler_wake_for_signal_locked(p);
+}
+
 extern "C" void signal_send_current(int sig)
 {
     signal_send(process_get_current(), sig);
@@ -500,7 +550,11 @@ extern "C" uint32_t g_xsave_mask_hi;
 struct alignas(64) SignalContext
 {
     InterruptFrame frame;
-    alignas(64) uint8_t fpu_state[1024];
+    // Must hold whatever xsave area the CPU exposes: with AVX enabled the
+    // standard-format region is ~832 bytes, and AVX-512-class parts would
+    // need well over 1024. Size it like the per-process switch buffer so a
+    // signal delivery can never overflow the kernel stack.
+    alignas(64) uint8_t fpu_state[FPU_STATE_SIZE];
     uint64_t old_mask;
     uint32_t magic;
 };
@@ -509,8 +563,8 @@ constexpr uint32_t SIG_CONTEXT_MAGIC = 0x51644374; // 'SigC'
 
 static void restore_fpu_state(const uint8_t *fpu_buffer)
 {
-    alignas(64) uint8_t sanitized_buf[1024];
-    kstring::memcpy(sanitized_buf, fpu_buffer, 1024);
+    alignas(64) uint8_t sanitized_buf[FPU_STATE_SIZE];
+    kstring::memcpy(sanitized_buf, fpu_buffer, FPU_STATE_SIZE);
 
     // Sanitize MXCSR to prevent GPF from reserved bits (bits 16-31 are reserved)
     uint32_t *mxcsr = reinterpret_cast<uint32_t *>(&sanitized_buf[24]);
@@ -719,6 +773,10 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
 {
     if (sig <= 0 || sig > 31)
         return static_cast<uint64_t>(-1);
+    // SIGKILL can never be caught or ignored; allowing a handler would let a
+    // process make itself unkillable.
+    if (sig == SIGKILL)
+        return static_cast<uint64_t>(-1);
     Process *p = process_get_current();
     if (!p)
         return static_cast<uint64_t>(-1);
@@ -732,9 +790,22 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
 
     if (act && validate_user_ptr(act, sizeof(struct sigaction), false)) {
         STAC();
-        p->signals.handlers[sig] = act->sa_handler;
-        p->signals.restorer = (uint64_t)act->sa_restorer;
+        sighandler_t handler = act->sa_handler;
+        void (*restorer)(void) = act->sa_restorer;
         CLAC();
+
+        // A handler/restorer must be SIG_DFL, SIG_IGN, or a canonical user
+        // address. A non-canonical handler would later be loaded into RIP by
+        // signal delivery and fault inside the kernel on the return path.
+        const uint64_t handler_addr = reinterpret_cast<uint64_t>(handler);
+        if (handler != SIG_DFL && handler != SIG_IGN && handler_addr >= USER_SPACE_MAX)
+            return static_cast<uint64_t>(-1);
+        const uint64_t restorer_addr = reinterpret_cast<uint64_t>(restorer);
+        if (restorer && restorer_addr >= USER_SPACE_MAX)
+            return static_cast<uint64_t>(-1);
+
+        p->signals.handlers[sig] = handler;
+        p->signals.restorer = restorer_addr;
     }
 
     return 0;
@@ -813,17 +884,30 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     Process *current = process_get_current();
-    Process *target = process_find_by_pid(pid);
-    if (!current || !target)
+    if (!current)
         return static_cast<uint64_t>(-1);
 
+    // Find-and-deliver under the scheduler lock: an unlocked
+    // process_find_by_pid() could hand back a Process that another core reaps
+    // and frees (or reuses for a different process) before the signal lands.
+    const uint64_t sched_flags = scheduler_big_lock_irqsave();
+    Process *target = process_find_by_pid_locked(pid);
+    if (!target) {
+        scheduler_big_unlock_irqrestore(sched_flags);
+        return static_cast<uint64_t>(-1);
+    }
+
     if (current->uid != 0 && current->pid != target->pid && current->uid != target->uid) {
+        scheduler_big_unlock_irqrestore(sched_flags);
         return static_cast<uint64_t>(-1);
     }
 
     if (sig != 0) {
-        signal_send(target, sig);
+        signal_send_locked(target, sig);
     }
+    scheduler_big_unlock_irqrestore(sched_flags);
+    if (sig != 0)
+        scheduler_notify_idle_cpus();
     return 0;
 }
 
@@ -873,6 +957,10 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         while (read_count == 0) {
             input_poll();
             while (!input_keyboard_has_char() && !serial_has_char()) {
+                // A pending fatal signal must not be slept through: break out
+                // with EINTR so the return-to-user path can deliver it.
+                if (scheduler_fatal_signal_pending(p))
+                    return static_cast<uint64_t>(-4);
                 scheduler_sleep_ms(1);
                 input_poll();
             }
@@ -1095,6 +1183,31 @@ static void user_task_wrapper()
     if (!p)
         return -1;
 
+    {
+        // POSIX semantics: exec terminates all other threads of the process.
+        // Until thread teardown under a live address space is implemented,
+        // refuse instead: swapping the page tables here would leave sibling
+        // threads running on freed page tables (wild faults / cross-process
+        // writes into reused frames).
+        const uint64_t chk_flags = scheduler_big_lock_irqsave();
+        bool has_threads = false;
+        Process *scan = scheduler_get_process_list();
+        if (scan) {
+            do {
+                if (scan != p && scan->page_table == p->page_table) {
+                    has_threads = true;
+                    break;
+                }
+                scan = scan->next;
+            } while (scan != scheduler_get_process_list());
+        }
+        scheduler_big_unlock_irqrestore(chk_flags);
+        if (has_threads) {
+            DEBUG_WARN("exec: refused for pid %lu (shared address space with other threads)", p->pid);
+            return -1;
+        }
+    }
+
     char k_path[512];
     if (!copy_string_from_user(path, k_path, 511))
         return -1;
@@ -1157,11 +1270,11 @@ static void user_task_wrapper()
     uint64_t *old_pml4 = p->page_table;
     VMA *old_vma_list = p->vma_list;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     p->page_table = new_pml4;
     p->vma_list = loader_proc->vma_list;
     p->exec_entry = entry;
-    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
     loader_proc->vma_list = nullptr;
     aligned_free(loader_proc);
@@ -1265,10 +1378,14 @@ static void user_task_wrapper()
     loader_proc->vma_list = nullptr;
     child->exec_entry = entry;
 
+    // Capture before publishing: the task can run and exit on another core
+    // the moment it is queued.
+    const int64_t child_pid = static_cast<int64_t>(child->pid);
+
     scheduler_enqueue_task(child);
     aligned_free(loader_proc);
-    DEBUG_SUCCESS("kernel_exec: launched %s as pid %lu", resolved, child->pid);
-    return static_cast<int64_t>(child->pid);
+    DEBUG_SUCCESS("kernel_exec: launched %s as pid %lu", resolved, static_cast<uint64_t>(child_pid));
+    return child_pid;
 }
 
 static uint64_t sys_getprocs(ProcessInfo *out, uint64_t max_count)
@@ -1281,31 +1398,39 @@ static uint64_t sys_getprocs(ProcessInfo *out, uint64_t max_count)
     if (!validate_user_ptr(out, out_bytes, true))
         return static_cast<uint64_t>(-1);
 
-    extern Process *scheduler_get_process_list();
-    Process *list = scheduler_get_process_list();
-    if (!list)
-        return 0;
+    // Snapshot under the scheduler lock: an unlocked walk raced process
+    // teardown (unlink + free) and followed dangling next pointers into the
+    // user-visible output. The heap alloc happens before locking (heap lock
+    // must not nest inside the scheduler lock).
+    ProcessInfo *snap = static_cast<ProcessInfo *>(malloc(out_bytes));
+    if (!snap)
+        return static_cast<uint64_t>(-1);
+    kstring::zero_memory(snap, out_bytes);
 
     uint64_t count = 0;
-    Process *curr = list;
+    const uint64_t sched_flags = scheduler_big_lock_irqsave();
+    Process *list = scheduler_get_process_list();
+    if (list) {
+        Process *curr = list;
+        do {
+            snap[count].pid = curr->pid;
+            snap[count].parent_pid = curr->parent_pid;
+            snap[count].uid = curr->uid;
+            snap[count].state = curr->state;
+            snap[count].priority = curr->priority;
+            kstring::strncpy(snap[count].name, curr->name, 31);
+            snap[count].name[31] = '\0';
 
-    // Zero out the entire user buffer first to prevent leaks via alignment padding
+            count++;
+            curr = curr->next;
+        } while (curr != list && count < max_count);
+    }
+    scheduler_big_unlock_irqrestore(sched_flags);
+
     STAC();
-    kstring::zero_memory(out, out_bytes);
-
-    do {
-        out[count].pid = curr->pid;
-        out[count].parent_pid = curr->parent_pid;
-        out[count].uid = curr->uid;
-        out[count].state = curr->state;
-        out[count].priority = curr->priority;
-        kstring::strncpy(out[count].name, curr->name, 31);
-        out[count].name[31] = '\0';
-
-        count++;
-        curr = curr->next;
-    } while (curr != list && count < max_count);
+    kstring::memcpy(out, snap, count * sizeof(ProcessInfo));
     CLAC();
+    free(snap);
 
     return count;
 }
@@ -1383,21 +1508,24 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     if (!(prot & PROT_EXEC))
         pte_flags |= PTE_NX;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&current->vma_lock);
+    // VMA metadata and the PTE rewrite happen under the shared address-space
+    // lock (vma_lock_ptr — threads share the leader's lock), so a concurrent
+    // munmap cannot free pages mid-rewrite. One batched shootdown replaces a
+    // per-page IPI round trip.
+    uint64_t sl_flags = spinlock_acquire_irqsave(current->vma_lock_ptr);
     for (VMA *curr = current->vma_list; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > start_addr) {
             curr->flags = pte_flags;
         }
     }
-    spinlock_release_irqrestore(&current->vma_lock, sl_flags);
-
     for (uint64_t page_vaddr = start_addr; page_vaddr < end_addr; page_vaddr += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(current->page_table, page_vaddr);
         if (phys != 0) {
             vmm_replace_page_in(current->page_table, page_vaddr, phys & ~0xFFFULL, pte_flags);
-            vmm_invalidate_tlb(page_vaddr);
         }
     }
+    spinlock_release_irqrestore(current->vma_lock_ptr, sl_flags);
+    vmm_invalidate_tlb_range(start_addr, (end_addr - start_addr) / 4096);
 
     return 0;
 }
@@ -1504,9 +1632,16 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
         target_pid = gui_get_wm_pid();
     }
 
-    Process *target = process_find_by_pid(target_pid);
-    if (!target)
+    // Hold the scheduler lock across lookup AND transfer: the target can be
+    // reaped on another core between the two, and installing an fd into a
+    // dying/freed process corrupts whatever gets its memory next. The fd
+    // locks nest inside (the reverse order never occurs).
+    const uint64_t sched_flags = scheduler_big_lock_irqsave();
+    Process *target = process_find_by_pid_locked(target_pid);
+    if (!target) {
+        scheduler_big_unlock_irqrestore(sched_flags);
         return -3; // -ESRCH
+    }
 
     uint64_t sl_flags = 0;
     if (current == target) {
@@ -1529,6 +1664,7 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
             spinlock_release(&current->fd_lock);
             spinlock_release_irqrestore(&target->fd_lock, sl_flags);
         }
+        scheduler_big_unlock_irqrestore(sched_flags);
         return -9; // -EBADF
     }
 
@@ -1552,6 +1688,7 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
             spinlock_release(&current->fd_lock);
             spinlock_release_irqrestore(&target->fd_lock, sl_flags);
         }
+        scheduler_big_unlock_irqrestore(sched_flags);
         return -24; // -EMFILE
     }
 
@@ -1569,6 +1706,7 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
         spinlock_release_irqrestore(&target->fd_lock, sl_flags);
     }
 
+    scheduler_big_unlock_irqrestore(sched_flags);
     return target_fd;
 }
 
@@ -1598,22 +1736,37 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!validate_user_ptr(reinterpret_cast<void *>(arg1), sizeof(int) * 2, true))
                 return static_cast<uint64_t>(-1);
             Process *p = process_get_current();
-            int fd1 = find_free_fd(p);
-            if (fd1 < 0)
+            if (!p)
                 return static_cast<uint64_t>(-1);
+
+            // All fd-table mutations happen under fd_lock: an unlocked
+            // allocation here raced close/dup2/fd_transfer in sibling threads.
+            const uint64_t pipe_flags = spinlock_acquire_irqsave(&p->fd_lock);
+            int fd1 = find_free_fd(p);
+            if (fd1 < 0) {
+                spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+                return static_cast<uint64_t>(-1);
+            }
             p->fd_table[fd1].used = true;
             int fd2 = find_free_fd(p);
             if (fd2 < 0) {
                 p->fd_table[fd1].used = false;
+                spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
                 return static_cast<uint64_t>(-1);
             }
             p->fd_table[fd2].used = true;
+            spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+
             int pipe_id = pipe_create();
             if (pipe_id < 0) {
+                const uint64_t clr_flags = spinlock_acquire_irqsave(&p->fd_lock);
                 p->fd_table[fd1].used = false;
                 p->fd_table[fd2].used = false;
+                spinlock_release_irqrestore(&p->fd_lock, clr_flags);
                 return static_cast<uint64_t>(-1);
             }
+
+            const uint64_t set_flags = spinlock_acquire_irqsave(&p->fd_lock);
             p->fd_table[fd1].vnode = pipe_get_vnode(pipe_id, false);
             p->fd_table[fd1].flags = 0;
             p->fd_table[fd1].offset = 0;
@@ -1622,6 +1775,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             p->fd_table[fd2].flags = 0;
             p->fd_table[fd2].offset = 0;
             p->fd_table[fd2].dir_pos = 0;
+            spinlock_release_irqrestore(&p->fd_lock, set_flags);
+
             STAC();
             reinterpret_cast<int *>(arg1)[0] = fd1;
             reinterpret_cast<int *>(arg1)[1] = fd2;
@@ -2402,6 +2557,11 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 if (arg2 == 0)
                     return 0; // Non-blocking
 
+                // A pending fatal signal must break the block; otherwise a
+                // process waiting on a quiet queue is effectively unkillable.
+                if (scheduler_fatal_signal_pending(p))
+                    return static_cast<uint64_t>(-4); // -EINTR
+
                 const uint64_t irq_flags = interrupts_save_disable();
                 if (event_poll(p->event_queue, ev)) {
                     interrupts_restore(irq_flags);
@@ -2417,9 +2577,6 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             }
         }
         case SYS_POST_EVENT: {
-            Process *target = process_find_by_pid(arg1);
-            if (!target)
-                return static_cast<uint64_t>(-1);
             if (!validate_user_ptr(reinterpret_cast<void *>(arg2), sizeof(Event), false))
                 return static_cast<uint64_t>(-1);
 
@@ -2428,8 +2585,18 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             ev = *reinterpret_cast<Event *>(arg2);
             CLAC();
 
+            // Push-and-wake under the scheduler lock so the target cannot be
+            // reaped between the lookup and the use of its event queue.
+            const uint64_t sched_flags = scheduler_big_lock_irqsave();
+            Process *target = process_find_by_pid_locked(arg1);
+            if (!target) {
+                scheduler_big_unlock_irqrestore(sched_flags);
+                return static_cast<uint64_t>(-1);
+            }
             event_push(target->event_queue, ev);
-            scheduler_wake_all(&target->event_wait_queue);
+            scheduler_wake_all_locked(&target->event_wait_queue);
+            scheduler_big_unlock_irqrestore(sched_flags);
+            scheduler_notify_idle_cpus();
             return 0;
         }
         case SYS_GUI_REGISTER_WM: {
@@ -2451,11 +2618,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 gui_set_focus_pid(0);
                 return 0;
             }
-            Process *target = process_find_by_pid(arg1);
-            if (!target)
+            const uint64_t focus_flags = scheduler_big_lock_irqsave();
+            Process *target = process_find_by_pid_locked(arg1);
+            if (!target) {
+                scheduler_big_unlock_irqrestore(focus_flags);
                 return static_cast<uint64_t>(-1);
+            }
             gui_set_focus_pid(target->pid);
-            scheduler_boost_process_priority(target, 0);
+            scheduler_boost_process_priority_under_lock(target, 0);
+            scheduler_big_unlock_irqrestore(focus_flags);
             return 0;
         }
         case SYS_GETMEMINFO: {

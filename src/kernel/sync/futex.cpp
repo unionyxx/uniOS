@@ -34,11 +34,9 @@ static inline uint32_t futex_hash(uint64_t phys_addr)
 
 int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
 {
-    static bool futex_inited = false;
-    if (!futex_inited) {
-        futex_init();
-        futex_inited = true;
-    }
+    // Buckets are initialized at boot (kmain, single-core). A lazy init here
+    // raced on SMP: two cores could initialize a bucket lock while a third
+    // was already acquiring it.
 
     if (reinterpret_cast<uintptr_t>(uaddr) % sizeof(uint32_t) != 0) {
         return -22; // EINVAL: Unaligned access
@@ -67,6 +65,11 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
         if (current_val != val) {
             spinlock_release_irqrestore(&bucket->lock, flags);
             return -11; // EAGAIN
+        }
+
+        if (scheduler_fatal_signal_pending(current)) {
+            spinlock_release_irqrestore(&bucket->lock, flags);
+            return -4; // -EINTR: do not sleep through a fatal signal
         }
 
         scheduler_wait(&bucket->wait_queue, &bucket->lock);

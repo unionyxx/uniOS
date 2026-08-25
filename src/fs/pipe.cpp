@@ -49,6 +49,7 @@ struct PipeInternal : public Pipe
 
 static PipeInternal pipes[MAX_PIPES];
 static bool pipes_initialized = false;
+static Spinlock g_pipe_slot_lock = SPINLOCK_INIT;
 static int g_pipe_debug_reads = 0;
 static int g_pipe_debug_writes = 0;
 
@@ -67,6 +68,9 @@ int pipe_create()
 {
     pipe_init();
 
+    // The slot scan is serialized: two cores racing an unlocked scan could
+    // claim the same slot and cross-wire their wait queues.
+    uint64_t flags = spinlock_acquire_irqsave(&g_pipe_slot_lock);
     for (int i = 0; i < MAX_PIPES; i++) {
         if (!pipes[i].in_use) {
             pipes[i].in_use = true;
@@ -77,9 +81,11 @@ int pipe_create()
             pipes[i].read_closed = false;
             pipes[i].data_wait = {nullptr, nullptr};
             pipes[i].space_wait = {nullptr, nullptr};
+            spinlock_release_irqrestore(&g_pipe_slot_lock, flags);
             return i;
         }
     }
+    spinlock_release_irqrestore(&g_pipe_slot_lock, flags);
     return -1;
 }
 
@@ -112,9 +118,14 @@ int64_t pipe_read(int pipe_id, char *buf, uint64_t count)
             return (int64_t)to_read;
         }
 
-        if (p->write_closed) {
+        if (p->write_closed || p->read_closed) {
             spinlock_release_irqrestore(&p->lock, flags);
-            return 0; // EOF
+            return 0; // EOF / read end closed by another fd holder
+        }
+
+        if (scheduler_fatal_signal_pending(process_get_current())) {
+            spinlock_release_irqrestore(&p->lock, flags);
+            return -4; // -EINTR: do not sleep through a fatal signal
         }
 
         scheduler_wait(&p->data_wait, &p->lock);
@@ -131,9 +142,14 @@ int64_t pipe_write(int pipe_id, const char *buf, uint64_t count)
 
     uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     while (true) {
-        if (p->read_closed) {
+        if (p->read_closed || p->write_closed) {
             spinlock_release_irqrestore(&p->lock, flags);
-            return -1; // Broken pipe
+            return -1; // Broken pipe / write end closed by another fd holder
+        }
+
+        if (scheduler_fatal_signal_pending(process_get_current())) {
+            spinlock_release_irqrestore(&p->lock, flags);
+            return -4; // -EINTR: do not sleep through a fatal signal
         }
 
         uint64_t space = PIPE_BUFFER_SIZE - p->count;
@@ -169,6 +185,9 @@ void pipe_close_read(int pipe_id)
     uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     p->read_closed = true;
     scheduler_wake_all(&p->space_wait);
+    // A reader blocked on an empty pipe must also be woken: with the read
+    // end gone it observes EOF instead of hanging forever.
+    scheduler_wake_all(&p->data_wait);
 
     if (p->write_closed) {
         p->in_use = false;

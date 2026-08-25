@@ -539,7 +539,8 @@ struct TestStackFrame {
 
 struct alignas(64) TestSignalContext {
     InterruptFrame frame;
-    alignas(64) uint8_t fpu_state[1024];
+    // Must mirror the kernel's SignalContext (FPU_STATE_SIZE).
+    alignas(64) uint8_t fpu_state[FPU_STATE_SIZE];
     uint64_t old_mask;
     uint32_t magic;
 };
@@ -562,12 +563,14 @@ KTEST(extended_syscalls_signal_context)
         p->page_table = vmm_get_kernel_pml4();
     }
 
-    // Allocate a page of user memory to use as the user stack
+    // Allocate user memory to use as the user stack. The kernel signal frame
+    // carries the full FPU_STATE_SIZE xsave area now, so one page is not
+    // enough for the frame + red zone.
     SyscallFrame mmap_frame = {};
     mmap_frame.arg4 = MAP_PRIVATE | MAP_ANONYMOUS;
     mmap_frame.arg5 = static_cast<uint64_t>(-1);
     mmap_frame.arg6 = 0;
-    uint64_t mmap_res = syscall_handler(SYS_MMAP, 0, 4096, PROT_READ | PROT_WRITE, &mmap_frame);
+    uint64_t mmap_res = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &mmap_frame);
     KTEST_EXPECT(mmap_res != static_cast<uint64_t>(-1));
 
     // Save current signal state
@@ -583,7 +586,7 @@ KTEST(extended_syscalls_signal_context)
     TestStackFrame tf = {};
     tf.original_rax = 0xAAABBBULL;
     tf.frame.rip = 0x9999ULL;
-    tf.frame.rsp = mmap_res + 4096; // Top of the mapped page
+    tf.frame.rsp = mmap_res + 12288; // Top of the mapped region
     tf.frame.cs = 0x23ULL;
     tf.frame.ss = 0x1BULL;
     tf.frame.rflags = 0x202ULL;
@@ -601,7 +604,7 @@ KTEST(extended_syscalls_signal_context)
     // RIP should point to the signal handler
     KTEST_EXPECT_EQ(tf.frame.rip, 0x123456ULL);
     // RSP should have decreased
-    KTEST_EXPECT(tf.frame.rsp < mmap_res + 4096);
+    KTEST_EXPECT(tf.frame.rsp < mmap_res + 12288);
     // The signal should no longer be pending
     KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
 
@@ -637,7 +640,7 @@ KTEST(extended_syscalls_signal_context)
     KTEST_EXPECT_EQ(returned_rax, 0xAAABBBULL);
     // RIP and RSP should be restored
     KTEST_EXPECT_EQ(tf.frame.rip, 0x9999ULL);
-    KTEST_EXPECT_EQ(tf.frame.rsp, mmap_res + 4096);
+    KTEST_EXPECT_EQ(tf.frame.rsp, mmap_res + 12288);
     // Callee-saved registers should be restored
     KTEST_EXPECT_EQ(tf.frame.rbx, 0x11ULL);
     KTEST_EXPECT_EQ(tf.frame.rbp, 0x22ULL);
@@ -653,7 +656,7 @@ KTEST(extended_syscalls_signal_context)
     
     InterruptFrame int_frame = {};
     int_frame.rip = 0xaaaaULL;
-    int_frame.rsp = mmap_res + 4096;
+    int_frame.rsp = mmap_res + 12288;
     int_frame.cs = 0x23ULL; // Ring 3
     int_frame.ss = 0x1BULL;
     int_frame.rflags = 0x202ULL;
@@ -666,7 +669,7 @@ KTEST(extended_syscalls_signal_context)
     KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
 
     // Clean up
-    uint64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 4096, 0, &mmap_frame);
+    uint64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 12288, 0, &mmap_frame);
     KTEST_EXPECT_EQ(munmap_res, 0);
 
     p->signals = orig_signals;

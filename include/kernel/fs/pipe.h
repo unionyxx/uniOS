@@ -1,7 +1,9 @@
 #include <kernel/process.h>
 
 #define PIPE_BUFFER_SIZE 4096
-#define MAX_PIPES 8
+// Shell pipelines with several stages plus GUI/app pipes exhausted the old
+// cap of 8; running out left pipe() failing spuriously under load.
+#define MAX_PIPES 64
 
 struct Pipe
 {
