@@ -17,7 +17,7 @@ Startup order:
 
 ## Menubar
 
-Occupies window slot 0. Renders a canvas taller than the visible strip (for dropdown menus) into a shared block and pushes damage. Contents: uniOS logo menu, focused window title, static menu labels, and a clock (`Mon D  HH:MM`, seconds optional). The system menu offers About, Settings, Close/Minimize/Maximize of the focused window, Restart, and Shut Down. Launchers focus an existing window by title or fork+exec the app.
+Occupies window slot 0. Renders a canvas taller than the visible strip (for dropdown menus) into a shared block and pushes damage. Contents: uniOS logo menu, focused window title, and a clock/date button (`Mon D  HH:MM`, seconds optional) that toggles the control center (`cp_toggle_requested`; the WM also toggles it for clicks in the rightmost 120 px). Hover damage tracks the logo and date buttons independently. The system menu offers About, Settings, Close/Minimize/Maximize of the focused window, Restart, and Shut Down. Launchers focus an existing window by title or fork+exec the app.
 
 ## Dock
 
@@ -31,7 +31,7 @@ Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, 
 | **files** | File manager: places sidebar (Home `/data`, Desktop, Documents, Downloads, Pictures) + volumes; listing via `SYS_GETDENTS`; new folder, rename, copy, move; context menus; storage-mode aware. |
 | **preferences** | Settings app: Appearance (theme, wallpaper, transparency, animations), Desktop (grid, clock seconds, volume), Network (ethernet + DHCP toggles), System (launch terminal, storage mode). Writes registry fields and persists `SYSTEM.CFG`/wallpaper config. |
 | **latitude** | Text/code editor: 2048 x 512 buffer, 512 KiB open limit with binary sniffing, syntax highlighting (text, C++, JS, Python, Rust, HTML, CSS, JSON, Markdown, shell), project browser, outline, search panes. |
-| **clock** | Analog clock with continuous-sweep hands integrated from tick deltas and drift-corrected against the RTC; digital time and date below. |
+| **clock** | Analog clock with continuous-sweep hands anchored to the RTC every second; the sub-second sweep interpolates scheduler ticks at a rate measured from observed RTC second boundaries (never trusting the nominal `timer_hz`). Digital time and date below. |
 | **calendar** | Month grid with today highlight, month navigation, Sakamoto weekday computation, leap-year-aware month lengths. |
 | **calculator** | Keypad calculator with pending-op accumulator, percent, sign toggle, and 15-place decimal cap. |
 | **about** | System information: kernel commit, bootloader name/version, CPU count, timer rate, memory totals, uptime, display capabilities. |

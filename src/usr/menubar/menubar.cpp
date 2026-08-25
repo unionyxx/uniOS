@@ -623,12 +623,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
                                   is_light);
         x += title_w + gui_scaled_metric(24);
     }
-
-    const char *menus[] = {"File", "Edit", "View", "Go", "Window", "Help"};
-    for (int i = 0; i < 6; i++) {
-        draw_menubar_text(canvas, menu_font, x, menu_text_y, menus[i], g_gui_style.text, is_light);
-        x += gui_measure_text(menu_font, menus[i]) + gui_scaled_metric(22);
-    }
+    (void)x;
 
     struct SysTime t;
     if (get_time(&t) == 0) {
@@ -667,6 +662,15 @@ int get_hovered_item(Registry *reg)
         }
     }
     return -1;
+}
+
+static Rect hover_item_rect(int item)
+{
+    if (item == 99)
+        return {g_logo_btn_x, logo_y(), g_logo_btn_w, logo_h()};
+    if (item == 100)
+        return {g_date_btn_x, logo_y(), g_date_btn_w, logo_h()};
+    return {0, 0, 0, 0};
 }
 
 extern "C" int main(int argc, char **argv)
@@ -780,8 +784,13 @@ extern "C" int main(int argc, char **argv)
             } else {
                 int mx = click_local_x(registry);
                 int my = click_local_y(registry);
-                if (mx >= logo_x() && mx < logo_x() + logo_w() && my >= logo_y() && my < logo_y() + logo_h()) {
+                if (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() &&
+                    my < logo_y() + logo_h()) {
                     g_menu_open = true;
+                } else if (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() &&
+                           my < logo_y() + logo_h()) {
+                    registry->cp_toggle_requested = true;
+                    asm volatile("sfence" ::: "memory");
                 }
             }
             registry->mb_clicked = false;
@@ -820,10 +829,31 @@ extern "C" int main(int argc, char **argv)
             bool menu_state_changed = (g_menu_open != last_menu_open);
 
             if (hover_changed) {
-                SystemMenuModel model = build_system_menu_model(registry);
-                Rect hover_rect = g_menu_open ? Rect{menu_x(), menu_y(), model.width, model.height}
-                                              : Rect{logo_x(), logo_y(), logo_w(), logo_h()};
+                Rect hover_rect;
+                if (g_menu_open) {
+                    SystemMenuModel model = build_system_menu_model(registry);
+                    hover_rect = Rect{menu_x(), menu_y(), model.width, model.height};
+                } else {
+                    // Damage both the old and new hover targets; the logo and
+                    // date buttons each track hover independently.
+                    Rect prev = hover_item_rect(last_hovered);
+                    Rect cur = hover_item_rect(current_hovered);
+                    if (prev.w <= 0 || prev.h <= 0)
+                        hover_rect = cur;
+                    else if (cur.w <= 0 || cur.h <= 0)
+                        hover_rect = prev;
+                    else
+                        hover_rect = gui_rect_union(prev, cur);
+                    if (hover_rect.w <= 0 || hover_rect.h <= 0)
+                        hover_rect = Rect{logo_x(), logo_y(), logo_w(), logo_h()};
+                }
                 dirty = hover_rect;
+                has_dirty = true;
+            }
+            if (cp_state_changed) {
+                // The date button mirrors the control-center open state.
+                Rect date_rect = hover_item_rect(100);
+                dirty = has_dirty ? gui_rect_union(dirty, date_rect) : date_rect;
                 has_dirty = true;
             }
             if (clicked || menu_state_changed) {
