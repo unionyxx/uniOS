@@ -32,6 +32,7 @@ create_iso = files('tools/create_iso.py')[0]
 build_efi_image = files('tools/build_efi_image.py')[0]
 qemu_smoke = files('tools/qemu_smoke.py')[0]
 wallpaper_package = files('tools/wallpaper_package.py')[0]
+docs_site = files('tools/docs_site.py')[0]
 linker_script = files('linker.ld')[0]
 user_linker_script = files('src/usr/user.ld')[0]
 
@@ -754,6 +755,18 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
               qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
   )
 endif
+
+run_target(
+  'wiki',
+  command : [
+    py,
+    docs_site,
+    '--source',
+    meson.project_source_root() / 'docs' / 'reference',
+    '--dest',
+    build_root / 'wiki',
+  ],
+)
 
 clang_format = find_program('clang-format', required : false)
 if clang_format.found()

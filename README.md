@@ -105,6 +105,8 @@ For real hardware, write `boot.img` to a USB drive as a raw disk image.
 
 ## Documentation
 
+The full documentation is rendered as the project wiki at [unionyxx.github.io/uniOS/wiki](https://unionyxx.github.io/uniOS/wiki/), generated from the markdown in `docs/reference/` (rebuild locally with `meson compile -C build/debug wiki`).
+
 - [Architecture](docs/reference/architecture.md)
 - [SMP](docs/reference/smp.md)
 - [Shell scripting](docs/reference/scripting.md)

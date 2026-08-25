@@ -5,10 +5,10 @@ UOWP is the uniOS runtime wallpaper package format. It stores one or more wallpa
 ## Identity
 
 - Extension: `.uowp`
-- Magic: `UOWP`
+- Magic: `0x50574F55` (`UOWP`, little-endian)
 - Byte order: little-endian
 - Current runtime use: desktop wallpaper loading
-- Current generated default package: light and dark variants
+- Default package: light and dark variants built at meson time
 
 ## Header
 
@@ -45,38 +45,24 @@ typedef struct {
 } UowpEntry;
 ```
 
+- `codec`: RAW = 4.
+- `variant`: default 0, light 1, dark 2, lock blur 3, dynamic 4.
+- `color_space`: sRGB = 1; `transfer`: SDR = 1.
+- Entries may carry an embedded preview image.
+
 ## Runtime Use
 
-The GUI image loader selects a wallpaper entry by theme variant and display size. The selected image is scaled and cropped to cover the desktop.
-
-The default wallpaper path is:
+The GUI loader (`gui_load_uowp`) selects an entry by preferred theme variant and target size, then `gui_blit_scaled_cover` scales and crops it to cover the desktop. The window manager resolves the active path from `/data/WALLPAPR.CFG` (fallback `/etc/wallpaper.conf`), the registry request, or the default:
 
 ```text
 /usr/share/wallpapers/default.uowp
 ```
 
-Wallpaper settings are read from:
-
-```text
-/data/WALLPAPR.CFG
-```
-
-with fallback to:
-
-```text
-/etc/wallpaper.conf
-```
+See [Runtime configuration](../config.md) and [Window manager](../wm.md).
 
 ## Generation
 
-The default package is generated from:
-
-```text
-assets/wallpapers/wp_light.svg
-assets/wallpapers/wp_dark.svg
-```
-
-The wallpaper packaging tool writes `.uowp` files:
+The default package is generated from `assets/wallpapers/wp_light.svg` and `wp_dark.svg` (gitignored inputs):
 
 ```sh
 python3 tools/wallpaper_package.py \
@@ -84,3 +70,5 @@ python3 tools/wallpaper_package.py \
     --dark assets/wallpapers/wp_dark.svg \
     --output default.uowp
 ```
+
+Unlike icons and cursors, the default `.uowp` is built at meson time and is not committed.

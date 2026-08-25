@@ -42,6 +42,9 @@ jobs:
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
 
+    - name: Wiki link check
+      run: python tools/docs_site.py --source docs/reference --dest build/wiki-check
+
     - name: Show tool versions
       run: |
         meson --version

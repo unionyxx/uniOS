@@ -5,7 +5,7 @@ UOCU is the uniOS runtime cursor package format. It stores cursor images with ro
 ## Identity
 
 - Extension: `.uocu`
-- Magic: `UOCU`
+- Magic: `0x55434F55` (`UOCU`, little-endian)
 - Byte order: little-endian
 - Runtime pixel format: BGRA8888
 - Origin: top-left
@@ -47,9 +47,14 @@ typedef struct {
 } UocuEntry;
 ```
 
+- `cursor_role`: 0-11 (arrow through not-allowed, including text, busy, drag, resize, zoom roles).
+- `variant`: 0-4 (default, dark, light, high contrast, large).
+- `codec`: QOI = 1, RAW = 3.
+- `frame_duration_ms` supports animated cursors.
+
 ## Runtime Use
 
-The GUI image loader selects a cursor entry by role, display scale, and variant. The selected entry provides both image data and hotspot coordinates.
+The GUI image loader selects a cursor entry by role, display scale, and variant; the entry provides both image data and hotspot coordinates. The window manager caches cursor assets per kind (arrow, move, resize variants) across the size ladder 16/20/24/32/40/48/64 and uses a hardware cursor when the display backend supports page flips, otherwise a software cursor.
 
 Cursor files are staged under:
 
@@ -57,16 +62,14 @@ Cursor files are staged under:
 /usr/share/cursors/
 ```
 
-The current cursor set includes the default pointer, text pointer, busy/progress cursors, drag cursors, zoom cursors, and resize cursors.
-
 ## Generation
 
-Cursor source SVG files and metadata live under `cursors/`.
-
-The cursor generation tool writes `.uocu` packages:
+Cursor source SVG files and metadata live under `cursors/`:
 
 ```sh
 python3 tools/cursor_rasterize.py \
     --source-root cursors \
     --output-root rootfs/usr/share/cursors
 ```
+
+Generated binaries are committed; keep binaries and sources in sync in the same change.

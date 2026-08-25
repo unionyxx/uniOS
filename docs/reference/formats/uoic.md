@@ -5,11 +5,11 @@ UOIC is the uniOS runtime icon package format. It stores pre-rendered icon image
 ## Identity
 
 - Extension: `.uoic`
-- Magic: `UOIC`
+- Magic: `0x43494F55` (`UOIC`, little-endian)
 - Byte order: little-endian
 - Runtime pixel format: BGRA8888
 - Origin: top-left
-- Alpha: straight or premultiplied, depending on the entry metadata
+- Alpha: straight or premultiplied, per entry metadata
 
 ## Header
 
@@ -45,11 +45,15 @@ typedef struct {
 } UoicEntry;
 ```
 
+- `codec`: QOI = 1, BGRA = 3.
+- `alpha`: straight = 1, premultiplied = 2.
+- Entries carry a decoded-size and checksum for validation.
+
 ## Runtime Use
 
-The GUI image loader reads UOIC files from the runtime filesystem and selects an entry by requested size, scale, and variant.
+The GUI image loader (`gui_load_uoic`) selects the smallest entry that covers the requested physical size (logical size x display scale), falling back to the largest entry. Decoding supports QOI and raw BGRA.
 
-Current generated app icons are stored under:
+Generated app icons are staged under:
 
 ```text
 /usr/share/appicons/
@@ -57,9 +61,7 @@ Current generated app icons are stored under:
 
 ## Generation
 
-Source SVG files live under `appicons/`.
-
-The icon generation tool renders fixed sizes and writes `.uoic` packages:
+Source SVG files live under `appicons/`. The icon generation tool renders fixed sizes and writes `.uoic` packages:
 
 ```sh
 python3 tools/appicon_rasterize.py \
@@ -67,4 +69,4 @@ python3 tools/appicon_rasterize.py \
     --output-root rootfs/usr/share/appicons
 ```
 
-The Meson build stages generated icon packages into the runtime filesystem.
+Generated binaries are committed; keep binaries and sources in sync in the same change.
