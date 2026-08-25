@@ -2,9 +2,14 @@
 #include <kernel/net/arp.h>
 #include <kernel/net/ethernet.h>
 #include <kernel/net/net.h>
+#include <kernel/sync/spinlock.h>
 #include <kernel/time/timer.h>
 
 static ArpEntry arp_table[ARP_TABLE_SIZE];
+// Guards the ARP table and the pending-resolution state. Resolution can be
+// re-entered (net_poll() while waiting can itself trigger a send that needs a
+// different address), so both the table and the waiting state are locked.
+static Spinlock arp_lock = SPINLOCK_INIT;
 
 static bool arp_waiting = false;
 static uint32_t arp_waiting_ip = 0;
@@ -36,10 +41,13 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
     if (ip == 0 || ip == 0xFFFFFFFF || arp_mac_is_unusable(mac))
         return;
 
+    uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+
     // Check if already exists
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
             eth_mac_copy(arp_table[i].mac, mac);
+            spinlock_release_irqrestore(&arp_lock, flags);
             return;
         }
     }
@@ -50,7 +58,7 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
             arp_table[i].ip = ip;
             eth_mac_copy(arp_table[i].mac, mac);
             arp_table[i].valid = true;
-
+            spinlock_release_irqrestore(&arp_lock, flags);
             return;
         }
     }
@@ -59,18 +67,22 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
     arp_table[0].ip = ip;
     eth_mac_copy(arp_table[0].mac, mac);
     arp_table[0].valid = true;
+    spinlock_release_irqrestore(&arp_lock, flags);
 }
 
 bool arp_lookup(uint32_t ip, uint8_t *out_mac)
 {
     if (!out_mac || ip == 0)
         return false;
+    uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
             eth_mac_copy(out_mac, arp_table[i].mac);
+            spinlock_release_irqrestore(&arp_lock, flags);
             return true;
         }
     }
+    spinlock_release_irqrestore(&arp_lock, flags);
     return false;
 }
 
@@ -143,9 +155,13 @@ void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac)
     arp_add_entry(arp->sender_ip, arp->sender_mac);
 
     // Check if this is reply to our pending request
-    if (arp_waiting && arp->sender_ip == arp_waiting_ip) {
-        eth_mac_copy(arp_waiting_mac, arp->sender_mac);
-        arp_resolved = true;
+    {
+        uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+        if (arp_waiting && arp->sender_ip == arp_waiting_ip) {
+            eth_mac_copy(arp_waiting_mac, arp->sender_mac);
+            arp_resolved = true;
+        }
+        spinlock_release_irqrestore(&arp_lock, flags);
     }
 
     uint16_t op = ntohs(arp->operation);
@@ -174,33 +190,70 @@ bool arp_resolve(uint32_t ip, uint8_t *out_mac)
         return true;
     }
 
-    // Set up pending request
-    arp_waiting = true;
-    arp_waiting_ip = ip;
-    arp_resolved = false;
+    // Claim the pending-resolution slot. Resolution is re-entrant (net_poll()
+    // below can itself send a packet that needs a *different* address), so if
+    // a resolution is already in flight we must not clobber its target. In
+    // that case we skip sending a fresh request and simply wait for the table
+    // to be populated (replies are learned gratuitously by arp_add_entry).
+    bool started_wait = false;
+    {
+        uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+        if (!arp_waiting) {
+            arp_waiting = true;
+            arp_waiting_ip = ip;
+            arp_resolved = false;
+            started_wait = true;
+        }
+        spinlock_release_irqrestore(&arp_lock, flags);
+    }
 
-    // Send request
-    arp_send_request(ip);
+    if (started_wait)
+        arp_send_request(ip);
 
     // Wait for reply (with timeout)
     uint64_t start = timer_get_ticks();
     uint64_t timeout_ticks = (ARP_TIMEOUT_MS * timer_get_frequency()) / 1000;
 
-    while (!arp_resolved && (timer_get_ticks() - start) < timeout_ticks) {
+    while ((timer_get_ticks() - start) < timeout_ticks) {
         // Poll network
         net_poll();
+
+        {
+            uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+            bool done = arp_resolved && arp_waiting_ip == ip;
+            spinlock_release_irqrestore(&arp_lock, flags);
+            if (done)
+                break;
+        }
+        // Also accept an entry learned gratuitously while we waited.
+        if (arp_lookup(ip, out_mac)) {
+            uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+            if (started_wait)
+                arp_waiting = false;
+            spinlock_release_irqrestore(&arp_lock, flags);
+            return true;
+        }
 
         // Small delay
         for (volatile int i = 0; i < 10000; i++)
             ;
     }
 
-    arp_waiting = false;
-
-    if (arp_resolved) {
-        eth_mac_copy(out_mac, arp_waiting_mac);
-        return true;
+    {
+        uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+        bool done = arp_resolved && arp_waiting_ip == ip;
+        if (started_wait)
+            arp_waiting = false;
+        if (done)
+            eth_mac_copy(out_mac, arp_waiting_mac);
+        spinlock_release_irqrestore(&arp_lock, flags);
+        if (done)
+            return true;
     }
+
+    // Final table check before giving up.
+    if (arp_lookup(ip, out_mac))
+        return true;
 
     DEBUG_WARN("arp: resolution timeout for %d.%d.%d.%d", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
                (ip >> 24) & 0xFF);

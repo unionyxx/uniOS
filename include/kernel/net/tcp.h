@@ -104,10 +104,19 @@ struct TcpSocket
     TxSegment tx_segments[TCP_MAX_FLIGHT_SEGMENTS];
     uint32_t rto_retries; // RTO retries since last forward progress
 
+    // One segment-sized scratch area per socket: transmit paths build packets
+    // here under the socket lock instead of malloc/free on every segment.
+    uint8_t tx_scratch[TCP_HEADER_SIZE + TCP_MSS];
+
     // Congestion control / recovery / RTT (tcp_congestion.h)
     tcpcc::State cc;
     tcpcc::RttEstimate rtt;
     uint32_t peer_window;
+
+    // Zero-window persist state: while the peer advertises window 0 we probe
+    // with one byte on a backed-off timer instead of hanging forever.
+    uint32_t persist_ms;
+    uint64_t last_probe_ticks;
 
     // Control segment (SYN / FIN) and close sequencing
     ControlSegment ctrl;

@@ -87,9 +87,10 @@ void ipv4_receive(const void *data, uint16_t length)
         return;
     }
 
-    uint16_t orig_checksum = hdr->checksum;
-    if (orig_checksum != 0) {
-        // Calculate checksum over header
+    // The IPv4 header checksum is mandatory; a zero value is invalid, so
+    // validate unconditionally instead of trusting segments that skip it.
+    {
+        uint16_t orig_checksum = hdr->checksum;
         uint8_t header_copy[60];
         for (int i = 0; i < ihl; i++) {
             header_copy[i] = ((const uint8_t *)data)[i];

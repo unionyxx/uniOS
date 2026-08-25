@@ -157,6 +157,9 @@ void net_poll()
 
     // Process TCP retransmissions
     tcp_poll();
+
+    // Periodic DHCP lease renewal (no-op unless a lease is live and at T1).
+    dhcp_tick();
 }
 
 // Configuration getters

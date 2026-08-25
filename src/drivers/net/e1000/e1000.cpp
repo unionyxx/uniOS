@@ -9,6 +9,26 @@
 
 static E1000Device g_e1000;
 
+// This driver implements the legacy 8254x programming model only. Later
+// silicon (I217/I218/I219/I225/I226) needs PHY firmware handling this code
+// does not provide, so claiming those leaves a dead NIC that looks alive.
+[[nodiscard]] static bool e1000_device_supported(uint16_t device_id)
+{
+    switch (device_id) {
+        case E1000_DEV_ID_82540EM:
+        case E1000_DEV_ID_82545EM:
+        case E1000_DEV_ID_82546EB:
+        case E1000_DEV_ID_82541GI:
+        case E1000_DEV_ID_82543GC:
+        case E1000_DEV_ID_82544EI:
+        case E1000_DEV_ID_82574L:
+        case E1000_DEV_ID_82583V:
+            return true;
+        default:
+            return false;
+    }
+}
+
 [[nodiscard]] static inline uint32_t e1000_read_reg(uint32_t reg)
 {
     return *reinterpret_cast<volatile uint32_t *>(g_e1000.mmio_base + reg);
@@ -146,11 +166,17 @@ bool e1000_init()
                 if (pci_config_read16(b, d, f, PCI_VENDOR_ID) != E1000_VENDOR_ID)
                     continue;
                 if (pci_config_read8(b, d, f, PCI_CLASS) == 0x02 && pci_config_read8(b, d, f, PCI_SUBCLASS) == 0x00) {
+                    const uint16_t device_id = pci_config_read16(b, d, f, PCI_DEVICE_ID);
+                    if (!e1000_device_supported(device_id)) {
+                        DEBUG_WARN("e1000: Intel NIC %04x:%04x at %d:%d.%d is not supported by this legacy driver",
+                                   E1000_VENDOR_ID, device_id, b, d, f);
+                        continue;
+                    }
                     nic = {static_cast<uint8_t>(b),
                            d,
                            f,
                            E1000_VENDOR_ID,
-                           pci_config_read16(b, d, f, PCI_DEVICE_ID),
+                           device_id,
                            0x02,
                            0x00,
                            pci_config_read8(b, d, f, PCI_PROG_IF),
@@ -214,7 +240,10 @@ bool e1000_init()
 
 bool e1000_send(const void *data, uint16_t length)
 {
-    if (!g_e1000.initialized || !data || length == 0 || length > 1500)
+    // `length` includes the 14-byte Ethernet header: a full-MSS TCP segment
+    // is a 1514-byte frame, so the old 1500 cap silently dropped every
+    // full-size frame and broke bulk TCP.
+    if (!g_e1000.initialized || !data || length == 0 || length > 1514)
         return false;
     e1000_tx_desc *desc = &g_e1000.tx_descs[g_e1000.tx_cur];
     int timeout = 10000;
@@ -241,8 +270,15 @@ bool e1000_send(const void *data, uint16_t length)
     while (!(desc->status & E1000_TXD_STAT_DD) && timeout-- > 0)
         for (volatile int i = 0; i < 100; i++)
             ;
+    if (!(desc->status & E1000_TXD_STAT_DD)) {
+        // The NIC may still be DMA-ing this frame: leaking the page is
+        // deliberate; freeing it would hand memory to someone else while the
+        // DMA is live.
+        DEBUG_WARN("e1000: TX completion timeout; leaking the frame to stay safe");
+        return false;
+    }
     pmm_free_frame(buf_phys);
-    return (desc->status & E1000_TXD_STAT_DD) != 0;
+    return true;
 }
 
 int e1000_receive(void *buffer, uint16_t max_length)

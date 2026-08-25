@@ -53,3 +53,4 @@ struct DhcpPacket
 void dhcp_init();
 bool dhcp_request(); // Request IP via DHCP (blocking)
 void dhcp_receive(const void *data, uint16_t length, uint32_t src_ip);
+void dhcp_tick(); // Periodic lease renewal; call from the network poll loop

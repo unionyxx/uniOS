@@ -74,6 +74,13 @@ void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
         return;
     }
 
+    // Validate the UDP checksum when present. RFC 768 permits a zero value
+    // meaning "no checksum"; any non-zero value must match.
+    if (hdr->checksum != 0 && udp_checksum(src_ip, dst_ip, data, udp_len) != 0) {
+        DEBUG_WARN("udp: bad checksum");
+        return;
+    }
+
     // Find socket bound to this port
     for (int i = 0; i < UDP_MAX_SOCKETS; i++) {
         if (sockets[i].in_use && sockets[i].bound && sockets[i].port == dst_port) {

@@ -54,7 +54,12 @@ static uint16_t next_ephemeral_port = EPHEMERAL_PORT_MIN;
 
 #define TCP_CTRL_MAX_RETRIES 5
 #define TCP_RTO_MAX_RETRIES 5
-#define TCP_TIME_WAIT_MS 5000
+// 2*MSL is far longer than needed inside this host, but 5 s let stale
+// duplicates of a previous incarnation of the same 4-tuple land in a fresh
+// connection on busy networks.
+#define TCP_TIME_WAIT_MS 30000
+#define TCP_PERSIST_INITIAL_MS 1000
+#define TCP_PERSIST_MAX_MS 30000
 
 static inline uint64_t read_tsc()
 {
@@ -150,6 +155,8 @@ static void tcp_socket_reset(TcpSocket *s)
     s->cc = tcpcc::initial_state();
     s->rtt = tcpcc::initial_rtt();
     s->peer_window = TCP_WINDOW_SIZE;
+    s->persist_ms = 0;
+    s->last_probe_ticks = 0;
     s->ctrl.pending = false;
     s->want_close = false;
     s->pending_ack = false;
@@ -255,15 +262,15 @@ static void tx_desc_free_acked(TcpSocket *s)
     }
 }
 
-// Transmit one segment. Must be called with sock->lock held.
+// Transmit one segment. Must be called with sock->lock held: the per-socket
+// scratch buffer replaces a malloc/free per segment (which also happened with
+// interrupts disabled on the RX path).
 static bool tcp_transmit(TcpSocket *sock, uint8_t flags, uint32_t seq, uint32_t ack_num, const void *data,
                          uint16_t length)
 {
     if (!sock || (!data && length > 0) || length > TCP_MSS)
         return false;
-    uint8_t *packet = static_cast<uint8_t *>(malloc(TCP_HEADER_SIZE + length));
-    if (!packet)
-        return false;
+    uint8_t *packet = sock->tx_scratch;
 
     TcpHeader *hdr = reinterpret_cast<TcpHeader *>(packet);
     hdr->src_port = htons(sock->local_port);
@@ -283,20 +290,18 @@ static bool tcp_transmit(TcpSocket *sock, uint8_t flags, uint32_t seq, uint32_t 
     hdr->checksum = tcp_checksum(net_get_ip(), sock->remote_ip, packet, total_len);
 
     bool result = ipv4_send(sock->remote_ip, IP_PROTO_TCP, packet, total_len);
-    free(packet);
     if (result)
         sock->last_activity = timer_get_ticks();
     return result;
 }
 
-// Transmit payload bytes straight out of the send ring.
+// Transmit payload bytes straight out of the send ring. Caller holds
+// sock->lock (guards tx_scratch).
 static bool tcp_transmit_ring(TcpSocket *s, uint32_t seq, uint16_t len, bool psh)
 {
     if (len == 0 || len > TCP_MSS)
         return false;
-    uint8_t *packet = static_cast<uint8_t *>(malloc(TCP_HEADER_SIZE + len));
-    if (!packet)
-        return false;
+    uint8_t *packet = s->tx_scratch;
 
     TcpHeader *hdr = reinterpret_cast<TcpHeader *>(packet);
     hdr->src_port = htons(s->local_port);
@@ -315,7 +320,6 @@ static bool tcp_transmit_ring(TcpSocket *s, uint32_t seq, uint16_t len, bool psh
     hdr->checksum = tcp_checksum(net_get_ip(), s->remote_ip, packet, total_len);
 
     bool result = ipv4_send(s->remote_ip, IP_PROTO_TCP, packet, total_len);
-    free(packet);
     if (result)
         s->last_activity = timer_get_ticks();
     return result;
@@ -340,10 +344,45 @@ static void tcp_retransmit_oldest(TcpSocket *s)
 // Send as much queued data as cwnd, the peer window and the send buffer
 // allow. Segments are MSS-sized except the tail; a partial tail is held
 // back (Nagle) while other data is in flight to bound descriptor use.
+// Zero-window persist probe: the peer advertised window 0 and nothing is in
+// flight, so the normal send loop and RTO both stay silent. Send the next
+// byte (tracked as a normal segment so ACK/RTO bookkeeping applies) to
+// elicit a window update; the probe interval backs off exponentially.
+static void tcp_persist_probe(TcpSocket *s)
+{
+    if (tx_unsent(s) == 0 || tx_flight(s) > 0)
+        return;
+    const uint64_t now = timer_get_ticks();
+    if (s->last_probe_ticks != 0 && now - s->last_probe_ticks < ms_to_ticks(s->persist_ms))
+        return;
+    TxSegment *d = tx_desc_alloc(s);
+    if (!d)
+        return;
+    uint8_t probe_byte = s->tx_buffer[s->send_next % TCP_TX_BUFFER_SIZE];
+    if (tcp_transmit(s, TCP_FLAG_ACK | TCP_FLAG_PSH, s->send_next, s->ack_num, &probe_byte, 1)) {
+        d->in_flight = true;
+        d->retransmitted = true; // Karn: no RTT sample from a probe
+        d->seq_num = s->send_next;
+        d->length = 1;
+        d->sent_time = now;
+        s->send_next += 1;
+        s->last_probe_ticks = now;
+        if (s->persist_ms == 0)
+            s->persist_ms = TCP_PERSIST_INITIAL_MS;
+        else if (s->persist_ms < TCP_PERSIST_MAX_MS)
+            s->persist_ms = s->persist_ms * 2 > TCP_PERSIST_MAX_MS ? TCP_PERSIST_MAX_MS : s->persist_ms * 2;
+    }
+}
+
 static void tcp_try_send(TcpSocket *s)
 {
     if (s->state != TCP_ESTABLISHED && s->state != TCP_CLOSE_WAIT)
         return;
+
+    if (s->peer_window == 0) {
+        tcp_persist_probe(s);
+        return;
+    }
 
     while (tx_unsent(s) > 0) {
         const uint32_t flight = tx_flight(s);
@@ -473,7 +512,9 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
         return;
     }
 
-    if (hdr->checksum != 0 && tcp_checksum(src_ip, dst_ip, data, length) != 0) {
+    // The TCP checksum is mandatory; unlike UDP, zero is not a valid
+    // "no checksum" sentinel.
+    if (tcp_checksum(src_ip, dst_ip, data, length) != 0) {
         DEBUG_WARN("tcp: bad checksum");
         return;
     }
@@ -496,9 +537,17 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
 
     // Track the peer's advertised receive window; it caps new transmissions.
     sock->peer_window = ntohs(hdr->window);
+    if (sock->peer_window > 0) {
+        sock->persist_ms = 0;
+        sock->last_probe_ticks = 0;
+    }
 
     if (flags & TCP_FLAG_RST) {
-        tcp_socket_reset(sock);
+        // RFC 5961: honor an RST only when its sequence matches the expected
+        // receive edge, and never let an RST reset a listener — otherwise one
+        // spoofed/off-window segment tears down the connection.
+        if (sock->state != TCP_LISTEN && seq == sock->ack_num)
+            tcp_socket_reset(sock);
         spinlock_release_irqrestore(&sock->lock, sock_flags);
         return;
     }
@@ -595,10 +644,14 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
                 }
             }
 
-            // Handle FIN
+            // Handle FIN: only in-order (at the expected receive edge). A
+            // reordered/ahead FIN would jump ack_num past not-yet-received
+            // data and silently truncate the stream.
             if (flags & TCP_FLAG_FIN) {
-                sock->ack_num = seq + payload_len + 1;
-                sock->state = TCP_CLOSE_WAIT;
+                if (seq + payload_len == sock->ack_num) {
+                    sock->ack_num = seq + payload_len + 1;
+                    sock->state = TCP_CLOSE_WAIT;
+                }
                 sock->pending_ack = true;
             }
 
@@ -613,25 +666,31 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
             if (flags & TCP_FLAG_ACK)
                 tcp_process_ack(sock, ack);
             if ((flags & TCP_FLAG_ACK) && (flags & TCP_FLAG_FIN)) {
-                sock->ack_num = seq + payload_len + 1;
-                tcp_transmit(sock, TCP_FLAG_ACK, sock->send_next, sock->ack_num, nullptr, 0);
-                sock->state = TCP_TIME_WAIT;
-                sock->last_activity = timer_get_ticks();
+                if (seq + payload_len == sock->ack_num) {
+                    sock->ack_num = seq + payload_len + 1;
+                    tcp_transmit(sock, TCP_FLAG_ACK, sock->send_next, sock->ack_num, nullptr, 0);
+                    sock->state = TCP_TIME_WAIT;
+                    sock->last_activity = timer_get_ticks();
+                }
             } else if (flags & TCP_FLAG_ACK) {
                 sock->state = TCP_FIN_WAIT_2;
             } else if (flags & TCP_FLAG_FIN) {
-                sock->ack_num = seq + payload_len + 1;
-                tcp_transmit(sock, TCP_FLAG_ACK, sock->send_next, sock->ack_num, nullptr, 0);
-                sock->state = TCP_CLOSING;
+                if (seq + payload_len == sock->ack_num) {
+                    sock->ack_num = seq + payload_len + 1;
+                    tcp_transmit(sock, TCP_FLAG_ACK, sock->send_next, sock->ack_num, nullptr, 0);
+                    sock->state = TCP_CLOSING;
+                }
             }
             break;
 
         case TCP_FIN_WAIT_2:
             if (flags & TCP_FLAG_FIN) {
-                sock->ack_num = seq + payload_len + 1;
-                tcp_transmit(sock, TCP_FLAG_ACK, sock->send_next, sock->ack_num, nullptr, 0);
-                sock->state = TCP_TIME_WAIT;
-                sock->last_activity = timer_get_ticks();
+                if (seq + payload_len == sock->ack_num) {
+                    sock->ack_num = seq + payload_len + 1;
+                    tcp_transmit(sock, TCP_FLAG_ACK, sock->send_next, sock->ack_num, nullptr, 0);
+                    sock->state = TCP_TIME_WAIT;
+                    sock->last_activity = timer_get_ticks();
+                }
             }
             break;
 

@@ -19,6 +19,18 @@ static uint32_t dhcp_dns = 0;
 static bool dhcp_got_offer = false;
 static bool dhcp_got_ack = false;
 
+// Lease bookkeeping for renewal (RFC 2131 T1/T2 timers).
+static uint32_t dhcp_lease_seconds = 0;
+static uint64_t dhcp_expiry_ticks = 0;   // lease fully expired -> drop address
+static uint64_t dhcp_renew_at_ticks = 0; // T1: start unicasting REQUEST
+static bool dhcp_active = false;         // have a bound lease
+static bool dhcp_renewing = false;       // renewal REQUEST in flight
+static uint64_t dhcp_renew_retry_at = 0;
+
+// Retransmission for the initial DORA exchange: one lost DISCOVER/REQUEST on
+// a slow link used to leave the host permanently unconfigured.
+static constexpr int DHCP_MAX_ATTEMPTS = 3;
+
 void dhcp_init()
 {
     dhcp_xid = timer_get_ticks() & 0xFFFFFFFF;
@@ -29,6 +41,12 @@ void dhcp_init()
     dhcp_dns = 0;
     dhcp_got_offer = false;
     dhcp_got_ack = false;
+    dhcp_lease_seconds = 0;
+    dhcp_expiry_ticks = 0;
+    dhcp_renew_at_ticks = 0;
+    dhcp_active = false;
+    dhcp_renewing = false;
+    dhcp_renew_retry_at = 0;
 }
 
 static bool dhcp_put_option(uint8_t *opt, int *idx, int opt_capacity, uint8_t code, const uint8_t *data, uint8_t len)
@@ -223,10 +241,32 @@ void dhcp_parse_options(const uint8_t *options, uint16_t length)
                         options[i] | (options[i + 1] << 8) | (options[i + 2] << 16) | (options[i + 3] << 24);
                 }
                 break;
+            case DHCP_OPT_LEASE_TIME:
+                if (len >= 4) {
+                    dhcp_lease_seconds =
+                        options[i] | (options[i + 1] << 8) | (options[i + 2] << 16) | (options[i + 3] << 24);
+                }
+                break;
         }
 
         i += len;
     }
+}
+
+// Compute T1/lease-expiry tick deadlines from the parsed lease time and mark
+// the lease live. Called whenever an ACK is accepted.
+static void dhcp_arm_lease()
+{
+    uint32_t freq = timer_get_frequency();
+    if (freq == 0)
+        freq = 1000;
+    uint64_t now = timer_get_ticks();
+    uint32_t lease = dhcp_lease_seconds != 0 ? dhcp_lease_seconds : 86400u; // default 1 day
+    uint64_t lease_ticks = ((uint64_t)lease * freq);
+    dhcp_expiry_ticks = now + lease_ticks;
+    dhcp_renew_at_ticks = now + lease_ticks / 2; // T1
+    dhcp_active = true;
+    dhcp_renewing = false;
 }
 
 // Receive DHCP packet
@@ -295,10 +335,69 @@ void dhcp_receive(const void *data, uint16_t length, uint32_t src_ip)
         dhcp_offered_ip = pkt->yiaddr;
         dhcp_parse_options(pkt->options, opt_len);
         dhcp_got_ack = true;
+        // Arm (or re-arm, for a renewal) the lease timers.
+        dhcp_arm_lease();
+        dhcp_renewing = false;
+    } else if (msg_type == DHCP_NAK) {
+        // Server rejected our lease: drop the address and stop renewing.
+        if (dhcp_active) {
+            net_set_ip(0);
+            dhcp_active = false;
+            dhcp_renewing = false;
+        }
     }
 }
 
-// Request IP via DHCP (blocking)
+// Send a unicast renewal REQUEST for the currently bound address. Uses the
+// normal UDP/IP path since we already own an IP at renewal time.
+static bool dhcp_send_renew()
+{
+    DhcpPacket pkt;
+    uint16_t len = dhcp_build_packet(&pkt, DHCP_REQUEST);
+    if (len == 0)
+        return false;
+    pkt.ciaddr = net_get_ip(); // Renewal: we already own this address
+    return udp_send(dhcp_server_ip, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, &pkt, len);
+}
+
+// Periodic lease maintenance, driven from net_poll(). Non-blocking: it only
+// transmits a renewal REQUEST when T1 elapses and re-arms on ACK (handled in
+// dhcp_receive). If the lease fully expires without renewal the address is
+// dropped so the host does not keep using a stale address.
+void dhcp_tick()
+{
+    if (!dhcp_active)
+        return;
+
+    uint32_t freq = timer_get_frequency();
+    if (freq == 0)
+        freq = 1000;
+    uint64_t now = timer_get_ticks();
+
+    if (dhcp_expiry_ticks != 0 && now >= dhcp_expiry_ticks) {
+        DEBUG_WARN("dhcp: lease expired without renewal, dropping address");
+        net_set_ip(0);
+        dhcp_active = false;
+        dhcp_renewing = false;
+        return;
+    }
+
+    if (!dhcp_renewing && now >= dhcp_renew_at_ticks && dhcp_server_ip != 0) {
+        dhcp_xid = timer_get_ticks() & 0xFFFFFFFF;
+        if (dhcp_send_renew()) {
+            dhcp_renewing = true;
+            // Retry the renewal every 5 s until it is acked or expires.
+            dhcp_renew_retry_at = now + (5000 * (uint64_t)freq) / 1000;
+        }
+    } else if (dhcp_renewing && now >= dhcp_renew_retry_at && dhcp_server_ip != 0) {
+        if (dhcp_send_renew())
+            dhcp_renew_retry_at = now + (5000 * (uint64_t)freq) / 1000;
+    }
+}
+
+// Request IP via DHCP (blocking). DISCOVER and REQUEST are each retried a few
+// times so a single lost frame on a slow link does not leave the host
+// unconfigured.
 bool dhcp_request()
 {
     DhcpPacket pkt;
@@ -313,45 +412,53 @@ bool dhcp_request()
     dhcp_dns = 0;
     dhcp_xid = timer_get_ticks() & 0xFFFFFFFF;
 
-    // Send DISCOVER
-    uint16_t len = dhcp_build_packet(&pkt, DHCP_DISCOVER);
-    if (len == 0 || !dhcp_send(&pkt, len)) {
-        DEBUG_ERROR("dhcp: failed to send DISCOVER");
+    uint32_t freq = timer_get_frequency();
+    if (freq == 0)
+        freq = 1000;
+    // 3 s per phase attempt: a host with no DHCP server pays at most
+    // ~18 s of boot time instead of the old single 10 s window, while a host
+    // with a server still resolves on the first attempt in well under a second.
+    uint64_t phase_timeout = (3000 * (uint64_t)freq) / 1000;
+
+    // DISCOVER, retried.
+    bool got_offer = false;
+    for (int attempt = 0; attempt < DHCP_MAX_ATTEMPTS && !got_offer; attempt++) {
+        uint16_t len = dhcp_build_packet(&pkt, DHCP_DISCOVER);
+        if (len == 0 || !dhcp_send(&pkt, len)) {
+            DEBUG_ERROR("dhcp: failed to send DISCOVER");
+            return false;
+        }
+        uint64_t start = timer_get_ticks();
+        while (!dhcp_got_offer && (timer_get_ticks() - start) < phase_timeout) {
+            net_poll();
+            scheduler_yield(); // Yield CPU instead of busy-wait
+        }
+        got_offer = dhcp_got_offer;
+        if (!got_offer)
+            DEBUG_WARN("dhcp: no OFFER received (attempt %d/%d)", attempt + 1, DHCP_MAX_ATTEMPTS);
+    }
+    if (!got_offer)
         return false;
+
+    // REQUEST, retried.
+    bool got_ack = false;
+    for (int attempt = 0; attempt < DHCP_MAX_ATTEMPTS && !got_ack; attempt++) {
+        uint16_t len = dhcp_build_packet(&pkt, DHCP_REQUEST);
+        if (len == 0 || !dhcp_send(&pkt, len)) {
+            DEBUG_ERROR("dhcp: failed to send REQUEST");
+            return false;
+        }
+        uint64_t start = timer_get_ticks();
+        while (!dhcp_got_ack && (timer_get_ticks() - start) < phase_timeout) {
+            net_poll();
+            scheduler_yield(); // Yield CPU instead of busy-wait
+        }
+        got_ack = dhcp_got_ack;
+        if (!got_ack)
+            DEBUG_WARN("dhcp: no ACK received (attempt %d/%d)", attempt + 1, DHCP_MAX_ATTEMPTS);
     }
-
-    // Wait for OFFER (5 second timeout)
-    uint64_t start = timer_get_ticks();
-    uint64_t timeout = (5000 * timer_get_frequency()) / 1000;
-
-    while (!dhcp_got_offer && (timer_get_ticks() - start) < timeout) {
-        net_poll();
-        scheduler_yield(); // Yield CPU instead of busy-wait
-    }
-
-    if (!dhcp_got_offer) {
-        DEBUG_WARN("dhcp: no OFFER received");
+    if (!got_ack)
         return false;
-    }
-
-    // Send REQUEST
-    len = dhcp_build_packet(&pkt, DHCP_REQUEST);
-    if (len == 0 || !dhcp_send(&pkt, len)) {
-        DEBUG_ERROR("dhcp: failed to send REQUEST");
-        return false;
-    }
-
-    // Wait for ACK
-    start = timer_get_ticks();
-    while (!dhcp_got_ack && (timer_get_ticks() - start) < timeout) {
-        net_poll();
-        scheduler_yield(); // Yield CPU instead of busy-wait
-    }
-
-    if (!dhcp_got_ack) {
-        DEBUG_WARN("dhcp: no ACK received");
-        return false;
-    }
 
     // Configure network with received parameters
     net_set_ip(dhcp_offered_ip);

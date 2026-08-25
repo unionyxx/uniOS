@@ -264,6 +264,66 @@ void dns_receive(const void *data, uint16_t length)
     dns_response_received = true;
 }
 
+// One query/attempt: fresh transaction ID and a unique ephemeral source port.
+// Returns the resolved IP, or 0 if this attempt timed out or the response was
+// rejected; sets *got_response when *some* reply arrived (so the caller can
+// distinguish "no answer" from "answered but malformed").
+static uint32_t dns_attempt(const char *hostname, uint32_t dns_server, bool *got_response)
+{
+    if (got_response)
+        *got_response = false;
+
+    uint8_t query[512];
+    int query_len = dns_build_query(hostname, query); // bumps dns_transaction_id
+    if (query_len <= 0)
+        return 0;
+
+    int sock = udp_socket();
+    if (sock < 0)
+        return 0;
+
+    // Wider ephemeral spread: the old %1000 window collided across concurrent
+    // resolutions and stale replies from a previous query.
+    const uint16_t src_port = static_cast<uint16_t>(49152 + (dns_transaction_id % 16000));
+    if (!udp_bind(sock, src_port)) {
+        udp_close(sock);
+        return 0;
+    }
+
+    uint32_t result = 0;
+    if (!udp_sendto(sock, dns_server, DNS_PORT, query, query_len)) {
+        udp_close(sock);
+        return 0;
+    }
+
+    uint64_t start = timer_get_ticks();
+    uint64_t timeout = (DNS_TIMEOUT_MS * timer_get_frequency()) / 1000;
+
+    while ((timer_get_ticks() - start) < timeout) {
+        net_poll();
+
+        uint8_t buffer[512];
+        uint32_t src_ip;
+        uint16_t src_port_out;
+        int len = udp_recvfrom(sock, buffer, sizeof(buffer), &src_ip, &src_port_out);
+        if (len > 0) {
+            if (got_response)
+                *got_response = true;
+            result = dns_parse_response(buffer, len);
+            if (result != 0)
+                break;
+            // Malformed/mismatched reply: keep waiting briefly for a good one,
+            // but don't stall the full timeout on it.
+        }
+
+        for (volatile int i = 0; i < 1000; i++)
+            ;
+    }
+
+    udp_close(sock);
+    return result;
+}
+
 uint32_t dns_resolve(const char *hostname)
 {
     if (!hostname || !*hostname)
@@ -279,64 +339,20 @@ uint32_t dns_resolve(const char *hostname)
         dns_server = dns_parse_ip("8.8.8.8");
     }
 
-    // Build query
-    uint8_t query[512];
-    int query_len = dns_build_query(hostname, query);
-    if (query_len <= 0) {
-        DEBUG_WARN("dns: invalid hostname %s", hostname);
-        return 0;
+    // Up to three attempts with fresh transaction IDs. A malformed or lost
+    // reply no longer consumes a single all-or-nothing 5 s window.
+    static constexpr int DNS_MAX_ATTEMPTS = 3;
+    for (int attempt = 0; attempt < DNS_MAX_ATTEMPTS; attempt++) {
+        bool got_response = false;
+        uint32_t ip = dns_attempt(hostname, dns_server, &got_response);
+        if (ip != 0)
+            return ip;
+        if (!got_response && attempt + 1 < DNS_MAX_ATTEMPTS)
+            continue; // no reply at all: resend
+        if (got_response)
+            break; // answered but unparseable: retrying the same server won't help
     }
 
-    int sock = udp_socket();
-    if (sock < 0) {
-        DEBUG_ERROR("dns: failed to create socket");
-        return 0;
-    }
-
-    // Bind to ephemeral port
-    if (!udp_bind(sock, 50000 + (dns_transaction_id % 1000))) {
-        udp_close(sock);
-        return 0;
-    }
-
-    dns_response_received = false;
-    dns_resolved_ip = 0;
-
-    if (!udp_sendto(sock, dns_server, DNS_PORT, query, query_len)) {
-        DEBUG_ERROR("dns: failed to send query");
-        udp_close(sock);
-        return 0;
-    }
-
-    uint64_t start = timer_get_ticks();
-    uint64_t timeout = (DNS_TIMEOUT_MS * timer_get_frequency()) / 1000;
-
-    while (!dns_response_received && (timer_get_ticks() - start) < timeout) {
-        // Poll network
-        net_poll();
-
-        uint8_t buffer[512];
-        uint32_t src_ip;
-        uint16_t src_port;
-        int len = udp_recvfrom(sock, buffer, sizeof(buffer), &src_ip, &src_port);
-
-        if (len > 0) {
-            dns_resolved_ip = dns_parse_response(buffer, len);
-            if (dns_resolved_ip != 0) {
-                dns_response_received = true;
-            }
-        }
-
-        for (volatile int i = 0; i < 1000; i++)
-            ;
-    }
-
-    udp_close(sock);
-
-    if (dns_resolved_ip != 0) {
-    } else {
-        DEBUG_WARN("dns: resolution failed for %s", hostname);
-    }
-
-    return dns_resolved_ip;
+    DEBUG_WARN("dns: resolution failed for %s", hostname);
+    return 0;
 }

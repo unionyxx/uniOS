@@ -133,7 +133,8 @@ bool rtl8139_init()
 
 bool rtl8139_send(const void *data, uint16_t length)
 {
-    if (!g_rtl8139.initialized || !data || length == 0 || length > 1500)
+    // Length includes the 14-byte Ethernet header (1514 for a full-MSS frame).
+    if (!g_rtl8139.initialized || !data || length == 0 || length > 1514)
         return false;
     const uint8_t cur = g_rtl8139.tx_cur;
     int timeout = 10000;
@@ -154,6 +155,16 @@ bool rtl8139_send(const void *data, uint16_t length)
     return (rtl_inl(RTL_REG_TXSTATUS0 + cur * 4) & RTL_TX_TOK) != 0;
 }
 
+// Re-derives rx_offset from the hardware's Current Buffer Address after the
+// ring desynced (garbage header/CRC error): resetting to 0 discarded every
+// queued packet and re-interpreted mid-ring bytes as headers.
+static void rtl8139_resync_from_cbr()
+{
+    const uint16_t cbr = rtl_inw(RTL_REG_CBR);
+    g_rtl8139.rx_offset = cbr;
+    rtl_outw(RTL_REG_CAPR, static_cast<uint16_t>((cbr + 8192 - 16) % 8192));
+}
+
 int rtl8139_receive(void *buffer, uint16_t max_length)
 {
     if (!g_rtl8139.initialized || !buffer || (rtl_inb(RTL_REG_CMD) & RTL_CMD_BUFE))
@@ -161,14 +172,21 @@ int rtl8139_receive(void *buffer, uint16_t max_length)
     const uint8_t *pkt = g_rtl8139.rx_buffer + g_rtl8139.rx_offset;
     const uint16_t status = pkt[0] | (pkt[1] << 8);
     const uint16_t length = pkt[2] | (pkt[3] << 8);
-    if (length == 0 || length > 1518 || !(status & 0x01)) {
-        g_rtl8139.rx_offset = 0;
-        rtl_outw(RTL_REG_CAPR, 0);
+    if (!(status & 0x01) || length == 0 || length > 1518) {
+        // Bad frame: skip it if its length is sane, otherwise resync from
+        // the hardware's idea of where the ring head is.
+        if ((status & 0x01) == 0 && length != 0 && length <= 1518) {
+            g_rtl8139.rx_offset = (g_rtl8139.rx_offset + length + 4 + 3) & ~3u;
+            g_rtl8139.rx_offset %= 8192;
+            rtl_outw(RTL_REG_CAPR, static_cast<uint16_t>((g_rtl8139.rx_offset + 8192 - 16) % 8192));
+        } else {
+            rtl8139_resync_from_cbr();
+        }
         return 0;
     }
     uint16_t dlen = (length - 4 < max_length) ? length - 4 : max_length;
     kstring::memcpy(buffer, pkt + 4, dlen);
-    g_rtl8139.rx_offset = (g_rtl8139.rx_offset + length + 4 + 3) & ~3;
+    g_rtl8139.rx_offset = (g_rtl8139.rx_offset + length + 4 + 3) & ~3u;
     g_rtl8139.rx_offset %= 8192;
     rtl_outw(RTL_REG_CAPR, static_cast<uint16_t>((g_rtl8139.rx_offset + 8192 - 16) % 8192));
     return dlen;
