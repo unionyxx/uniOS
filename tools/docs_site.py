@@ -103,6 +103,26 @@ CSS = """\
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+
+*::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: var(--radius-pill);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
 }
 
 html {
@@ -197,30 +217,49 @@ nav {
 
 .theme-switch-mini {
     display: flex;
+    position: relative;
     background: var(--surface);
     border: 1px solid var(--surface-border);
-    padding: 2px;
+    padding: 4px;
     border-radius: var(--radius-pill);
     transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 
 .theme-switch-mini button {
-    padding: 0.3rem 0.85rem;
+    position: relative;
+    z-index: 2;
+    padding: 0.4rem 1.1rem;
     border-radius: var(--radius-pill);
-    font-size: 0.75rem;
+    font-size: 0.8rem;
     font-weight: 500;
     font-family: inherit;
     color: var(--muted);
     cursor: pointer;
     border: none;
     background: transparent;
-    transition: color 0.3s var(--ease), background-color 0.3s var(--ease);
+    transition: color 0.3s var(--ease);
 }
 
 .theme-switch-mini button.active {
     color: var(--text);
+}
+
+.theme-switch-mini::before {
+    content: '';
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: calc(50% - 4px);
+    height: calc(100% - 8px);
     background: var(--bg);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    border-radius: var(--radius-pill);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    z-index: 1;
+    transition: transform 0.3s var(--ease), background-color var(--dur) var(--ease);
+}
+
+[data-theme="light"] .theme-switch-mini::before {
+    transform: translateX(100%);
 }
 
 .docs-layout {
@@ -239,6 +278,7 @@ nav {
     max-height: calc(100vh - 104px);
     overflow-y: auto;
     padding-bottom: 1rem;
+    padding-right: 0.6rem;
 }
 
 .search {
@@ -574,17 +614,20 @@ article img {
 }
 
 .pager a {
+    display: block;
+    min-width: 0;
     border: 1px solid var(--surface-border);
     border-radius: var(--radius-sm);
     padding: 0.8rem 1rem;
     text-decoration: none;
     color: var(--text);
     font-size: 0.9rem;
-    transition: border-color 0.2s var(--ease);
+    transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease);
 }
 
 .pager a:hover {
     border-color: var(--border);
+    background: var(--surface);
 }
 
 .pager .label {
@@ -593,11 +636,42 @@ article img {
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--muted);
-    margin-bottom: 0.3rem;
+    margin-bottom: 0.35rem;
+}
+
+.pager .title {
+    display: block;
+    font-weight: 500;
+    line-height: 1.4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .pager .next {
     text-align: right;
+}
+
+.docs-footer-wrap {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 2rem 3rem;
+}
+
+.docs-footer {
+    padding: 2rem 0 0;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+    transition: border-color var(--dur) var(--ease);
+}
+
+.docs-footer .footer-logo {
+    font-weight: 600;
+    color: var(--text);
 }
 
 .sidebar-backdrop {
@@ -631,6 +705,10 @@ article img {
 
     .nav-links {
         gap: 1.25rem;
+    }
+
+    .nav-links a:not(.active) {
+        display: none;
     }
 
     .docs-sidebar {
@@ -669,6 +747,10 @@ article img {
 
     .pager {
         grid-template-columns: 1fr;
+    }
+
+    .docs-footer-wrap {
+        padding: 0 1.25rem 2rem;
     }
 }
 """
@@ -864,7 +946,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
             try {{ saved = localStorage.getItem('theme'); }} catch (e) {{}}
             var dark = saved ? saved === 'dark'
                 : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-            if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+            document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
         }})();
     </script>
 </head>
@@ -872,12 +954,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <body>
     <nav>
         <div class="nav-content">
-            <button class="menu-btn" id="menu-btn" type="button" aria-label="Toggle navigation">
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                    <path d="M2 4.5h14M2 9h14M2 13.5h14" stroke="currentColor" stroke-width="1.5"
-                        stroke-linecap="round" />
-                </svg>
-            </button>
             <a class="logo" href="{base}index.html">uniOS</a>
             <div class="nav-links">
                 <a href="{github_docs}">Docs</a>
@@ -893,6 +969,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
                     </svg>
                     GitHub
                 </a>
+                <button class="menu-btn" id="menu-btn" type="button" aria-label="Toggle navigation">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                        <path d="M2 4.5h14M2 9h14M2 13.5h14" stroke="currentColor" stroke-width="1.5"
+                            stroke-linecap="round" />
+                    </svg>
+                </button>
             </div>
         </div>
     </nav>
@@ -912,6 +994,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
             </article>
             {pager}
         </main>
+    </div>
+    <div class="docs-footer-wrap">
+        <footer class="docs-footer">
+            <div class="footer-logo">uniOS</div>
+            <div>MIT License &bull; 2026</div>
+        </footer>
     </div>
     <script src="{wbase}wiki.js"></script>
 </body>
@@ -1250,12 +1338,14 @@ def build_pager(order, index, base):
         return ""
     parts = ['<div class="pager">']
     if prev_link:
-        parts.append('<a class="prev" href="%s"><span class="label">Previous</span>%s</a>'
+        parts.append('<a class="prev" href="%s"><span class="label">Previous</span>'
+                     '<span class="title">%s</span></a>'
                      % (base + prev_link.rel_html, html.escape(prev_link.nav_title)))
     else:
         parts.append("<span></span>")
     if next_link:
-        parts.append('<a class="next" href="%s"><span class="label">Next</span>%s</a>'
+        parts.append('<a class="next" href="%s"><span class="label">Next</span>'
+                     '<span class="title">%s</span></a>'
                      % (base + next_link.rel_html, html.escape(next_link.nav_title)))
     else:
         parts.append("<span></span>")
