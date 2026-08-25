@@ -1,6 +1,7 @@
 #pragma once
-#include <stdint.h>
+#include <kernel/net/tcp_congestion.h>
 #include <kernel/sync/spinlock.h>
+#include <stdint.h>
 
 // TCP Header flags
 #define TCP_FLAG_FIN 0x01
@@ -44,18 +45,36 @@ struct TcpHeader
 #define TCP_MAX_SOCKETS 32
 #define TCP_WINDOW_SIZE 65535
 #define TCP_RX_BUFFER_SIZE 65536
+#define TCP_MSS 1460
 
-// TCP Control Block (connection state)
-struct RetransmitPacket
+// Send window: ring of TCP_TX_BUFFER_SIZE bytes plus one descriptor per
+// segment that may be in flight. flight_limit() additionally bounds
+// outstanding data by cwnd, the peer window and the ring capacity.
+#define TCP_TX_SEGMENTS 4
+#define TCP_TX_BUFFER_SIZE (TCP_TX_SEGMENTS * TCP_MSS)
+#define TCP_MAX_FLIGHT_SEGMENTS 8
+
+// In-flight data segment metadata. Ring bytes for `seq_num` live at
+// tx_buffer[seq_num % TCP_TX_BUFFER_SIZE]; the flight cap keeps regions
+// from overlapping.
+struct TxSegment
 {
-    bool in_use;
+    bool in_flight;
+    bool retransmitted; // Karn: never sample RTT from this segment
     uint32_t seq_num;
     uint16_t length;
+    uint64_t sent_time;
+};
+
+// SYN/FIN travel outside the data ring but still consume sequence space.
+struct ControlSegment
+{
+    bool pending;
     uint8_t flags;
+    uint32_t seq_num;
     uint64_t sent_time;
     uint32_t retries;
     uint32_t rto_ms;
-    uint8_t data[1460];
 };
 
 struct TcpSocket
@@ -68,22 +87,35 @@ struct TcpSocket
     uint16_t remote_port;
     uint32_t remote_ip;
 
-    uint32_t seq_num; // Our sequence number
+    uint32_t seq_num; // Our ISN (SYN consumes it; data starts at ISN+1)
     uint32_t ack_num; // Remote's sequence we've acked
 
-    uint32_t send_next; // Next seq to send
-    uint32_t send_una;  // Oldest unacked seq
+    uint32_t send_next; // Next data seq to transmit
+    uint32_t send_una;  // Oldest unacked data seq
+    uint32_t tx_end;    // Highest data seq accepted from the app (>= send_next)
 
     // Receive buffer
     uint8_t rx_buffer[TCP_RX_BUFFER_SIZE];
     uint32_t rx_head;
     uint32_t rx_tail;
 
+    // Send buffer + in-flight segment descriptors
+    uint8_t tx_buffer[TCP_TX_BUFFER_SIZE];
+    TxSegment tx_segments[TCP_MAX_FLIGHT_SEGMENTS];
+    uint32_t rto_retries; // RTO retries since last forward progress
+
+    // Congestion control / recovery / RTT (tcp_congestion.h)
+    tcpcc::State cc;
+    tcpcc::RttEstimate rtt;
+    uint32_t peer_window;
+
+    // Control segment (SYN / FIN) and close sequencing
+    ControlSegment ctrl;
+    bool want_close;
+
     // Connection tracking
     bool pending_ack;
     uint64_t last_activity;
-
-    struct RetransmitPacket retransmit;
 };
 
 // TCP functions
