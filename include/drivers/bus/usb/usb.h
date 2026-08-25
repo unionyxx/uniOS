@@ -43,6 +43,7 @@
 #define USB_CLASS_MASS_STORAGE 0x08
 #define USB_MSC_SUBCLASS_SCSI 0x06
 #define USB_MSC_PROTOCOL_BULK_ONLY 0x50
+#define USB_CLASS_HUB 0x09
 
 // Endpoint direction/type
 #define USB_ENDPOINT_DIR_MASK 0x80
@@ -185,6 +186,14 @@ struct UsbDeviceInfo
     uint16_t msc_bulk_out_max_packet;
     uint8_t msc_bulk_in_max_burst;
     uint8_t msc_bulk_out_max_burst;
+
+    // Hub support (status-change interrupt endpoint)
+    bool has_hub;
+    uint8_t hub_interface;
+    uint8_t hub_alt_setting;
+    uint8_t hub_endpoint; // DCI (endpoint number * 2 + 1 for IN)
+    uint16_t hub_max_packet;
+    uint8_t hub_interval;
 
     uint8_t root_hub_port; // The port on the ROOT hub (motherboard)
 };

@@ -50,6 +50,7 @@ enum class ParsedEndpointKind : uint8_t
     HidInterruptIn,
     MscBulkIn,
     MscBulkOut,
+    HubInterruptIn,
 };
 
 struct MassStorageInterfaceCandidate
@@ -66,6 +67,37 @@ struct MassStorageInterfaceCandidate
     uint8_t bulk_in_max_burst = 0;
     uint8_t bulk_out_max_burst = 0;
 };
+
+struct HubInterfaceCandidate
+{
+    bool present = false;
+    bool has_interrupt_in = false;
+    uint8_t interface_number = 0;
+    uint8_t alt_setting = 0;
+    uint8_t endpoint = 0;
+    uint16_t max_packet = 0;
+    uint8_t interval = 0;
+};
+
+static void usb_commit_hub_candidate(UsbDeviceInfo *dev, const HubInterfaceCandidate &candidate)
+{
+    if (!dev || !candidate.present || !candidate.has_interrupt_in)
+        return;
+
+    const bool replace = !dev->has_hub || (candidate.interface_number == dev->hub_interface &&
+                                           candidate.alt_setting == 0 && dev->hub_alt_setting != 0);
+    if (!replace)
+        return;
+
+    dev->has_hub = true;
+    dev->hub_interface = candidate.interface_number;
+    dev->hub_alt_setting = candidate.alt_setting;
+    dev->hub_endpoint = candidate.endpoint;
+    dev->hub_max_packet = candidate.max_packet;
+    dev->hub_interval = candidate.interval;
+    KLOG(LogModule::Usb, LogLevel::Info, "Found hub interface %d alt %d (Interrupt IN EP %d)", dev->hub_interface,
+         dev->hub_alt_setting, dev->hub_endpoint);
+}
 
 static void usb_commit_hid_candidate(UsbDeviceInfo *dev, const HidInterfaceCandidate &candidate)
 {
@@ -147,6 +179,7 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
     uint16_t offset = 0;
     HidInterfaceCandidate current_hid = {};
     MassStorageInterfaceCandidate current_msc = {};
+    HubInterfaceCandidate current_hub = {};
     ParsedEndpointKind last_endpoint = ParsedEndpointKind::None;
 
     while (offset + 2 <= length) {
@@ -158,8 +191,10 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
         if (type == USB_DESC_INTERFACE && len >= sizeof(UsbInterfaceDescriptor)) {
             usb_commit_hid_candidate(dev, current_hid);
             usb_commit_msc_candidate(dev, current_msc);
+            usb_commit_hub_candidate(dev, current_hub);
             current_hid = {};
             current_msc = {};
+            current_hub = {};
             last_endpoint = ParsedEndpointKind::None;
 
             auto *iface = reinterpret_cast<const UsbInterfaceDescriptor *>(&data[offset]);
@@ -182,6 +217,10 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
                 current_msc.present = true;
                 current_msc.interface_number = iface->bInterfaceNumber;
                 current_msc.alt_setting = iface->bAlternateSetting;
+            } else if (iface->bInterfaceClass == USB_CLASS_HUB) {
+                current_hub.present = true;
+                current_hub.interface_number = iface->bInterfaceNumber;
+                current_hub.alt_setting = iface->bAlternateSetting;
             }
         } else if (type == USB_DESC_HID && current_hid.present && len >= sizeof(UsbHidDescriptor)) {
             auto *hid = reinterpret_cast<const UsbHidDescriptor *>(&data[offset]);
@@ -219,6 +258,15 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
                     current_msc.has_bulk_out = true;
                     last_endpoint = ParsedEndpointKind::MscBulkOut;
                 }
+            } else if (current_hub.present && (ep->bEndpointAddress & USB_ENDPOINT_DIR_IN) &&
+                       (ep->bmAttributes & USB_ENDPOINT_TYPE_MASK) == USB_ENDPOINT_TYPE_INTERRUPT &&
+                       !current_hub.has_interrupt_in) {
+                const uint8_t ep_num = ep->bEndpointAddress & 0x0F;
+                current_hub.endpoint = static_cast<uint8_t>(ep_num * 2 + 1);
+                current_hub.max_packet = ep->wMaxPacketSize & 0x7FF;
+                current_hub.interval = ep->bInterval;
+                current_hub.has_interrupt_in = true;
+                last_endpoint = ParsedEndpointKind::HubInterruptIn;
             }
         } else if (type == USB_DESC_SS_ENDPOINT_COMPANION && current_hid.present &&
                    last_endpoint == ParsedEndpointKind::HidInterruptIn && current_hid.has_interrupt_in &&
@@ -241,6 +289,7 @@ static bool usb_parse_config(UsbDeviceInfo *dev, uint8_t *data, uint16_t length)
 
     usb_commit_hid_candidate(dev, current_hid);
     usb_commit_msc_candidate(dev, current_msc);
+    usb_commit_hub_candidate(dev, current_hub);
     return true;
 }
 } // namespace
@@ -437,11 +486,29 @@ int usb_enumerate_device(uint8_t port, uint8_t parent_hub_slot, uint8_t parent_h
             KLOG(LogModule::Usb, LogLevel::Trace, "USB: Mass-storage endpoints configured (Slot %d)", slot_id);
         }
     }
+    if (dev->has_hub && dev->hub_endpoint != 0) {
+        // Configure the hub's status-change interrupt endpoint before handing
+        // the device to the hub driver; submitting transfers to an
+        // unconfigured endpoint fails with "EP Not Enabled" forever.
+        if (dev->hub_alt_setting != 0 && !usb_set_interface(slot_id, dev->hub_interface, dev->hub_alt_setting)) {
+            KLOG(LogModule::Usb, LogLevel::Error, "USB: Set hub interface %d alt %d failed (Slot %d)",
+                 dev->hub_interface, dev->hub_alt_setting, slot_id);
+            dev->hub_endpoint = 0;
+        } else if (!xhci_configure_endpoint(slot_id, dev->hub_endpoint, EP_TYPE_INTERRUPT_IN, dev->hub_max_packet,
+                                            dev->hub_interval, 0, 0, dev->hub_max_packet)) {
+            KLOG(LogModule::Usb, LogLevel::Error, "USB: Configure hub endpoint failed (Slot %d, EP %d)", slot_id,
+                 dev->hub_endpoint);
+            dev->hub_endpoint = 0;
+        } else {
+            KLOG(LogModule::Usb, LogLevel::Trace, "USB: Hub endpoint %d configured (Slot %d)", dev->hub_endpoint,
+                 slot_id);
+        }
+    }
     dev->configured = true;
 
     // Register hub ONLY AFTER device is configured
-    if (dev->device_class == 0x09)
-        usb_hub_register(slot_id, port, speed);
+    if (dev->device_class == 0x09 || dev->has_hub)
+        usb_hub_register(slot_id, port, speed, dev->hub_endpoint);
 
     // Notify HID driver for hotplug support
     usb_hid_device_connected(dev);

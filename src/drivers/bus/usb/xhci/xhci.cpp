@@ -801,14 +801,36 @@ void xhci_free_device_resources(uint8_t slot_id)
 {
     if (slot_id == 0)
         return;
+
+    // Stop every endpoint first so the controller stops DMA-ing into these
+    // rings and buffers before they are detached and freed.
+    for (int i = 0; i < 32; i++) {
+        if (g_xhci.transfer_rings[slot_id][i])
+            xhci_stop_endpoint(slot_id, i);
+    }
+
+    // Gather the allocations and detach them while holding the xHCI lock, so
+    // the event handler (which takes the same lock) cannot observe freed
+    // memory. The actual frees happen after the lock is dropped because
+    // vmm_free_dma performs a TLB shootdown and must not run with IRQs off.
+    DMAAllocation pending_rings[32];
+    int ring_count = 0;
+    DMAAllocation pending_intr[32];
+    int intr_count = 0;
+    DMAAllocation pending_input = {0, 0, 0};
+    DMAAllocation pending_device = {0, 0, 0};
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&g_xhci_lock);
     for (int i = 0; i < 32; i++) {
         if (g_xhci.transfer_rings[slot_id][i]) {
-            vmm_free_dma({g_xhci.transfer_ring_phys[slot_id][i],
-                          reinterpret_cast<uint64_t>(g_xhci.transfer_rings[slot_id][i]), 1});
+            if (ring_count < 32)
+                pending_rings[ring_count++] = {g_xhci.transfer_ring_phys[slot_id][i],
+                                               reinterpret_cast<uint64_t>(g_xhci.transfer_rings[slot_id][i]), 1};
             g_xhci.transfer_rings[slot_id][i] = nullptr;
         }
         if (g_intr_buffer_dma[slot_id][i].phys) {
-            vmm_free_dma(g_intr_buffer_dma[slot_id][i]);
+            if (intr_count < 32)
+                pending_intr[intr_count++] = g_intr_buffer_dma[slot_id][i];
             g_intr_buffer_dma[slot_id][i] = {0, 0, 0};
         }
         g_xhci.intr_callbacks[slot_id][i] = nullptr;
@@ -820,16 +842,28 @@ void xhci_free_device_resources(uint8_t slot_id)
         g_intr_recovery_needed[slot_id][i] = false;
     }
     if (g_xhci.input_contexts[slot_id]) {
-        vmm_free_dma({g_xhci.input_context_phys[slot_id], reinterpret_cast<uint64_t>(g_xhci.input_contexts[slot_id]),
-                      (g_xhci.context_size_64 ? 64ULL : 32ULL) * 33 / 4096 + 1});
+        pending_input = {g_xhci.input_context_phys[slot_id],
+                         reinterpret_cast<uint64_t>(g_xhci.input_contexts[slot_id]),
+                         (g_xhci.context_size_64 ? 64ULL : 32ULL) * 33 / 4096 + 1};
         g_xhci.input_contexts[slot_id] = nullptr;
     }
     if (g_xhci.device_contexts[slot_id]) {
-        vmm_free_dma({g_xhci.device_context_phys[slot_id], reinterpret_cast<uint64_t>(g_xhci.device_contexts[slot_id]),
-                      (g_xhci.context_size_64 ? 64ULL : 32ULL) * 32 / 4096 + 1});
+        pending_device = {g_xhci.device_context_phys[slot_id],
+                          reinterpret_cast<uint64_t>(g_xhci.device_contexts[slot_id]),
+                          (g_xhci.context_size_64 ? 64ULL : 32ULL) * 32 / 4096 + 1};
         g_xhci.device_contexts[slot_id] = nullptr;
         g_xhci.dcbaa[slot_id] = 0;
     }
+    spinlock_release_irqrestore(&g_xhci_lock, sl_flags);
+
+    for (int i = 0; i < ring_count; i++)
+        vmm_free_dma(pending_rings[i]);
+    for (int i = 0; i < intr_count; i++)
+        vmm_free_dma(pending_intr[i]);
+    if (pending_input.phys)
+        vmm_free_dma(pending_input);
+    if (pending_device.phys)
+        vmm_free_dma(pending_device);
 }
 
 bool xhci_address_device(uint8_t slot_id, uint8_t port, uint8_t speed, uint8_t parent_hub_slot, uint8_t parent_port)
@@ -1151,10 +1185,17 @@ bool xhci_control_transfer(uint8_t slot_id, uint8_t request_type, uint8_t reques
 
     Trb result = {0, 0, 0};
     const bool success = xhci_wait_transfer(slot_id, &result, 2500);
-    if (!success && log_error) {
-        const uint8_t cc = static_cast<uint8_t>((result.status >> 24) & 0xFF);
-        KLOG(LogModule::Usb, LogLevel::Error, "xHCI: Control Transfer Failed: %s (Slot %d, Req %d)",
-             xhci_completion_code_str(cc), slot_id, request);
+    if (!success) {
+        // The TRB may still be queued and the xHC may still be DMA-ing the
+        // buffer. Stop the endpoint and reset the ring so the pending TRB is
+        // abandoned BEFORE the DMA buffer is freed; otherwise a late DMA would
+        // land in memory that has already been handed back to the PMM.
+        xhci_set_tr_dequeue(slot_id, 0);
+        if (log_error) {
+            const uint8_t cc = static_cast<uint8_t>((result.status >> 24) & 0xFF);
+            KLOG(LogModule::Usb, LogLevel::Error, "xHCI: Control Transfer Failed: %s (Slot %d, Req %d)",
+                 xhci_completion_code_str(cc), slot_id, request);
+        }
     }
 
     if (success && data && length > 0 && (request_type & 0x80)) {
@@ -1205,6 +1246,9 @@ bool xhci_bulk_transfer(uint8_t slot_id, uint8_t ep_num, bool in, void *data, ui
     if (!success) {
         g_xhci.sync_pending[slot_id][ep_num] = false;
         g_xhci.sync_complete[slot_id][ep_num] = false;
+        // Abandon any still-pending TRB before freeing the DMA buffer so a
+        // late DMA cannot write into memory that is reused elsewhere.
+        xhci_set_tr_dequeue(slot_id, ep_num);
         if (dma.phys)
             vmm_free_dma(dma);
         const uint8_t cc = static_cast<uint8_t>((result.status >> 24) & 0xFF);

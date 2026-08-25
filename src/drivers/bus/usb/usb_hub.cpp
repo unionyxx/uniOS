@@ -61,11 +61,17 @@ void usb_hub_init()
     g_num_hubs = 0;
 }
 
-bool usb_hub_register(uint8_t slot_id, uint8_t root_port, uint8_t speed)
+bool usb_hub_register(uint8_t slot_id, uint8_t root_port, uint8_t speed, uint8_t intr_endpoint)
 {
     (void)speed;
     if (g_num_hubs >= MAX_HUBS)
         return false;
+
+    if (intr_endpoint == 0) {
+        KLOG(LogModule::Usb, LogLevel::Warn, "USB Hub (Slot %d) has no configured interrupt endpoint; skipping",
+             slot_id);
+        return false;
+    }
 
     HubDescriptor desc;
     uint16_t transferred;
@@ -92,9 +98,11 @@ bool usb_hub_register(uint8_t slot_id, uint8_t root_port, uint8_t speed)
     // Wait for ports to stabilize (In a real OS, this would be an async state machine)
     sleep(desc.bPwrOn2PwrGood * 2);
 
-    // Register interrupt endpoint (standard Hub is EP1 IN)
-    hub->intr_endpoint = 1 * 2 + 1; // EP1 IN (idx 3)
-    hub->status_changed = true;     // Initial poll
+    // Use the interrupt-IN endpoint discovered from the hub's configuration
+    // descriptor; it has already been configured on the controller. The old
+    // hardcoded EP1 guess failed on hubs using a different endpoint number.
+    hub->intr_endpoint = intr_endpoint;
+    hub->status_changed = true; // Initial poll
 
     xhci_register_interrupt_callback(slot_id, hub->intr_endpoint, hub_interrupt_cb);
     xhci_submit_interrupt_transfer(slot_id, hub->intr_endpoint, 1); // Hub mask is usually small
