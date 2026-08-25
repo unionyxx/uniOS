@@ -84,11 +84,14 @@ static inline void tlb_flush_range_local(uint64_t addr, uint64_t pages)
     }
 }
 
-static void tlb_shootdown_handler(uint8_t vector, void *ctx)
+// Drain this CPU's shootdown queue, flushing and acking each entry in order.
+// Called both from the shootdown IPI handler AND by a sender while it spins
+// waiting for other CPUs' acks: a sender must service its own queue too, or
+// two CPUs that shoot each other down concurrently would each wait for the
+// other's ack forever (both spin with interrupts disabled and neither can
+// take the other's IPI).
+static void tlb_drain_queue(PerCpu *cpu)
 {
-    (void)vector;
-    (void)ctx;
-    PerCpu *cpu = cpu_get_local();
     if (!cpu || cpu->cpu_id >= CONFIG_SMP_MAX_CPUS)
         return;
 
@@ -105,6 +108,18 @@ static void tlb_shootdown_handler(uint8_t vector, void *ctx)
         q.tail = tail + 1;
         __atomic_store_n(&cpu->tlb_ack_sequence, req.seq, __ATOMIC_RELEASE);
     }
+}
+
+static inline void tlb_drain_local_queue()
+{
+    tlb_drain_queue(cpu_get_local());
+}
+
+static void tlb_shootdown_handler(uint8_t vector, void *ctx)
+{
+    (void)vector;
+    (void)ctx;
+    tlb_drain_local_queue();
 }
 
 static bool tlb_shootdown_acked(uint64_t sequence, uint32_t sender_id)
@@ -189,12 +204,17 @@ void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages)
 
     // Wait for every target WITHOUT holding the publish lock so concurrent
     // invalidators can queue behind us. The budget is generous: healthy
-    // targets ack within microseconds.
+    // targets ack within microseconds. While spinning, keep draining our own
+    // queue: if another CPU shot our ranges down at the same time, it is
+    // waiting on OUR ack the same way we wait on theirs, and servicing our
+    // queue here is what breaks that cycle.
+    PerCpu *self = cpu_get_local();
     constexpr uint32_t kAckPollBudget = 2000000u;
     for (int attempt = 0; attempt < 40; attempt++) {
         for (uint32_t polls = 0; polls < kAckPollBudget; polls++) {
             if (tlb_shootdown_acked(sequence, sender_id))
                 return;
+            tlb_drain_queue(self);
             asm volatile("pause");
         }
         send_tlb_shootdown_to_lagging_cpus(sequence, sender_id);
