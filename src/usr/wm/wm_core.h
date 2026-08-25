@@ -293,6 +293,10 @@ struct WmInputState
     bool alt_down = false;
     int snap_edges = RESIZE_NONE;
     DirtyRect snap_preview = {};
+    // Titlebar double-click tracking (maximize/restore).
+    WindowEntry *titlebar_click_entry = nullptr;
+    uint64_t titlebar_click_ticks = 0;
+    bool titlebar_click_was_maximized = false;
 };
 
 extern Surface g_screen;

@@ -1157,6 +1157,24 @@ extern "C" int main(int argc, char **argv)
                     }
                     if (point_in_titlebar(w, g_input.mouse_x, g_input.mouse_y)) {
                         hit_idx = focus_window(i, true);
+                        WindowEntry *click_entry = g_windows[hit_idx].entry;
+                        const uint64_t click_ticks = get_ticks();
+                        if (click_entry && click_entry == g_input.titlebar_click_entry &&
+                            click_ticks - g_input.titlebar_click_ticks < 400) {
+                            // Titlebar double-click toggles maximize, unless the
+                            // first click of the pair already restored the window.
+                            const bool first_click_restored = g_input.titlebar_click_was_maximized;
+                            g_input.titlebar_click_entry = nullptr;
+                            g_input.pointer_down = false;
+                            g_input.drag_index = -1;
+                            g_input.drag_edges = RESIZE_NONE;
+                            if (!first_click_restored)
+                                toggle_maximize_window(hit_idx);
+                            break;
+                        }
+                        g_input.titlebar_click_entry = click_entry;
+                        g_input.titlebar_click_ticks = click_ticks;
+                        g_input.titlebar_click_was_maximized = click_entry && click_entry->state == WIN_MAXIMIZED;
                         if (g_windows[hit_idx].entry) {
                             if (g_windows[hit_idx].entry->state == WIN_MAXIMIZED) {
                                 int old_x = g_windows[hit_idx].x;
