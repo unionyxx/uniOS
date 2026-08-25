@@ -49,6 +49,9 @@ struct SyscallFrame;
 [[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, struct SyscallFrame *frame);
 void scheduler_remove_from_ready_queue(Process *p);
 void scheduler_boost_process_priority(Process *p, uint8_t new_priority);
+// ktest hook: validates ready-queue push/pop/remove invariants on isolated
+// synthetic state. Returns false on any invariant breach.
+bool scheduler_ready_queue_self_test();
 
 extern WaitQueue g_epoll_wait_queue;
 

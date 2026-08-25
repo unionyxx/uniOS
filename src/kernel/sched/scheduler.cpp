@@ -197,35 +197,69 @@ static void interactive_boost_if_needed(Process *p)
     }
 }
 
-static void ready_queue_push(Process *p)
+// Ready-queue primitives operate on an explicit (head, tail) pair so they can
+// be exercised on isolated state by scheduler_ready_queue_self_test().
+static void ready_queue_push_entry(Process **head, Process **tail, Process *p)
 {
     if (!p || p->in_ready_queue || p->on_cpu)
+        return;
+    p->queue_next = nullptr;
+    p->in_ready_queue = true;
+    if (!*tail) {
+        *head = *tail = p;
+    } else {
+        (*tail)->queue_next = p;
+        *tail = p;
+    }
+}
+
+static Process *ready_queue_pop_entry(Process **head, Process **tail)
+{
+    Process *p = *head;
+    if (!p)
+        return nullptr;
+    *head = p->queue_next;
+    if (!*head)
+        *tail = nullptr;
+    p->queue_next = nullptr;
+    p->in_ready_queue = false;
+    return p;
+}
+
+static bool ready_queue_remove_entry(Process **head, Process **tail, Process *p)
+{
+    Process *prev = nullptr;
+    for (Process *curr = *head; curr; prev = curr, curr = curr->queue_next) {
+        if (curr != p)
+            continue;
+        if (prev)
+            prev->queue_next = curr->queue_next;
+        else
+            *head = curr->queue_next;
+        if (*tail == curr)
+            *tail = prev;
+        curr->queue_next = nullptr;
+        curr->in_ready_queue = false;
+        return true;
+    }
+    return false;
+}
+
+static void ready_queue_push(Process *p)
+{
+    if (!p)
         return;
     uint8_t prio = p->priority;
     if (prio >= NUM_PRIORITY_LEVELS)
         prio = NUM_PRIORITY_LEVELS - 1;
-    p->queue_next = nullptr;
-    p->in_ready_queue = true;
-    if (!g_ready_tails[prio]) {
-        g_ready_queues[prio] = g_ready_tails[prio] = p;
-    } else {
-        g_ready_tails[prio]->queue_next = p;
-        g_ready_tails[prio] = p;
-    }
+    ready_queue_push_entry(&g_ready_queues[prio], &g_ready_tails[prio], p);
 }
 
 static Process *ready_queue_pop()
 {
     for (int i = 0; i < NUM_PRIORITY_LEVELS; i++) {
-        if (g_ready_queues[i]) {
-            Process *p = g_ready_queues[i];
-            g_ready_queues[i] = p->queue_next;
-            if (!g_ready_queues[i])
-                g_ready_tails[i] = nullptr;
-            p->queue_next = nullptr;
-            p->in_ready_queue = false;
+        if (Process *p = ready_queue_pop_entry(&g_ready_queues[i], &g_ready_tails[i]))
             return p;
-        }
     }
     return nullptr;
 }
@@ -233,23 +267,8 @@ static Process *ready_queue_pop()
 static void scheduler_remove_from_ready_queue_locked(Process *p)
 {
     for (int i = 0; i < NUM_PRIORITY_LEVELS; i++) {
-        Process *curr = g_ready_queues[i];
-        Process *prev = nullptr;
-        while (curr) {
-            if (curr == p) {
-                if (prev)
-                    prev->queue_next = curr->queue_next;
-                else
-                    g_ready_queues[i] = curr->queue_next;
-                if (g_ready_tails[i] == curr)
-                    g_ready_tails[i] = prev;
-                curr->queue_next = nullptr;
-                curr->in_ready_queue = false;
-                return;
-            }
-            prev = curr;
-            curr = curr->queue_next;
-        }
+        if (ready_queue_remove_entry(&g_ready_queues[i], &g_ready_tails[i], p))
+            return;
     }
 }
 
@@ -262,6 +281,60 @@ void scheduler_remove_from_ready_queue(Process *p)
     scheduler_remove_from_ready_queue_locked(p);
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
+}
+
+// ktest hook: exercises the ready-queue push/pop/remove primitives on
+// isolated synthetic state (never touches the live run queues). Returns false
+// on any invariant breach.
+bool scheduler_ready_queue_self_test()
+{
+    static Process fake_a;
+    static Process fake_b;
+    static Process fake_c;
+    kstring::zero_memory(&fake_a, sizeof(Process));
+    kstring::zero_memory(&fake_b, sizeof(Process));
+    kstring::zero_memory(&fake_c, sizeof(Process));
+
+    Process *head = nullptr;
+    Process *tail = nullptr;
+    bool ok = true;
+
+    ready_queue_push_entry(&head, &tail, &fake_a);
+    ok = ok && fake_a.in_ready_queue && !fake_a.on_cpu;
+    ok = ok && head == &fake_a && tail == &fake_a;
+
+    ready_queue_push_entry(&head, &tail, &fake_a); // guard: already queued, must not re-link
+    ok = ok && head == &fake_a && tail == &fake_a && fake_a.queue_next == nullptr;
+
+    ready_queue_push_entry(&head, &tail, &fake_b);
+    ok = ok && head == &fake_a && tail == &fake_b && fake_a.queue_next == &fake_b && fake_b.queue_next == nullptr;
+
+    Process *popped = ready_queue_pop_entry(&head, &tail); // FIFO order
+    ok = ok && popped == &fake_a && !fake_a.in_ready_queue;
+    ok = ok && head == &fake_b && tail == &fake_b;
+
+    ok = ok && ready_queue_remove_entry(&head, &tail, &fake_b); // sole entry
+    ok = ok && !fake_b.in_ready_queue && head == nullptr && tail == nullptr;
+    ok = ok && ready_queue_pop_entry(&head, &tail) == nullptr;
+    ok = ok && !ready_queue_remove_entry(&head, &tail, &fake_a); // absent: no-op
+
+    ready_queue_push_entry(&head, &tail, &fake_a);
+    ready_queue_push_entry(&head, &tail, &fake_b);
+    ready_queue_push_entry(&head, &tail, &fake_c);
+    ok = ok && ready_queue_remove_entry(&head, &tail, &fake_b); // middle entry
+    ok = ok && head == &fake_a && tail == &fake_c && fake_a.queue_next == &fake_c && fake_c.queue_next == nullptr;
+    ok = ok && !fake_b.in_ready_queue;
+
+    ok = ok && ready_queue_pop_entry(&head, &tail) == &fake_a; // head removal
+    ok = ok && ready_queue_pop_entry(&head, &tail) == &fake_c; // tail removal empties queue
+    ok = ok && head == nullptr && tail == nullptr && ready_queue_pop_entry(&head, &tail) == nullptr;
+
+    fake_a.on_cpu = true;
+    ready_queue_push_entry(&head, &tail, &fake_a); // guard: on-cpu tasks are never queued
+    ok = ok && !fake_a.in_ready_queue && head == nullptr && tail == nullptr;
+    fake_a.on_cpu = false;
+
+    return ok;
 }
 
 void scheduler_boost_process_priority(Process *p, uint8_t new_priority)
