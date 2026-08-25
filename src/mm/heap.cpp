@@ -370,25 +370,42 @@ void free(void *ptr)
         return nullptr;
     }
 
+    // Resolve and validate the header under the heap lock: a concurrent free
+    // of `ptr` (or of its aligned base) would otherwise turn the metadata read
+    // into a race on freed/reused memory. The caller still guarantees `ptr`
+    // stays valid for the duration of realloc.
     void *base_user_ptr = ptr;
     bool was_aligned = false;
-    const AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr, &was_aligned);
+    size_t old_size = 0;
 
-    if (!header || header->magic != HEAP_MAGIC || header->size < sizeof(AllocHeader))
-        return nullptr;
+    {
+        uint64_t flags = spinlock_acquire_irqsave(&g_heap_lock);
+        const AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr, &was_aligned);
 
-    size_t total_usable = header->size - sizeof(AllocHeader);
-    uintptr_t user_addr = reinterpret_cast<uintptr_t>(ptr);
-    uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_user_ptr);
+        if (!header || header->magic != HEAP_MAGIC || header->size < sizeof(AllocHeader)) {
+            spinlock_release_irqrestore(&g_heap_lock, flags);
+            return nullptr;
+        }
 
-    if (user_addr < base_addr)
-        return nullptr;
+        size_t total_usable = header->size - sizeof(AllocHeader);
+        uintptr_t user_addr = reinterpret_cast<uintptr_t>(ptr);
+        uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_user_ptr);
 
-    size_t alignment_slack = static_cast<size_t>(user_addr - base_addr);
-    if (alignment_slack > total_usable)
-        return nullptr;
+        if (user_addr < base_addr) {
+            spinlock_release_irqrestore(&g_heap_lock, flags);
+            return nullptr;
+        }
 
-    size_t old_size = total_usable - alignment_slack;
+        size_t alignment_slack = static_cast<size_t>(user_addr - base_addr);
+        if (alignment_slack > total_usable) {
+            spinlock_release_irqrestore(&g_heap_lock, flags);
+            return nullptr;
+        }
+
+        old_size = total_usable - alignment_slack;
+        spinlock_release_irqrestore(&g_heap_lock, flags);
+    }
+
     if (size <= old_size)
         return ptr;
 

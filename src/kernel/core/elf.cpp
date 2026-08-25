@@ -57,6 +57,7 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
         return false;
 
     const auto *phdr = reinterpret_cast<const Elf64_Phdr *>(data + ehdr->e_phoff);
+    bool entry_covered = false;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_LOAD)
             continue;
@@ -70,9 +71,27 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
             return false;
         if (phdr[i].p_vaddr >= k_user_address_limit || mem_end > k_user_address_limit)
             return false;
+        if (phdr[i].p_memsz > 0 && ehdr->e_entry >= phdr[i].p_vaddr && ehdr->e_entry < mem_end)
+            entry_covered = true;
+
+        // Overlapping PT_LOAD segments would merge their page permissions
+        // (writable AND executable) and double-map physical frames. uniOS
+        // binaries are single-segment; reject anything overlapping outright.
+        for (uint16_t j = 0; j < i; j++) {
+            if (phdr[j].p_type != PT_LOAD || phdr[j].p_memsz == 0 || phdr[i].p_memsz == 0)
+                continue;
+            uint64_t other_end = 0;
+            if (add_overflow_u64(phdr[j].p_vaddr, phdr[j].p_memsz, &other_end))
+                return false;
+            if (phdr[i].p_vaddr < other_end && phdr[j].p_vaddr < mem_end)
+                return false;
+        }
     }
 
-    return true;
+    // The entry point must land inside an actual segment; a dangling entry
+    // would fault before the first instruction and is indistinguishable from
+    // loader failure further up the stack.
+    return entry_covered;
 }
 
 [[nodiscard]] static bool ensure_segment_vma(Process *proc, uint64_t start, uint64_t end, uint64_t flags, VMAType type)
@@ -186,12 +205,14 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
             }
             kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(phys)), k_page_size);
         } else if (target_pml4) {
+            // A page shared with an earlier mapping (cannot happen for
+            // validated non-overlapping segments; kept for robustness): keep
+            // the frame, refresh permissions in place.
             uint64_t existing_flags = vmm_get_page_flags_in(target_pml4, page_vaddr);
             uint64_t merged_flags = existing_flags | flags;
-            // If either the existing mapping or the new segment is executable, keep the page executable.
             if (((existing_flags & PTE_NX) == 0) || ((flags & PTE_NX) == 0))
                 merged_flags &= ~PTE_NX;
-            if (!vmm_map_page_in(target_pml4, page_vaddr, phys & ~0xFFFULL, merged_flags).ok())
+            if (!vmm_replace_page_in(target_pml4, page_vaddr, phys & ~0xFFFULL, merged_flags).ok())
                 return false;
         } else {
             uint64_t merged_flags = flags;
@@ -199,7 +220,7 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
                 merged_flags |= PTE_NX;
             else
                 merged_flags &= ~PTE_NX;
-            if (!vmm_map_page(page_vaddr, phys & ~0xFFFULL, merged_flags).ok())
+            if (!vmm_replace_page(page_vaddr, phys & ~0xFFFULL, merged_flags).ok())
                 return false;
         }
 
@@ -214,6 +235,15 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
                 bytes_copied += copy_amount;
             }
         }
+
+        // Zero the BSS tail of this page ([filesz, memsz)) even when the page
+        // already existed, so no stale file/segment data leaks into BSS.
+        const uint64_t seg_lo = page_vaddr > vaddr ? page_vaddr : vaddr;
+        const uint64_t seg_hi = (page_vaddr + k_page_size) < (vaddr + memsz) ? (page_vaddr + k_page_size)
+                                                                              : (vaddr + memsz);
+        const uint64_t file_hi = seg_hi < (vaddr + filesz) ? seg_hi : (vaddr + filesz);
+        if (seg_hi > file_hi)
+            kstring::zero_memory(dest + (file_hi - page_vaddr), seg_hi - file_hi);
     }
     return true;
 }

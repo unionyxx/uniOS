@@ -245,7 +245,14 @@ void *pmm_alloc_frames(size_t count)
         }
 
         spinlock_release_irqrestore(&g_pmm_lock, flags);
-        return reinterpret_cast<void *>(frame_idx * k_frame_size);
+
+        // Zero outside the lock, matching pmm_alloc_frame(): callers (kernel
+        // stacks, DMA buffers handed to devices) must never observe stale
+        // contents from a previous owner.
+        void *phys_ptr = reinterpret_cast<void *>(frame_idx * k_frame_size);
+        void *virt_ptr = reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(phys_ptr)));
+        kstring::zero_memory(virt_ptr, count * k_frame_size);
+        return phys_ptr;
     }
 
     spinlock_release_irqrestore(&g_pmm_lock, flags);
@@ -297,6 +304,12 @@ void pmm_refcount_inc(const void *frame)
     uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
     if (frame_idx < g_bitmap_bits) {
+        // Referencing a frame nobody owns desyncs the bitmap and the
+        // refcount and later frees the frame out from under the caller.
+        if (g_pmm_refcounts[frame_idx] == 0) {
+            spinlock_release_irqrestore(&g_pmm_lock, flags);
+            panic("pmm: refcount_inc on free frame");
+        }
         if (g_pmm_refcounts[frame_idx] == UINT16_MAX) {
             spinlock_release_irqrestore(&g_pmm_lock, flags);
             panic("pmm: refcount overflow");
@@ -317,6 +330,10 @@ void pmm_refcount_dec(void *frame)
 
     if (frame_idx >= g_bitmap_bits || g_pmm_refcounts[frame_idx] == 0) {
         spinlock_release_irqrestore(&g_pmm_lock, flags);
+        // A free of a frame with no live owner is a double-free or a wild
+        // pointer; swallowing it silently let real bugs masquerade as
+        // working code. Surface it loudly in debug builds.
+        DEBUG_ERROR("pmm: invalid free of frame 0x%lx (double free or stray ref)", frame_idx * k_frame_size);
         return;
     }
 

@@ -1394,7 +1394,7 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     for (uint64_t page_vaddr = start_addr; page_vaddr < end_addr; page_vaddr += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(current->page_table, page_vaddr);
         if (phys != 0) {
-            vmm_map_page_in(current->page_table, page_vaddr, phys & ~0xFFFULL, pte_flags);
+            vmm_replace_page_in(current->page_table, page_vaddr, phys & ~0xFFFULL, pte_flags);
             vmm_invalidate_tlb(page_vaddr);
         }
     }
@@ -2140,12 +2140,27 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint64_t virt_start = 0x200000000ULL; // Dedicated region for FB mapping
             uint64_t flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_WC;
 
+            // Idempotent: a second call returns the existing mapping instead
+            // of failing on already-present PTEs.
+            uint64_t chk_flags = spinlock_acquire_irqsave(&p->vma_lock);
+            VMA *existing_fb = vma_find(p->vma_list, virt_start);
+            if (existing_fb) {
+                const bool same_mapping = existing_fb->start == virt_start &&
+                                          existing_fb->end >= virt_start + size && (existing_fb->flags & PTE_SHARED);
+                spinlock_release_irqrestore(&p->vma_lock, chk_flags);
+                return same_mapping ? virt_start : static_cast<uint64_t>(-1);
+            }
+            spinlock_release_irqrestore(&p->vma_lock, chk_flags);
+
             for (size_t i = 0; i < num_pages; i++) {
                 uint64_t phys = vmm_virt_to_phys(virt_addr + (i * 0x1000));
                 if (phys) {
                     if (!vmm_map_page_in(p->page_table, virt_start + (i * 0x1000), phys, flags).ok()) {
-                        // For FB mapping, failure is more critical but rollback is simpler (VMA not added yet)
-                        // All we need is to stop and return error.
+                        // Roll back the pages already installed so a retry can
+                        // start from a clean slate.
+                        for (size_t j = 0; j < i; j++) {
+                            vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
+                        }
                         return static_cast<uint64_t>(-1);
                     }
                 }
@@ -2154,6 +2169,9 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
             if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
                 spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+                for (size_t j = 0; j < num_pages; j++) {
+                    vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
+                }
                 return static_cast<uint64_t>(-1);
             }
             spinlock_release_irqrestore(&p->vma_lock, sl_flags);
@@ -2198,18 +2216,14 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint32_t height = static_cast<uint32_t>(g_framebuffer->height);
             uint32_t width = static_cast<uint32_t>(g_framebuffer->width);
             uint32_t pitch = static_cast<uint32_t>(g_framebuffer->pitch);
-            const uint32_t *src32 = reinterpret_cast<const uint32_t *>(src);
-            volatile uint32_t *dst32 = reinterpret_cast<volatile uint32_t *>(dest);
-            const uint32_t stride = pitch / 4;
-            uint64_t irq_flags = interrupts_save_disable();
+            const size_t row_bytes = static_cast<size_t>(width) * 4;
+            // Row copies instead of per-pixel volatile stores. Interrupts stay
+            // ENABLED: this copy touches no shared kernel state, and disabling
+            // IRQs for a full-frame VRAM blit stalled input and timers.
             for (uint32_t y = 0; y < height; y++) {
-                const uint32_t *s = &src32[y * stride];
-                volatile uint32_t *d = &dst32[y * stride];
-                for (uint32_t x = 0; x < width; x++) {
-                    d[x] = s[x];
-                }
+                kstring::memcpy(dest + static_cast<size_t>(y) * pitch, src + static_cast<size_t>(y) * pitch,
+                                row_bytes);
             }
-            interrupts_restore(irq_flags);
             CLAC();
 
             asm volatile("sfence" ::: "memory");

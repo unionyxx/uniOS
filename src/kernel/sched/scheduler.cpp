@@ -628,7 +628,10 @@ void scheduler_enter_idle(Process *idle)
     cpu_get_local()->idle = idle;
     // Publish online only now: the LAPIC is enabled and this is the last stop
     // before the idle loop enables interrupts, so IPI/shootdown senders that
-    // observe this flag can actually reach the core.
+    // observe this flag can actually reach the core. Sync the shootdown
+    // sequence first so this core is never asked to ack invalidations that
+    // completed before it existed.
+    vmm_tlb_mark_this_cpu_synced();
     __atomic_store_n(&cpu_get_local()->online, true, __ATOMIC_RELEASE);
     __sync_fetch_and_add(&g_cpu_online_count, 1);
     BOOT_SUCCESS("SMP: core %u online (%d CPUs total)", cpu_get_local()->cpu_id,

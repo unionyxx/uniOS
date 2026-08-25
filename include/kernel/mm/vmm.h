@@ -28,6 +28,9 @@ void vmm_protect_kernel();
 /** @brief Maps a physical address to a virtual address in the current address space. */
 Result<void> vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
+/** @brief Overwrites an existing mapping in the current address space. */
+Result<void> vmm_replace_page(uint64_t virt, uint64_t phys, uint64_t flags);
+
 /** @brief Maps a physical address to a virtual address in a specific PML4. */
 Result<void> vmm_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 
@@ -75,3 +78,11 @@ void vmm_free_dma(const DMAAllocation &alloc);
 bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code);
 void vmm_invalidate_tlb(uint64_t virt);
 void vmm_invalidate_tlb_range(uint64_t virt_start, size_t pages);
+
+// Overwrites an already-present mapping (COW, mprotect, cache-type remap).
+// vmm_map_page_in() refuses present slots; this variant is the escape hatch.
+Result<void> vmm_replace_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
+
+// AP bring-up: adopt the current shootdown sequence so the fresh core is not
+// expected to ack invalidations that predate its existence.
+void vmm_tlb_mark_this_cpu_synced();

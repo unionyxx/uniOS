@@ -170,7 +170,10 @@ KTEST(extended_syscalls_mprotect)
     void *phys = pmm_alloc_frame();
     KTEST_EXPECT(phys != nullptr);
 
-    Result<void> map_res = vmm_map_page_in(current->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys), PTE_PRESENT | PTE_USER);
+    // The bootloader identity-maps low RAM in the kernel PML4, so this slot is
+    // already present: replace it deliberately (this is the mprotect test, not
+    // the fresh-map path).
+    Result<void> map_res = vmm_replace_page_in(current->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys), PTE_PRESENT | PTE_USER);
     KTEST_EXPECT(map_res.ok());
 
     VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
