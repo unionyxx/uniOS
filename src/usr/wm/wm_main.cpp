@@ -33,7 +33,8 @@ bool g_window_visible_region_overflow[MAX_WINDOWS] = {};
 int g_dirty_count = 0;
 bool g_window_visibility_cache_dirty = true;
 bool g_dirty_frame_ready = false;
-static uint64_t g_wait_start_ticks = 0; // Non-blocking wait timer
+static uint64_t g_wait_start_ticks = 0;   // Non-blocking wait timer
+static uint64_t g_wait_warn_interval = 250; // backs off so a wedged display does not log-flood
 
 ContextMenuState g_context_menu = {};
 StoragePromptState g_storage_prompt = {};
@@ -105,7 +106,7 @@ static void reap_exited_children()
     while ((pid = waitpid_nohang(-1, &status)) > 0) {
         for (int i = 0; i < g_window_count; i++) {
             if (g_windows[i].owner_pid == (uint32_t)pid) {
-                close_window(i);
+                close_window(i, false); // owner already dead: do not kill by (possibly recycled) PID
                 i--; // Adjust index as close_window compacts the array by shifting elements down
             }
         }
@@ -226,6 +227,71 @@ static bool sample_stable_window_entry(const WindowEntry &entry, WindowEntrySnap
         *out = b;
     return true;
 }
+
+// Adoption-failure tracking: a registry entry whose window cannot be created
+// (bad shm, size mismatch, mapping failure) used to be retried EVERY frame,
+// burning syscalls forever. Key by (shm_id, owner_pid) so a recycled fd of a
+// different process is not punished for an earlier window's failure.
+namespace {
+
+struct AdoptionFailure
+{
+    int shm_id;
+    uint32_t owner_pid;
+    int count;
+    uint64_t last_ticks;
+};
+
+constexpr int ADOPTION_FAILURE_SLOTS = 64;
+constexpr int ADOPTION_FAILURE_LIMIT = 8;
+AdoptionFailure g_adoption_failures[ADOPTION_FAILURE_SLOTS];
+
+int adoption_failure_slot(int shm_id, uint32_t owner_pid)
+{
+    int empty = -1;
+    for (int i = 0; i < ADOPTION_FAILURE_SLOTS; i++) {
+        if (g_adoption_failures[i].count > 0 && g_adoption_failures[i].shm_id == shm_id &&
+            g_adoption_failures[i].owner_pid == owner_pid)
+            return i;
+        if (empty < 0 && g_adoption_failures[i].count == 0)
+            empty = i;
+    }
+    return empty;
+}
+
+bool adoption_exhausted(int shm_id, uint32_t owner_pid)
+{
+    const int slot = adoption_failure_slot(shm_id, owner_pid);
+    if (slot < 0 || g_adoption_failures[slot].count < ADOPTION_FAILURE_LIMIT)
+        return false;
+    // Expire the tombstone so a client that fixes its buffer can recover.
+    if (get_ticks() - g_adoption_failures[slot].last_ticks > 5000)
+        g_adoption_failures[slot].count = ADOPTION_FAILURE_LIMIT - 1;
+    return g_adoption_failures[slot].count >= ADOPTION_FAILURE_LIMIT;
+}
+
+void adoption_note_failure(int shm_id, uint32_t owner_pid)
+{
+    int slot = adoption_failure_slot(shm_id, owner_pid);
+    if (slot < 0)
+        slot = 0;
+    if (g_adoption_failures[slot].count == 0) {
+        g_adoption_failures[slot].shm_id = shm_id;
+        g_adoption_failures[slot].owner_pid = owner_pid;
+    }
+    if (g_adoption_failures[slot].count < ADOPTION_FAILURE_LIMIT)
+        g_adoption_failures[slot].count++;
+    g_adoption_failures[slot].last_ticks = get_ticks();
+}
+
+void adoption_clear(int shm_id, uint32_t owner_pid)
+{
+    const int slot = adoption_failure_slot(shm_id, owner_pid);
+    if (slot >= 0)
+        g_adoption_failures[slot] = {};
+}
+
+} // namespace
 
 static void cycle_user_window_focus(Registry *registry)
 {
@@ -1159,12 +1225,18 @@ extern "C" int main(int argc, char **argv)
                         hit_idx = focus_window(i, true);
                         WindowEntry *click_entry = g_windows[hit_idx].entry;
                         const uint64_t click_ticks = get_ticks();
+                        const int click_shm = g_windows[hit_idx].shm_id;
+                        const uint32_t click_owner = g_windows[hit_idx].owner_pid;
                         if (click_entry && click_entry == g_input.titlebar_click_entry &&
+                            click_shm == g_input.titlebar_click_shm_id &&
+                            click_owner == g_input.titlebar_click_owner_pid &&
                             click_ticks - g_input.titlebar_click_ticks < 400) {
                             // Titlebar double-click toggles maximize, unless the
                             // first click of the pair already restored the window.
                             const bool first_click_restored = g_input.titlebar_click_was_maximized;
                             g_input.titlebar_click_entry = nullptr;
+                            g_input.titlebar_click_shm_id = WIN_SHM_INVALID;
+                            g_input.titlebar_click_owner_pid = 0;
                             g_input.pointer_down = false;
                             g_input.drag_index = -1;
                             g_input.drag_edges = RESIZE_NONE;
@@ -1175,6 +1247,8 @@ extern "C" int main(int argc, char **argv)
                         g_input.titlebar_click_entry = click_entry;
                         g_input.titlebar_click_ticks = click_ticks;
                         g_input.titlebar_click_was_maximized = click_entry && click_entry->state == WIN_MAXIMIZED;
+                        g_input.titlebar_click_shm_id = click_shm;
+                        g_input.titlebar_click_owner_pid = click_owner;
                         if (g_windows[hit_idx].entry) {
                             if (g_windows[hit_idx].entry->state == WIN_MAXIMIZED) {
                                 int old_x = g_windows[hit_idx].x;
@@ -1509,10 +1583,16 @@ extern "C" int main(int argc, char **argv)
 
                 if (!gui_shm_id_is_valid(e.shm_id) || e.w <= 0 || e.h <= 0 || !e.owner_pid || !e.title[0])
                     continue;
+                if (adoption_exhausted(e.shm_id, e.owner_pid))
+                    continue;
                 if (find_window_by_entry(&e) >= 0 || find_window_by_shm(e.shm_id) >= 0)
                     continue;
-                add_win_internal(e.shm_id, e.x, e.y, e.w, e.h, e.title, &e.damage, &e,
-                                 (e.flags & WIN_FLAG_TRANSPARENT));
+                if (add_win_internal(e.shm_id, e.x, e.y, e.w, e.h, e.title, &e.damage, &e,
+                                     (e.flags & WIN_FLAG_TRANSPARENT))) {
+                    adoption_clear(e.shm_id, e.owner_pid);
+                } else {
+                    adoption_note_failure(e.shm_id, e.owner_pid);
+                }
             }
         }
 
@@ -1521,7 +1601,7 @@ extern "C" int main(int argc, char **argv)
             if (w.entry) {
                 if (w.entry->request_close) {
                     w.entry->request_close = false;
-                    close_window(i);
+                    close_window(i, false); // the app asked for this close; it terminates itself
                     i--;
                     continue;
                 }
@@ -1538,8 +1618,18 @@ extern "C" int main(int argc, char **argv)
 
                 WindowEntrySnapshot entry_snapshot = {};
                 if (!sample_stable_window_entry(*w.entry, &entry_snapshot)) {
-                    w.needs_full_redraw = true;
-                    continue;
+                    if (w.unstable_sample_count < 3) {
+                        w.unstable_sample_count++;
+                        w.needs_full_redraw = true;
+                        continue;
+                    }
+                    // The client updates its entry faster than we can sample
+                    // it; accept the freshest read best-effort instead of
+                    // re-damaging the whole window every frame forever.
+                    entry_snapshot = read_window_entry_snapshot(*w.entry);
+                    w.unstable_sample_count = 0;
+                } else {
+                    w.unstable_sample_count = 0;
                 }
                 int bw = entry_snapshot.buffer_w > 0 ? entry_snapshot.buffer_w : entry_snapshot.w;
                 int bh = entry_snapshot.buffer_h > 0 ? entry_snapshot.buffer_h : entry_snapshot.h;
@@ -1555,10 +1645,14 @@ extern "C" int main(int argc, char **argv)
 
                         if (is_memfd) {
                             int fd = entry_snapshot.shm_id & ~0x40000000;
-                            void *mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                            if (mapped_ptr != MAP_FAILED) {
-                                mapped = reinterpret_cast<uint64_t>(mapped_ptr);
-                                map_ok = true;
+                            uint64_t file_size = syscall1(SYS_FSIZE, (uint64_t)fd);
+                            if (file_size != (uint64_t)-1 && req_size <= file_size) {
+                                void *mapped_ptr =
+                                    mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                                if (mapped_ptr != MAP_FAILED) {
+                                    mapped = reinterpret_cast<uint64_t>(mapped_ptr);
+                                    map_ok = true;
+                                }
                             }
                         } else {
                             uint32_t shm_owner = (uint32_t)syscall1(SYS_SHM_GET_OWNER, entry_snapshot.shm_id);
@@ -1621,10 +1715,14 @@ extern "C" int main(int argc, char **argv)
                             // Modern memfd Backed Graphics Pipeline
                             uint64_t req_size = (uint64_t)bw * bh * 4;
                             int fd = w.shm_id & ~0x40000000;
-                            
+
                             // Safely establish an expanded virtual memory map for the existing file handle
-                            void *mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                            if (mapped_ptr != MAP_FAILED) {
+                            uint64_t file_size = syscall1(SYS_FSIZE, (uint64_t)fd);
+                            void *mapped_ptr = nullptr;
+                            if (file_size != (uint64_t)-1 && req_size <= file_size) {
+                                mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                            }
+                            if (mapped_ptr != MAP_FAILED && mapped_ptr != nullptr) {
                                 if (w.buffer) {
                                     size_t old_size = (size_t)w.buffer_w * w.buffer_h * 4;
                                     munmap(w.buffer, old_size);
@@ -1770,7 +1868,7 @@ extern "C" int main(int argc, char **argv)
             for (int i = 0; i < g_window_count;) {
                 Window &w = g_windows[i];
                 if (w.owner_pid != 0 && !process_is_alive(w.owner_pid)) {
-                    close_window(i);
+                    close_window(i, false); // owner already dead: do not kill by (possibly recycled) PID
                     continue;
                 }
                 ++i;
@@ -1784,7 +1882,10 @@ extern "C" int main(int argc, char **argv)
                 g_window_visibility_cache_dirty = false;
             }
             normalize_dirty_rects(inter);
-            if (resizing && g_dirty_count > 1) {
+            // Collapse only when the rect count actually threatens the budget:
+            // collapsing two small distant rects during a resize turns them
+            // into a screen-spanning recompose every frame.
+            if (resizing && g_dirty_count > MAX_DIRTY_RECTS / 2) {
                 collapse_dirty_rects_to_bounds();
             }
 
@@ -1987,6 +2088,7 @@ extern "C" int main(int argc, char **argv)
                 g_dirty_count = 0;
                 g_dirty_frame_ready = false;
                 g_wait_start_ticks = 0; // Reset wait timer
+                g_wait_warn_interval = 250;
             }
         } else if (!g_dirty_frame_ready || action == wm::PresentPolicyDecision::Skip) {
             if (action == wm::PresentPolicyDecision::Skip)
@@ -1994,7 +2096,10 @@ extern "C" int main(int argc, char **argv)
             // Flush deferred settings persist during idle to avoid blocking I/O during compositing.
             flush_pending_settings_persist(registry);
             if (g_dirty_count == 0 && last_seq <= g_display_queue.completed_sequence) {
-                sleep_ms(1);
+                // Fully idle: a 1 ms loop woke the compositor ~1000x/second
+                // for no work (power/thermal cost on real laptops). The only
+                // genuinely periodic duties are 1 Hz (clock) and toast expiry.
+                sleep_ms(16);
             } else {
                 yield();
             }
@@ -2003,9 +2108,11 @@ extern "C" int main(int argc, char **argv)
             if (g_wait_start_ticks == 0) {
                 g_wait_start_ticks = get_ticks();
             }
-            if (get_ticks() - g_wait_start_ticks > 250) {
+            if (get_ticks() - g_wait_start_ticks > g_wait_warn_interval) {
                 LOG_ERROR("wm", "Display driver has not completed the pending frame");
                 g_wait_start_ticks = get_ticks();
+                if (g_wait_warn_interval < 4000)
+                    g_wait_warn_interval *= 2;
             }
             sleep_ms(1);
             continue; // Wait without releasing ownership of an in-flight present buffer.

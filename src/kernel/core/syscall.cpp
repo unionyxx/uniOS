@@ -1473,6 +1473,24 @@ extern "C" int64_t sys_ftruncate(int fd, uint64_t size)
     return res;
 }
 
+// Size of an open vnode (lets userspace validate a memfd-backed buffer
+// before mapping it; mapping past EOF faults on first access).
+static uint64_t sys_fsize(int fd)
+{
+    Process *p = process_get_current();
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
+        return static_cast<uint64_t>(-1);
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
+        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+        return static_cast<uint64_t>(-1);
+    }
+    const uint64_t size = p->fd_table[fd].vnode->size;
+    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    return size;
+}
+
 extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
 {
     if (fd < 0 || fd >= MAX_OPEN_FILES)
@@ -2870,6 +2888,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_ftruncate(static_cast<int>(arg1), arg2);
         case SYS_FD_TRANSFER:
             return sys_fd_transfer(arg1, static_cast<int>(arg2));
+        case SYS_FSIZE:
+            return sys_fsize(static_cast<int>(arg1));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

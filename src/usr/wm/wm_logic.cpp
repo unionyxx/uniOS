@@ -1315,12 +1315,21 @@ void minimize_window(int index)
         mark_window_chrome_damage(g_windows[focus_idx]);
 }
 
-void close_window(int index)
+void close_window(int index, bool kill_owner)
 {
     if (index < WM_FIRST_USER_WINDOW || index >= g_window_count)
         return;
     Window doomed = g_windows[index];
     uint32_t owner = doomed.owner_pid;
+
+    // A pending titlebar double-click must not survive this window: the
+    // registry slot can be reused by a different window within the
+    // double-click window (ABA).
+    if (doomed.entry && doomed.entry == g_input.titlebar_click_entry) {
+        g_input.titlebar_click_entry = nullptr;
+        g_input.titlebar_click_shm_id = WIN_SHM_INVALID;
+        g_input.titlebar_click_owner_pid = 0;
+    }
 
     mark_window_frame_damage(doomed);
 
@@ -1375,7 +1384,10 @@ void close_window(int index)
         publish_focus(gui_registry(), focus_target);
     if (focus_idx >= WM_FIRST_USER_WINDOW)
         mark_window_chrome_damage(g_windows[focus_idx]);
-    if (owner)
+    // Kill only on user-initiated close. Reaping an already-dead owner (or
+    // honoring the app's own request_close) and then killing by PID can hit a
+    // recycled PID and terminate an unrelated process.
+    if (kill_owner && owner)
         syscall2(SYS_KILL, owner, SIGTERM);
 }
 
@@ -2710,7 +2722,7 @@ bool persist_runtime_settings(const Registry *registry)
     return cfg_write_text_file(SYSTEM_CONFIG_PATH, contents);
 }
 
-void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
+bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
                       bool transparent)
 {
     int bw = (entry && entry->buffer_w > 0) ? entry->buffer_w : w;
@@ -2723,6 +2735,17 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
 
     if (is_memfd) {
         int fd = shm_id & ~0x40000000;
+        // Reject buffers larger than the backing file: mapping past EOF
+        // succeeds but faults (taking the compositor down) on first read.
+        uint64_t file_size = syscall1(SYS_FSIZE, (uint64_t)fd);
+        if (file_size == (uint64_t)-1 || req_size > file_size) {
+            if (g_add_fail_logs < 8) {
+                LOG_WARN("wm", "add rejected: memfd=%d claims %ux%u but file is %llu bytes", fd, bw, bh,
+                         (unsigned long long)file_size);
+                g_add_fail_logs++;
+            }
+            return false;
+        }
         void *mapped_ptr = mmap(NULL, req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (mapped_ptr != MAP_FAILED) {
             ptr = reinterpret_cast<uint64_t>(mapped_ptr);
@@ -2744,7 +2767,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
             LOG_WARN("wm", "add skipped/failed: shm=%d (invalid bounds/size/mapping)", shm_id);
             g_add_fail_logs++;
         }
-        return;
+        return false;
     }
 
     if (g_window_count >= MAX_WINDOWS) {
@@ -2758,7 +2781,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
         } else {
             syscall1(SYS_SHM_UNMAP, (uint64_t)shm_id);
         }
-        return;
+        return false;
     }
 
     w = w > bw ? bw : w;
@@ -2810,6 +2833,7 @@ void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
         enqueue_damage_rect(o.x, o.y, o.w, o.h);
     }
     invalidate_window_visibility_cache();
+    return true;
 }
 
 void apply_mouse_move(Registry *registry, int new_x, int new_y)

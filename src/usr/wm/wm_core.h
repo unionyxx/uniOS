@@ -129,6 +129,10 @@ struct Window
     bool resize_configure_pending;
     bool first_damage_received;
 
+    // Consecutive frames the shared WindowEntry could not be sampled stable.
+    // Bounded so one busy client cannot force endless full-window re-damage.
+    int unstable_sample_count = 0;
+
     char title[64];
 };
 
@@ -293,10 +297,14 @@ struct WmInputState
     bool alt_down = false;
     int snap_edges = RESIZE_NONE;
     DirtyRect snap_preview = {};
-    // Titlebar double-click tracking (maximize/restore).
+    // Titlebar double-click tracking (maximize/restore). The shm_id/owner
+    // pair guards against the registry slot being reused by a different
+    // window within the double-click window (ABA).
     WindowEntry *titlebar_click_entry = nullptr;
     uint64_t titlebar_click_ticks = 0;
     bool titlebar_click_was_maximized = false;
+    int titlebar_click_shm_id = WIN_SHM_INVALID;
+    uint32_t titlebar_click_owner_pid = 0;
 };
 
 extern Surface g_screen;
@@ -683,7 +691,7 @@ bool focus_window_owner(const Window *w);
 void publish_focus(Registry *registry, const Window *w);
 void clear_window_focus(Registry *registry);
 int focus_window(int index, bool raise);
-void close_window(int index);
+void close_window(int index, bool kill_owner = true);
 void minimize_window(int index);
 void maximize_window(int index);
 void toggle_maximize_window(int index);
@@ -692,7 +700,7 @@ void set_window_bounds(Window &w, int x, int y, int width, int height);
 void apply_pending_window_bounds();
 int bring_window_to_front(int index);
 int send_window_to_back(int index);
-void add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
+bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
                       bool transparent);
 int find_top_opaque_covering_window(const DirtyRect &r);
 bool rect_intersects_window_chrome(const Window &w, const DirtyRect &r);
