@@ -53,6 +53,15 @@ static Surface g_blur_surface = {};
 static uint32_t g_last_blur_generation = 0;
 static int g_last_blur_shm_id = -1;
 
+// Launch feedback: while an app is starting (no window yet), its dock item
+// shows a hollow indicator and further launches are suppressed. A click also
+// flashes a short pressed state for tactile feedback.
+static uint64_t g_launch_pending_ticks[SHELL_DOCK_ITEM_COUNT] = {};
+static int g_pressed_item = -1;
+static uint64_t g_pressed_ticks = 0;
+static constexpr uint64_t DOCK_PRESS_FLASH_TICKS = 150;
+static constexpr uint64_t DOCK_LAUNCH_TIMEOUT_TICKS = 8000;
+
 static constexpr int k_dock_item_count = (int)(sizeof(k_dock_items) / sizeof(k_dock_items[0]));
 static_assert(k_dock_item_count == SHELL_DOCK_ITEM_COUNT, "Dock layout constants must match dock items");
 
@@ -782,6 +791,11 @@ static void draw_dock(Surface *canvas, Registry *registry, int hovered_idx)
             draw_fallback_icon(canvas, i, x_ptr, icon_y, icon_size);
         }
 
+        if (g_pressed_item == i) {
+            int press_r = gui_corner_radius(icon_size, icon_size, gui_radius_lg());
+            gui_fill_rounded_rect(canvas, x_ptr, icon_y, icon_size, icon_size, press_r, 0x2E000000u);
+        }
+
         if (open_count > 0) {
             bool focused = registry->focused_window >= 2 && registry->focused_window < (int)registry->window_count &&
                            window_title_matches_item(registry->windows[registry->focused_window], k_dock_items[i]);
@@ -793,6 +807,12 @@ static void draw_dock(Surface *canvas, Registry *registry, int hovered_idx)
             uint32_t dot_color =
                 is_light ? (focused ? 0x90000000u : 0x60000000u) : (focused ? 0xD0F2F2F0u : 0x85F2F2F0u);
             gui_fill_rounded_rect(canvas, dot_x, dot_y, dot_w, dot_h, dot_h / 2, dot_color);
+        } else if (g_launch_pending_ticks[i] != 0) {
+            int dot_h = shell_dock_indicator_size();
+            int dot_y = panel_y + panel_h - gui_scaled_metric(6) - dot_h;
+            int dot_x = x_ptr + (icon_size - dot_h) / 2;
+            uint32_t ring_color = is_light ? 0x90000000u : 0xA0F2F2F0u;
+            gui_draw_rounded_rect(canvas, dot_x, dot_y, dot_h, dot_h, dot_h / 2, ring_color);
         }
         if (is_hovered)
             draw_hover_label(canvas, k_dock_items[i], panel_y, x_ptr, icon_size, is_light);
@@ -916,21 +936,79 @@ extern "C" int main(int argc, char **argv)
             submit_damage(registry->windows[1], dock_full_rect(dock_w, dock_h));
         }
 
+        int dirty_items[SHELL_DOCK_ITEM_COUNT];
+        int dirty_item_count = 0;
+        auto note_dirty_item = [&](int idx) {
+            if (idx < 0)
+                return;
+            for (int d = 0; d < dirty_item_count; d++)
+                if (dirty_items[d] == idx)
+                    return;
+            if (dirty_item_count < SHELL_DOCK_ITEM_COUNT)
+                dirty_items[dirty_item_count++] = idx;
+        };
+
+        if (registry->dk_clicked) {
+            registry->dk_clicked = false;
+            asm volatile("sfence" ::: "memory");
+
+            int clicked_icon = get_clicked_icon(registry, dock_w, dock_h);
+            if (clicked_icon != -1) {
+                g_pressed_item = clicked_icon;
+                g_pressed_ticks = get_ticks();
+                note_dirty_item(clicked_icon);
+                int target_slot = find_window_for_item(registry, k_dock_items[clicked_icon], registry->focused_window);
+                if (target_slot >= 2 && target_slot < (int)registry->window_count) {
+                    WindowEntry &entry = registry->windows[target_slot];
+                    if (entry.state == WIN_MINIMIZED || entry.state == WIN_HIDDEN)
+                        entry.request_restore = true;
+                    entry.request_focus = true;
+                    asm volatile("sfence" ::: "memory");
+                } else if (g_launch_pending_ticks[clicked_icon] == 0) {
+                    // No window yet and no launch in flight: start the app
+                    // and mark the item pending so rapid clicks cannot fork a
+                    // second instance before the first window registers.
+                    int pid = fork();
+                    if (pid == 0) {
+                        exec(k_dock_items[clicked_icon].path);
+                        exit(1);
+                    }
+                    if (pid > 0)
+                        g_launch_pending_ticks[clicked_icon] = get_ticks();
+                }
+            }
+        }
+
         int hovered = get_hovered_icon(registry, dock_w, dock_h);
         uint32_t sig = dock_visual_signature(registry);
         bool hover_changed = (hovered != last_hovered);
         bool visual_changed = (sig != last_sig);
-        if (hover_changed || visual_changed) {
+
+        if (hover_changed) {
+            note_dirty_item(last_hovered);
+            note_dirty_item(hovered);
+        }
+        if (g_pressed_item >= 0 && get_ticks() - g_pressed_ticks >= DOCK_PRESS_FLASH_TICKS) {
+            note_dirty_item(g_pressed_item);
+            g_pressed_item = -1;
+        }
+        for (int i = 0; i < k_dock_item_count; i++) {
+            if (g_launch_pending_ticks[i] == 0)
+                continue;
+            if (count_windows_for_item(registry, k_dock_items[i]) > 0 ||
+                get_ticks() - g_launch_pending_ticks[i] > DOCK_LAUNCH_TIMEOUT_TICKS) {
+                g_launch_pending_ticks[i] = 0;
+                note_dirty_item(i);
+            }
+        }
+
+        if (hover_changed || visual_changed || dirty_item_count > 0) {
             Rect dirty = dock_full_rect(dock_w, dock_h);
             if (!visual_changed) {
                 bool has_dirty = false;
-                if (last_hovered >= 0) {
-                    dirty = dock_item_damage_rect(last_hovered, dock_w, dock_h);
-                    has_dirty = true;
-                }
-                if (hovered >= 0) {
-                    Rect hovered_dirty = dock_item_damage_rect(hovered, dock_w, dock_h);
-                    dirty = has_dirty ? gui_rect_union(dirty, hovered_dirty) : hovered_dirty;
+                for (int d = 0; d < dirty_item_count; d++) {
+                    Rect item_rect = dock_item_damage_rect(dirty_items[d], dock_w, dock_h);
+                    dirty = has_dirty ? gui_rect_union(dirty, item_rect) : item_rect;
                     has_dirty = true;
                 }
                 if (!has_dirty || !gui_clamp_rect_to_canvas(&dirty, (int)dock_w, (int)dock_h))
@@ -944,29 +1022,6 @@ extern "C" int main(int argc, char **argv)
             submit_damage(registry->windows[1], dirty);
             last_hovered = hovered;
             last_sig = sig;
-        }
-
-        if (registry->dk_clicked) {
-            registry->dk_clicked = false;
-            asm volatile("sfence" ::: "memory");
-
-            int clicked_icon = get_clicked_icon(registry, dock_w, dock_h);
-            if (clicked_icon != -1) {
-                int target_slot = find_window_for_item(registry, k_dock_items[clicked_icon], registry->focused_window);
-                if (target_slot >= 2 && target_slot < (int)registry->window_count) {
-                    WindowEntry &entry = registry->windows[target_slot];
-                    if (entry.state == WIN_MINIMIZED || entry.state == WIN_HIDDEN)
-                        entry.request_restore = true;
-                    entry.request_focus = true;
-                    asm volatile("sfence" ::: "memory");
-                } else {
-                    int pid = fork();
-                    if (pid == 0) {
-                        exec(k_dock_items[clicked_icon].path);
-                        exit(1);
-                    }
-                }
-            }
         }
 
         reap_exited_children();

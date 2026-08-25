@@ -21,7 +21,7 @@ Occupies window slot 0. Renders a canvas taller than the visible strip (for drop
 
 ## Dock
 
-Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, Settings. Icons come from `.uoic` packages (the calendar composes day/number assets over its base icon). Running windows get indicator dots; clicks cycle matching windows starting after the focused one, or launch. The dock renders a glass panel over a blurred backdrop and publishes its width in the registry.
+Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, Settings. Icons come from `.uoic` packages (the calendar composes day/number assets over its base icon). Running windows get indicator dots; clicks cycle matching windows starting after the focused one, or launch. Launching shows a hollow pending indicator and suppresses duplicate launches until the window registers (8 s timeout); clicks flash a brief pressed state. The dock renders a glass panel over a blurred backdrop and publishes its width in the registry.
 
 ## Applications
 
