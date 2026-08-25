@@ -2196,6 +2196,11 @@ void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, const char 
     gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, knob_bg);
 }
 
+int gui_app_slider_h(void)
+{
+    return gui_space_2() * 2 + gui_line_height() + gui_scaled_metric(10) + gui_scaled_metric(16);
+}
+
 Rect gui_app_slider_track_rect(int x, int y, int w, int h)
 {
     const int pad = gui_space_2();

@@ -489,7 +489,7 @@ static int compute_preferences_content_height(PreferencesState *state, int detai
         section_h += gui_space_2() + gui_line_height();
     } else if (state->section == PREF_SECTION_DESKTOP) {
         int row_h = gui_scaled_metric(40);
-        section_h += row_h * 2 + gui_scaled_metric(56) + gui_scaled_metric(12) * 2;
+        section_h += row_h * 2 + gui_app_slider_h() + gui_scaled_metric(12) * 2;
     } else if (state->section == PREF_SECTION_NETWORK) {
         int row_h = gui_scaled_metric(40);
         section_h += row_h * 2 + gui_scaled_metric(12);
@@ -623,7 +623,7 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
         rects->grid_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
         rects->seconds_toggle = gui_rect_make(content_x, content_y + row_h + gui_scaled_metric(12), content_w, row_h);
         int slider_y = rects->seconds_toggle.y + rects->seconds_toggle.h + gui_scaled_metric(12);
-        rects->volume_slider = gui_rect_make(content_x, slider_y, content_w, gui_scaled_metric(56));
+        rects->volume_slider = gui_rect_make(content_x, slider_y, content_w, gui_app_slider_h());
         gui_app_draw_toggle_row(win, rects->grid_toggle.x, rects->grid_toggle.y, rects->grid_toggle.w,
                                 rects->grid_toggle.h, "Show desktop grid", nullptr,
                                 (state->system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) != 0, false,

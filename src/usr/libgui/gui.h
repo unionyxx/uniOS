@@ -300,6 +300,7 @@ void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, const char 
 // Slider row: label left, percent value right, track along the bottom.
 // Track geometry for hit-testing comes from gui_app_slider_track_rect; map a
 // pointer x position to a value with gui_app_slider_value_from_x.
+int gui_app_slider_h(void);
 Rect gui_app_slider_track_rect(int x, int y, int w, int h);
 uint32_t gui_app_slider_value_from_x(int mouse_x, const Rect *track, uint32_t max_value);
 void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *label, uint32_t value, uint32_t max_value,
