@@ -27,7 +27,7 @@ Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, 
 
 | App | Description |
 | --- | --- |
-| **terminal** | Terminal emulator hosting the shell over pipes; epoll on shell output plus GUI events; per-cell colors with an ANSI CSI subset (clear, cursor home/move, erase line, SGR foreground colors); 2048-line scrollback; starts 80x25. |
+| **terminal** | Terminal emulator hosting the shell over pipes; epoll on shell output plus GUI events (~16 ms idle poll); per-cell colors with an ANSI CSI subset (clear, cursor home/move, erase line, SGR foreground colors); 2048-line scrollback that holds its position while output streams; blinking caret while focused; starts 80x25. |
 | **files** | File manager: places sidebar (Home `/data`, Desktop, Documents, Downloads, Pictures) + volumes; listing via `SYS_GETDENTS`; new folder, rename, copy, move; context menus; storage-mode aware. |
 | **preferences** | Settings app: Appearance (theme, wallpaper, transparency, animations), Desktop (grid, clock seconds, volume), Network (ethernet + DHCP toggles), System (launch terminal, storage mode). Writes registry fields and persists `SYSTEM.CFG`/wallpaper config. |
 | **latitude** | Text/code editor: 2048 x 512 buffer, 512 KiB open limit with binary sniffing, syntax highlighting (text, C++, JS, Python, Rust, HTML, CSS, JSON, Markdown, shell), project browser, outline, search panes. |

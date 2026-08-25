@@ -283,6 +283,22 @@ public:
         return m_ready;
     }
 
+    void set_focused(bool f)
+    {
+        m_focused = f;
+    }
+
+    bool focused() const
+    {
+        return m_focused;
+    }
+
+    // Cursor blink gate: render_all only draws the caret when this is true.
+    void set_blink_on(bool on)
+    {
+        m_blink_on = on;
+    }
+
     void clear_screen()
     {
         reset_history();
@@ -428,7 +444,7 @@ public:
             }
         }
 
-        if (m_cursor_visible && m_cursor_x < m_width && m_cursor_y < m_height) {
+        if (m_cursor_visible && m_blink_on && m_scroll_offset == 0 && m_cursor_x < m_width && m_cursor_y < m_height) {
             gui_fill_rect(&m_window, term_content_x() + (int32_t)(m_cursor_x * term_cell_w()),
                           term_content_y() + (int32_t)(m_cursor_y * term_cell_h() + term_cell_h() - TERM_CURSOR_H),
                           term_cell_w(), TERM_CURSOR_H, term_cursor());
@@ -574,7 +590,9 @@ private:
 
         m_history_count++;
         m_history_cursor_col = 0;
-        m_scroll_offset = 0;
+        // Do NOT force m_scroll_offset to 0 here: a user reading scrollback
+        // while output streams should keep their place. The offset is counted
+        // from the bottom, so following live output (offset 0) still works.
         // No full redraw here: the grid diff in render_all() repaints the
         // shifted cells. Forcing a full redraw on every newline made bursty
         // command output redraw the whole window per line.
@@ -751,7 +769,10 @@ private:
                 clear_screen();
             }
         } else if (final_char == 'H') {
-            reset_history();
+            // Cursor home: move to the start of the current line. This must
+            // NOT clear the screen (programs send CSI H frequently just to
+            // reposition the cursor).
+            m_history_cursor_col = 0;
         } else if (final_char == 'K') {
             if (m_history_count == 0)
                 return;
@@ -760,14 +781,30 @@ private:
             uint32_t *fg = history_line_fg(line_index);
             uint16_t len = history_line_len(line_index);
             int mode = term_ansi_param_at(m_ansi_buf, 0, 0);
-            uint32_t start = mode == 2 ? 0 : m_history_cursor_col;
-            if (start < len) {
-                memset(line + start, 0, (size_t)(len - start));
-                memset(fg + start, 0, (size_t)(len - start) * sizeof(uint32_t));
-                history_line_len(line_index) = (uint16_t)start;
-                if (m_history_cursor_col > start)
-                    m_history_cursor_col = start;
-                m_needs_full_redraw = true;
+            if (mode == 1) {
+                // Erase from the start of the line up to the cursor.
+                uint32_t count = m_history_cursor_col;
+                if (count > len)
+                    count = len;
+                if (count > 0) {
+                    memmove(line, line + count, (size_t)(len - count));
+                    memmove(fg, fg + count, (size_t)(len - count) * sizeof(uint32_t));
+                    len = (uint16_t)(len - count);
+                    line[len] = '\0';
+                    history_line_len(line_index) = len;
+                    m_history_cursor_col = 0;
+                    m_needs_full_redraw = true;
+                }
+            } else {
+                uint32_t start = mode == 2 ? 0 : m_history_cursor_col;
+                if (start < len) {
+                    memset(line + start, 0, (size_t)(len - start));
+                    memset(fg + start, 0, (size_t)(len - start) * sizeof(uint32_t));
+                    history_line_len(line_index) = (uint16_t)start;
+                    if (m_history_cursor_col > start)
+                        m_history_cursor_col = start;
+                    m_needs_full_redraw = true;
+                }
             }
         } else if (final_char == 'C') {
             int n = term_ansi_param_at(m_ansi_buf, 0, 1);
@@ -824,6 +861,8 @@ private:
     int m_ansi_state = 0;
     int m_ansi_idx = 0;
     char m_ansi_buf[32];
+    bool m_focused = true;
+    bool m_blink_on = true;
 };
 
 static void term_printf(TerminalEmulator &term, const char *fmt, ...)
@@ -903,6 +942,8 @@ extern "C" int main(int argc, char **argv)
     }
 
     bool shell_alive = true;
+    uint64_t last_activity_ticks = get_ticks();
+    bool last_blink_on = true;
     while (true) {
         bool saw_event = false;
         Event gui_ev = {};
@@ -918,6 +959,17 @@ extern "C" int main(int argc, char **argv)
                 if (term.sync_resize()) {
                     needs_render = true;
                 }
+                continue;
+            }
+            if (gui_ev.type == EVT_FOCUS) {
+                term.set_focused(true);
+                last_activity_ticks = get_ticks();
+                needs_render = true;
+                continue;
+            }
+            if (gui_ev.type == EVT_UNFOCUS) {
+                term.set_focused(false);
+                needs_render = true;
                 continue;
             }
             if (gui_ev.type == EVT_MOUSE_SCROLL) {
@@ -945,8 +997,10 @@ extern "C" int main(int argc, char **argv)
                 }
 
                 if (shell_alive) {
-                    write(pipe_to_shell[1], &c, 1);
+                    if (write(pipe_to_shell[1], &c, 1) < 0)
+                        shell_alive = false;
                 }
+                last_activity_ticks = get_ticks();
                 continue;
             }
         }
@@ -955,7 +1009,7 @@ extern "C" int main(int argc, char **argv)
         //    holds before rendering so bursty output costs one redraw, not
         //    one redraw per chunk (the visible "word-by-word" effect).
         if (shell_alive) {
-            int timeout = (needs_render || saw_event) ? 0 : 50;
+            int timeout = (needs_render || saw_event) ? 0 : 16;
             struct epoll_event events[1];
             int n = epoll_wait(epfd, events, 1, timeout);
             char read_buf[4096];
@@ -965,6 +1019,7 @@ extern "C" int main(int argc, char **argv)
                     term.write_bytes(read_buf, (size_t)bytes_read);
                     needs_render = true;
                     saw_event = true;
+                    last_activity_ticks = get_ticks();
                     // read() blocks on an empty pipe: only keep draining
                     // while epoll says more data is already pending.
                     n = epoll_wait(epfd, events, 1, 0);
@@ -990,10 +1045,27 @@ extern "C" int main(int argc, char **argv)
             needs_render = true;
         }
 
+        // 4. Cursor blink: solid for a moment after activity, then a steady
+        //    530 ms phase while focused; hidden when the window is unfocused.
+        uint64_t now_ticks = get_ticks();
+        bool blink_on;
+        if (!term.focused()) {
+            blink_on = false;
+        } else if (now_ticks - last_activity_ticks < 530) {
+            blink_on = true;
+        } else {
+            blink_on = (((now_ticks - last_activity_ticks) / 530) % 2) == 0;
+        }
+        if (blink_on != last_blink_on) {
+            last_blink_on = blink_on;
+            term.set_blink_on(blink_on);
+            needs_render = true;
+        }
+
         if (needs_render) {
             term.render_all();
         } else if (!shell_alive && !saw_event) {
-            sleep_ms(50);
+            sleep_ms(16);
         }
     }
 
