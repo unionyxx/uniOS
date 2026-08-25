@@ -1,3 +1,4 @@
+#include <drivers/acpi/acpi.h>
 #include <drivers/apic/ioapic.h>
 #include <drivers/class/hid/ps2_keyboard.h>
 #include <drivers/class/hid/ps2_mouse.h>
@@ -193,6 +194,30 @@ void irq_unregister_isa_handler(uint8_t irq)
     irq_unregister_vector_handler(irq_isa_to_vector(irq));
 }
 
+// Delays for `us` microseconds using the ACPI PM timer (fixed 3.579545 MHz).
+// Returns false when no PM timer is available or it does not advance. The
+// 24-bit modular delta accumulates correctly across counter wrap as long as
+// the loop samples more often than the 24-bit wrap period (~4.7 s).
+[[nodiscard]] static bool pm_timer_wait_us(uint64_t us)
+{
+    const uint32_t pm_blk = acpi_get_pm_timer_block();
+    if (pm_blk == 0)
+        return false;
+
+    const uint64_t target = (us * 3579545ULL + 999999ULL) / 1000000ULL;
+    uint32_t last = inl(pm_blk);
+    uint64_t elapsed = 0;
+    for (uint64_t guard = 0; guard < 100000000ULL; guard++) {
+        const uint32_t cur = inl(pm_blk);
+        elapsed += (cur - last) & 0xFFFFFFu;
+        last = cur;
+        if (elapsed >= target)
+            return true;
+        asm volatile("pause");
+    }
+    return false;
+}
+
 void apic_timer_init(uint32_t frequency)
 {
     if (!g_lapic_base || frequency == 0)
@@ -203,14 +228,24 @@ void apic_timer_init(uint32_t frequency)
     lapic_write(LAPIC_DIVIDE, LAPIC_DIVIDE_16);
     lapic_write(LAPIC_INITCNT, 0xFFFFFFFFu);
 
-    const bool calibrated = pit_wait_10ms_via_channel2();
-    const uint32_t elapsed = 0xFFFFFFFFu - lapic_read(LAPIC_CURRCNT);
+    bool calibrated = pit_wait_10ms_via_channel2();
+    uint32_t elapsed = 0xFFFFFFFFu - lapic_read(LAPIC_CURRCNT);
+
+    // On modern systems the legacy PIT can be gated off, making PIT
+    // calibration fail. Fall back to the fixed-rate ACPI PM timer.
+    if (!calibrated || elapsed == 0) {
+        lapic_write(LAPIC_INITCNT, 0xFFFFFFFFu);
+        if (pm_timer_wait_us(10000)) {
+            elapsed = 0xFFFFFFFFu - lapic_read(LAPIC_CURRCNT);
+            calibrated = elapsed != 0;
+        }
+    }
 
     lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_MASK | kVectorTimer);
 
     uint64_t ticks_per_10ms = elapsed;
     if (!calibrated || ticks_per_10ms == 0) {
-        BOOT_WARN("APIC: PIT calibration failed/timed out, using fallback");
+        BOOT_WARN("APIC: PIT/PM-timer calibration failed, using fallback");
         ticks_per_10ms = 100000; // 10 MHz fallback for a 10 ms window
     }
 
@@ -256,12 +291,55 @@ void apic_enable_this_core()
     lapic_write(LAPIC_SVR, LAPIC_SW_ENABLE | kVectorSpurious);
 }
 
+// If firmware left the local APIC in x2APIC mode, MMIO register access does
+// nothing and interrupts silently stop working. Attempt the documented
+// transition back to xAPIC mode (disable the APIC, clear the EXT bit, then
+// re-enable). Some CPUs only allow this via reset, so treat it as best-effort
+// and warn loudly if x2APIC stays on.
+static void apic_force_xapic_mode()
+{
+    constexpr uint32_t kIa32ApicBase = 0x1B;
+    constexpr uint64_t kApicGlobalEnable = 1ULL << 11;
+    constexpr uint64_t kApicX2ApicEnable = 1ULL << 10;
+
+    uint32_t lo = 0, hi = 0;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kIa32ApicBase));
+    uint64_t base = (static_cast<uint64_t>(hi) << 32) | lo;
+
+    if ((base & kApicX2ApicEnable) == 0)
+        return;
+
+    BOOT_WARN("APIC: x2APIC mode is enabled, attempting transition to xAPIC");
+
+    // Disable the APIC, clear x2APIC, then re-enable.
+    base &= ~kApicGlobalEnable;
+    asm volatile("wrmsr" ::"c"(kIa32ApicBase), "a"(static_cast<uint32_t>(base)),
+                 "d"(static_cast<uint32_t>(base >> 32)));
+    base &= ~kApicX2ApicEnable;
+    asm volatile("wrmsr" ::"c"(kIa32ApicBase), "a"(static_cast<uint32_t>(base)),
+                 "d"(static_cast<uint32_t>(base >> 32)));
+    base |= kApicGlobalEnable;
+    asm volatile("wrmsr" ::"c"(kIa32ApicBase), "a"(static_cast<uint32_t>(base)),
+                 "d"(static_cast<uint32_t>(base >> 32)));
+
+    lo = 0;
+    hi = 0;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kIa32ApicBase));
+    const uint64_t check = (static_cast<uint64_t>(hi) << 32) | lo;
+    if (check & kApicX2ApicEnable)
+        BOOT_WARN("APIC: unable to leave x2APIC mode; MMIO APIC access may not function");
+    else
+        BOOT_LOG("APIC: switched to xAPIC mode");
+}
+
 void apic_init()
 {
     constexpr uint64_t k_default_lapic_phys = 0xFEE00000;
     uint64_t lapic_phys = k_default_lapic_phys;
     g_lapic_base = 0;
     g_apic_enabled = false;
+
+    apic_force_xapic_mode();
 
     AcpiMadtHeader *madt = reinterpret_cast<AcpiMadtHeader *>(acpi_find_table("APIC"));
     if (madt) {

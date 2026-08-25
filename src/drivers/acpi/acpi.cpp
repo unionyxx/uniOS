@@ -16,6 +16,8 @@ static uint32_t smi_cmd_port = 0;   // SMI command port
 static uint8_t acpi_enable_val = 0; // Value to write to enable ACPI
 static AcpiGas g_reset_reg = {};    // ACPI Reset Register
 static uint8_t g_reset_value = 0;   // ACPI Reset Value
+static uint32_t g_pm_tmr_blk = 0;   // ACPI PM Timer block (I/O port)
+static uint8_t g_pm_tmr_len = 0;    // PM Timer block length
 static bool g_rsdp_logged = false;
 
 
@@ -315,6 +317,8 @@ void acpi_init()
                 pm1b_cnt = fadt->pm1b_cnt_blk;
                 smi_cmd_port = fadt->smi_cmd;
                 acpi_enable_val = fadt->acpi_enable;
+                g_pm_tmr_blk = fadt->pm_tmr_blk;
+                g_pm_tmr_len = fadt->pm_tmr_len;
                 if (fadt->dsdt)
                     find_s5_in_dsdt(fadt->dsdt);
             }
@@ -337,6 +341,14 @@ void acpi_init()
 bool acpi_is_available()
 {
     return acpi_available;
+}
+
+uint32_t acpi_get_pm_timer_block()
+{
+    // Only expose a usable I/O-port PM timer of a sane length.
+    if (g_pm_tmr_blk == 0 || g_pm_tmr_len < 4)
+        return 0;
+    return g_pm_tmr_blk;
 }
 
 // SCI_EN bit in PM1_CNT register

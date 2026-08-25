@@ -112,3 +112,7 @@ void *acpi_find_table(const char *signature);
 bool acpi_reboot();
 bool acpi_poweroff();
 bool acpi_is_available();
+// Returns the ACPI PM timer I/O-port block, or 0 if unavailable. The PM timer
+// runs at a fixed 3.579545 MHz and is a reliable calibration source on
+// systems where the legacy PIT is gated off.
+uint32_t acpi_get_pm_timer_block();
