@@ -8,6 +8,12 @@ void timer_init(uint32_t frequency);
 void timer_set_frequency(uint32_t frequency);
 uint64_t timer_get_ticks();
 uint32_t timer_get_frequency();
-void timer_handler();
+uint32_t timer_handler();
 void timer_poll_wait_ms(uint32_t ms);
 void sleep(uint32_t ms);
+
+uint64_t timer_ms_to_ticks(uint64_t ms);
+void timer_tsc_calibrate();
+uint64_t timer_tsc_freq_hz();
+uint64_t timer_now_us();
+void udelay(uint32_t us);

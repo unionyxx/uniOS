@@ -2507,7 +2507,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return 0;
         }
         case SYS_GET_TSC_FREQ: {
-            return 2000;
+            return timer_tsc_freq_hz() / 1000000ULL;
         }
         case SYS_GETRANDOM: {
             size_t len = static_cast<size_t>(arg2);

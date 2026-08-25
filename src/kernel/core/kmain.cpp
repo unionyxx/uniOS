@@ -432,6 +432,7 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     ps2_keyboard_init();
     ps2_mouse_init();
     timer_init(1000);
+    timer_tsc_calibrate();
     boot_timing_start();
     pci_init();
     display_late_init();
