@@ -28,6 +28,7 @@ struct CalcState
     CalcOp pending;
     bool fresh;
     bool has_decimal;
+    bool error;
     uint8_t decimal_places;
     char display[32];
 };
@@ -62,6 +63,10 @@ static constexpr double k_pow10[] = {
 
 static void calc_update_display(CalcState *state)
 {
+    if (state->error) {
+        snprintf(state->display, sizeof(state->display), "Error");
+        return;
+    }
     if (state->has_decimal && state->decimal_places > 0) {
         snprintf(state->display, sizeof(state->display), "%.*f", state->decimal_places, state->current);
     } else {
@@ -125,15 +130,21 @@ static void calc_input_decimal(CalcState *state)
 static void calc_exec_pending(CalcState *state)
 {
     if (state->pending == CalcOp::None) return;
-    
+
     switch (state->pending) {
         case CalcOp::Add: state->accumulator += state->current; break;
         case CalcOp::Sub: state->accumulator -= state->current; break;
         case CalcOp::Mul: state->accumulator *= state->current; break;
-        case CalcOp::Div: state->accumulator = (state->current != 0.0) ? (state->accumulator / state->current) : 0.0; break;
+        case CalcOp::Div:
+            if (state->current != 0.0) {
+                state->accumulator = state->accumulator / state->current;
+            } else {
+                state->error = true;
+            }
+            break;
         default: break;
     }
-    
+
     state->current = state->accumulator;
     state->pending = CalcOp::None;
     state->fresh = true;
@@ -157,6 +168,21 @@ static void calc_input_op(CalcState *state, CalcOp op)
 
 static void calc_dispatch_action(CalcState *state, const ButtonDef& btn)
 {
+    if (state->error) {
+        // From an error state only a fresh digit or an explicit clear resumes.
+        if (btn.action == BtnAction::ClearAll) {
+            calc_init(state);
+        } else if (btn.action == BtnAction::Digit || btn.action == BtnAction::Decimal ||
+                   btn.action == BtnAction::Clear) {
+            state->error = false;
+            calc_init(state);
+            if (btn.action == BtnAction::Digit)
+                calc_input_digit(state, btn.value);
+            else if (btn.action == BtnAction::Decimal)
+                calc_input_decimal(state);
+        }
+        return;
+    }
     switch (btn.action) {
         case BtnAction::Digit:      calc_input_digit(state, btn.value); break;
         case BtnAction::Op:         calc_input_op(state, static_cast<CalcOp>(btn.value)); break;
@@ -166,6 +192,44 @@ static void calc_dispatch_action(CalcState *state, const ButtonDef& btn)
         case BtnAction::Decimal:    calc_input_decimal(state); break;
         case BtnAction::Percent:    state->current /= 100.0; calc_update_display(state); break;
         case BtnAction::ToggleSign: state->current = -state->current; state->fresh = false; calc_update_display(state); break;
+    }
+}
+
+// Keyboard entry point: map a character to a button action where one exists.
+static bool calc_dispatch_key(CalcState *state, char c)
+{
+    if (c >= '0' && c <= '9') {
+        ButtonDef d = {"", true, BtnAction::Digit, (uint8_t)(c - '0')};
+        calc_dispatch_action(state, d);
+        return true;
+    }
+    switch (c) {
+        case '.': case ',': calc_dispatch_action(state, {".", true, BtnAction::Decimal, 0}); return true;
+        case '+':           calc_dispatch_action(state, {"+", false, BtnAction::Op, (uint8_t)CalcOp::Add}); return true;
+        case '-':           calc_dispatch_action(state, {"-", false, BtnAction::Op, (uint8_t)CalcOp::Sub}); return true;
+        case '*': case 'x': case 'X':
+            calc_dispatch_action(state, {"*", false, BtnAction::Op, (uint8_t)CalcOp::Mul}); return true;
+        case '/': case ':': calc_dispatch_action(state, {"/", false, BtnAction::Op, (uint8_t)CalcOp::Div}); return true;
+        case '=': case '\n': case '\r':
+            calc_dispatch_action(state, {"=", false, BtnAction::Eq, 0}); return true;
+        case '%':           calc_dispatch_action(state, {"%", false, BtnAction::Percent, 0}); return true;
+        case '\b': case 127: // backspace clears the current entry
+            calc_dispatch_action(state, {"C", false, BtnAction::Clear, 0}); return true;
+        case 27:             // escape clears everything
+            calc_dispatch_action(state, {"AC", false, BtnAction::ClearAll, 0}); return true;
+        default: return false;
+    }
+}
+
+// Grid position of the operator button for a pending op (for the armed highlight).
+static bool calc_op_button(CalcOp op, int *row, int *col)
+{
+    switch (op) {
+        case CalcOp::Div: *row = 0; *col = 3; return true;
+        case CalcOp::Mul: *row = 1; *col = 3; return true;
+        case CalcOp::Sub: *row = 2; *col = 3; return true;
+        case CalcOp::Add: *row = 3; *col = 3; return true;
+        default: return false;
     }
 }
 
@@ -221,23 +285,39 @@ static void render_display(Surface *win, CalcState *state, const CalcRects *rect
     gui_draw_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr, g_gui_style.border);
 
     const GuiFont *disp_font = gui_font_title();
-    int disp_text_w = gui_measure_text(disp_font, state->display);
-    int disp_x = rects->display.x + rects->display.w - disp_text_w - gui_space_2();
+    int max_w = rects->display.w - gui_space_2() * 2;
+    if (max_w < 0)
+        max_w = 0;
+
+    // Keep the right end (newest digits) visible when the value overflows.
+    char shown[32];
+    strncpy(shown, state->display, sizeof(shown) - 1);
+    shown[sizeof(shown) - 1] = '\0';
+    size_t len = strlen(shown);
+    while (len > 1 && gui_measure_text_n(disp_font, shown, len) > max_w) {
+        memmove(shown, shown + 1, len);
+        len--;
+    }
+
+    int disp_text_w = gui_measure_text_n(disp_font, shown, len);
+    int disp_x = rects->display.x + rects->display.w - gui_space_2() - disp_text_w;
+    if (disp_x < rects->display.x + gui_space_2())
+        disp_x = rects->display.x + gui_space_2();
     int disp_y = rects->display.y + (rects->display.h - gui_font_line_height(disp_font)) / 2;
-    
-    if (disp_x < rects->display.x + gui_space_2()) disp_x = rects->display.x + gui_space_2();
-    
-    gui_draw_text_clipped(win, disp_font, disp_x, disp_y, rects->display.w - gui_space_4(), state->display, g_gui_style.text, g_gui_style.app_surface);
+
+    gui_draw_text_clipped(win, disp_font, disp_x, disp_y, rects->display.w - gui_space_4(), shown, g_gui_style.text,
+                          g_gui_style.app_surface);
     gui_blit_to_screen_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h);
 }
 
-static void render_button(Surface *win, const CalcRects *rects, int row, int col, bool hovered, bool pressed)
+static void render_button(Surface *win, const CalcRects *rects, int row, int col, bool hovered, bool pressed,
+                          bool armed)
 {
     if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
-    
+
     const Rect& r = rects->buttons[row][col];
     const ButtonDef& def = k_buttons[row][col];
-    
+
     int rad = gui_corner_radius(r.w, r.h, gui_radius_md());
     uint32_t bg = def.primary ? g_gui_style.accent : g_gui_style.chrome_bg;
     uint32_t fg = def.primary ? 0xFFFFFFFFu : g_gui_style.text;
@@ -253,32 +333,50 @@ static void render_button(Surface *win, const CalcRects *rects, int row, int col
         } else {
             bg = g_gui_style.chrome_bg_alt;
         }
+    } else if (armed) {
+        // Pending operator stays lit so the user can see which op is armed.
+        bg = def.primary ? g_gui_style.accent_soft : g_gui_style.chrome_bg_alt;
+        border = g_gui_style.border_focus;
     }
 
     gui_fill_rounded_rect(win, r.x, r.y, r.w, r.h, rad, bg);
     gui_draw_rounded_rect(win, r.x, r.y, r.w, r.h, rad, border);
+    if (armed && !pressed) {
+        int ir = rad > 0 ? rad - 1 : 0;
+        if (r.w > 4 && r.h > 4)
+            gui_draw_rounded_rect(win, r.x + 1, r.y + 1, r.w - 2, r.h - 2, ir, g_gui_style.accent_soft);
+    }
 
     const GuiFont *font = gui_font_title();
     int tw = gui_measure_text(font, def.label);
     int tx = r.x + (r.w - tw) / 2 + (pressed ? 1 : 0);
     int ty = r.y + (r.h - gui_font_line_height(font)) / 2 + (pressed ? 1 : 0);
-    
+
     gui_draw_text_clipped(win, font, tx, ty, r.w - gui_space_2(), def.label, fg, bg);
     gui_blit_to_screen_rect(win, r.x, r.y, r.w, r.h);
 }
 
-static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int h_row, int h_col, int p_row, int p_col)
+static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int h_row, int h_col, int p_row,
+                           int p_col)
 {
     if (!rects->layout_valid) compute_layout(win, rects);
-    
+
     gui_fill_surface(win, g_gui_style.app_bg);
     render_display(win, state, rects);
-    
+
+    int armed_r = -1, armed_c = -1;
+    if (state->pending != CalcOp::None && !state->error)
+        calc_op_button(state->pending, &armed_r, &armed_c);
+
     for (int r = 0; r < ROWS; r++) {
         for (int c = 0; c < COLS; c++) {
-            render_button(win, rects, r, c, (r == h_row && c == h_col), (r == p_row && c == p_col));
+            render_button(win, rects, r, c, (r == h_row && c == h_col), (r == p_row && c == p_col),
+                          (r == armed_r && c == armed_c));
         }
     }
+    // Commit the whole window: the background fill is content too, and a
+    // partial commit would leave stale padding after theme switches.
+    gui_blit_to_screen_rect(win, 0, 0, (int)win->width, (int)win->height);
 }
 
 static void find_button_at(const CalcRects *rects, int x, int y, int *out_row, int *out_col)
@@ -306,12 +404,36 @@ extern "C" int main()
 
     CalcState state;
     calc_init(&state);
-    
+
     CalcRects rects = {};
     render_full_ui(&win, &state, &rects, -1, -1, -1, -1);
 
     int hover_r = -1, hover_c = -1;
     int press_r = -1, press_c = -1;
+
+    auto armed_cell = [&](int *ar, int *ac) {
+        *ar = -1;
+        *ac = -1;
+        if (state.pending != CalcOp::None && !state.error)
+            calc_op_button(state.pending, ar, ac);
+    };
+    auto redraw_button = [&](int r, int c) {
+        int ar, ac;
+        armed_cell(&ar, &ac);
+        render_button(&win, &rects, r, c, (r == hover_r && c == hover_c), (r == press_r && c == press_c),
+                      (r == ar && c == ac));
+    };
+    auto apply_action = [&](int r, int c) {
+        int armed_before_r, armed_before_c, armed_after_r, armed_after_c;
+        armed_cell(&armed_before_r, &armed_before_c);
+        calc_dispatch_action(&state, k_buttons[r][c]);
+        armed_cell(&armed_after_r, &armed_after_c);
+        render_display(&win, &state, &rects);
+        // Only the armed-operator highlight spans multiple buttons; repaint
+        // fully when it appears/moves, otherwise the single button suffices.
+        if (armed_before_r != armed_after_r || armed_before_c != armed_after_c)
+            render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
+    };
 
     Registry *registry = gui_registry();
     uint32_t last_settings_gen = registry ? registry->settings_generation : 0;
@@ -323,45 +445,91 @@ extern "C" int main()
             switch (ev.type) {
                 case EVT_WINDOW_CLOSE:
                     return 0;
-                    
+
                 case EVT_WINDOW_RESIZE:
                     if (gui_sync_window_size(&win) > 0) {
                         rects.layout_valid = false;
+                        hover_r = hover_c = -1;
+                        press_r = press_c = -1;
+                        render_full_ui(&win, &state, &rects, -1, -1, -1, -1);
+                    }
+                    break;
+
+                case EVT_FOCUS:
+                    gui_sync_theme_from_registry();
+                    render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
+                    break;
+
+                case EVT_UNFOCUS:
+                case EVT_MOUSE_LEAVE:
+                    if (hover_r >= 0 || press_r >= 0) {
+                        int old_hr = hover_r, old_hc = hover_c;
+                        int old_pr = press_r, old_pc = press_c;
+                        hover_r = hover_c = -1;
+                        press_r = press_c = -1;
+                        if (old_pr >= 0)
+                            redraw_button(old_pr, old_pc);
+                        if (old_hr >= 0 && (old_hr != old_pr || old_hc != old_pc))
+                            redraw_button(old_hr, old_hc);
+                    }
+                    break;
+
+                case EVT_KEY_DOWN:
+                    if (ev.key.c != 0 && calc_dispatch_key(&state, ev.key.c)) {
                         render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
                     }
                     break;
-                    
+
                 case EVT_MOUSE_MOVE: {
                     int r, c;
                     find_button_at(&rects, ev.mouse.x, ev.mouse.y, &r, &c);
                     if (r != hover_r || c != hover_c) {
                         int old_r = hover_r, old_c = hover_c;
                         hover_r = r; hover_c = c;
-                        
-                        // Partial Invalidation: Only re-rasterize delta state
-                        if (old_r >= 0) render_button(&win, &rects, old_r, old_c, false, (old_r == press_r && old_c == press_c));
-                        if (hover_r >= 0) render_button(&win, &rects, hover_r, hover_c, true, (hover_r == press_r && hover_c == press_c));
+                        if (old_r >= 0)
+                            redraw_button(old_r, old_c);
+                        if (hover_r >= 0 && (hover_r != old_r || hover_c != old_c))
+                            redraw_button(hover_r, hover_c);
+                        // Moving off a pressed button cancels the press visually.
+                        if (press_r >= 0 && (press_r != hover_r || press_c != hover_c)) {
+                            int pr = press_r, pc = press_c;
+                            press_r = press_c = -1;
+                            redraw_button(pr, pc);
+                        }
                     }
                     break;
                 }
-                
-                case EVT_MOUSE_DOWN:
-                    if (ev.mouse.button == 1 && hover_r >= 0) {
-                        press_r = hover_r; press_c = hover_c;
-                        calc_dispatch_action(&state, k_buttons[press_r][press_c]);
-                        render_display(&win, &state, &rects);
-                        render_button(&win, &rects, press_r, press_c, true, true);
+
+                case EVT_MOUSE_DOWN: {
+                    if (ev.mouse.button != 1)
+                        break;
+                    int r, c;
+                    find_button_at(&rects, ev.mouse.x, ev.mouse.y, &r, &c);
+                    if (r >= 0) {
+                        press_r = r;
+                        press_c = c;
+                        redraw_button(r, c);
                     }
                     break;
-                    
+                }
+
                 case EVT_MOUSE_UP:
-                    if (ev.mouse.button == 1 && press_r >= 0) {
+                    if (ev.mouse.button != 1)
+                        break;
+                    if (press_r >= 0) {
                         int r = press_r, c = press_c;
-                        press_r = -1; press_c = -1;
-                        render_button(&win, &rects, r, c, (r == hover_r && c == hover_c), false);
+                        press_r = press_c = -1;
+                        // Release-to-apply: the action fires only when the
+                        // pointer is still over the pressed button, so
+                        // dragging away cancels.
+                        int up_r, up_c;
+                        find_button_at(&rects, ev.mouse.x, ev.mouse.y, &up_r, &up_c);
+                        if (up_r == r && up_c == c)
+                            apply_action(r, c);
+                        redraw_button(r, c);
                     }
                     break;
-                    
+
                 default: break;
             }
         }

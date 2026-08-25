@@ -33,7 +33,7 @@ Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, 
 | **latitude** | Text/code editor: 2048 x 512 buffer, 512 KiB open limit with binary sniffing, syntax highlighting (text, C++, JS, Python, Rust, HTML, CSS, JSON, Markdown, shell), project browser, outline, search panes. |
 | **clock** | Analog clock with continuous-sweep hands anchored to the RTC every second; the sub-second sweep interpolates scheduler ticks at a rate measured from observed RTC second boundaries (never trusting the nominal `timer_hz`). Digital time and date below. |
 | **calendar** | Month grid with today highlight, month navigation, Sakamoto weekday computation, leap-year-aware month lengths. |
-| **calculator** | Keypad calculator with pending-op accumulator, percent, sign toggle, and 15-place decimal cap. |
+| **calculator** | Keypad calculator with pending-op accumulator, percent, sign toggle, and 15-place decimal cap. Full keyboard input (digits, operators, Enter/=, Backspace clears entry, Esc clears all), release-to-apply button semantics with drag-away cancel, an armed-operator highlight, divide-by-zero Error state, and a display that keeps the newest digits visible on overflow. |
 | **about** | System information: kernel commit, bootloader name/version, CPU count, timer rate, memory totals, uptime, display capabilities. |
 
 All user windows are resizable (`WIN_FLAG_RESIZABLE`) and follow the resize protocol in [Window manager](wm.md).
