@@ -377,6 +377,140 @@ static bool copy_file_stream(const char *src, const char *dst, char *error, size
     return true;
 }
 
+static bool path_is_within(const char *child, const char *parent)
+{
+    if (!child || !parent || !parent[0])
+        return false;
+    size_t len = strlen(parent);
+    if (strncmp(child, parent, len) != 0)
+        return false;
+    return child[len] == '\0' || child[len] == '/';
+}
+
+// Userspace stacks are 32 KB and each recursion level needs ~1.4 KB of
+// path/stat buffers, so keep the tree depth bounded well below that.
+static constexpr int MAX_TREE_DEPTH = 12;
+
+static bool delete_directory_tree(const char *path, int depth, char *error, size_t error_size);
+
+static bool copy_directory_tree(const char *src, const char *dst, int depth, char *error, size_t error_size)
+{
+    if (!src || !dst || depth > MAX_TREE_DEPTH) {
+        snprintf(error, error_size, "invalid or too deep copy");
+        return false;
+    }
+    if (path_is_within(dst, src)) {
+        snprintf(error, error_size, "destination is inside source");
+        return false;
+    }
+
+    VNodeStat st = {};
+    if (stat(src, &st) != 0 || !st.is_dir) {
+        snprintf(error, error_size, "source is not a directory");
+        return false;
+    }
+    VNodeStat dst_st = {};
+    if (stat(dst, &dst_st) == 0) {
+        snprintf(error, error_size, "destination already exists");
+        return false;
+    }
+    if (mkdir(dst) != 0) {
+        snprintf(error, error_size, "mkdir failed for %s", dst);
+        return false;
+    }
+
+    int fd = open(src, O_RDONLY);
+    if (fd < 0) {
+        snprintf(error, error_size, "open failed for %s", src);
+        return false;
+    }
+
+    bool ok = true;
+    while (true) {
+        char name[256] = {};
+        if (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) != 0)
+            break;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+            continue;
+
+        char child_src[512];
+        char child_dst[512];
+        join_path(src, name, child_src, sizeof(child_src));
+        join_path(dst, name, child_dst, sizeof(child_dst));
+
+        VNodeStat child_st = {};
+        if (stat(child_src, &child_st) != 0) {
+            snprintf(error, error_size, "stat failed for %s", child_src);
+            ok = false;
+            break;
+        }
+        if (child_st.is_dir) {
+            if (!copy_directory_tree(child_src, child_dst, depth + 1, error, error_size)) {
+                ok = false;
+                break;
+            }
+        } else if (!copy_file_stream(child_src, child_dst, error, error_size)) {
+            ok = false;
+            break;
+        }
+    }
+    close(fd);
+
+    if (!ok)
+        delete_directory_tree(dst, depth, nullptr, 0); // best-effort cleanup
+    return ok;
+}
+
+static bool delete_directory_tree(const char *path, int depth, char *error, size_t error_size)
+{
+    if (!path || depth > MAX_TREE_DEPTH) {
+        if (error)
+            snprintf(error, error_size, "invalid or too deep delete");
+        return false;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        if (error)
+            snprintf(error, error_size, "open failed for %s", path);
+        return false;
+    }
+
+    bool ok = true;
+    while (true) {
+        char name[256] = {};
+        if (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) != 0)
+            break;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+            continue;
+
+        char child[512];
+        join_path(path, name, child, sizeof(child));
+        VNodeStat child_st = {};
+        if (stat(child, &child_st) == 0 && child_st.is_dir) {
+            if (!delete_directory_tree(child, depth + 1, error, error_size)) {
+                ok = false;
+                break;
+            }
+        } else if (unlink(child) != 0) {
+            if (error)
+                snprintf(error, error_size, "unlink failed for %s", child);
+            ok = false;
+            break;
+        }
+    }
+    close(fd);
+
+    if (!ok)
+        return false;
+    if (rmdir(path) != 0) {
+        if (error)
+            snprintf(error, error_size, "rmdir failed for %s", path);
+        return false;
+    }
+    return true;
+}
+
 static bool move_entry(const FileRow *row, const char *dst, char *error, size_t error_size)
 {
     if (!row || !dst) {
@@ -390,8 +524,14 @@ static bool move_entry(const FileRow *row, const char *dst, char *error, size_t 
     if (rename(row->path, dst) == 0)
         return true;
     if (row->is_dir) {
-        snprintf(error, error_size, "cross-volume directory move is unsupported");
-        return false;
+        // Cross-volume: fall back to recursive copy + delete of the source.
+        if (!copy_directory_tree(row->path, dst, 0, error, error_size))
+            return false;
+        if (!delete_directory_tree(row->path, 0, nullptr, 0)) {
+            snprintf(error, error_size, "source cleanup failed");
+            return false;
+        }
+        return true;
     }
     if (!copy_file_stream(row->path, dst, error, error_size))
         return false;
@@ -744,7 +884,12 @@ static bool confirm_dialog(AppState *state)
         if (!resolve_destination_path(state, &row, input, dst, sizeof(dst))) {
             set_status(state, "Enter a destination path");
         } else if (row.is_dir) {
-            set_status(state, "Directory copy is unsupported");
+            if (copy_directory_tree(row.path, dst, 0, err, sizeof(err))) {
+                set_status(state, "Copy complete");
+                load_directory(state);
+            } else {
+                set_status(state, err);
+            }
         } else if (copy_file_stream(row.path, dst, err, sizeof(err))) {
             set_status(state, "Copy complete");
             load_directory(state);
