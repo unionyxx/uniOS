@@ -275,6 +275,9 @@ static void app_publish(App *app)
     if (!app->canvas.buffer || !app->window.buffer)
         return;
 
+    if (!full && rect_count <= 0)
+        return;
+
     auto log_first_frame = [&]() {
 #ifdef DEBUG
         if (!app->first_frame_logged) {
@@ -285,6 +288,24 @@ static void app_publish(App *app)
         (void)app;
 #endif
     };
+
+    // Two-slot mailbox: copy the full canvas into the slot the compositor is
+    // not presenting and publish it, so the WM never reads mid-redraw pixels.
+    if (gui_window_mailbox_active()) {
+        Surface *target = gui_window_mailbox_target(app->canvas.width, app->canvas.height);
+        if (target && target->buffer) {
+            uint32_t ts = target->pitch / 4;
+            uint32_t cs = app->canvas.pitch / 4;
+            for (uint32_t y = 0; y < app->canvas.height; y++)
+                memcpy(&target->buffer[(size_t)y * ts], &app->canvas.buffer[(size_t)y * cs],
+                       (size_t)app->canvas.width * sizeof(uint32_t));
+            gui_blit_to_screen_rect(target, 0, 0, (int)app->canvas.width, (int)app->canvas.height);
+            gui_window_mailbox_commit();
+            log_first_frame();
+        }
+        // No free slot: drop this frame; the canvas keeps the app's state.
+        return;
+    }
 
     if (full) {
         app_copy_rect_to_window(app, 0, 0, (int)app->canvas.width, (int)app->canvas.height);

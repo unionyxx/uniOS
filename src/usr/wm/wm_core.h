@@ -138,6 +138,17 @@ struct Window
     // Bounded so one busy client cannot force endless full-window re-damage.
     int unstable_sample_count = 0;
 
+    // Two-slot client mailbox (protocol v1): mapped slot buffers and the slot
+    // currently being presented. buffer/buffer_w/buffer_h alias the committed
+    // slot once its commit is observed.
+    uint32_t *mailbox_maps[2] = {nullptr, nullptr};
+    int mailbox_map_w[2] = {0, 0};
+    int mailbox_map_h[2] = {0, 0};
+    int mailbox_shm_seen[2] = {0, 0};
+    uint32_t mailbox_last_commit_seq = 0;
+    int mailbox_presented_idx = -1;
+    bool mailbox_active = false;
+
     char title[64];
 };
 

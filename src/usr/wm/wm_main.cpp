@@ -358,6 +358,97 @@ static bool sample_stable_window_entry(const WindowEntry &entry, WindowEntrySnap
     return true;
 }
 
+// Two-slot client mailbox (protocol v1): map both client slots, follow the
+// committed one, and release the slot the compositor just finished reading so
+// the client can reuse it. Keeps w.buffer/buffer_w/buffer_h aliased to the
+// committed slot so the normal blit path needs no changes.
+static void sync_window_mailbox(Window &w)
+{
+    WindowEntry *e = w.entry;
+    if (!e || e->protocol_version != 1u) {
+        w.mailbox_active = false;
+        return;
+    }
+    w.mailbox_active = true;
+
+    for (int idx = 0; idx < 2; idx++) {
+        int shm = e->mailbox_shm_id[idx];
+        if (!gui_shm_id_is_valid(shm))
+            continue;
+        if (shm == w.mailbox_shm_seen[idx] && w.mailbox_maps[idx])
+            continue;
+        int bw = e->mailbox_buffer_w[idx];
+        int bh = e->mailbox_buffer_h[idx];
+        if (bw <= 0 || bh <= 0)
+            continue;
+        if (bw > 8192)
+            bw = 8192;
+        if (bh > 8192)
+            bh = 8192;
+        int fd = shm & ~0x40000000;
+        uint64_t req_size = (uint64_t)bw * (uint64_t)bh * 4u;
+        uint64_t file_size = syscall1(SYS_FSIZE, (uint64_t)fd);
+        if (file_size == (uint64_t)-1 || req_size > file_size)
+            continue;
+        if (w.mailbox_maps[idx] && gui_shm_id_is_valid(w.mailbox_shm_seen[idx])) {
+            int old_fd = w.mailbox_shm_seen[idx] & ~0x40000000;
+            size_t old_size = (size_t)w.mailbox_map_w[idx] * (size_t)w.mailbox_map_h[idx] * 4u;
+            munmap(w.mailbox_maps[idx], old_size);
+            close(old_fd);
+        }
+        void *mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (mapped_ptr == MAP_FAILED) {
+            w.mailbox_maps[idx] = nullptr;
+            continue;
+        }
+        w.mailbox_maps[idx] = reinterpret_cast<uint32_t *>(mapped_ptr);
+        w.mailbox_map_w[idx] = bw;
+        w.mailbox_map_h[idx] = bh;
+        w.mailbox_shm_seen[idx] = shm;
+    }
+
+    // Read (commit_seq, commit_index) consistently: the client writes the
+    // index before bumping the seq, so re-check seq after reading the index.
+    uint32_t commit_seq = e->mailbox_commit_seq;
+    if (commit_seq == 0)
+        return; // Client has not committed a frame yet; present nothing.
+    smp_rmb();
+    uint32_t commit_idx = e->mailbox_commit_index & 1u;
+    if (e->mailbox_commit_seq != commit_seq)
+        return; // Commit raced; pick it up next frame.
+
+    if (commit_seq != w.mailbox_last_commit_seq) {
+        int old = w.mailbox_presented_idx;
+        if (old >= 0 && old != (int)commit_idx)
+            e->mailbox_slot_free[old] = 1u; // Compositor is done with the old slot.
+        w.mailbox_presented_idx = (int)commit_idx;
+        w.mailbox_last_commit_seq = commit_seq;
+        smp_wmb();
+    }
+
+    int idx = w.mailbox_presented_idx;
+    if (idx >= 0 && idx < 2 && w.mailbox_maps[idx]) {
+        if (w.buffer != w.mailbox_maps[idx] || w.buffer_w != w.mailbox_map_w[idx] ||
+            w.buffer_h != w.mailbox_map_h[idx]) {
+            w.buffer = w.mailbox_maps[idx];
+            w.buffer_w = w.mailbox_map_w[idx];
+            w.buffer_h = w.mailbox_map_h[idx];
+            // Valid content is the logical window size actually drawn into the
+            // slot, clamped to the backing — never the slack beyond it.
+            int cw = e->w > 0 ? e->w : w.mailbox_map_w[idx];
+            int ch = e->h > 0 ? e->h : w.mailbox_map_h[idx];
+            if (cw > w.mailbox_map_w[idx])
+                cw = w.mailbox_map_w[idx];
+            if (ch > w.mailbox_map_h[idx])
+                ch = w.mailbox_map_h[idx];
+            w.client_committed_w = cw;
+            w.client_committed_h = ch;
+            w.needs_full_redraw = true;
+            invalidate_window_decoration_cache(w);
+        }
+    }
+}
+
 // Adoption-failure tracking: a registry entry whose window cannot be created
 // (bad shm, size mismatch, mapping failure) used to be retried EVERY frame,
 // burning syscalls forever. Key by (shm_id, owner_pid) so a recycled fd of a
@@ -1893,6 +1984,12 @@ extern "C" int main(int argc, char **argv)
                 } else {
                     w.unstable_sample_count = 0;
                 }
+
+                // Two-slot mailbox windows manage their own slot mappings and
+                // alias w.buffer to the committed slot; the legacy single-shm
+                // adoption below is skipped for them.
+                sync_window_mailbox(w);
+
                 int bw = entry_snapshot.buffer_w > 0 ? entry_snapshot.buffer_w : entry_snapshot.w;
                 int bh = entry_snapshot.buffer_h > 0 ? entry_snapshot.buffer_h : entry_snapshot.h;
                 if (bw > 8192)
@@ -1900,7 +1997,7 @@ extern "C" int main(int argc, char **argv)
                 if (bh > 8192)
                     bh = 8192;
 
-                if (gui_shm_id_is_valid(entry_snapshot.shm_id)) {
+                if (!w.mailbox_active && gui_shm_id_is_valid(entry_snapshot.shm_id)) {
                     if (entry_snapshot.shm_id != w.shm_id) {
                         bool is_memfd = (entry_snapshot.shm_id & 0x40000000) != 0;
                         bool map_ok = false;

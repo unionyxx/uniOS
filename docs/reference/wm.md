@@ -24,6 +24,8 @@ Slots 0 and 1 are reserved for the menubar and dock; user windows take slots 2-3
 
 **Adoption (WM side).** Each frame the WM scans ready entries and adopts valid ones: it validates the buffer size against `SYS_FSIZE` (a memfd mapped past EOF would fault the compositor), clamps dimensions, and maps. Adoption failures leave tombstones (keyed by `shm_id + owner_pid`, 5000-tick expiry) to stop retry storms.
 
+**Two-slot mailbox (protocol_version 1).** Regular app windows register with two backing slots and render into the slot the WM is not presenting, removing the single-buffer race where the compositor reads pixels mid-redraw. The client sets `mailbox_commit_index` and bumps `mailbox_commit_seq` behind store fences after each frame. The WM maps both slots, follows the committed one (aliasing `buffer`/`buffer_w/h` to it so the blit path is unchanged), and marks the superseded slot free (`mailbox_slot_free`) so the client can reuse it; commit seq/index are re-checked to reject a racing commit. Valid content is the logical window size clamped to the slot backing, never the growth slack. Windows present nothing until the first commit (`commit_seq == 0`). Shell surfaces (`WIN_FLAG_SYSTEM`) stay on the legacy single-buffer path.
+
 **Validation hardening.** Window entries are sampled twice across load fences and accepted only when bitwise stable (bounded retries). Buffer dimensions are clamped to 8192. Dimension growth is re-validated against `SYS_FSIZE`/`SYS_SHM_INFO` and forced back on violations; SysV blocks must be owned by the entry's owner pid. Titles are copied with forced NUL termination. Liveness is checked with `kill(pid, 0)` every 30 frames; dead owners' windows are closed without killing recycled pids.
 
 ## Resize Protocol

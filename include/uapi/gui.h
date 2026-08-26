@@ -114,6 +114,19 @@ typedef struct WindowEntry
     // menu_command_seq. The owning app polls and consumes each new seq.
     volatile uint32_t menu_command_seq;
     volatile uint32_t menu_command_id;
+    // Two-slot client mailbox (protocol_version 1). The client renders into the
+    // slot the WM is not presenting, then sets mailbox_commit_index and bumps
+    // mailbox_commit_seq behind a store fence. The WM composites only the
+    // committed slot and marks the superseded slot free (mailbox_slot_free) so
+    // the client can reuse it. protocol_version 0 keeps the legacy single
+    // buffer path (shm_id / buffer_w / buffer_h) unchanged.
+    volatile uint32_t protocol_version;
+    volatile uint32_t mailbox_commit_index;
+    volatile uint32_t mailbox_commit_seq;
+    volatile uint32_t mailbox_slot_free[2];
+    volatile int mailbox_shm_id[2];
+    volatile int mailbox_buffer_w[2];
+    volatile int mailbox_buffer_h[2];
 } WindowEntry;
 
 typedef struct MenuItem
