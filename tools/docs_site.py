@@ -87,6 +87,7 @@ CSS = """\
     --ease: cubic-bezier(0.4, 0, 0.2, 1);
     --dur: 0.4s;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color-scheme: light;
 }
 
 [data-theme="dark"] {
@@ -97,6 +98,7 @@ CSS = """\
     --nav-bg: rgba(0, 0, 0, 0.72);
     --surface: #111111;
     --surface-border: #222222;
+    color-scheme: dark;
 }
 
 * {
@@ -176,6 +178,11 @@ nav {
     font-size: 1.1rem;
     color: var(--text);
     text-decoration: none;
+    transition: opacity 0.2s var(--ease);
+}
+
+.logo:hover {
+    opacity: 0.8;
 }
 
 .nav-links {
@@ -197,7 +204,8 @@ nav {
 }
 
 .nav-links a.active {
-    color: var(--muted);
+    color: var(--text);
+    font-weight: 600;
 }
 
 .nav-github {
@@ -212,7 +220,14 @@ nav {
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    padding: 0.25rem;
+    padding: 0.35rem;
+    border-radius: 6px;
+    transition: color 0.2s var(--ease), background-color 0.2s var(--ease);
+}
+
+.menu-btn:hover {
+    color: var(--muted);
+    background: var(--surface);
 }
 
 .theme-switch-mini {
@@ -289,7 +304,7 @@ nav {
 
 .search input {
     width: 100%;
-    padding: 0.55rem 0.9rem;
+    padding: 0.55rem 2.3rem 0.55rem 0.9rem;
     border-radius: var(--radius-sm);
     border: 1px solid var(--surface-border);
     background: var(--surface);
@@ -306,6 +321,29 @@ nav {
 .search input:focus {
     outline: none;
     border-color: var(--border);
+}
+
+.search-key {
+    position: absolute;
+    top: 50%;
+    right: 0.6rem;
+    transform: translateY(-50%);
+    font-family: inherit;
+    font-size: 0.7rem;
+    font-weight: 500;
+    line-height: 1;
+    color: var(--muted);
+    background: var(--bg);
+    border: 1px solid var(--surface-border);
+    border-radius: 5px;
+    padding: 0.2rem 0.45rem;
+    pointer-events: none;
+    transition: opacity 0.2s var(--ease), background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.search:focus-within .search-key,
+.search input:not(:placeholder-shown) ~ .search-key {
+    opacity: 0;
 }
 
 .search-results {
@@ -327,6 +365,10 @@ nav {
     display: block;
 }
 
+[data-theme="dark"] .search-results {
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
 .search-result {
     display: block;
     padding: 0.6rem 0.9rem;
@@ -334,6 +376,7 @@ nav {
     color: var(--text);
     border-bottom: 1px solid var(--surface-border);
     font-size: 0.85rem;
+    transition: background-color 0.15s var(--ease);
 }
 
 .search-result:last-child {
@@ -380,7 +423,7 @@ mark {
 
 .nav-section {
     margin: 1.5rem 0 0.5rem;
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -434,11 +477,21 @@ article {
     min-width: 0;
 }
 
+.page-section {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin: 0 0 1.25rem;
+}
+
 article h1 {
     font-size: 2.1rem;
     font-weight: 700;
     line-height: 1.15;
-    margin: 0.25rem 0 1.25rem;
+    margin: 0 0 1.25rem;
+    text-wrap: balance;
 }
 
 article h2 {
@@ -490,6 +543,7 @@ article a {
 
 article a:hover {
     text-decoration: underline;
+    text-underline-offset: 3px;
 }
 
 article code {
@@ -546,6 +600,16 @@ article td {
     line-height: 1.55;
 }
 
+article th:first-child,
+article td:first-child {
+    padding-left: 0;
+}
+
+article th:last-child,
+article td:last-child {
+    padding-right: 0;
+}
+
 article blockquote {
     border-left: 3px solid var(--link);
     background: var(--surface);
@@ -579,7 +643,7 @@ article img {
 }
 
 .toc-title {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -594,11 +658,16 @@ article img {
     padding: 0.28rem 0 0.28rem 0.75rem;
     border-left: 1px solid var(--surface-border);
     line-height: 1.4;
-    transition: color 0.2s var(--ease);
+    transition: color 0.2s var(--ease), border-color 0.2s var(--ease);
 }
 
 .toc a:hover {
     color: var(--text);
+}
+
+.toc a.active {
+    color: var(--text);
+    border-left-color: var(--link);
 }
 
 .toc a.l3 {
@@ -717,6 +786,15 @@ article img {
         align-items: center;
     }
 
+    .search-key {
+        display: none;
+    }
+
+    .search input {
+        font-size: 1rem;
+        padding-right: 0.9rem;
+    }
+
     .nav-content {
         padding: 1rem 1.25rem;
     }
@@ -741,7 +819,7 @@ article img {
         padding: 1.5rem 1.25rem;
         z-index: 200;
         transform: translateX(-105%);
-        transition: transform 0.3s var(--ease);
+        transition: transform 0.3s var(--ease), background-color var(--dur) var(--ease);
     }
 
     body.sidebar-open .docs-sidebar {
@@ -820,6 +898,34 @@ JS = """\
     var navItems = document.querySelectorAll('.nav-item');
     for (var n = 0; n < navItems.length; n++) {
         navItems[n].addEventListener('click', closeSidebar);
+    }
+
+    var tocLinks = document.querySelectorAll('.toc a');
+    if (tocLinks.length > 0) {
+        var headings = [];
+        for (var t = 0; t < tocLinks.length; t++) {
+            var target = document.getElementById(tocLinks[t].getAttribute('href').slice(1));
+            if (target) headings.push({ el: target, link: tocLinks[t] });
+        }
+        var ticking = false;
+        function updateToc() {
+            ticking = false;
+            var current = null;
+            for (var h = 0; h < headings.length; h++) {
+                if (headings[h].el.getBoundingClientRect().top <= 96) current = headings[h];
+                else break;
+            }
+            for (var k = 0; k < headings.length; k++) {
+                headings[k].link.classList.toggle('active', current === headings[k]);
+            }
+        }
+        window.addEventListener('scroll', function () {
+            if (!ticking) {
+                ticking = true;
+                window.requestAnimationFrame(updateToc);
+            }
+        }, { passive: true });
+        updateToc();
     }
 
     var input = document.getElementById('doc-search');
@@ -999,8 +1105,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="docs-layout">
         <aside class="docs-sidebar">
             <div class="search">
-                <input id="doc-search" type="search" placeholder="Search docs…  ( / )" autocomplete="off"
+                <input id="doc-search" type="search" placeholder="Search docs…" autocomplete="off"
                     spellcheck="false" data-base="{wbase}">
+                <kbd class="search-key" aria-hidden="true">/</kbd>
                 <div class="search-results" id="search-results"></div>
             </div>
             {sidebar}
@@ -1008,6 +1115,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
         <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
         <main class="docs-main{toc_class}">
             <article>
+                <div class="page-section">{section}</div>
 {article}
             </article>
             {toc}
@@ -1506,6 +1614,7 @@ def main():
             github_repo=GITHUB_REPO,
             sidebar=sidebar,
             toc_class=" has-toc" if toc else "",
+            section=html.escape(page.section),
             article=page.html,
             toc=toc,
             pager=pager,
