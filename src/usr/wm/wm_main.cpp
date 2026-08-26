@@ -1136,9 +1136,18 @@ extern "C" int main(int argc, char **argv)
                 }
             }
 
-            if ((ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) && g_input.mouse_y >= registry->windows[0].h) {
-                registry->mb_menu_dismiss_requested = true;
-                smp_wmb();
+            if (ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) {
+                // Dismiss the system menu on any click outside it: below the
+                // expanded menubar window, or inside its bounds but on
+                // transparent pixels beside the panel.
+                bool dismiss = g_input.mouse_y >= registry->windows[0].h;
+                if (!dismiss && g_input.mouse_y >= wm_menubar_h() &&
+                    system_window_hit(g_input.mouse_x, g_input.mouse_y) < 0)
+                    dismiss = true;
+                if (dismiss) {
+                    registry->mb_menu_dismiss_requested = true;
+                    smp_wmb();
+                }
             }
 
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
@@ -1837,6 +1846,13 @@ extern "C" int main(int argc, char **argv)
                         w.y = ny;
                         w.w = nw;
                         w.h = nh;
+                        // Shell surfaces bypass the resize/configure protocol:
+                        // their registry geometry is exactly what the client
+                        // committed (the menubar grows its window to expose the
+                        // system dropdown), so the committed content size tracks
+                        // it instead of staying pinned at the boot-time size.
+                        w.client_committed_w = nw < w.buffer_w ? nw : w.buffer_w;
+                        w.client_committed_h = nh < w.buffer_h ? nh : w.buffer_h;
                         w.needs_full_redraw = (old.w != nw) || (old.h != nh);
                         if (clamp_window_scroll(w) && w.entry) {
                             w.entry->scroll_x = w.scroll_x;

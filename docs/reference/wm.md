@@ -35,7 +35,7 @@ For resizable windows:
 3. Client publishes `buffer_resize_serial`; the WM retries the configure until serials match.
 4. Retired buffers are released when the WM's acknowledge generation reaches theirs.
 
-While a resize is in flight the WM geometry changes before the client commits, so the compositor tracks each window's last committed content size (`client_committed_w/h`, updated on adoption and every resize ack) and only blits that region — never the slack pixels of an over-allocated backing. During an interactive edge/corner drag the committed content is anchored to the corner opposite the dragged edges (drag left: content pins right), and the anchor survives pointer release until the outstanding configure is acknowledged, so content never slides with the grip or snaps on release. Programmatic resizes (maximize/restore) clear the anchor.
+While a resize is in flight the WM geometry changes before the client commits, so the compositor tracks each window's last committed content size (`client_committed_w/h`, updated on adoption and every resize ack) and only blits that region — never the slack pixels of an over-allocated backing. During an interactive edge/corner drag the committed content is anchored to the corner opposite the dragged edges (drag left: content pins right), and the anchor survives pointer release until the outstanding configure is acknowledged, so content never slides with the grip or snaps on release. Programmatic resizes (maximize/restore) clear the anchor. Shell surfaces (menubar, dock) bypass the configure protocol and redraw their whole entry, so their committed size tracks the registry geometry directly (bounded by the backing); this lets the menubar grow its window to expose the system dropdown.
 
 ## Focus and Z-Order
 
