@@ -125,6 +125,12 @@ extern "C" int main(int argc, char **argv)
         spawn_process("Terminal", "/bin/terminal.elf");
     }
 
+#ifdef DEBUG
+    // Temporary verification hook (removed after the libapp migration):
+    // spawn the app under test so smoke runs exercise it.
+    spawn_process("Test App", "/bin/about.elf");
+#endif
+
     int status = 0;
     while (true) {
         int pid = waitpid(-1, &status);

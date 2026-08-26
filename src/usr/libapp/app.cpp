@@ -20,6 +20,9 @@ struct App
     bool exit_requested;
     int exit_code;
     bool last_pump_active;
+#ifdef DEBUG
+    bool first_frame_logged;
+#endif
     bool dirty_full;
     int dirty_count;
     Rect dirty_rects[APP_DIRTY_MAX];
@@ -275,9 +278,21 @@ void app_commit(App *app)
 
     app->config.on_draw(app, &app->canvas);
 
+    auto log_first_frame = [&]() {
+#ifdef DEBUG
+        if (!app->first_frame_logged) {
+            app->first_frame_logged = true;
+            LOG_INFO("app", "%s submitted first frame", app->config.title ? app->config.title : "app");
+        }
+#else
+        (void)app;
+#endif
+    };
+
     if (full) {
         app_copy_rect_to_window(app, 0, 0, (int)app->canvas.width, (int)app->canvas.height);
         gui_blit_to_screen_rect(&app->window, 0, 0, (int)app->canvas.width, (int)app->canvas.height);
+        log_first_frame();
         return;
     }
     for (int i = 0; i < rect_count; i++) {
@@ -299,6 +314,7 @@ void app_commit(App *app)
         app_copy_rect_to_window(app, r.x, r.y, r.w, r.h);
         gui_blit_to_screen_rect(&app->window, r.x, r.y, r.w, r.h);
     }
+    log_first_frame();
 }
 
 // Drain all pending GUI events; returns false when the window was closed.

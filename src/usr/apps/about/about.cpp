@@ -6,8 +6,8 @@
 #include <uapi/event.h>
 #include <uapi/sysinfo.h>
 
+#include "../../libapp/app.h"
 #include "../../libc/unistd.h"
-#include "../../libgui/gui.h"
 
 static void format_size_kb(uint64_t kb, char *out, size_t out_size)
 {
@@ -200,23 +200,6 @@ static uint32_t about_static_signature(const AboutSnapshot *snapshot)
     return sig;
 }
 
-static void about_copy_rect(const Surface *backbuffer, Surface *win, const Rect &rect)
-{
-    if (gui_rect_is_empty(rect))
-        return;
-    int x = rect.x > 0 ? rect.x : 0;
-    int y = rect.y > 0 ? rect.y : 0;
-    int x2 = rect.x + rect.w < (int)win->width ? rect.x + rect.w : (int)win->width;
-    int y2 = rect.y + rect.h < (int)win->height ? rect.y + rect.h : (int)win->height;
-    if (x2 <= x || y2 <= y)
-        return;
-    uint32_t stride = win->pitch / 4;
-    for (int row = y; row < y2; row++) {
-        memcpy(&win->buffer[(size_t)row * stride + x], &backbuffer->buffer[(size_t)row * stride + x],
-               (size_t)(x2 - x) * sizeof(uint32_t));
-    }
-}
-
 static void draw_summary(Surface *win, int x, int y, int w, int h, const char *kernel_commit, bool debug_build)
 {
     draw_section(win, x, y, w, h, "Overview");
@@ -335,10 +318,18 @@ struct AboutPanelRects
     Rect memory;
 };
 
-static void draw_about(Surface *window, uint32_t **back_data, size_t *back_capacity, Surface *win,
-                       const AboutSnapshot *snapshot, AboutPanelRects *panel_rects)
+struct AboutState
 {
-    if (!window || !back_data || !back_capacity || !win || !snapshot)
+    AboutSnapshot snapshot;
+    uint32_t static_signature;
+    uint64_t last_refresh_tick;
+    AboutPanelRects panels;
+    bool has_snapshot;
+};
+
+static void draw_about(App *app, Surface *win, const AboutSnapshot *snapshot, AboutPanelRects *panel_rects)
+{
+    if (!win || !snapshot)
         return;
     if (panel_rects)
         *panel_rects = {};
@@ -392,26 +383,10 @@ static void draw_about(Surface *window, uint32_t **back_data, size_t *back_capac
     int summary_h = about_summary_h();
 
     int content_total = compute_about_content_height(content_w, row_h, summary_h) + layout.body_rect.y + bottom_pad;
-    // Content size and backing growth must act on the real window surface,
-    // never on the private backbuffer (a resize would swap its buffer pointer
-    // and strand the malloc'd pixels).
-    gui_set_content_size(window, view_w, content_total);
-
-    // The backbuffer spans the whole scrollable content, not just the view.
-    size_t needed = (size_t)(window->pitch / 4) * window->height;
-    if (needed > *back_capacity) {
-        uint32_t *grown = (uint32_t *)malloc(needed * sizeof(uint32_t));
-        if (!grown)
-            return;
-        if (*back_data)
-            memcpy(grown, *back_data, *back_capacity * sizeof(uint32_t));
-        free(*back_data);
-        *back_data = grown;
-        *back_capacity = needed;
-    }
-    *win = *window;
-    win->buffer = *back_data;
-    win->owns_buffer = false;
+    // Content size and backing growth must act on the window backing, never
+    // on the private canvas (a resize would swap its buffer pointer and
+    // strand the malloc'd pixels). The runtime keeps both in sync.
+    app_set_content_size(app, view_w, content_total);
     layout = gui_app_begin(win);
 
     const int outer = layout.body_rect.x;
@@ -463,10 +438,50 @@ static void draw_about(Surface *window, uint32_t **back_data, size_t *back_capac
     gui_app_draw_header(win, &layout, "About uniOS", "Hardware, runtime, and display overview", nullptr);
 }
 
-// The only entry is the reserved About command, which the menubar handles
-// itself (it re-focuses this window), so no app-side dispatch is needed.
-static void about_publish_menus()
+static void about_refresh_snapshot(App *app, AboutState *st)
 {
+    AboutSnapshot snapshot;
+    collect_about_snapshot(&snapshot);
+    uint32_t signature = about_static_signature(&snapshot);
+    st->snapshot = snapshot;
+    if (!st->has_snapshot || signature != st->static_signature) {
+        st->static_signature = signature;
+        app_invalidate_all(app);
+    } else {
+        // Only time/uptime/process count changed: republish the two panels
+        // that display them.
+        app_invalidate(app, st->panels.runtime.x, st->panels.runtime.y, st->panels.runtime.w, st->panels.runtime.h);
+        app_invalidate(app, st->panels.memory.x, st->panels.memory.y, st->panels.memory.w, st->panels.memory.h);
+    }
+    st->has_snapshot = true;
+}
+
+static void about_draw(App *app, Surface *canvas)
+{
+    AboutState *st = (AboutState *)app_user(app);
+    if (!st->has_snapshot) {
+        // The runtime invalidated the window before this first draw; just
+        // populate the snapshot without re-invalidating mid-commit.
+        collect_about_snapshot(&st->snapshot);
+        st->static_signature = about_static_signature(&st->snapshot);
+        st->has_snapshot = true;
+    }
+    draw_about(app, canvas, &st->snapshot, &st->panels);
+}
+
+static void about_idle(App *app)
+{
+    AboutState *st = (AboutState *)app_user(app);
+    uint64_t now = get_ticks();
+    if (st->has_snapshot && now - st->last_refresh_tick < 1000)
+        return;
+    st->last_refresh_tick = now;
+    about_refresh_snapshot(app, st);
+}
+
+static void about_menus(App *app)
+{
+    (void)app;
     MenuModel model;
     gui_menu_model_reset(&model);
 
@@ -478,86 +493,19 @@ static void about_publish_menus()
 
 extern "C" int main()
 {
-    Surface win = gui_register_window_ex("About uniOS", (uint32_t)gui_scaled_metric(720),
-                                         (uint32_t)gui_scaled_metric(440), WIN_FLAG_RESIZABLE);
-    if (!win.buffer)
-        return 1;
-    gui_window_set_min_size(gui_scaled_metric(560), gui_scaled_metric(420));
+    AboutState state = {};
 
-    gui_sync_theme_from_registry();
-    gui_request_focus();
-    about_publish_menus();
+    AppConfig config = {};
+    config.title = "About uniOS";
+    config.width = gui_scaled_metric(720);
+    config.height = gui_scaled_metric(440);
+    config.min_width = gui_scaled_metric(560);
+    config.min_height = gui_scaled_metric(420);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.idle_ms = 50;
+    config.on_draw = about_draw;
+    config.on_menus = about_menus;
+    config.on_idle = about_idle;
 
-    // Double buffer: draw off-screen, then publish whole regions at once so
-    // the compositor never samples a half-drawn frame. The buffer is grown by
-    // draw_about as the scrollable content height changes.
-    size_t back_capacity = (size_t)(win.pitch / 4) * win.height;
-    uint32_t *back_data = (uint32_t *)malloc(back_capacity * sizeof(uint32_t));
-    if (!back_data)
-        return 1;
-    Surface backbuffer = win;
-    backbuffer.buffer = back_data;
-    backbuffer.owns_buffer = false;
-
-    uint64_t last_refresh_tick = 0;
-    bool needs_redraw = true;
-    uint32_t last_static_signature = 0;
-    Registry *registry = gui_registry();
-    uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
-
-    while (true) {
-        Event ev = {};
-        while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE) {
-                free(back_data);
-                return 0;
-            }
-            if (ev.type == EVT_FOCUS) {
-                about_publish_menus();
-                continue;
-            }
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
-                // draw_about grows the backbuffer to the new content size.
-                needs_redraw = true;
-            }
-        }
-
-        registry = gui_registry();
-        if (registry && registry->settings_generation != last_settings_generation) {
-            last_settings_generation = registry->settings_generation;
-            if (gui_sync_theme_from_registry())
-                needs_redraw = true;
-        }
-
-        uint64_t now_tick = get_ticks();
-        if (needs_redraw || now_tick - last_refresh_tick >= 1000) {
-            AboutSnapshot snapshot = {};
-            collect_about_snapshot(&snapshot);
-            uint32_t static_sig = about_static_signature(&snapshot);
-            bool full = needs_redraw || static_sig != last_static_signature;
-
-            AboutPanelRects panels = {};
-            draw_about(&win, &back_data, &back_capacity, &backbuffer, &snapshot, &panels);
-
-            if (full) {
-                memcpy(win.buffer, backbuffer.buffer, back_capacity * sizeof(uint32_t));
-                gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
-                last_static_signature = static_sig;
-            } else {
-                // Only time/uptime/process count changed: republish the two
-                // panels that display them.
-                about_copy_rect(&backbuffer, &win, panels.runtime);
-                about_copy_rect(&backbuffer, &win, panels.memory);
-                if (!gui_rect_is_empty(panels.runtime))
-                    gui_blit_to_screen_rect(&win, panels.runtime.x, panels.runtime.y, panels.runtime.w,
-                                            panels.runtime.h);
-                if (!gui_rect_is_empty(panels.memory))
-                    gui_blit_to_screen_rect(&win, panels.memory.x, panels.memory.y, panels.memory.w, panels.memory.h);
-            }
-            last_refresh_tick = now_tick;
-            needs_redraw = false;
-        }
-
-        sleep_ms(50);
-    }
+    return app_run(&config, &state);
 }
