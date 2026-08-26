@@ -3,12 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <uapi/event.h>
 #include <uapi/fs.h>
 #include <uapi/syscalls.h>
 #include <uapi/sysinfo.h>
 #include <unistd.h>
-#include <sys/epoll.h>
 
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
@@ -38,6 +38,17 @@ static inline uint32_t term_cursor()
 {
     return g_gui_style.accent;
 }
+// Selection highlight: accent blended ~45% over the cell background so the
+// tint stays legible in both themes and over ANSI-colored output.
+static inline uint32_t term_sel_bg()
+{
+    uint32_t a = g_gui_style.accent;
+    uint32_t b = g_gui_style.app_surface;
+    uint32_t r = (((a >> 16) & 0xFFu) * 115u + ((b >> 16) & 0xFFu) * 141u) >> 8;
+    uint32_t g = (((a >> 8) & 0xFFu) * 115u + ((b >> 8) & 0xFFu) * 141u) >> 8;
+    uint32_t bl = ((a & 0xFFu) * 115u + (b & 0xFFu) * 141u) >> 8;
+    return 0xFF000000u | (r << 16) | (g << 8) | bl;
+}
 static constexpr int TERM_CURSOR_H = 2;
 static constexpr const char *WALLPAPER_CONFIG_PATH = "/data/WALLPAPR.CFG";
 static constexpr const char *WALLPAPER_BOOTSTRAP_CONFIG_PATH = "/etc/wallpaper.conf";
@@ -56,6 +67,16 @@ static constexpr uint8_t KEY_DELETE = 0x86;
 static constexpr uint8_t KEY_PAGEUP = 0x87;
 static constexpr uint8_t KEY_PAGEDOWN = 0x88;
 static constexpr uint32_t TERM_SCROLLBAR_RESERVE = 12;
+
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum
+{
+    TERM_MENU_COPY = 1,
+    TERM_MENU_PASTE,
+    TERM_MENU_SELECT_ALL,
+    TERM_MENU_CLEAR,
+    TERM_MENU_HELP = 0x80,
+};
 
 static inline const GuiFont *term_font()
 {
@@ -178,19 +199,26 @@ class TerminalEmulator
 {
 public:
     TerminalEmulator()
-        : m_scroll_offset(0), m_grid(nullptr), m_presented_grid(nullptr), m_history_len(nullptr), m_history_text(nullptr),
-          m_history_fg(nullptr), m_history_start(0), m_ready(false), m_cursor_visible(false)
+        : m_scroll_offset(0), m_grid(nullptr), m_presented_grid(nullptr), m_history_len(nullptr),
+          m_history_text(nullptr), m_history_fg(nullptr), m_history_start(0), m_ready(false), m_cursor_visible(false)
     {
     }
 
-    uint32_t get_scroll_offset() const { return m_scroll_offset; }
-    uint32_t height() const { return m_height; }
+    uint32_t get_scroll_offset() const
+    {
+        return m_scroll_offset;
+    }
+    uint32_t height() const
+    {
+        return m_height;
+    }
 
     void reset_scroll()
     {
         if (m_scroll_offset != 0) {
             m_scroll_offset = 0;
             m_needs_full_redraw = true;
+            sel_clear();
         }
     }
 
@@ -206,6 +234,7 @@ public:
         if (m_scroll_offset != (uint32_t)new_offset) {
             m_scroll_offset = (uint32_t)new_offset;
             m_needs_full_redraw = true;
+            sel_clear();
         }
     }
 
@@ -301,6 +330,7 @@ public:
 
     void clear_screen()
     {
+        sel_clear();
         reset_history();
     }
 
@@ -346,6 +376,7 @@ public:
     {
         if (!str)
             return;
+        sel_clear();
         while (*str)
             put_char(*str++);
     }
@@ -354,6 +385,7 @@ public:
     {
         if (!data)
             return;
+        sel_clear();
         for (size_t i = 0; i < len; i++)
             put_char(data[i]);
     }
@@ -364,6 +396,7 @@ public:
             return;
 
         rebuild_grid_from_history();
+        apply_sel_tint();
         int32_t dirty_x1 = (int32_t)m_window.width;
         int32_t dirty_y1 = (int32_t)m_window.height;
         int32_t dirty_x2 = 0;
@@ -477,6 +510,15 @@ public:
             }
         }
 
+        if (m_help_visible) {
+            draw_help_overlay();
+            dirty_x1 = 0;
+            dirty_y1 = 0;
+            dirty_x2 = (int32_t)m_window.width;
+            dirty_y2 = (int32_t)m_window.height;
+            has_dirty = true;
+        }
+
         asm volatile("sfence" ::: "memory");
         if (has_dirty) {
             gui_blit_to_screen_rect(&m_window, dirty_x1, dirty_y1, dirty_x2 - dirty_x1, dirty_y2 - dirty_y1);
@@ -495,8 +537,9 @@ public:
         if (resized <= 0)
             return false;
 
-        uint32_t content_w =
-            (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE)) ? (m_window.width - (uint32_t)(term_pad_x() * 2) - TERM_SCROLLBAR_RESERVE) : 0;
+        uint32_t content_w = (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE))
+                                 ? (m_window.width - (uint32_t)(term_pad_x() * 2) - TERM_SCROLLBAR_RESERVE)
+                                 : 0;
         uint32_t content_h =
             (m_window.height > (uint32_t)(term_pad_y() * 2)) ? (m_window.height - (uint32_t)(term_pad_y() * 2)) : 0;
         uint32_t new_width = content_w / term_cell_w();
@@ -515,7 +558,217 @@ public:
         m_needs_full_redraw = true;
     }
 
+    // --- Mouse selection ---------------------------------------------------
+    // The selection is a contiguous row-major range over the visible grid. It
+    // is expressed in viewport cell coordinates, so anything that reflows the
+    // viewport (scroll, resize, new output, clear) invalidates it.
+    void sel_start(int32_t x, int32_t y)
+    {
+        uint32_t c, r;
+        cell_from_point(x, y, &c, &r);
+        m_sel_anchor_col = c;
+        m_sel_anchor_row = r;
+        m_sel_caret_col = c;
+        m_sel_caret_row = r;
+        m_sel_active = true;
+        m_sel_dragging = true;
+    }
+
+    bool sel_extend(int32_t x, int32_t y)
+    {
+        if (!m_sel_active || !m_sel_dragging)
+            return false;
+        uint32_t c, r;
+        cell_from_point(x, y, &c, &r);
+        if (c == m_sel_caret_col && r == m_sel_caret_row)
+            return false;
+        m_sel_caret_col = c;
+        m_sel_caret_row = r;
+        return true;
+    }
+
+    void sel_finish()
+    {
+        m_sel_dragging = false;
+        if (m_sel_active && m_sel_anchor_col == m_sel_caret_col && m_sel_anchor_row == m_sel_caret_row)
+            m_sel_active = false;
+    }
+
+    void sel_stop_drag()
+    {
+        m_sel_dragging = false;
+    }
+
+    void sel_clear()
+    {
+        m_sel_active = false;
+        m_sel_dragging = false;
+    }
+
+    void sel_all()
+    {
+        if (m_width == 0 || m_height == 0)
+            return;
+        m_sel_anchor_col = 0;
+        m_sel_anchor_row = 0;
+        m_sel_caret_col = m_width - 1;
+        m_sel_caret_row = m_height - 1;
+        m_sel_active = true;
+        m_sel_dragging = false;
+    }
+
+    bool sel_has() const
+    {
+        return m_sel_active && !(m_sel_anchor_col == m_sel_caret_col && m_sel_anchor_row == m_sel_caret_row);
+    }
+
+    size_t sel_extract(char *out, size_t out_size) const
+    {
+        if (!sel_has() || !m_grid || !out || out_size == 0 || m_width == 0)
+            return 0;
+        uint32_t a = m_sel_anchor_row * m_width + m_sel_anchor_col;
+        uint32_t b = m_sel_caret_row * m_width + m_sel_caret_col;
+        uint32_t lo = a < b ? a : b;
+        uint32_t hi = a < b ? b : a;
+        uint32_t start_row = lo / m_width;
+        uint32_t start_col = lo % m_width;
+        uint32_t end_row = hi / m_width;
+        uint32_t end_col = hi % m_width;
+
+        size_t pos = 0;
+        for (uint32_t row = start_row; row <= end_row && pos + 1 < out_size; row++) {
+            uint32_t c0 = (row == start_row) ? start_col : 0;
+            uint32_t c1 = (row == end_row) ? end_col : (m_width - 1);
+            int last = -1;
+            for (uint32_t c = c0; c <= c1; c++) {
+                char ch = m_grid[row * m_width + c].ch;
+                if (ch >= 33)
+                    last = (int)c;
+            }
+            if (last >= 0) {
+                for (uint32_t c = c0; c <= (uint32_t)last && pos + 1 < out_size; c++) {
+                    char ch = m_grid[row * m_width + c].ch;
+                    out[pos++] = (ch >= 32) ? ch : ' ';
+                }
+            }
+            if (row < end_row && pos + 1 < out_size)
+                out[pos++] = '\n';
+        }
+        while (pos > 0 && out[pos - 1] == '\n')
+            pos--;
+        out[pos] = '\0';
+        return pos;
+    }
+
+    // --- Help overlay ------------------------------------------------------
+    void show_help()
+    {
+        if (!m_help_visible) {
+            m_help_visible = true;
+            m_needs_full_redraw = true;
+        }
+    }
+
+    void hide_help()
+    {
+        if (m_help_visible) {
+            m_help_visible = false;
+            m_needs_full_redraw = true;
+        }
+    }
+
+    bool help_visible() const
+    {
+        return m_help_visible;
+    }
+
+    bool help_close_hit(int x, int y) const
+    {
+        return m_help_visible && x >= m_help_close.x && x < m_help_close.x + m_help_close.w && y >= m_help_close.y &&
+               y < m_help_close.y + m_help_close.h;
+    }
+
 private:
+    void cell_from_point(int32_t x, int32_t y, uint32_t *col, uint32_t *row) const
+    {
+        int32_t cx = 0, cy = 0;
+        if (m_width > 0 && m_height > 0) {
+            cx = (x - term_content_x()) / (int32_t)term_cell_w();
+            cy = (y - term_content_y()) / (int32_t)term_cell_h();
+            if (cx < 0)
+                cx = 0;
+            if (cy < 0)
+                cy = 0;
+            if (cx >= (int32_t)m_width)
+                cx = (int32_t)m_width - 1;
+            if (cy >= (int32_t)m_height)
+                cy = (int32_t)m_height - 1;
+        }
+        *col = (uint32_t)cx;
+        *row = (uint32_t)cy;
+    }
+
+    bool cell_selected(uint32_t col, uint32_t row) const
+    {
+        if (!sel_has())
+            return false;
+        uint32_t a = m_sel_anchor_row * m_width + m_sel_anchor_col;
+        uint32_t b = m_sel_caret_row * m_width + m_sel_caret_col;
+        uint32_t lo = a < b ? a : b;
+        uint32_t hi = a < b ? b : a;
+        uint32_t p = row * m_width + col;
+        return p >= lo && p <= hi;
+    }
+
+    void apply_sel_tint()
+    {
+        if (!sel_has() || !m_grid)
+            return;
+        uint32_t sel_bg = term_sel_bg();
+        for (uint32_t y = 0; y < m_height; y++) {
+            for (uint32_t x = 0; x < m_width; x++) {
+                if (cell_selected(x, y))
+                    m_grid[y * m_width + x].bg = sel_bg;
+            }
+        }
+    }
+
+    void draw_help_overlay()
+    {
+        int win_w = (int)m_window.width;
+        int win_h = (int)m_window.height;
+        int box_w = gui_scaled_metric(430);
+        int box_h = gui_scaled_metric(238);
+        if (box_w > win_w - gui_space_4())
+            box_w = win_w - gui_space_4();
+        if (box_h > win_h - gui_space_4())
+            box_h = win_h - gui_space_4();
+        int box_x = (win_w - box_w) / 2;
+        int box_y = (win_h - box_h) / 2;
+        gui_fill_rect_blend(&m_window, 0, 0, win_w, win_h, 0x80000000u);
+        gui_draw_panel_inset(&m_window, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
+                             g_gui_style.chrome_bg_alt);
+        gui_draw_card_header(&m_window, box_x + 1, box_y + 1, box_w - 2, "Terminal Help", nullptr);
+        static const char *tips[] = {
+            "Drag with the mouse to select output, then copy it",   "Ctrl+X copies the selection (Ctrl+C sends SIGINT)",
+            "Ctrl+V pastes the clipboard into the shell",           "Right-click pastes the clipboard",
+            "Page Up / Page Down and the wheel scroll the history", "Edit > Clear Screen wipes the scrollback",
+        };
+        int text_x = box_x + gui_space_2();
+        int text_y = box_y + gui_card_header_h() + gui_space_2();
+        int line_h = gui_line_height();
+        for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+            gui_draw_text_clipped(&m_window, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i],
+                                  g_gui_style.text, g_gui_style.app_surface);
+            text_y += line_h + gui_space_1();
+        }
+        int btn_w = gui_scaled_metric(88);
+        m_help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
+                                     box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
+        gui_app_draw_button_ex(&m_window, m_help_close.x, m_help_close.y, m_help_close.w, m_help_close.h, "Close", true,
+                               false, false, false);
+    }
+
     void draw_chrome()
     {
         gui_fill_surface(&m_window, term_frame_bg());
@@ -739,6 +992,7 @@ private:
         m_height = new_height;
         m_presented_cursor_visible = false;
         m_needs_full_redraw = true;
+        sel_clear();
         rebuild_grid_from_history();
         return true;
     }
@@ -863,6 +1117,14 @@ private:
     char m_ansi_buf[32];
     bool m_focused = true;
     bool m_blink_on = true;
+    bool m_sel_active = false;
+    bool m_sel_dragging = false;
+    uint32_t m_sel_anchor_col = 0;
+    uint32_t m_sel_anchor_row = 0;
+    uint32_t m_sel_caret_col = 0;
+    uint32_t m_sel_caret_row = 0;
+    bool m_help_visible = false;
+    Rect m_help_close = {0, 0, 0, 0};
 };
 
 static void term_printf(TerminalEmulator &term, const char *fmt, ...)
@@ -873,6 +1135,80 @@ static void term_printf(TerminalEmulator &term, const char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     term.write_string(buf);
+}
+
+static bool term_paste_to(int fd)
+{
+    char text[MENU_CLIPBOARD_CAP + 1];
+    size_t len = 0;
+    if (!gui_clipboard_paste(text, sizeof(text), &len) || len == 0)
+        return false;
+    size_t written = 0;
+    while (written < len) {
+        int n = write(fd, text + written, len - written);
+        if (n < 0)
+            return false;
+        written += (size_t)n;
+    }
+    return true;
+}
+
+static bool term_copy_selection(TerminalEmulator &term)
+{
+    char text[MENU_CLIPBOARD_CAP + 1];
+    size_t len = term.sel_extract(text, sizeof(text));
+    if (len == 0)
+        return false;
+    return gui_clipboard_copy(text, len);
+}
+
+static void term_publish_menus(TerminalEmulator &term, bool clipboard_nonempty)
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+
+    int edit = gui_menu_model_add_menu(&model, "Edit");
+    gui_menu_model_add_item(&model, edit, "Copy", TERM_MENU_COPY, term.sel_has() ? 0 : MENU_FLAG_DISABLED, "Ctrl+X");
+    gui_menu_model_add_item(&model, edit, "Paste", TERM_MENU_PASTE, clipboard_nonempty ? 0 : MENU_FLAG_DISABLED,
+                            "Ctrl+V");
+    gui_menu_model_add_item(&model, edit, "Select All", TERM_MENU_SELECT_ALL, 0, nullptr);
+    gui_menu_model_add_separator(&model, edit);
+    gui_menu_model_add_item(&model, edit, "Clear Screen", TERM_MENU_CLEAR, 0, nullptr);
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Terminal Help", TERM_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static void term_handle_menu_command(TerminalEmulator &term, uint32_t cmd, int shell_fd, bool *shell_alive,
+                                     bool *needs_render)
+{
+    switch (cmd) {
+        case TERM_MENU_COPY:
+            term_copy_selection(term);
+            break;
+        case TERM_MENU_PASTE:
+            if (*shell_alive)
+                term_paste_to(shell_fd);
+            break;
+        case TERM_MENU_SELECT_ALL:
+            term.sel_all();
+            *needs_render = true;
+            break;
+        case TERM_MENU_CLEAR:
+            term.clear_screen();
+            *needs_render = true;
+            break;
+        case TERM_MENU_HELP:
+            term.show_help();
+            *needs_render = true;
+            break;
+        default:
+            break;
+    }
 }
 
 extern "C" int main(int argc, char **argv)
@@ -889,6 +1225,10 @@ extern "C" int main(int argc, char **argv)
     term.render_all();
     Registry *registry = gui_registry();
     uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
+
+    bool last_menu_sel = term.sel_has();
+    bool last_menu_clip = false;
+    bool menu_focus_dirty = true;
 
     int pipe_to_shell[2];
     int pipe_from_shell[2];
@@ -964,6 +1304,7 @@ extern "C" int main(int argc, char **argv)
             if (gui_ev.type == EVT_FOCUS) {
                 term.set_focused(true);
                 last_activity_ticks = get_ticks();
+                menu_focus_dirty = true;
                 needs_render = true;
                 continue;
             }
@@ -978,8 +1319,50 @@ extern "C" int main(int argc, char **argv)
                 needs_render = true;
                 continue;
             }
+            if (gui_ev.type == EVT_MOUSE_LEAVE) {
+                term.sel_stop_drag();
+                continue;
+            }
+            if (gui_ev.type == EVT_MOUSE_DOWN) {
+                if (term.help_visible()) {
+                    if (gui_ev.mouse.button == 1) {
+                        term.hide_help();
+                        needs_render = true;
+                    }
+                    continue;
+                }
+                if (gui_ev.mouse.button == 1) {
+                    term.sel_start(gui_ev.mouse.x, gui_ev.mouse.y);
+                    needs_render = true;
+                } else if (gui_ev.mouse.button == 2) {
+                    if (shell_alive)
+                        term_paste_to(pipe_to_shell[1]);
+                    last_activity_ticks = get_ticks();
+                    needs_render = true;
+                }
+                continue;
+            }
+            if (gui_ev.type == EVT_MOUSE_MOVE) {
+                if (term.sel_extend(gui_ev.mouse.x, gui_ev.mouse.y))
+                    needs_render = true;
+                continue;
+            }
+            if (gui_ev.type == EVT_MOUSE_UP) {
+                if (gui_ev.mouse.button == 1) {
+                    term.sel_finish();
+                    needs_render = true;
+                }
+                continue;
+            }
             if (gui_ev.type == EVT_KEY_DOWN && gui_ev.key.c != 0) {
                 char c = (char)gui_ev.key.c;
+                if (term.help_visible()) {
+                    if ((uint8_t)c == 27 || c == '\n' || c == '\r') {
+                        term.hide_help();
+                        needs_render = true;
+                    }
+                    continue;
+                }
                 if ((uint8_t)c == KEY_PAGEUP) {
                     term.scroll_history((int)term.height() / 2);
                     needs_render = true;
@@ -987,6 +1370,17 @@ extern "C" int main(int argc, char **argv)
                 }
                 if ((uint8_t)c == KEY_PAGEDOWN) {
                     term.scroll_history(-(int)term.height() / 2);
+                    needs_render = true;
+                    continue;
+                }
+                if ((uint8_t)c == 24) { // Ctrl+X copies the selection (Ctrl+C is SIGINT).
+                    term_copy_selection(term);
+                    continue;
+                }
+                if ((uint8_t)c == 22) { // Ctrl+V pastes the clipboard into the shell.
+                    if (shell_alive)
+                        term_paste_to(pipe_to_shell[1]);
+                    last_activity_ticks = get_ticks();
                     needs_render = true;
                     continue;
                 }
@@ -1043,6 +1437,22 @@ extern "C" int main(int argc, char **argv)
                 term.theme_changed();
             }
             needs_render = true;
+        }
+
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd)) {
+            term_handle_menu_command(term, menu_cmd, pipe_to_shell[1], &shell_alive, &needs_render);
+        }
+
+        // Republish the menu model when Copy/Paste availability or focus
+        // changes so the menubar's enabled-state stays honest.
+        bool clip_nonempty = registry && registry->clipboard_len > 0;
+        bool sel_has_now = term.sel_has();
+        if (term.focused() && (menu_focus_dirty || sel_has_now != last_menu_sel || clip_nonempty != last_menu_clip)) {
+            term_publish_menus(term, clip_nonempty);
+            last_menu_sel = sel_has_now;
+            last_menu_clip = clip_nonempty;
+            menu_focus_dirty = false;
         }
 
         // 4. Cursor blink: solid for a moment after activity, then a steady
