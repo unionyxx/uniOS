@@ -6,8 +6,10 @@
 #include <uapi/syscalls.h>
 #include <unistd.h>
 
+#include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
 #include "../../libgui/gui.h"
+#include "../../libmedia/media_image.h"
 
 static constexpr int MAX_VOLUMES = 16;
 static constexpr int MAX_ROWS = 128;
@@ -78,12 +80,21 @@ enum FilesMenuId
     FILES_MENU_PASTE,
     FILES_MENU_REFRESH,
     FILES_MENU_UP,
+    FILES_MENU_TOGGLE_SIDEBAR,
+    FILES_MENU_TOGGLE_VIEW,
     FILES_MENU_GO_PLACE = 0x20,  // + place index
     FILES_MENU_GO_VOLUME = 0x40, // + visible volume index
     FILES_MENU_HELP = 0x80,
 };
 
 namespace {
+struct ThumbCache
+{
+    char path[512];
+    media_image img;
+    bool tried;
+};
+
 struct AppState
 {
     VolumeInfo volumes[MAX_VOLUMES];
@@ -118,6 +129,9 @@ struct AppState
     int dialog_pressed; // 1 = OK held, 2 = Cancel held
     int selected_volume_row;
     char window_title[96];
+    bool show_sidebar;
+    bool icon_view;
+    ThumbCache thumbs[MAX_ROWS];
 };
 } // namespace
 
@@ -282,6 +296,31 @@ static const char *path_basename(const char *path)
     if (!slash)
         return path;
     return slash[1] ? slash + 1 : slash;
+}
+
+static bool suffix_match_icase(const char *name, const char *suffix)
+{
+    size_t name_len = strlen(name);
+    size_t suffix_len = strlen(suffix);
+    if (name_len < suffix_len)
+        return false;
+    const char *p = name + name_len - suffix_len;
+    for (size_t i = 0; i < suffix_len; i++) {
+        char a = p[i];
+        if (a >= 'A' && a <= 'Z')
+            a = static_cast<char>(a - 'A' + 'a');
+        if (a != suffix[i])
+            return false;
+    }
+    return true;
+}
+
+static bool name_is_image(const char *name)
+{
+    if (!name)
+        return false;
+    return suffix_match_icase(name, ".png") || suffix_match_icase(name, ".jpg") || suffix_match_icase(name, ".jpeg") ||
+           suffix_match_icase(name, ".bmp") || suffix_match_icase(name, ".gif") || suffix_match_icase(name, ".qoi");
 }
 
 static bool path_equals(const char *a, const char *b)
@@ -670,6 +709,17 @@ static void refresh_volumes(AppState *state)
         set_status(state, storage_mode_label(state->storage_mode));
 }
 
+static void clear_thumbs(AppState *state)
+{
+    if (!state)
+        return;
+    for (int i = 0; i < MAX_ROWS; i++) {
+        media_image_free(&state->thumbs[i].img);
+        state->thumbs[i].path[0] = '\0';
+        state->thumbs[i].tried = false;
+    }
+}
+
 static void load_directory(AppState *state)
 {
     if (!state)
@@ -684,6 +734,7 @@ static void load_directory(AppState *state)
     state->row_count = 0;
     state->selected_row = -1;
     state->load_failed = false;
+    clear_thumbs(state);
     reset_click_tracking(state);
     if (state->volume_home || state->current_path[0] == '\0')
         return;
@@ -1075,21 +1126,203 @@ static void draw_menu(Surface *win, AppState *state, LayoutCache *cache)
     gui_draw_popup_menu(win, state->menu_x, state->menu_y, state->menu_w, items, count, state->menu_hovered);
 }
 
-static int compute_files_content_height(AppState *state)
+static inline int files_icon_cell_w()
 {
-    int sidebar_h = gui_card_header_h() + gui_space_1() + gui_line_height() + gui_space_1();
-    int data_index = find_data_volume_index(state);
-    if (data_index >= 0 && state->storage_mode != STORAGE_MODE_OFF)
-        sidebar_h += MAX_PLACES * gui_scaled_metric(46) + gui_space_1();
-    else
-        sidebar_h += gui_scaled_metric(46);
-    sidebar_h += gui_card_header_h() + gui_space_1();
-    int visible_vols = 0;
-    for (int i = 0; i < state->volume_count; i++) {
-        if (is_visible_volume(state->volumes[i]))
-            visible_vols++;
+    return gui_scaled_metric(104);
+}
+
+static inline int files_icon_cell_h()
+{
+    return gui_scaled_metric(96);
+}
+
+// Shape-based icon: folder = tab + body, file = page with text lines. There
+// are no per-type icon assets, so geometry carries the distinction.
+static void draw_shape_icon(Surface *win, int x, int y, int size, bool is_dir, uint32_t fg, uint32_t detail)
+{
+    if (!win || size <= 0)
+        return;
+    int r = size / 8;
+    if (r < 2)
+        r = 2;
+    if (is_dir) {
+        int tab_w = size * 42 / 100;
+        int tab_h = size * 18 / 100;
+        gui_fill_rounded_rect(win, x, y, tab_w, tab_h + r, r, fg);
+        gui_fill_rounded_rect(win, x, y + tab_h, size, size - tab_h, r, fg);
+    } else {
+        int page_w = size * 76 / 100;
+        int page_x = x + (size - page_w) / 2;
+        gui_fill_rounded_rect(win, page_x, y, page_w, size, r, fg);
+        int line_w = page_w * 56 / 100;
+        int line_x = page_x + (page_w - line_w) / 2;
+        int line_h = size / 16;
+        if (line_h < 2)
+            line_h = 2;
+        int gap_v = size / 5;
+        int line_y = y + size * 32 / 100;
+        for (int i = 0; i < 3 && line_y + line_h <= y + size - r; i++) {
+            gui_fill_rect(win, line_x, line_y, line_w, line_h, detail);
+            line_y += gap_v;
+        }
     }
-    sidebar_h += visible_vols * gui_scaled_metric(48);
+}
+
+static constexpr uint64_t THUMB_MAX_FILE_BYTES = 8ull * 1024 * 1024;
+
+static void blend_thumb_onto(Surface *win, int x0, int y0, const media_image *img)
+{
+    if (!img->pixels)
+        return;
+    uint32_t stride = win->pitch / 4;
+    for (int y = 0; y < img->height; y++) {
+        int dy = y0 + y;
+        if (dy < 0 || dy >= static_cast<int>(win->height))
+            continue;
+        const uint32_t *src = img->pixels + static_cast<uint64_t>(y) * img->width;
+        uint32_t *dst = win->buffer + static_cast<uint64_t>(dy) * stride;
+        for (int x = 0; x < img->width; x++) {
+            int dx = x0 + x;
+            if (dx < 0 || dx >= static_cast<int>(win->width))
+                continue;
+            uint32_t p = src[x];
+            uint32_t a = p >> 24;
+            if (a == 255) {
+                dst[dx] = p;
+                continue;
+            }
+            if (a == 0)
+                continue;
+            uint32_t d = dst[dx];
+            uint32_t ia = 255 - a;
+            uint32_t r = (((p >> 16) & 0xFF) * a + ((d >> 16) & 0xFF) * ia + 127) / 255;
+            uint32_t g = (((p >> 8) & 0xFF) * a + ((d >> 8) & 0xFF) * ia + 127) / 255;
+            uint32_t b = ((p & 0xFF) * a + (d & 0xFF) * ia + 127) / 255;
+            dst[dx] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+// Decode a directory entry into a cached icon-sized thumbnail. Called lazily
+// from the draw path so only visible cells pay the decode cost, and only once
+// per entry per directory load.
+static void refresh_thumb(AppState *state, int index)
+{
+    ThumbCache *thumb = &state->thumbs[index];
+    media_image_free(&thumb->img);
+    thumb->tried = true;
+    strncpy(thumb->path, state->rows[index].path, sizeof(thumb->path) - 1);
+    thumb->path[sizeof(thumb->path) - 1] = '\0';
+
+    const FileRow &row = state->rows[index];
+    if (row.size == 0 || row.size > THUMB_MAX_FILE_BYTES)
+        return;
+    uint8_t *data = nullptr;
+    uint32_t size = 0;
+    if (!gui_load_file(row.path, &data, &size))
+        return;
+    media_image full = {};
+    bool ok = media_image_decode(data, size, &full);
+    free(data);
+    if (!ok)
+        return;
+
+    int box = gui_scaled_metric(40);
+    int tw = 1, th = 1;
+    if (full.width > 0 && full.height > 0) {
+        if (full.width >= full.height) {
+            tw = box;
+            th = static_cast<int>(static_cast<uint64_t>(full.height) * box / full.width);
+        } else {
+            th = box;
+            tw = static_cast<int>(static_cast<uint64_t>(full.width) * box / full.height);
+        }
+    }
+    if (tw < 1)
+        tw = 1;
+    if (th < 1)
+        th = 1;
+    if (!media_image_scale(&full, &thumb->img, tw, th))
+        media_image_free(&thumb->img);
+    media_image_free(&full);
+}
+
+static void draw_file_icon_cell(Surface *win, AppState *state, const Rect &cell, int index)
+{
+    if (!win || !state || index < 0 || index >= state->row_count)
+        return;
+    const FileRow &row = state->rows[index];
+    bool selected = index == state->selected_row;
+    bool hovered = state->have_mouse && state->menu_kind == MENU_NONE && state->dialog_mode == DIALOG_NONE &&
+                   rect_contains(cell, state->mouse_x, state->mouse_y);
+
+    int rad = gui_radius_md();
+    if (selected) {
+        gui_fill_rounded_rect(win, cell.x, cell.y, cell.w, cell.h, rad, g_gui_style.accent_soft);
+        gui_draw_rounded_rect(win, cell.x, cell.y, cell.w, cell.h, rad, g_gui_style.accent);
+    } else if (hovered) {
+        gui_fill_rounded_rect(win, cell.x, cell.y, cell.w, cell.h, rad, g_gui_style.chrome_bg_alt);
+    }
+
+    int icon_size = gui_scaled_metric(40);
+    int icon_x = cell.x + (cell.w - icon_size) / 2;
+    int icon_y = cell.y + gui_space_2();
+
+    bool drew_thumb = false;
+    if (!row.is_dir && name_is_image(row.name)) {
+        ThumbCache *thumb = &state->thumbs[index];
+        bool cell_visible = true;
+        if (g_my_window) {
+            int view_top = g_my_window->scroll_y;
+            int view_bottom = view_top + static_cast<int>(win->height);
+            cell_visible = cell.y + cell.h > view_top && cell.y < view_bottom;
+        }
+        if ((!thumb->tried || strcmp(thumb->path, row.path) != 0) && cell_visible)
+            refresh_thumb(state, index);
+        if (thumb->img.pixels) {
+            int pad = 2;
+            gui_fill_rounded_rect(win, icon_x - pad, icon_y - pad, icon_size + pad * 2, icon_size + pad * 2,
+                                  gui_radius_xs(), g_gui_style.app_surface_alt);
+            gui_draw_rounded_rect(win, icon_x - pad, icon_y - pad, icon_size + pad * 2, icon_size + pad * 2,
+                                  gui_radius_xs(), g_gui_style.border);
+            int tx = icon_x + (icon_size - thumb->img.width) / 2;
+            int ty = icon_y + (icon_size - thumb->img.height) / 2;
+            blend_thumb_onto(win, tx, ty, &thumb->img);
+            drew_thumb = true;
+        }
+    }
+    if (!drew_thumb) {
+        uint32_t icon_color = row.is_dir ? g_gui_style.accent : g_gui_style.text_dim;
+        draw_shape_icon(win, icon_x, icon_y, icon_size, row.is_dir, icon_color, g_gui_style.app_surface);
+    }
+
+    int label_y = icon_y + icon_size + gui_space_1();
+    gui_draw_text_clipped(win, gui_font_default(), cell.x + gui_space_1(), label_y, cell.w - gui_space_2(), row.name,
+                          g_gui_style.text, g_gui_style.app_surface);
+}
+
+static int compute_files_content_height(AppState *state, int content_w)
+{
+    int sidebar_h = 0;
+    if (state->show_sidebar) {
+        sidebar_h = gui_card_header_h() + gui_space_1() + gui_line_height() + gui_space_1();
+        int data_index = find_data_volume_index(state);
+        if (data_index >= 0 && state->storage_mode != STORAGE_MODE_OFF)
+            sidebar_h += MAX_PLACES * gui_scaled_metric(46) + gui_space_1();
+        else
+            sidebar_h += gui_scaled_metric(46);
+        sidebar_h += gui_card_header_h() + gui_space_1();
+        int visible_vols = 0;
+        for (int i = 0; i < state->volume_count; i++) {
+            if (is_visible_volume(state->volumes[i]))
+                visible_vols++;
+        }
+        sidebar_h += visible_vols * gui_scaled_metric(48);
+    }
+
+    int sidebar_w = state->show_sidebar ? gui_scaled_metric(170) : 0;
+    int sidebar_gap = state->show_sidebar ? gui_app_section_gap() : 0;
+    int main_w = content_w - sidebar_w - sidebar_gap;
 
     int main_h = gui_card_header_h() + gui_space_2();
     if (state->volume_home) {
@@ -1097,6 +1330,13 @@ static int compute_files_content_height(AppState *state)
         main_h += (vols > 0 ? vols : 1) * (gui_app_row_h() + gui_space_1());
     } else if (state->load_failed) {
         main_h += gui_app_row_h();
+    } else if (state->icon_view) {
+        int cell_w = files_icon_cell_w();
+        int cols = cell_w > 0 ? (main_w - gui_space_4()) / cell_w : 1;
+        if (cols < 1)
+            cols = 1;
+        int rows = (state->row_count + cols - 1) / cols;
+        main_h += rows * files_icon_cell_h() + gui_space_2();
     } else {
         main_h += state->row_count * (gui_app_row_h() + 2);
     }
@@ -1109,17 +1349,18 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
     memset(cache, 0, sizeof(*cache));
     GuiAppLayout layout = gui_app_begin(win);
     int view_w = layout.outer_w + layout.outer_x * 2;
-    int body_content_h = compute_files_content_height(state);
+    int body_content_h = compute_files_content_height(state, layout.body_rect.w);
     int content_total = layout.body_rect.y + body_content_h + gui_app_outer_padding();
     gui_set_content_size(win, view_w, content_total);
 
-    int sidebar_w = gui_scaled_metric(170);
+    int sidebar_w = state->show_sidebar ? gui_scaled_metric(170) : 0;
+    int sidebar_gap = state->show_sidebar ? gui_app_section_gap() : 0;
     int content_x = layout.body_rect.x;
     int content_y = layout.body_rect.y;
     int content_w = layout.body_rect.w;
     int sidebar_x = content_x;
-    int main_x = sidebar_x + sidebar_w + gui_app_section_gap();
-    int main_w = content_w - sidebar_w - gui_app_section_gap();
+    int main_x = sidebar_x + sidebar_w + sidebar_gap;
+    int main_w = content_w - sidebar_w - sidebar_gap;
     int content_h = layout.body_rect.h;
     if (body_content_h > content_h)
         content_h = body_content_h;
@@ -1141,6 +1382,20 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
     } else if (state->load_failed) {
         gui_app_draw_list_row(win, main_x + gui_space_2(), list_y, main_w - gui_space_4(), gui_app_row_h(), "ERR",
                               "Unable to open directory", state->current_path, false, false, true);
+    } else if (state->icon_view) {
+        int cell_w = files_icon_cell_w();
+        int cell_h = files_icon_cell_h();
+        int usable_w = main_w - gui_space_4();
+        int cols = cell_w > 0 ? usable_w / cell_w : 1;
+        if (cols < 1)
+            cols = 1;
+        int grid_x = main_x + gui_space_2();
+        for (int i = 0; i < state->row_count; i++) {
+            int col = i % cols;
+            int grid_row = i / cols;
+            cache->row_rects[i] = gui_rect_make(grid_x + col * cell_w, list_y + grid_row * cell_h, cell_w, cell_h);
+            draw_file_icon_cell(win, state, cache->row_rects[i], i);
+        }
     } else {
         for (int i = 0; i < state->row_count; i++) {
             cache->row_rects[i] = gui_rect_make(main_x + gui_space_2(), list_y + i * (gui_app_row_h() + 2),
@@ -1152,57 +1407,61 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
                 snprintf(detail, sizeof(detail), "%llu bytes", (unsigned long long)state->rows[i].size);
             bool hovered = state->have_mouse && state->menu_kind == MENU_NONE &&
                            rect_contains(cache->row_rects[i], state->mouse_x, state->mouse_y);
+            const char *badge = state->rows[i].is_dir ? "DIR" : (name_is_image(state->rows[i].name) ? "IMG" : "FILE");
             gui_app_draw_list_row(win, cache->row_rects[i].x, cache->row_rects[i].y, cache->row_rects[i].w,
-                                  cache->row_rects[i].h, state->rows[i].is_dir ? "DIR" : "FILE", state->rows[i].name,
-                                  detail, i == state->selected_row, hovered, false);
+                                  cache->row_rects[i].h, badge, state->rows[i].name, detail, i == state->selected_row,
+                                  hovered, false);
         }
     }
 
     // 3. Draw sticky overlays
-    gui_draw_panel_inset(win, sidebar_x, sticky_sidebar_y, sidebar_w, layout.body_rect.h, g_gui_style.app_surface,
-                         g_gui_style.border, g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(win, sidebar_x + 1, sticky_sidebar_y + 1, sidebar_w - 2, "Places", nullptr);
-    int sy = sticky_sidebar_y + gui_card_header_h() + gui_space_1();
-    gui_draw_text_clipped(win, gui_font_default(), sidebar_x + gui_space_2(), sy, sidebar_w - gui_space_4(),
-                          storage_mode_label(state->storage_mode), g_gui_style.text_dim, 0);
-    sy += gui_line_height() + gui_space_1();
-    int data_index = find_data_volume_index(state);
-    if (data_index >= 0 && state->storage_mode != STORAGE_MODE_OFF) {
-        for (int i = 0; i < MAX_PLACES; i++) {
-            cache->place_rects[i] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(42));
-            bool active = !state->volume_home && strcmp(state->current_path, k_places[i].path) == 0;
-            bool hovered = state->have_mouse && state->menu_kind == MENU_NONE && state->dialog_mode == DIALOG_NONE &&
-                           rect_contains(cache->place_rects[i], state->mouse_x, state->mouse_y);
-            gui_app_draw_nav_item(win, cache->place_rects[i].x, cache->place_rects[i].y, cache->place_rects[i].w,
-                                  cache->place_rects[i].h, k_places[i].label, k_places[i].detail, active, hovered);
+    if (state->show_sidebar) {
+        gui_draw_panel_inset(win, sidebar_x, sticky_sidebar_y, sidebar_w, layout.body_rect.h, g_gui_style.app_surface,
+                             g_gui_style.border, g_gui_style.chrome_bg_alt);
+        gui_draw_card_header(win, sidebar_x + 1, sticky_sidebar_y + 1, sidebar_w - 2, "Places", nullptr);
+        int sy = sticky_sidebar_y + gui_card_header_h() + gui_space_1();
+        gui_draw_text_clipped(win, gui_font_default(), sidebar_x + gui_space_2(), sy, sidebar_w - gui_space_4(),
+                              storage_mode_label(state->storage_mode), g_gui_style.text_dim, 0);
+        sy += gui_line_height() + gui_space_1();
+        int data_index = find_data_volume_index(state);
+        if (data_index >= 0 && state->storage_mode != STORAGE_MODE_OFF) {
+            for (int i = 0; i < MAX_PLACES; i++) {
+                cache->place_rects[i] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(42));
+                bool active = !state->volume_home && strcmp(state->current_path, k_places[i].path) == 0;
+                bool hovered = state->have_mouse && state->menu_kind == MENU_NONE &&
+                               state->dialog_mode == DIALOG_NONE &&
+                               rect_contains(cache->place_rects[i], state->mouse_x, state->mouse_y);
+                gui_app_draw_nav_item(win, cache->place_rects[i].x, cache->place_rects[i].y, cache->place_rects[i].w,
+                                      cache->place_rects[i].h, k_places[i].label, k_places[i].detail, active, hovered);
+                sy += gui_scaled_metric(46);
+            }
+            sy += gui_space_1();
+        } else {
+            cache->place_rects[0] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(42));
+            gui_app_draw_nav_item(win, cache->place_rects[0].x, cache->place_rects[0].y, cache->place_rects[0].w,
+                                  cache->place_rects[0].h, "Home", "No data volume available", false, false);
             sy += gui_scaled_metric(46);
         }
-        sy += gui_space_1();
-    } else {
-        cache->place_rects[0] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(42));
-        gui_app_draw_nav_item(win, cache->place_rects[0].x, cache->place_rects[0].y, cache->place_rects[0].w,
-                              cache->place_rects[0].h, "Home", "No data volume available", false, false);
-        sy += gui_scaled_metric(46);
-    }
 
-    gui_draw_card_header(win, sidebar_x + 1, sy, sidebar_w - 2, "Storage", nullptr);
-    sy += gui_card_header_h() + gui_space_1();
-    int visible = 0;
-    for (int i = 0; i < state->volume_count; i++) {
-        if (!is_visible_volume(state->volumes[i]))
-            continue;
-        cache->volume_rects[visible] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(44));
-        bool active = !state->volume_home && strcmp(state->current_path, state->volumes[i].mount_path) == 0;
-        bool hovered = state->have_mouse && state->menu_kind == MENU_NONE && state->dialog_mode == DIALOG_NONE &&
-                       rect_contains(cache->volume_rects[visible], state->mouse_x, state->mouse_y);
-        gui_app_draw_nav_item(win, cache->volume_rects[visible].x, cache->volume_rects[visible].y,
-                              cache->volume_rects[visible].w, cache->volume_rects[visible].h,
-                              state->volumes[i].display_name[0] ? state->volumes[i].display_name
-                                                                : state->volumes[i].mount_path,
-                              state->volumes[i].mount_path, active, hovered);
-        sy += gui_scaled_metric(48);
-        visible++;
-    }
+        gui_draw_card_header(win, sidebar_x + 1, sy, sidebar_w - 2, "Storage", nullptr);
+        sy += gui_card_header_h() + gui_space_1();
+        int visible = 0;
+        for (int i = 0; i < state->volume_count; i++) {
+            if (!is_visible_volume(state->volumes[i]))
+                continue;
+            cache->volume_rects[visible] = gui_rect_make(sidebar_x + 1, sy, sidebar_w - 2, gui_scaled_metric(44));
+            bool active = !state->volume_home && strcmp(state->current_path, state->volumes[i].mount_path) == 0;
+            bool hovered = state->have_mouse && state->menu_kind == MENU_NONE && state->dialog_mode == DIALOG_NONE &&
+                           rect_contains(cache->volume_rects[visible], state->mouse_x, state->mouse_y);
+            gui_app_draw_nav_item(win, cache->volume_rects[visible].x, cache->volume_rects[visible].y,
+                                  cache->volume_rects[visible].w, cache->volume_rects[visible].h,
+                                  state->volumes[i].display_name[0] ? state->volumes[i].display_name
+                                                                    : state->volumes[i].mount_path,
+                                  state->volumes[i].mount_path, active, hovered);
+            sy += gui_scaled_metric(48);
+            visible++;
+        }
+    } // show_sidebar
 
     int sticky_main_y = content_y + scroll_y;
     gui_draw_card_header(win, main_x + 1, sticky_main_y + 1, main_w - 2,
@@ -1262,6 +1521,28 @@ static void navigate_up(AppState *state)
     state->needs_redraw = true;
 }
 
+static void open_in_image_viewer(AppState *state, const FileRow *row)
+{
+    if (!state || !row)
+        return;
+    if (!gui_open_request_submit(row->path)) {
+        set_status(state, "Open request failed");
+        return;
+    }
+    int pid = fork();
+    if (pid == 0) {
+        exec("/bin/imageviewer.elf");
+        exit(1);
+    }
+    if (pid < 0) {
+        set_status(state, "Launch failed");
+        return;
+    }
+    char msg[sizeof(state->status)];
+    snprintf(msg, sizeof(msg), "Opening %s", row->name);
+    set_status(state, msg);
+}
+
 static void activate_row(AppState *state, int index)
 {
     if (state->volume_home) {
@@ -1274,6 +1555,8 @@ static void activate_row(AppState *state, int index)
         return;
     state->selected_row = index;
     if (!state->rows[index].is_dir) {
+        if (name_is_image(state->rows[index].name))
+            open_in_image_viewer(state, &state->rows[index]);
         state->needs_redraw = true;
         return;
     }
@@ -1428,8 +1711,14 @@ static void files_publish_menus(AppState *state)
     gui_menu_model_add_item(&model, edit, "Copy", FILES_MENU_COPY, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+C");
     gui_menu_model_add_item(&model, edit, "Paste", FILES_MENU_PASTE, writable && in_dir ? 0 : MENU_FLAG_DISABLED,
                             "Ctrl+V");
-    gui_menu_model_add_separator(&model, edit);
-    gui_menu_model_add_item(&model, edit, "Refresh", FILES_MENU_REFRESH, 0, nullptr);
+
+    int view = gui_menu_model_add_menu(&model, "View");
+    gui_menu_model_add_item(&model, view, "Show Sidebar", FILES_MENU_TOGGLE_SIDEBAR,
+                            state->show_sidebar ? MENU_FLAG_CHECKED : 0, nullptr);
+    gui_menu_model_add_item(&model, view, "Show as Icons", FILES_MENU_TOGGLE_VIEW,
+                            state->icon_view ? MENU_FLAG_CHECKED : 0, nullptr);
+    gui_menu_model_add_separator(&model, view);
+    gui_menu_model_add_item(&model, view, "Refresh", FILES_MENU_REFRESH, 0, nullptr);
 
     int go = gui_menu_model_add_menu(&model, "Go");
     gui_menu_model_add_item(&model, go, "Up", FILES_MENU_UP, in_dir ? 0 : MENU_FLAG_DISABLED, nullptr);
@@ -1590,6 +1879,18 @@ static void files_handle_menu_command(AppState *state, uint32_t cmd)
             load_directory(state);
         return;
     }
+    if (cmd == FILES_MENU_TOGGLE_SIDEBAR) {
+        state->show_sidebar = !state->show_sidebar;
+        cfg_save_int(APP_SETTINGS_CONFIG_PATH, "files_sidebar", state->show_sidebar ? 1 : 0);
+        state->needs_redraw = true;
+        return;
+    }
+    if (cmd == FILES_MENU_TOGGLE_VIEW) {
+        state->icon_view = !state->icon_view;
+        cfg_save_int(APP_SETTINGS_CONFIG_PATH, "files_view_mode", state->icon_view ? 1 : 0);
+        state->needs_redraw = true;
+        return;
+    }
     if (cmd == FILES_MENU_UP) {
         if (!state->volume_home)
             navigate_up(state);
@@ -1649,6 +1950,8 @@ extern "C" int main()
     state->dialog_pressed = 0;
     state->selected_volume_row = -1;
     state->window_title[0] = '\0';
+    state->show_sidebar = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "files_sidebar", 1) != 0;
+    state->icon_view = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "files_view_mode", 0) != 0;
     set_status(state, storage_mode_label(state->storage_mode));
     refresh_volumes(state);
     select_default_location(state, true);
@@ -1663,8 +1966,12 @@ extern "C" int main()
             close_menu(state);
         }
         while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE)
+            if (ev.type == EVT_WINDOW_CLOSE) {
+                clear_thumbs(state);
+                free(state);
+                free(cache);
                 return 0;
+            }
             if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
                 state->needs_redraw = true;
             }

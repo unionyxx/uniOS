@@ -305,7 +305,7 @@ foreach app_name, search_roots : app_sources
   # Heavy libraries linked without --whole-archive: only translation units
   # that resolve undefined symbols are pulled into the final binary.
   app_link_with_lazy = []
-  if app_name == 'imageviewer'
+  if app_name == 'imageviewer' or app_name == 'files'
     app_link_with_lazy += [libmedia]
   endif
   app_archive = static_library(
