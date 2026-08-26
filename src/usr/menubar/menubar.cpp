@@ -878,8 +878,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
             int bx = g_app_menu_btn_x[g_open_app_menu];
             int hovered = gui_popup_menu_hit_test(d.items, d.count, bx, menu_y(), d.width, pointer_local_x(reg),
                                                   pointer_local_y(reg));
-            gui_draw_popup_menu_ext(canvas, bx, menu_y(), d.width, d.items, d.count, hovered, d.accel_ptrs,
-                                    d.checked);
+            gui_draw_popup_menu_ext(canvas, bx, menu_y(), d.width, d.items, d.count, hovered, d.accel_ptrs, d.checked);
         }
     }
 }

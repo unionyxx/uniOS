@@ -249,6 +249,7 @@ bool gui_fonts_init(void);
 const GuiFont *gui_font_default(void);
 const GuiFont *gui_font_title(void);
 const GuiFont *gui_font_mono(void);
+const GuiFont *gui_font_mono_size(int pixel_size);
 int gui_font_line_height(const GuiFont *font);
 int gui_font_ascent(const GuiFont *font);
 int gui_font_max_advance(const GuiFont *font);

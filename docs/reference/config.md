@@ -8,6 +8,7 @@ Configuration files are plain text, one `key=value` per line (trailing CR/spaces
 | --- | --- | --- |
 | System settings | `/data/SYSTEM.CFG` | `/etc/system.conf` |
 | Wallpaper path | `/data/WALLPAPR.CFG` | `/etc/wallpaper.conf` |
+| App view settings | `/data/APPS.CFG` | — |
 | User database | `/etc/passwd`, `/etc/shadow` | persisted to `/data/etc/` |
 | Shell startup | `/etc/shell.rc` | `/data/shell.rc` |
 | Default wallpaper | `/usr/share/wallpapers/default.uowp` | — |
@@ -29,6 +30,19 @@ The wallpaper config is a single path on the first line, not key/value.
 | `volume_level` | `0..100` | `75` | WM |
 
 Writes are performed by the WM (idle-frame persistence) and by the Preferences app. Settings also propagate live through the registry's `settings_generation` counter; storage mode changes go through `storage_request_generation` because `SYS_STORAGE_SET_MODE` is WM-only.
+
+## APPS.CFG Keys
+
+Per-app view toggles live in `/data/APPS.CFG`, kept separate from `SYSTEM.CFG` so app writes never race the WM/Preferences persistence. Each app reads its keys at startup and writes them when the user toggles the setting; if storage is off or read-only the toggle applies for the session only. Values are integers (`0`/`1` for booleans, a step offset for zoom).
+
+| Key | Values | Default | Consumer |
+| --- | --- | --- | --- |
+| `files_sidebar` | `0`, `1` | `1` | Files (Places/Storage sidebar) |
+| `files_view_mode` | `0`=list, `1`=icons | `0` | Files (listing layout) |
+| `latitude_wrap` | `0`, `1` | `0` | Latitude (word wrap) |
+| `latitude_gutter` | `0`, `1` | `1` | Latitude (line numbers) |
+| `latitude_highlight` | `0`, `1` | `1` | Latitude (syntax colors) |
+| `terminal_zoom` | `-4..6` | `0` | Terminal (font step from base size) |
 
 ## Volumes and Labels
 

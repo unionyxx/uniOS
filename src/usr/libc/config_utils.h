@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <uapi/fs.h>
 
@@ -115,4 +116,73 @@ static inline bool cfg_read_first_line_from_candidates(const char *const *candid
             return true;
     }
     return false;
+}
+
+// Persistent store for per-app view toggles (files_sidebar, latitude_wrap,
+// terminal_zoom, ...). Kept separate from SYSTEM.CFG so app writes never race
+// the WM/Preferences persistence of system settings.
+#define APP_SETTINGS_CONFIG_PATH "/data/APPS.CFG"
+
+static inline int cfg_load_int(const char *path, const char *key, int fallback)
+{
+    char text[1024];
+    char value[32];
+    if (!cfg_read_text_file(path, text, sizeof(text)))
+        return fallback;
+    if (!cfg_line_value(text, key, value, sizeof(value)))
+        return fallback;
+    int sign = 1;
+    const char *p = value;
+    if (*p == '-') {
+        sign = -1;
+        p++;
+    } else if (*p == '+') {
+        p++;
+    }
+    if (*p < '0' || *p > '9')
+        return fallback;
+    int result = 0;
+    while (*p >= '0' && *p <= '9') {
+        result = result * 10 + (*p - '0');
+        p++;
+    }
+    return sign * result;
+}
+
+// Read-modify-write: preserve every other key, replace (or append) `key=value`.
+static inline bool cfg_save_int(const char *path, const char *key, int value)
+{
+    char text[1024];
+    char out[1024];
+    if (!cfg_read_text_file(path, text, sizeof(text)))
+        text[0] = '\0';
+
+    size_t pos = 0;
+    size_t key_len = strlen(key);
+    const char *line = text;
+    while (*line) {
+        const char *next = strchr(line, '\n');
+        size_t len = next ? (size_t)(next - line) : strlen(line);
+        size_t line_total = len + (next ? 1 : 0);
+        bool is_target = (len > key_len && strncmp(line, key, key_len) == 0 && line[key_len] == '=');
+        if (!is_target) {
+            if (pos + line_total + 1 >= sizeof(out))
+                return false;
+            memcpy(out + pos, line, line_total);
+            pos += line_total;
+        }
+        if (!next)
+            break;
+        line = next + 1;
+    }
+    if (pos > 0 && out[pos - 1] != '\n') {
+        if (pos + 1 >= sizeof(out))
+            return false;
+        out[pos++] = '\n';
+    }
+    int written = snprintf(out + pos, sizeof(out) - pos, "%s=%d\n", key, value);
+    if (written < 0 || (size_t)written >= sizeof(out) - pos)
+        return false;
+    out[pos + (size_t)written] = '\0';
+    return cfg_write_text_file(path, out);
 }

@@ -34,6 +34,10 @@ static GuiFont g_mono_font = {};
 static bool g_fonts_initialized = false;
 static bool g_fonts_ready = false;
 
+// Lazily loaded mono fonts for terminal zoom, indexed by k_font_sizes slot.
+static GuiFont g_mono_zoom_fonts[11] = {};
+static bool g_mono_zoom_loaded[11] = {};
+
 static constexpr int k_font_sizes[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
 static constexpr int k_font_size_count = (int)(sizeof(k_font_sizes) / sizeof(k_font_sizes[0]));
 static constexpr size_t k_gui_text_scan_limit = 1024;
@@ -116,6 +120,32 @@ static bool load_nearest_font(GuiFont *font, const char *prefix, int preferred_s
         return false;
 
     int preferred_index = nearest_font_index(clamp_font_target(preferred_size));
+    char path[64];
+    for (int radius = 0; radius < k_font_size_count; radius++) {
+        int left = preferred_index - radius;
+        int right = preferred_index + radius;
+        if (left >= 0) {
+            snprintf(path, sizeof(path), "/usr/share/fonts/%s-%d.uof", prefix, k_font_sizes[left]);
+            if (gui_font_load_from_file(font, path))
+                return true;
+        }
+        if (right < k_font_size_count && right != left) {
+            snprintf(path, sizeof(path), "/usr/share/fonts/%s-%d.uof", prefix, k_font_sizes[right]);
+            if (gui_font_load_from_file(font, path))
+                return true;
+        }
+    }
+    return false;
+}
+
+// Like load_nearest_font but without the 11px floor, so terminal zoom-out can
+// reach the smaller bundled sizes.
+static bool load_font_at_size(GuiFont *font, const char *prefix, int pixel_size)
+{
+    if (!font || !prefix)
+        return false;
+
+    int preferred_index = nearest_font_index(pixel_size);
     char path[64];
     for (int radius = 0; radius < k_font_size_count; radius++) {
         int left = preferred_index - radius;
@@ -498,6 +528,29 @@ const GuiFont *gui_font_mono(void)
 {
     gui_fonts_init();
     return g_fonts_ready ? &g_mono_font : nullptr;
+}
+
+// Mono font at a requested pixel size (terminal zoom). Loaded on first use and
+// cached per size index, so repeated zoom steps do not re-read the .uof.
+const GuiFont *gui_font_mono_size(int pixel_size)
+{
+    gui_fonts_init();
+    if (!g_fonts_ready)
+        return nullptr;
+
+    int idx = nearest_font_index(pixel_size);
+    if (idx < 0)
+        idx = 0;
+    if (idx >= k_font_size_count)
+        idx = k_font_size_count - 1;
+
+    if (!g_mono_zoom_loaded[idx]) {
+        if (!load_font_at_size(&g_mono_zoom_fonts[idx], "geist-mono", k_font_sizes[idx]))
+            return &g_mono_font;
+        build_font_alpha_lut(&g_mono_zoom_fonts[idx], FontRenderProfile::Mono);
+        g_mono_zoom_loaded[idx] = true;
+    }
+    return &g_mono_zoom_fonts[idx];
 }
 
 int gui_font_line_height(const GuiFont *font)

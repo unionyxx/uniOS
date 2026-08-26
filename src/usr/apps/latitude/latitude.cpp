@@ -7,6 +7,7 @@
 #include <uapi/syscalls.h>
 #include <unistd.h>
 
+#include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
 #include "../../libgui/gui.h"
 
@@ -171,6 +172,11 @@ struct AppState
     int first_col;
     int visible_lines;
     int visible_cols;
+    // Word wrap: the number of segments of first_line scrolled off the top.
+    int first_seg;
+    bool wrap_enabled;
+    bool gutter_enabled;
+    bool highlight_enabled;
 
     int anchor_line;
     int anchor_col;
@@ -208,7 +214,7 @@ struct AppState
     uint32_t last_settings_generation;
     bool needs_redraw;
 };
-}
+} // namespace
 
 static int clamp_int(int value, int lo, int hi)
 {
@@ -735,14 +741,88 @@ static void clamp_cursor(AppState *state)
     state->cursor_col = clamp_int(state->cursor_col, 0, line.len);
 }
 
+static int latitude_gutter_w(const AppState *state)
+{
+    if (!state || !state->gutter_enabled)
+        return 0;
+    return gui_scaled_metric(56);
+}
+
+// Number of visual rows a buffer line occupies when word wrap is enabled.
+static int wrap_segments_for(const AppState *state, int line_index)
+{
+    if (!state || !state->wrap_enabled || !state->buffer || state->visible_cols <= 0)
+        return 1;
+    if (line_index < 0 || line_index >= state->buffer->line_count)
+        return 1;
+    int len = state->buffer->lines[line_index].len;
+    if (len <= 0)
+        return 1;
+    return (len + state->visible_cols - 1) / state->visible_cols;
+}
+
 static void ensure_cursor_visible(AppState *state)
 {
-    if (!state)
+    if (!state || !state->buffer)
         return;
     if (state->visible_lines <= 0)
         state->visible_lines = 1;
     if (state->visible_cols <= 0)
         state->visible_cols = 1;
+
+    if (state->wrap_enabled) {
+        // Wrap scrolls vertically in visual rows; there is no horizontal pan.
+        state->first_col = 0;
+        if (state->first_line < 0 || state->first_line >= state->buffer->line_count) {
+            state->first_line = 0;
+            state->first_seg = 0;
+        }
+        if (state->first_seg >= wrap_segments_for(state, state->first_line))
+            state->first_seg = 0;
+        if (state->cursor_line < state->first_line) {
+            state->first_line = state->cursor_line;
+            state->first_seg = 0;
+        }
+        auto cursor_visual = [&]() {
+            int v = -state->first_seg;
+            for (int l = state->first_line; l < state->cursor_line; l++)
+                v += wrap_segments_for(state, l);
+            int seg = state->cursor_col / state->visible_cols;
+            int segs = wrap_segments_for(state, state->cursor_line);
+            if (seg >= segs)
+                seg = segs - 1;
+            return v + seg;
+        };
+        int guard = 0;
+        while (cursor_visual() >= state->visible_lines && guard++ < 4096) {
+            int segs_first = wrap_segments_for(state, state->first_line);
+            if (state->first_seg + 1 < segs_first) {
+                state->first_seg++;
+            } else if (state->first_line < state->buffer->line_count - 1) {
+                state->first_line++;
+                state->first_seg = 0;
+            } else {
+                break;
+            }
+        }
+        guard = 0;
+        while (cursor_visual() < 0 && guard++ < 4096) {
+            if (state->first_seg > 0) {
+                state->first_seg--;
+            } else if (state->first_line > 0) {
+                state->first_line--;
+                state->first_seg = wrap_segments_for(state, state->first_line) - 1;
+            } else {
+                break;
+            }
+        }
+        if (state->first_line < 0) {
+            state->first_line = 0;
+            state->first_seg = 0;
+        }
+        return;
+    }
+
     if (state->cursor_line < state->first_line)
         state->first_line = state->cursor_line;
     if (state->cursor_line >= state->first_line + state->visible_lines)
@@ -1211,8 +1291,7 @@ static bool buffer_replace_lines(TextBuffer *b, int start, int remove_count, con
     return true;
 }
 
-static void apply_top_entry(AppState *state, UndoEntry *from_stack, int *from_count, UndoEntry *to_stack,
-                            int *to_count)
+static void apply_top_entry(AppState *state, UndoEntry *from_stack, int *from_count, UndoEntry *to_stack, int *to_count)
 {
     if (!state || !state->buffer || !from_count || *from_count <= 0)
         return;
@@ -1455,8 +1534,7 @@ static void paste_clipboard(AppState *state)
     int col = state->cursor_col;
     TextLine &cur = b->lines[line];
     int tail_len = cur.len - col;
-    if ((int)max_segment + max_int(col, tail_len) > MAX_LINE_LEN - 1 ||
-        b->line_count + (nseg - 1) > MAX_LINES) {
+    if ((int)max_segment + max_int(col, tail_len) > MAX_LINE_LEN - 1 || b->line_count + (nseg - 1) > MAX_LINES) {
         set_status(state, "Clipboard too large to paste");
         state->needs_redraw = true;
         return;
@@ -2052,7 +2130,7 @@ static bool word_is_json_literal(const char *word, int len)
 }
 
 static void draw_code_line(Surface *win, const AppState *state, int line_index, int x, int y, int max_cols,
-                           uint32_t row_bg)
+                           uint32_t row_bg, int first_col)
 {
     if (!win || !state || !state->buffer || line_index < 0 || line_index >= state->buffer->line_count)
         return;
@@ -2070,8 +2148,12 @@ static void draw_code_line(Surface *win, const AppState *state, int line_index, 
     bool html_tag = false;
     bool markdown_heading = language == LANG_MARKDOWN && line.len > 0 && line.text[0] == '#';
 
-    int start = state->first_col;
+    int start = first_col;
     int end = min_int(line.len, start + max_cols);
+    if (!state->highlight_enabled) {
+        draw_mono_run(win, font, state, line, start, start, end, x, y, cell_w, cell_h, g_gui_style.text, row_bg);
+        return;
+    }
     for (int col = 0; col < end;) {
         char c = line.text[col];
         uint32_t fg = syntax_text();
@@ -2727,17 +2809,19 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
         edit_h = gui_scaled_metric(24);
 
     int minimap_w = panel_w >= gui_scaled_metric(760) ? gui_scaled_metric(76) : 0;
-    int gutter_w = gui_scaled_metric(56);
+    int gutter_w = latitude_gutter_w(state);
     Rect edit_area = gui_rect_make(panel_x + 1, edit_y, panel_w - 2 - minimap_w, edit_h);
     Rect minimap_rect = gui_rect_make(edit_area.x + edit_area.w, edit_y, minimap_w, edit_h);
     rects->editor_rect = edit_area;
 
     gui_fill_rect(win, edit_area.x, edit_area.y, edit_area.w, edit_area.h, editor_bg());
     // Separators and gutter fill
-    gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h,
-                  g_gui_style.app_surface_alt);
+    if (gutter_w > 0) {
+        gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h,
+                      g_gui_style.app_surface_alt);
+    }
     gui_draw_separator_h(win, panel_x + 1, edit_area.y - 1, panel_w - 2, g_gui_style.chrome_edge);
-    if (edit_area.w > gutter_w)
+    if (gutter_w > 0 && edit_area.w > gutter_w)
         gui_fill_rect(win, edit_area.x + gutter_w - 1, edit_area.y - 1, 1, edit_area.h + 1, g_gui_style.chrome_edge);
 
     const GuiFont *mono = gui_font_mono();
@@ -2753,48 +2837,83 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     ensure_cursor_visible(state);
 
     int text_x = edit_area.x + gutter_w + gui_space_1();
-    for (int visual = 0; visual < state->visible_lines; visual++) {
-        int line_index = state->first_line + visual;
-        int row_y = edit_area.y + visual * cell_h;
-        if (row_y + cell_h > edit_area.y + edit_area.h)
-            break;
-        uint32_t row_bg = line_index == state->cursor_line ? g_gui_style.app_surface_alt : editor_bg();
-        if (line_index == state->cursor_line && edit_area.w > gutter_w)
-            gui_fill_rect(win, edit_area.x + gutter_w, row_y, edit_area.w - gutter_w, cell_h, row_bg);
-        if (line_index < state->buffer->line_count) {
-            char line_no[16];
-            snprintf(line_no, sizeof(line_no), "%d", line_index + 1);
-            int number_w = gui_measure_text(gui_font_default(), line_no);
-            gui_draw_text_clipped(win, gui_font_default(), edit_area.x + gutter_w - gui_space_1() - number_w,
-                                  gui_align_text_y(gui_font_default(), row_y, cell_h), number_w, line_no,
-                                  line_index == state->cursor_line ? g_gui_style.text : syntax_muted(),
-                                  g_gui_style.app_surface_alt);
-            draw_code_line(win, state, line_index, text_x, row_y, state->visible_cols, row_bg);
+    int cursor_visual = -1;
+    int cursor_col_in_seg = 0;
+    {
+        int visual = 0;
+        int line_index = state->first_line;
+        int seg = state->wrap_enabled ? state->first_seg : 0;
+        while (visual < state->visible_lines && line_index >= 0 && line_index < state->buffer->line_count) {
+            int row_y = edit_area.y + visual * cell_h;
+            if (row_y + cell_h > edit_area.y + edit_area.h)
+                break;
+            int seg_start = state->wrap_enabled ? seg * state->visible_cols : state->first_col;
+            uint32_t row_bg = line_index == state->cursor_line ? g_gui_style.app_surface_alt : editor_bg();
+            if (line_index == state->cursor_line && edit_area.w > gutter_w)
+                gui_fill_rect(win, edit_area.x + gutter_w, row_y, edit_area.w - gutter_w, cell_h, row_bg);
+
+            // Gutter number on the first visual line of a buffer line only.
+            if (gutter_w > 0 && seg == 0) {
+                char line_no[16];
+                snprintf(line_no, sizeof(line_no), "%d", line_index + 1);
+                int number_w = gui_measure_text(gui_font_default(), line_no);
+                gui_draw_text_clipped(win, gui_font_default(), edit_area.x + gutter_w - gui_space_1() - number_w,
+                                      gui_align_text_y(gui_font_default(), row_y, cell_h), number_w, line_no,
+                                      line_index == state->cursor_line ? g_gui_style.text : syntax_muted(),
+                                      g_gui_style.app_surface_alt);
+            }
+
+            draw_code_line(win, state, line_index, text_x, row_y, state->visible_cols, row_bg, seg_start);
+
             if (selection_active(state)) {
                 int sl, sc, el, ec;
                 selection_ordered(state, &sl, &sc, &el, &ec);
                 if (line_index >= sl && line_index <= el) {
-                    int start_col = (line_index == sl) ? sc : state->first_col;
-                    int end_col = (line_index == el) ? ec : state->buffer->lines[line_index].len;
-                    if (start_col < state->first_col)
-                        start_col = state->first_col;
-                    if (end_col > state->first_col + state->visible_cols)
-                        end_col = state->first_col + state->visible_cols;
-                    if (end_col > start_col) {
+                    int seg_end = seg_start + state->visible_cols;
+                    int sel_start = (line_index == sl) ? sc : 0;
+                    int sel_end = (line_index == el) ? ec : state->buffer->lines[line_index].len;
+                    int ov_start = max_int(sel_start, seg_start);
+                    int ov_end = min_int(sel_end, seg_end);
+                    if (ov_end > ov_start) {
                         uint32_t sel_color = 0x55000000u | (g_gui_style.accent & 0x00FFFFFFu);
-                        gui_fill_rect_blend(win, text_x + (start_col - state->first_col) * cell_w, row_y,
-                                            (end_col - start_col) * cell_w, cell_h, sel_color);
+                        gui_fill_rect_blend(win, text_x + (ov_start - seg_start) * cell_w, row_y,
+                                            (ov_end - ov_start) * cell_w, cell_h, sel_color);
                     }
                 }
+            }
+
+            if (line_index == state->cursor_line) {
+                int caret_seg = 0;
+                if (state->wrap_enabled && state->visible_cols > 0) {
+                    caret_seg = state->cursor_col / state->visible_cols;
+                    int segs = wrap_segments_for(state, line_index);
+                    if (caret_seg >= segs)
+                        caret_seg = segs - 1;
+                    if (caret_seg < 0)
+                        caret_seg = 0;
+                }
+                if (caret_seg == seg) {
+                    cursor_visual = visual;
+                    cursor_col_in_seg = state->cursor_col - seg_start;
+                }
+            }
+
+            visual++;
+            if (state->wrap_enabled) {
+                seg++;
+                if (seg >= wrap_segments_for(state, line_index)) {
+                    seg = 0;
+                    line_index++;
+                }
+            } else {
+                line_index++;
             }
         }
     }
 
-    if (state->focus == FOCUS_EDITOR && state->cursor_line >= state->first_line &&
-        state->cursor_line < state->first_line + state->visible_lines && state->cursor_col >= state->first_col &&
-        state->cursor_col <= state->first_col + state->visible_cols) {
-        int caret_x = text_x + (state->cursor_col - state->first_col) * cell_w;
-        int caret_y = edit_area.y + (state->cursor_line - state->first_line) * cell_h;
+    if (state->focus == FOCUS_EDITOR && cursor_visual >= 0) {
+        int caret_x = text_x + cursor_col_in_seg * cell_w;
+        int caret_y = edit_area.y + cursor_visual * cell_h;
         gui_fill_rect(win, caret_x, caret_y + 2, gui_scaled_metric(2), cell_h - 4, g_gui_style.accent);
     }
 
@@ -2862,11 +2981,11 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
             text_y += line_h + gui_space_1();
         }
         int btn_w = gui_scaled_metric(88);
-        rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
-                                          box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w,
-                                          gui_app_control_h());
-        gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w,
-                               rects->help_close.h, "Close", true, false, false, false);
+        rects->help_close =
+            gui_rect_make(box_x + box_w - gui_space_2() - btn_w, box_y + box_h - gui_space_2() - gui_app_control_h(),
+                          btn_w, gui_app_control_h());
+        gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
+                               "Close", true, false, false, false);
     }
 }
 
@@ -2917,7 +3036,7 @@ static void jump_to_outline(AppState *state, int index)
 
 static void editor_pos_from_point(AppState *state, LatitudeRects *rects, int x, int y, int *out_line, int *out_col)
 {
-    if (!state || !rects || !out_line || !out_col)
+    if (!state || !rects || !out_line || !out_col || !state->buffer)
         return;
     const GuiFont *mono = gui_font_mono();
     int cell_w = gui_font_mono_cell_width(mono);
@@ -2926,10 +3045,36 @@ static void editor_pos_from_point(AppState *state, LatitudeRects *rects, int x, 
         cell_w = 8;
     if (cell_h <= 0)
         cell_h = 16;
-    int gutter_w = gui_scaled_metric(56);
+    int gutter_w = latitude_gutter_w(state);
     int text_x = rects->editor_rect.x + gutter_w + gui_space_1();
-    int line = state->first_line + (y - rects->editor_rect.y) / cell_h;
-    int col = state->first_col + (x - text_x) / cell_w;
+    int visual_row = (y - rects->editor_rect.y) / cell_h;
+    if (visual_row < 0)
+        visual_row = 0;
+
+    int line;
+    int seg_start;
+    if (state->wrap_enabled && state->visible_cols > 0) {
+        // Walk visual rows from (first_line, first_seg) to the target row.
+        line = state->first_line;
+        int seg = state->first_seg;
+        int row = 0;
+        while (row < visual_row && line < state->buffer->line_count) {
+            seg++;
+            if (seg >= wrap_segments_for(state, line)) {
+                seg = 0;
+                line++;
+            }
+            row++;
+        }
+        if (line >= state->buffer->line_count)
+            line = state->buffer->line_count - 1;
+        seg_start = seg * state->visible_cols;
+    } else {
+        line = state->first_line + visual_row;
+        seg_start = state->first_col;
+    }
+
+    int col = seg_start + (x - text_x) / cell_w;
     if (col < 0)
         col = 0;
     line = clamp_int(line, 0, state->buffer->line_count - 1);
@@ -3285,6 +3430,9 @@ enum LatitudeMenuId
     LAT_MENU_PASTE,
     LAT_MENU_DELETE,
     LAT_MENU_SELECT_ALL,
+    LAT_MENU_WRAP,
+    LAT_MENU_GUTTER,
+    LAT_MENU_HIGHLIGHT,
     LAT_MENU_HELP = 0x80,
 };
 
@@ -3300,8 +3448,8 @@ static void latitude_publish_menus(AppState *state)
     gui_menu_model_add_item(&model, file, "Open...", LAT_MENU_OPEN,
                             state->project_selected >= 0 ? 0 : MENU_FLAG_DISABLED, "Ctrl+O");
     gui_menu_model_add_item(&model, file, "Save", LAT_MENU_SAVE, 0, "Ctrl+S");
-    gui_menu_model_add_item(&model, file, "Reload", LAT_MENU_RELOAD,
-                            state->buffer->path[0] ? 0 : MENU_FLAG_DISABLED, nullptr);
+    gui_menu_model_add_item(&model, file, "Reload", LAT_MENU_RELOAD, state->buffer->path[0] ? 0 : MENU_FLAG_DISABLED,
+                            nullptr);
 
     int edit = gui_menu_model_add_menu(&model, "Edit");
     gui_menu_model_add_item(&model, edit, "Undo", LAT_MENU_UNDO, state->undo_count > 0 ? 0 : MENU_FLAG_DISABLED,
@@ -3316,6 +3464,14 @@ static void latitude_publish_menus(AppState *state)
     gui_menu_model_add_separator(&model, edit);
     gui_menu_model_add_item(&model, edit, "Select All", LAT_MENU_SELECT_ALL, has_text ? 0 : MENU_FLAG_DISABLED,
                             "Ctrl+A");
+
+    int view = gui_menu_model_add_menu(&model, "View");
+    gui_menu_model_add_item(&model, view, "Word Wrap", LAT_MENU_WRAP, state->wrap_enabled ? MENU_FLAG_CHECKED : 0,
+                            nullptr);
+    gui_menu_model_add_item(&model, view, "Line Numbers", LAT_MENU_GUTTER,
+                            state->gutter_enabled ? MENU_FLAG_CHECKED : 0, nullptr);
+    gui_menu_model_add_item(&model, view, "Syntax Highlight", LAT_MENU_HIGHLIGHT,
+                            state->highlight_enabled ? MENU_FLAG_CHECKED : 0, nullptr);
 
     int help = gui_menu_model_add_menu(&model, "Help");
     gui_menu_model_add_item(&model, help, "Latitude Help", LAT_MENU_HELP, 0, nullptr);
@@ -3367,45 +3523,63 @@ static void latitude_handle_menu_command(AppState *state, uint32_t cmd)
     if (!state)
         return;
     switch (cmd) {
-    case LAT_MENU_NEW:
-        latitude_request_new(state);
-        break;
-    case LAT_MENU_OPEN:
-        if (state->project_selected >= 0)
-            open_project_row(state, state->project_selected);
-        break;
-    case LAT_MENU_SAVE:
-        save_file(state);
-        break;
-    case LAT_MENU_RELOAD:
-        latitude_request_reload(state);
-        break;
-    case LAT_MENU_UNDO:
-        perform_undo(state);
-        break;
-    case LAT_MENU_REDO:
-        perform_redo(state);
-        break;
-    case LAT_MENU_CUT:
-        selection_to_clipboard(state, true);
-        break;
-    case LAT_MENU_COPY:
-        selection_to_clipboard(state, false);
-        break;
-    case LAT_MENU_PASTE:
-        paste_clipboard(state);
-        break;
-    case LAT_MENU_DELETE:
-        delete_selection(state);
-        break;
-    case LAT_MENU_SELECT_ALL:
-        select_all(state);
-        break;
-    case LAT_MENU_HELP:
-        state->show_help = true;
-        break;
-    default:
-        break;
+        case LAT_MENU_NEW:
+            latitude_request_new(state);
+            break;
+        case LAT_MENU_OPEN:
+            if (state->project_selected >= 0)
+                open_project_row(state, state->project_selected);
+            break;
+        case LAT_MENU_SAVE:
+            save_file(state);
+            break;
+        case LAT_MENU_RELOAD:
+            latitude_request_reload(state);
+            break;
+        case LAT_MENU_UNDO:
+            perform_undo(state);
+            break;
+        case LAT_MENU_REDO:
+            perform_redo(state);
+            break;
+        case LAT_MENU_CUT:
+            selection_to_clipboard(state, true);
+            break;
+        case LAT_MENU_COPY:
+            selection_to_clipboard(state, false);
+            break;
+        case LAT_MENU_PASTE:
+            paste_clipboard(state);
+            break;
+        case LAT_MENU_DELETE:
+            delete_selection(state);
+            break;
+        case LAT_MENU_SELECT_ALL:
+            select_all(state);
+            break;
+        case LAT_MENU_WRAP:
+            state->wrap_enabled = !state->wrap_enabled;
+            state->first_seg = 0;
+            cfg_save_int(APP_SETTINGS_CONFIG_PATH, "latitude_wrap", state->wrap_enabled ? 1 : 0);
+            ensure_cursor_visible(state);
+            state->needs_redraw = true;
+            break;
+        case LAT_MENU_GUTTER:
+            state->gutter_enabled = !state->gutter_enabled;
+            cfg_save_int(APP_SETTINGS_CONFIG_PATH, "latitude_gutter", state->gutter_enabled ? 1 : 0);
+            ensure_cursor_visible(state);
+            state->needs_redraw = true;
+            break;
+        case LAT_MENU_HIGHLIGHT:
+            state->highlight_enabled = !state->highlight_enabled;
+            cfg_save_int(APP_SETTINGS_CONFIG_PATH, "latitude_highlight", state->highlight_enabled ? 1 : 0);
+            state->needs_redraw = true;
+            break;
+        case LAT_MENU_HELP:
+            state->show_help = true;
+            break;
+        default:
+            break;
     }
 }
 
@@ -3439,6 +3613,10 @@ extern "C" int main()
     state->last_editor_click_line = -1;
     state->focus = FOCUS_EDITOR;
     state->needs_redraw = true;
+    state->gutter_enabled = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "latitude_gutter", 1) != 0;
+    state->highlight_enabled = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "latitude_highlight", 1) != 0;
+    state->wrap_enabled = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "latitude_wrap", 0) != 0;
+    state->first_seg = 0;
     reset_buffer(buffer, "/data/untitled.txt");
     sync_path_input(state);
     set_status(state, "Ready");
@@ -3463,8 +3641,8 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
-                bool changed = state->hovered != HOVER_NONE || state->project_hovered >= 0 ||
-                               state->outline_hovered >= 0;
+                bool changed =
+                    state->hovered != HOVER_NONE || state->project_hovered >= 0 || state->outline_hovered >= 0;
                 state->hovered = HOVER_NONE;
                 state->project_hovered = -1;
                 state->outline_hovered = -1;
@@ -3543,8 +3721,7 @@ extern "C" int main()
                     state->button_pressed_ticks = get_ticks();
                     if (state->buffer->modified) {
                         // Destructive: require a second confirming click.
-                        if (state->pending_confirm == 1 &&
-                            get_ticks() - state->pending_confirm_ticks < 3000) {
+                        if (state->pending_confirm == 1 && get_ticks() - state->pending_confirm_ticks < 3000) {
                             state->pending_confirm = 0;
                             new_file(state);
                         } else {
@@ -3570,8 +3747,7 @@ extern "C" int main()
                     state->button_pressed = 3;
                     state->button_pressed_ticks = get_ticks();
                     if (state->buffer->modified && state->buffer->path[0]) {
-                        if (state->pending_confirm == 2 &&
-                            get_ticks() - state->pending_confirm_ticks < 3000) {
+                        if (state->pending_confirm == 2 && get_ticks() - state->pending_confirm_ticks < 3000) {
                             state->pending_confirm = 0;
                             load_file(state, state->buffer->path);
                         } else {

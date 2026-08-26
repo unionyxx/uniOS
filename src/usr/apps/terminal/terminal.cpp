@@ -75,15 +75,29 @@ enum
     TERM_MENU_PASTE,
     TERM_MENU_SELECT_ALL,
     TERM_MENU_CLEAR,
+    TERM_MENU_ZOOM_IN,
+    TERM_MENU_ZOOM_OUT,
+    TERM_MENU_ZOOM_ACTUAL,
     TERM_MENU_HELP = 0x80,
 };
 
+// Zoom is a step offset from the resolution-chosen base mono size. Ctrl+= and
+// Ctrl+- collapse to plain '='/'-' at the PS/2 layer (only letters become
+// control codes), so zoom is menu-driven to avoid stealing '-'/'=' from the
+// shell.
+static constexpr int TERM_ZOOM_MIN = -4;
+static constexpr int TERM_ZOOM_MAX = 6;
+static int g_term_zoom = 0;
+
 static inline const GuiFont *term_font()
 {
-    const GuiFont *font = gui_font_mono();
-    if (font)
-        return font;
-    return gui_font_default();
+    const GuiFont *base = gui_font_mono();
+    if (!base)
+        return gui_font_default();
+    if (g_term_zoom == 0)
+        return base;
+    const GuiFont *zoomed = gui_font_mono_size((int)base->pixel_size + g_term_zoom);
+    return zoomed ? zoomed : base;
 }
 
 static inline uint32_t term_cell_w()
@@ -551,6 +565,30 @@ public:
         return resize_grid(new_width, new_height);
     }
 
+    // Re-derive the grid from the current window size after the font (and
+    // therefore the cell size) changed. The window keeps its pixel size; the
+    // column/row count follows the new cell dimensions.
+    bool reflow_for_font()
+    {
+        if (!m_ready)
+            return false;
+        m_scroll_offset = 0;
+        uint32_t content_w = (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE))
+                                 ? (m_window.width - (uint32_t)(term_pad_x() * 2) - TERM_SCROLLBAR_RESERVE)
+                                 : 0;
+        uint32_t content_h =
+            (m_window.height > (uint32_t)(term_pad_y() * 2)) ? (m_window.height - (uint32_t)(term_pad_y() * 2)) : 0;
+        uint32_t cw = term_cell_w();
+        uint32_t ch = term_cell_h();
+        uint32_t new_width = cw > 0 ? content_w / cw : 0;
+        uint32_t new_height = ch > 0 ? content_h / ch : 0;
+        if (new_width == 0)
+            new_width = 1;
+        if (new_height == 0)
+            new_height = 1;
+        return resize_grid(new_width, new_height);
+    }
+
     void theme_changed()
     {
         m_fg = term_fg();
@@ -738,7 +776,7 @@ private:
         int win_w = (int)m_window.width;
         int win_h = (int)m_window.height;
         int box_w = gui_scaled_metric(430);
-        int box_h = gui_scaled_metric(238);
+        int box_h = gui_scaled_metric(262);
         if (box_w > win_w - gui_space_4())
             box_w = win_w - gui_space_4();
         if (box_h > win_h - gui_space_4())
@@ -753,6 +791,7 @@ private:
             "Drag with the mouse to select output, then copy it",   "Ctrl+X copies the selection (Ctrl+C sends SIGINT)",
             "Ctrl+V pastes the clipboard into the shell",           "Right-click pastes the clipboard",
             "Page Up / Page Down and the wheel scroll the history", "Edit > Clear Screen wipes the scrollback",
+            "View > Zoom In / Zoom Out changes the text size",
         };
         int text_x = box_x + gui_space_2();
         int text_y = box_y + gui_card_header_h() + gui_space_2();
@@ -1162,6 +1201,20 @@ static bool term_copy_selection(TerminalEmulator &term)
     return gui_clipboard_copy(text, len);
 }
 
+// Clamp, persist, and report whether the zoom level actually changed.
+static bool term_apply_zoom(int new_zoom)
+{
+    if (new_zoom < TERM_ZOOM_MIN)
+        new_zoom = TERM_ZOOM_MIN;
+    if (new_zoom > TERM_ZOOM_MAX)
+        new_zoom = TERM_ZOOM_MAX;
+    if (new_zoom == g_term_zoom)
+        return false;
+    g_term_zoom = new_zoom;
+    cfg_save_int(APP_SETTINGS_CONFIG_PATH, "terminal_zoom", g_term_zoom);
+    return true;
+}
+
 static void term_publish_menus(TerminalEmulator &term, bool clipboard_nonempty)
 {
     MenuModel model;
@@ -1174,6 +1227,14 @@ static void term_publish_menus(TerminalEmulator &term, bool clipboard_nonempty)
     gui_menu_model_add_item(&model, edit, "Select All", TERM_MENU_SELECT_ALL, 0, nullptr);
     gui_menu_model_add_separator(&model, edit);
     gui_menu_model_add_item(&model, edit, "Clear Screen", TERM_MENU_CLEAR, 0, nullptr);
+
+    int view = gui_menu_model_add_menu(&model, "View");
+    gui_menu_model_add_item(&model, view, "Zoom In", TERM_MENU_ZOOM_IN,
+                            g_term_zoom >= TERM_ZOOM_MAX ? MENU_FLAG_DISABLED : 0, nullptr);
+    gui_menu_model_add_item(&model, view, "Zoom Out", TERM_MENU_ZOOM_OUT,
+                            g_term_zoom <= TERM_ZOOM_MIN ? MENU_FLAG_DISABLED : 0, nullptr);
+    gui_menu_model_add_item(&model, view, "Actual Size", TERM_MENU_ZOOM_ACTUAL,
+                            g_term_zoom == 0 ? MENU_FLAG_DISABLED : 0, nullptr);
 
     int help = gui_menu_model_add_menu(&model, "Help");
     gui_menu_model_add_item(&model, help, "Terminal Help", TERM_MENU_HELP, 0, nullptr);
@@ -1202,6 +1263,24 @@ static void term_handle_menu_command(TerminalEmulator &term, uint32_t cmd, int s
             term.clear_screen();
             *needs_render = true;
             break;
+        case TERM_MENU_ZOOM_IN:
+            if (term_apply_zoom(g_term_zoom + 1)) {
+                term.reflow_for_font();
+                *needs_render = true;
+            }
+            break;
+        case TERM_MENU_ZOOM_OUT:
+            if (term_apply_zoom(g_term_zoom - 1)) {
+                term.reflow_for_font();
+                *needs_render = true;
+            }
+            break;
+        case TERM_MENU_ZOOM_ACTUAL:
+            if (term_apply_zoom(0)) {
+                term.reflow_for_font();
+                *needs_render = true;
+            }
+            break;
         case TERM_MENU_HELP:
             term.show_help();
             *needs_render = true;
@@ -1216,6 +1295,12 @@ extern "C" int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    g_term_zoom = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "terminal_zoom", 0);
+    if (g_term_zoom < TERM_ZOOM_MIN)
+        g_term_zoom = TERM_ZOOM_MIN;
+    if (g_term_zoom > TERM_ZOOM_MAX)
+        g_term_zoom = TERM_ZOOM_MAX;
+
     TerminalEmulator term;
     term.init(80, 25);
     if (!term.ready())
@@ -1228,6 +1313,7 @@ extern "C" int main(int argc, char **argv)
 
     bool last_menu_sel = term.sel_has();
     bool last_menu_clip = false;
+    int last_menu_zoom = g_term_zoom;
     bool menu_focus_dirty = true;
 
     int pipe_to_shell[2];
@@ -1448,10 +1534,12 @@ extern "C" int main(int argc, char **argv)
         // changes so the menubar's enabled-state stays honest.
         bool clip_nonempty = registry && registry->clipboard_len > 0;
         bool sel_has_now = term.sel_has();
-        if (term.focused() && (menu_focus_dirty || sel_has_now != last_menu_sel || clip_nonempty != last_menu_clip)) {
+        if (term.focused() && (menu_focus_dirty || sel_has_now != last_menu_sel || clip_nonempty != last_menu_clip ||
+                               g_term_zoom != last_menu_zoom)) {
             term_publish_menus(term, clip_nonempty);
             last_menu_sel = sel_has_now;
             last_menu_clip = clip_nonempty;
+            last_menu_zoom = g_term_zoom;
             menu_focus_dirty = false;
         }
 
