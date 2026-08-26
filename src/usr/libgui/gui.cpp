@@ -1707,6 +1707,14 @@ int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_
         s->height >= static_cast<uint32_t>(g_my_window->h)) {
         g_my_window->buffer_resize_serial = resize_serial;
     }
+    // Manual-mode clients draw directly into the registered surface and commit
+    // through this path without using gui_window_mailbox_target, so publish the
+    // mailbox here too; libapp's mailbox path reaches the same commit via this
+    // function and must not commit twice.
+    if (g_mailbox_active) {
+        g_my_window->mailbox_commit_index = static_cast<uint32_t>(g_mailbox_draw_slot);
+        g_my_window->mailbox_commit_seq++;
+    }
     asm volatile("sfence" ::: "memory");
     return 0;
 }

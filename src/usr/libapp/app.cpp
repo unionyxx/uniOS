@@ -300,7 +300,6 @@ static void app_publish(App *app)
                 memcpy(&target->buffer[(size_t)y * ts], &app->canvas.buffer[(size_t)y * cs],
                        (size_t)app->canvas.width * sizeof(uint32_t));
             gui_blit_to_screen_rect(target, 0, 0, (int)app->canvas.width, (int)app->canvas.height);
-            gui_window_mailbox_commit();
             log_first_frame();
         }
         // No free slot: drop this frame; the canvas keeps the app's state.
