@@ -9,6 +9,7 @@
 
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
+#include "../../libapp/app.h"
 #include "../../libgui/gui.h"
 
 static constexpr int MAX_LINES = 2048;
@@ -2445,48 +2446,6 @@ static uint32_t editor_selection_color()
     return 0x55000000u | (g_gui_style.accent & 0x00FFFFFFu);
 }
 
-static bool ensure_render_surface(Surface *surface, uint32_t width, uint32_t height)
-{
-    if (!surface || width == 0 || height == 0)
-        return false;
-
-    if (surface->buffer && surface->width == width && surface->height == height)
-        return true;
-
-    if (surface->owns_buffer && surface->buffer)
-        free(surface->buffer);
-
-    *surface = gui_create_surface(width, height);
-    return surface->buffer != nullptr;
-}
-
-static void present_latitude_frame(Surface *window, Surface *frame)
-{
-    if (!window || !window->buffer || !frame || !frame->buffer)
-        return;
-
-    int w = min_int((int)window->width, (int)frame->width);
-    int h = min_int((int)window->height, (int)frame->height);
-    if (w <= 0 || h <= 0)
-        return;
-
-    // Keep the copy pitch-correct after maximize/resize. The window backing can
-    // be wider than the visible client area, so a flat memcpy or old libgui fast
-    // blit path shears the image diagonally.
-    uint32_t dst_pitch = window->pitch / 4u;
-    uint32_t src_pitch = frame->pitch / 4u;
-    if (dst_pitch == 0 || src_pitch == 0)
-        return;
-
-    size_t row_bytes = (size_t)w * sizeof(uint32_t);
-    for (int y = 0; y < h; y++) {
-        memcpy(&window->buffer[(size_t)y * dst_pitch], &frame->buffer[(size_t)y * src_pitch], row_bytes);
-    }
-
-    asm volatile("sfence" ::: "memory");
-    gui_blit_to_screen_rect(window, 0, 0, w, h);
-}
-
 static int latitude_view_width(Surface *win)
 {
     int w = win ? (int)win->width : 0;
@@ -3545,28 +3504,257 @@ static void latitude_handle_menu_command(AppState *state, uint32_t cmd)
     }
 }
 
+struct LatitudeApp
+{
+    TextBuffer buffer;
+    AppState state;
+    LatitudeRects rects;
+};
+
+static void latitude_draw(App *app, Surface *canvas)
+{
+    LatitudeApp *lat = (LatitudeApp *)app_user(app);
+    AppState *state = &lat->state;
+    draw_latitude(canvas, state, &lat->rects);
+    state->needs_redraw = false;
+    app_invalidate_all(app);
+
+    // Keep the titlebar in sync with the open file.
+    char title[128];
+    if (state->buffer->title[0])
+        snprintf(title, sizeof(title), "%s%s - Latitude", state->buffer->modified ? "* " : "", state->buffer->title);
+    else
+        snprintf(title, sizeof(title), "%suntitled - Latitude", state->buffer->modified ? "* " : "");
+    app_set_title(app, title);
+}
+
+static void latitude_menus(App *app)
+{
+    LatitudeApp *lat = (LatitudeApp *)app_user(app);
+    latitude_publish_menus(&lat->state);
+}
+
+static void latitude_menu(App *app, uint32_t cmd)
+{
+    LatitudeApp *lat = (LatitudeApp *)app_user(app);
+    latitude_handle_menu_command(&lat->state, cmd);
+    lat->state.needs_redraw = true;
+}
+
+static void latitude_settings(App *app)
+{
+    LatitudeApp *lat = (LatitudeApp *)app_user(app);
+    lat->state.needs_redraw = true;
+}
+
+static void latitude_idle(App *app)
+{
+    LatitudeApp *lat = (LatitudeApp *)app_user(app);
+    AppState *state = &lat->state;
+
+    uint64_t loop_ticks = get_ticks();
+    if (state->button_pressed != 0 && loop_ticks - state->button_pressed_ticks >= 150) {
+        state->button_pressed = 0;
+        state->needs_redraw = true;
+    }
+    if (state->pending_confirm != 0 && loop_ticks - state->pending_confirm_ticks >= 3000) {
+        state->pending_confirm = 0;
+        set_status(state, state->buffer->modified ? "Unsaved changes" : "Ready");
+        state->needs_redraw = true;
+    }
+
+    // The menubar model tracks buffer state; keep it fresh while focused.
+    Registry *registry = gui_registry();
+    if (app_focused(app) && registry && registry->focused_owner_pid == (uint32_t)syscall1(SYS_GETPID, 0))
+        latitude_publish_menus(state);
+
+    if (state->needs_redraw)
+        app_request_draw(app);
+}
+
+static void latitude_event(App *app, const Event *ev)
+{
+    LatitudeApp *lat = (LatitudeApp *)app_user(app);
+    AppState *state = &lat->state;
+    LatitudeRects *rects = &lat->rects;
+
+    switch (ev->type) {
+        case EVT_UNFOCUS:
+        case EVT_MOUSE_LEAVE: {
+            bool changed =
+                state->hovered != HOVER_NONE || state->project_hovered >= 0 || state->outline_hovered >= 0;
+            state->hovered = HOVER_NONE;
+            state->project_hovered = -1;
+            state->outline_hovered = -1;
+            state->button_pressed = 0;
+            if (changed)
+                state->needs_redraw = true;
+            break;
+        }
+
+        case EVT_MOUSE_MOVE: {
+            if (state->selecting) {
+                drag_editor(state, rects, ev->mouse.x, ev->mouse.y);
+                break;
+            }
+            HoverTarget previous = state->hovered;
+            int previous_project_hovered = state->project_hovered;
+            int previous_outline_hovered = state->outline_hovered;
+            HoverTarget hovered = update_hover(state, rects, ev->mouse.x, ev->mouse.y);
+            bool hover_changed = hovered != previous || state->project_hovered != previous_project_hovered ||
+                                 state->outline_hovered != previous_outline_hovered;
+            if (hover_changed) {
+                state->hovered = hovered;
+                state->needs_redraw = true;
+            }
+            break;
+        }
+
+        case EVT_MOUSE_UP: {
+            if (ev->mouse.button != 1)
+                break;
+            if (state->selecting) {
+                state->selecting = false;
+                state->needs_redraw = true;
+            }
+            break;
+        }
+
+        case EVT_MOUSE_SCROLL: {
+            if (point_in_rect(rects->editor_rect, ev->mouse.x, ev->mouse.y)) {
+                state->first_line += ev->mouse.scroll_y < 0 ? 3 : -3;
+                // Stop at the point where the last line is at the bottom of
+                // the view, not when only one line remains.
+                int max_first = state->visible_lines > 1
+                                    ? max_int(0, state->buffer->line_count - state->visible_lines)
+                                    : max_int(0, state->buffer->line_count - 1);
+                state->first_line = clamp_int(state->first_line, 0, max_first);
+                state->needs_redraw = true;
+            } else if (point_in_rect(rects->sidebar_rect, ev->mouse.x, ev->mouse.y)) {
+                int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
+
+                if (ev->mouse.y < project_area_bottom) {
+                    state->project_first_row += ev->mouse.scroll_y < 0 ? 3 : -3;
+                    state->project_first_row =
+                        clamp_int(state->project_first_row, 0, max_int(0, state->project_count - 1));
+                } else {
+                    state->outline_first_row += ev->mouse.scroll_y < 0 ? 3 : -3;
+                    state->outline_first_row =
+                        clamp_int(state->outline_first_row, 0, max_int(0, state->outline_count - 1));
+                }
+                state->needs_redraw = true;
+            }
+            break;
+        }
+
+        case EVT_MOUSE_DOWN: {
+            if (ev->mouse.button != 1)
+                break;
+            if (state->show_help) {
+                state->show_help = false;
+                state->needs_redraw = true;
+                break;
+            }
+            HoverTarget target = update_hover(state, rects, ev->mouse.x, ev->mouse.y);
+            state->hovered = target;
+            if (target == HOVER_NEW_FILE) {
+                clear_field_focus(state);
+                state->button_pressed = 1;
+                state->button_pressed_ticks = get_ticks();
+                if (state->buffer->modified) {
+                    // Destructive: require a second confirming click.
+                    if (state->pending_confirm == 1 && get_ticks() - state->pending_confirm_ticks < 3000) {
+                        state->pending_confirm = 0;
+                        new_file(state);
+                    } else {
+                        state->pending_confirm = 1;
+                        state->pending_confirm_ticks = get_ticks();
+                        set_status(state, "Unsaved changes - click New again to discard");
+                        state->needs_redraw = true;
+                    }
+                } else {
+                    state->pending_confirm = 0;
+                    new_file(state);
+                }
+            } else if (target == HOVER_SAVE) {
+                bool path_ok = !state->path_focused || set_buffer_path_from_input(state, false);
+                clear_field_focus(state);
+                state->button_pressed = 2;
+                state->button_pressed_ticks = get_ticks();
+                state->pending_confirm = 0;
+                if (path_ok)
+                    save_file(state);
+            } else if (target == HOVER_RELOAD) {
+                clear_field_focus(state);
+                state->button_pressed = 3;
+                state->button_pressed_ticks = get_ticks();
+                if (state->buffer->modified && state->buffer->path[0]) {
+                    if (state->pending_confirm == 2 && get_ticks() - state->pending_confirm_ticks < 3000) {
+                        state->pending_confirm = 0;
+                        load_file(state, state->buffer->path);
+                    } else {
+                        state->pending_confirm = 2;
+                        state->pending_confirm_ticks = get_ticks();
+                        set_status(state, "Unsaved changes - click Reload again to discard");
+                        state->needs_redraw = true;
+                    }
+                } else {
+                    state->pending_confirm = 0;
+                    if (state->buffer->path[0])
+                        load_file(state, state->buffer->path);
+                }
+            } else if (target == HOVER_PATH) {
+                sync_path_input(state);
+                state->path_focused = true;
+                state->search_focused = false;
+                state->focus = FOCUS_PATH;
+                state->needs_redraw = true;
+            } else if (target == HOVER_SEARCH) {
+                state->path_focused = false;
+                state->search_focused = true;
+                state->focus = FOCUS_SEARCH;
+                state->needs_redraw = true;
+            } else if (target == HOVER_PROJECT_ROW && state->project_hovered >= 0) {
+                uint64_t now = get_ticks();
+                bool double_click =
+                    state->last_project_click_row == state->project_hovered &&
+                    now - state->last_project_click_ticks < 450;
+                state->project_selected = state->project_hovered;
+                state->focus = FOCUS_PROJECT;
+                clear_field_focus(state);
+                if (double_click)
+                    open_project_row(state, state->project_hovered);
+                state->last_project_click_row = state->project_hovered;
+                state->last_project_click_ticks = now;
+                state->needs_redraw = true;
+            } else if (target == HOVER_OUTLINE_ROW && state->outline_hovered >= 0) {
+                jump_to_outline(state, state->outline_hovered);
+            } else if (target == HOVER_EDITOR) {
+                click_editor(state, rects, ev->mouse.x, ev->mouse.y);
+            } else {
+                clear_field_focus(state);
+                state->focus = FOCUS_EDITOR;
+                state->needs_redraw = true;
+            }
+            break;
+        }
+
+        case EVT_KEY_DOWN: {
+            handle_key(state, (uint8_t)ev->key.c);
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
 extern "C" int main()
 {
-    Surface win = gui_register_window_ex("Latitude", (uint32_t)gui_scaled_metric(980), (uint32_t)gui_scaled_metric(620),
-                                         WIN_FLAG_RESIZABLE);
-    if (!win.buffer)
-        return 1;
-    gui_window_set_min_size(gui_scaled_metric(720), gui_scaled_metric(470));
-    gui_sync_theme_from_registry();
-    gui_request_focus();
+    static LatitudeApp lat = {};
+    AppState *state = &lat.state;
+    TextBuffer *buffer = &lat.buffer;
 
-    TextBuffer *buffer = static_cast<TextBuffer *>(malloc(sizeof(TextBuffer)));
-    AppState *state = static_cast<AppState *>(malloc(sizeof(AppState)));
-    LatitudeRects *rects = static_cast<LatitudeRects *>(malloc(sizeof(LatitudeRects)));
-    Surface frame = {};
-    if (!buffer || !state || !rects) {
-        free(buffer);
-        free(state);
-        free(rects);
-        return 1;
-    }
-    memset(state, 0, sizeof(AppState));
-    memset(rects, 0, sizeof(LatitudeRects));
     state->buffer = buffer;
     state->project_selected = -1;
     state->project_hovered = -1;
@@ -3585,226 +3773,20 @@ extern "C" int main()
     load_project(state, "/data");
     build_outline(state);
 
-    Registry *registry = gui_registry();
-    state->last_settings_generation = registry ? registry->settings_generation : 0;
-    uint32_t self_pid = (uint32_t)syscall1(SYS_GETPID, 0);
+    AppConfig config = {};
+    config.title = "Latitude";
+    config.width = gui_scaled_metric(980);
+    config.height = gui_scaled_metric(620);
+    config.min_width = gui_scaled_metric(720);
+    config.min_height = gui_scaled_metric(470);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.idle_ms = 10;
+    config.on_draw = latitude_draw;
+    config.on_event = latitude_event;
+    config.on_menu = latitude_menu;
+    config.on_menus = latitude_menus;
+    config.on_settings = latitude_settings;
+    config.on_idle = latitude_idle;
 
-    while (true) {
-        Event ev = {};
-        while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE)
-                return 0;
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
-                state->needs_redraw = true;
-                continue;
-            }
-            if (ev.type == EVT_FOCUS) {
-                state->needs_redraw = true;
-                continue;
-            }
-            if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
-                bool changed =
-                    state->hovered != HOVER_NONE || state->project_hovered >= 0 || state->outline_hovered >= 0;
-                state->hovered = HOVER_NONE;
-                state->project_hovered = -1;
-                state->outline_hovered = -1;
-                state->button_pressed = 0;
-                if (changed)
-                    state->needs_redraw = true;
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_MOVE) {
-                if (state->selecting) {
-                    drag_editor(state, rects, ev.mouse.x, ev.mouse.y);
-                    continue;
-                }
-                HoverTarget previous = state->hovered;
-                int previous_project_hovered = state->project_hovered;
-                int previous_outline_hovered = state->outline_hovered;
-                HoverTarget hovered = update_hover(state, rects, ev.mouse.x, ev.mouse.y);
-                bool hover_changed = hovered != previous || state->project_hovered != previous_project_hovered ||
-                                     state->outline_hovered != previous_outline_hovered;
-                if (hover_changed) {
-                    state->hovered = hovered;
-                    state->needs_redraw = true;
-                }
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_UP && ev.mouse.button == 1) {
-                if (state->selecting) {
-                    state->selecting = false;
-                    state->needs_redraw = true;
-                }
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_SCROLL) {
-                if (point_in_rect(rects->editor_rect, ev.mouse.x, ev.mouse.y)) {
-                    state->first_line += ev.mouse.scroll_y < 0 ? 3 : -3;
-                    // Stop at the point where the last line is at the bottom of
-                    // the view, not when only one line remains.
-                    int max_first = state->visible_lines > 1
-                                        ? max_int(0, state->buffer->line_count - state->visible_lines)
-                                        : max_int(0, state->buffer->line_count - 1);
-                    state->first_line = clamp_int(state->first_line, 0, max_first);
-                    state->needs_redraw = true;
-                } else if (point_in_rect(rects->sidebar_rect, ev.mouse.x, ev.mouse.y)) {
-                    int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
-
-                    if (ev.mouse.y < project_area_bottom) {
-                        state->project_first_row += ev.mouse.scroll_y < 0 ? 3 : -3;
-                        state->project_first_row =
-                            clamp_int(state->project_first_row, 0, max_int(0, state->project_count - 1));
-                    } else {
-                        state->outline_first_row += ev.mouse.scroll_y < 0 ? 3 : -3;
-                        state->outline_first_row =
-                            clamp_int(state->outline_first_row, 0, max_int(0, state->outline_count - 1));
-                    }
-                    state->needs_redraw = true;
-                }
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
-                if (state->show_help) {
-                    state->show_help = false;
-                    state->needs_redraw = true;
-                    continue;
-                }
-                HoverTarget target = update_hover(state, rects, ev.mouse.x, ev.mouse.y);
-                state->hovered = target;
-                if (target == HOVER_NEW_FILE) {
-                    clear_field_focus(state);
-                    state->button_pressed = 1;
-                    state->button_pressed_ticks = get_ticks();
-                    if (state->buffer->modified) {
-                        // Destructive: require a second confirming click.
-                        if (state->pending_confirm == 1 && get_ticks() - state->pending_confirm_ticks < 3000) {
-                            state->pending_confirm = 0;
-                            new_file(state);
-                        } else {
-                            state->pending_confirm = 1;
-                            state->pending_confirm_ticks = get_ticks();
-                            set_status(state, "Unsaved changes - click New again to discard");
-                            state->needs_redraw = true;
-                        }
-                    } else {
-                        state->pending_confirm = 0;
-                        new_file(state);
-                    }
-                } else if (target == HOVER_SAVE) {
-                    bool path_ok = !state->path_focused || set_buffer_path_from_input(state, false);
-                    clear_field_focus(state);
-                    state->button_pressed = 2;
-                    state->button_pressed_ticks = get_ticks();
-                    state->pending_confirm = 0;
-                    if (path_ok)
-                        save_file(state);
-                } else if (target == HOVER_RELOAD) {
-                    clear_field_focus(state);
-                    state->button_pressed = 3;
-                    state->button_pressed_ticks = get_ticks();
-                    if (state->buffer->modified && state->buffer->path[0]) {
-                        if (state->pending_confirm == 2 && get_ticks() - state->pending_confirm_ticks < 3000) {
-                            state->pending_confirm = 0;
-                            load_file(state, state->buffer->path);
-                        } else {
-                            state->pending_confirm = 2;
-                            state->pending_confirm_ticks = get_ticks();
-                            set_status(state, "Unsaved changes - click Reload again to discard");
-                            state->needs_redraw = true;
-                        }
-                    } else {
-                        state->pending_confirm = 0;
-                        if (state->buffer->path[0])
-                            load_file(state, state->buffer->path);
-                    }
-                } else if (target == HOVER_PATH) {
-                    sync_path_input(state);
-                    state->path_focused = true;
-                    state->search_focused = false;
-                    state->focus = FOCUS_PATH;
-                    state->needs_redraw = true;
-                } else if (target == HOVER_SEARCH) {
-                    state->path_focused = false;
-                    state->search_focused = true;
-                    state->focus = FOCUS_SEARCH;
-                    state->needs_redraw = true;
-                } else if (target == HOVER_PROJECT_ROW && state->project_hovered >= 0) {
-                    uint64_t now = get_ticks();
-                    bool double_click = state->last_project_click_row == state->project_hovered &&
-                                        now - state->last_project_click_ticks < 450;
-                    state->project_selected = state->project_hovered;
-                    state->focus = FOCUS_PROJECT;
-                    clear_field_focus(state);
-                    if (double_click)
-                        open_project_row(state, state->project_hovered);
-                    state->last_project_click_row = state->project_hovered;
-                    state->last_project_click_ticks = now;
-                    state->needs_redraw = true;
-                } else if (target == HOVER_OUTLINE_ROW && state->outline_hovered >= 0) {
-                    jump_to_outline(state, state->outline_hovered);
-                } else if (target == HOVER_EDITOR) {
-                    click_editor(state, rects, ev.mouse.x, ev.mouse.y);
-                } else {
-                    clear_field_focus(state);
-                    state->focus = FOCUS_EDITOR;
-                    state->needs_redraw = true;
-                }
-                continue;
-            }
-            if (ev.type == EVT_KEY_DOWN) {
-                handle_key(state, (uint8_t)ev.key.c);
-            }
-        }
-
-        registry = gui_registry();
-        if (registry && registry->settings_generation != state->last_settings_generation) {
-            state->last_settings_generation = registry->settings_generation;
-            if (gui_sync_theme_from_registry())
-                state->needs_redraw = true;
-        }
-
-        uint64_t loop_ticks = get_ticks();
-        if (state->button_pressed != 0 && loop_ticks - state->button_pressed_ticks >= 150) {
-            state->button_pressed = 0;
-            state->needs_redraw = true;
-        }
-        if (state->pending_confirm != 0 && loop_ticks - state->pending_confirm_ticks >= 3000) {
-            state->pending_confirm = 0;
-            set_status(state, state->buffer->modified ? "Unsaved changes" : "Ready");
-            state->needs_redraw = true;
-        }
-
-        uint32_t menu_cmd = 0;
-        if (gui_menu_take_command(&menu_cmd)) {
-            latitude_handle_menu_command(state, menu_cmd);
-            state->needs_redraw = true;
-        }
-
-        if (state->needs_redraw) {
-            if (ensure_render_surface(&frame, win.width, win.height)) {
-                draw_latitude(&frame, state, rects);
-                present_latitude_frame(&win, &frame);
-            } else {
-                draw_latitude(&win, state, rects);
-                gui_blit_to_screen_rect(&win, 0, 0, (int)win.width, (int)win.height);
-            }
-            state->needs_redraw = false;
-
-            // Keep the titlebar in sync with the open file.
-            char title[128];
-            if (state->buffer->title[0])
-                snprintf(title, sizeof(title), "%s%s - Latitude", state->buffer->modified ? "* " : "",
-                         state->buffer->title);
-            else
-                snprintf(title, sizeof(title), "%suntitled - Latitude", state->buffer->modified ? "* " : "");
-            gui_set_window_title(title);
-
-            if (registry && registry->focused_owner_pid == self_pid)
-                latitude_publish_menus(state);
-        } else {
-            sleep_ms(10);
-        }
-    }
-
-    return 0;
+    return app_run(&config, &lat);
 }
