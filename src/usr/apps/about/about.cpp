@@ -328,8 +328,8 @@ static void draw_platform_panel(Surface *win, int x, int y, int w, int h, int ro
 {
     draw_section(win, x, y, w, h, "Platform");
     int inner_y = panel_content_top(y);
-    DetailItem items[4] = {{"CPU Vendor", vendor}, {"CPU Cores", cores}, {"Timer", timer_hz},
-                           {"Bootloader", bootloader}};
+    DetailItem items[4] = {
+        {"CPU Vendor", vendor}, {"CPU Cores", cores}, {"Timer", timer_hz}, {"Bootloader", bootloader}};
     for (int i = 0; i < 4; i++) {
         draw_detail_row(win, x + gui_space_2(), inner_y + i * row_h, w - gui_space_3(), row_h, items[i],
                         g_gui_style.app_surface);
@@ -468,6 +468,19 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot, AboutPanelRe
     gui_app_draw_header(win, &layout, "About uniOS", "Hardware, runtime, and display overview", nullptr);
 }
 
+// The only entry is the reserved About command, which the menubar handles
+// itself (it re-focuses this window), so no app-side dispatch is needed.
+static void about_publish_menus()
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
 extern "C" int main()
 {
     Surface win = gui_register_window_ex("About uniOS", (uint32_t)gui_scaled_metric(720),
@@ -478,6 +491,7 @@ extern "C" int main()
 
     gui_sync_theme_from_registry();
     gui_request_focus();
+    about_publish_menus();
 
     // Double buffer: draw off-screen, then publish whole regions at once so
     // the compositor never samples a half-drawn frame.
@@ -502,6 +516,10 @@ extern "C" int main()
             if (ev.type == EVT_WINDOW_CLOSE) {
                 free(back_data);
                 return 0;
+            }
+            if (ev.type == EVT_FOCUS) {
+                about_publish_menus();
+                continue;
             }
             if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
                 size_t needed = (size_t)(win.pitch / 4) * win.height;

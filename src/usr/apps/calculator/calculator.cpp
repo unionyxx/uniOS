@@ -11,14 +11,34 @@ static constexpr int COLS = 4;
 static constexpr int ROWS = 5;
 static constexpr int MAX_DECIMAL_PLACES = 15;
 
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum
+{
+    CALC_MENU_COPY = 1,
+    CALC_MENU_CLEAR,
+    CALC_MENU_CLEAR_ALL,
+    CALC_MENU_HELP = 0x80,
+};
+
 enum class CalcOp : uint8_t
 {
-    None, Add, Sub, Mul, Div
+    None,
+    Add,
+    Sub,
+    Mul,
+    Div
 };
 
 enum class BtnAction : uint8_t
 {
-    Digit, Op, Eq, Clear, ClearAll, Decimal, Percent, ToggleSign
+    Digit,
+    Op,
+    Eq,
+    Clear,
+    ClearAll,
+    Decimal,
+    Percent,
+    ToggleSign
 };
 
 struct CalcState
@@ -42,11 +62,26 @@ struct ButtonDef
 };
 
 static constexpr ButtonDef k_buttons[ROWS][COLS] = {
-    {{"AC", false, BtnAction::ClearAll, 0}, {"+/-", false, BtnAction::ToggleSign, 0}, {"%", false, BtnAction::Percent, 0}, {"/", false, BtnAction::Op, (uint8_t)CalcOp::Div}},
-    {{"7", true, BtnAction::Digit, 7}, {"8", true, BtnAction::Digit, 8}, {"9", true, BtnAction::Digit, 9}, {"*", false, BtnAction::Op, (uint8_t)CalcOp::Mul}},
-    {{"4", true, BtnAction::Digit, 4}, {"5", true, BtnAction::Digit, 5}, {"6", true, BtnAction::Digit, 6}, {"-", false, BtnAction::Op, (uint8_t)CalcOp::Sub}},
-    {{"1", true, BtnAction::Digit, 1}, {"2", true, BtnAction::Digit, 2}, {"3", true, BtnAction::Digit, 3}, {"+", false, BtnAction::Op, (uint8_t)CalcOp::Add}},
-    {{"0", true, BtnAction::Digit, 0}, {".", true, BtnAction::Decimal, 0}, {"=", false, BtnAction::Eq, 0}, {"C", false, BtnAction::Clear, 0}},
+    {{"AC", false, BtnAction::ClearAll, 0},
+     {"+/-", false, BtnAction::ToggleSign, 0},
+     {"%", false, BtnAction::Percent, 0},
+     {"/", false, BtnAction::Op, (uint8_t)CalcOp::Div}},
+    {{"7", true, BtnAction::Digit, 7},
+     {"8", true, BtnAction::Digit, 8},
+     {"9", true, BtnAction::Digit, 9},
+     {"*", false, BtnAction::Op, (uint8_t)CalcOp::Mul}},
+    {{"4", true, BtnAction::Digit, 4},
+     {"5", true, BtnAction::Digit, 5},
+     {"6", true, BtnAction::Digit, 6},
+     {"-", false, BtnAction::Op, (uint8_t)CalcOp::Sub}},
+    {{"1", true, BtnAction::Digit, 1},
+     {"2", true, BtnAction::Digit, 2},
+     {"3", true, BtnAction::Digit, 3},
+     {"+", false, BtnAction::Op, (uint8_t)CalcOp::Add}},
+    {{"0", true, BtnAction::Digit, 0},
+     {".", true, BtnAction::Decimal, 0},
+     {"=", false, BtnAction::Eq, 0},
+     {"C", false, BtnAction::Clear, 0}},
 };
 
 struct CalcRects
@@ -54,12 +89,13 @@ struct CalcRects
     Rect display;
     Rect buttons[ROWS][COLS];
     bool layout_valid;
+    bool help_visible;
+    Rect help_close;
 };
 
 // Pre-computed FPU lookup table to prevent precision drift and division latency
-static constexpr double k_pow10[] = {
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15
-};
+static constexpr double k_pow10[] = {1e0, 1e1, 1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+                                     1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15};
 
 static void calc_update_display(CalcState *state)
 {
@@ -81,7 +117,7 @@ static void calc_update_display(CalcState *state)
                 snprintf(state->display, sizeof(state->display), "%.10g", val);
         }
     }
-    
+
     size_t len = strlen(state->display);
     if (len > 0 && len + 1 < sizeof(state->display) && state->has_decimal && !strchr(state->display, '.')) {
         state->display[len] = '.';
@@ -104,7 +140,7 @@ static void calc_input_digit(CalcState *state, uint8_t digit)
         state->has_decimal = false;
         state->decimal_places = 0;
     }
-    
+
     if (state->has_decimal) {
         if (state->decimal_places < MAX_DECIMAL_PLACES) {
             state->decimal_places++;
@@ -129,12 +165,19 @@ static void calc_input_decimal(CalcState *state)
 
 static void calc_exec_pending(CalcState *state)
 {
-    if (state->pending == CalcOp::None) return;
+    if (state->pending == CalcOp::None)
+        return;
 
     switch (state->pending) {
-        case CalcOp::Add: state->accumulator += state->current; break;
-        case CalcOp::Sub: state->accumulator -= state->current; break;
-        case CalcOp::Mul: state->accumulator *= state->current; break;
+        case CalcOp::Add:
+            state->accumulator += state->current;
+            break;
+        case CalcOp::Sub:
+            state->accumulator -= state->current;
+            break;
+        case CalcOp::Mul:
+            state->accumulator *= state->current;
+            break;
         case CalcOp::Div:
             if (state->current != 0.0) {
                 state->accumulator = state->accumulator / state->current;
@@ -142,7 +185,8 @@ static void calc_exec_pending(CalcState *state)
                 state->error = true;
             }
             break;
-        default: break;
+        default:
+            break;
     }
 
     state->current = state->accumulator;
@@ -159,14 +203,14 @@ static void calc_input_op(CalcState *state, CalcOp op)
         calc_exec_pending(state);
     else
         state->accumulator = state->current;
-        
+
     state->pending = op;
     state->fresh = true;
     state->has_decimal = false;
     state->decimal_places = 0;
 }
 
-static void calc_dispatch_action(CalcState *state, const ButtonDef& btn)
+static void calc_dispatch_action(CalcState *state, const ButtonDef &btn)
 {
     if (state->error) {
         // From an error state only a fresh digit or an explicit clear resumes.
@@ -184,14 +228,39 @@ static void calc_dispatch_action(CalcState *state, const ButtonDef& btn)
         return;
     }
     switch (btn.action) {
-        case BtnAction::Digit:      calc_input_digit(state, btn.value); break;
-        case BtnAction::Op:         calc_input_op(state, static_cast<CalcOp>(btn.value)); break;
-        case BtnAction::Eq:         calc_exec_pending(state); state->accumulator = state->current; state->fresh = true; break;
-        case BtnAction::Clear:      state->current = 0.0; state->fresh = true; state->has_decimal = false; state->decimal_places = 0; calc_update_display(state); break;
-        case BtnAction::ClearAll:   calc_init(state); break;
-        case BtnAction::Decimal:    calc_input_decimal(state); break;
-        case BtnAction::Percent:    state->current /= 100.0; calc_update_display(state); break;
-        case BtnAction::ToggleSign: state->current = -state->current; state->fresh = false; calc_update_display(state); break;
+        case BtnAction::Digit:
+            calc_input_digit(state, btn.value);
+            break;
+        case BtnAction::Op:
+            calc_input_op(state, static_cast<CalcOp>(btn.value));
+            break;
+        case BtnAction::Eq:
+            calc_exec_pending(state);
+            state->accumulator = state->current;
+            state->fresh = true;
+            break;
+        case BtnAction::Clear:
+            state->current = 0.0;
+            state->fresh = true;
+            state->has_decimal = false;
+            state->decimal_places = 0;
+            calc_update_display(state);
+            break;
+        case BtnAction::ClearAll:
+            calc_init(state);
+            break;
+        case BtnAction::Decimal:
+            calc_input_decimal(state);
+            break;
+        case BtnAction::Percent:
+            state->current /= 100.0;
+            calc_update_display(state);
+            break;
+        case BtnAction::ToggleSign:
+            state->current = -state->current;
+            state->fresh = false;
+            calc_update_display(state);
+            break;
     }
 }
 
@@ -204,20 +273,42 @@ static bool calc_dispatch_key(CalcState *state, char c)
         return true;
     }
     switch (c) {
-        case '.': case ',': calc_dispatch_action(state, {".", true, BtnAction::Decimal, 0}); return true;
-        case '+':           calc_dispatch_action(state, {"+", false, BtnAction::Op, (uint8_t)CalcOp::Add}); return true;
-        case '-':           calc_dispatch_action(state, {"-", false, BtnAction::Op, (uint8_t)CalcOp::Sub}); return true;
-        case '*': case 'x': case 'X':
-            calc_dispatch_action(state, {"*", false, BtnAction::Op, (uint8_t)CalcOp::Mul}); return true;
-        case '/': case ':': calc_dispatch_action(state, {"/", false, BtnAction::Op, (uint8_t)CalcOp::Div}); return true;
-        case '=': case '\n': case '\r':
-            calc_dispatch_action(state, {"=", false, BtnAction::Eq, 0}); return true;
-        case '%':           calc_dispatch_action(state, {"%", false, BtnAction::Percent, 0}); return true;
-        case '\b': case 127: // backspace clears the current entry
-            calc_dispatch_action(state, {"C", false, BtnAction::Clear, 0}); return true;
-        case 27:             // escape clears everything
-            calc_dispatch_action(state, {"AC", false, BtnAction::ClearAll, 0}); return true;
-        default: return false;
+        case '.':
+        case ',':
+            calc_dispatch_action(state, {".", true, BtnAction::Decimal, 0});
+            return true;
+        case '+':
+            calc_dispatch_action(state, {"+", false, BtnAction::Op, (uint8_t)CalcOp::Add});
+            return true;
+        case '-':
+            calc_dispatch_action(state, {"-", false, BtnAction::Op, (uint8_t)CalcOp::Sub});
+            return true;
+        case '*':
+        case 'x':
+        case 'X':
+            calc_dispatch_action(state, {"*", false, BtnAction::Op, (uint8_t)CalcOp::Mul});
+            return true;
+        case '/':
+        case ':':
+            calc_dispatch_action(state, {"/", false, BtnAction::Op, (uint8_t)CalcOp::Div});
+            return true;
+        case '=':
+        case '\n':
+        case '\r':
+            calc_dispatch_action(state, {"=", false, BtnAction::Eq, 0});
+            return true;
+        case '%':
+            calc_dispatch_action(state, {"%", false, BtnAction::Percent, 0});
+            return true;
+        case '\b':
+        case 127: // backspace clears the current entry
+            calc_dispatch_action(state, {"C", false, BtnAction::Clear, 0});
+            return true;
+        case 27: // escape clears everything
+            calc_dispatch_action(state, {"AC", false, BtnAction::ClearAll, 0});
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -225,11 +316,24 @@ static bool calc_dispatch_key(CalcState *state, char c)
 static bool calc_op_button(CalcOp op, int *row, int *col)
 {
     switch (op) {
-        case CalcOp::Div: *row = 0; *col = 3; return true;
-        case CalcOp::Mul: *row = 1; *col = 3; return true;
-        case CalcOp::Sub: *row = 2; *col = 3; return true;
-        case CalcOp::Add: *row = 3; *col = 3; return true;
-        default: return false;
+        case CalcOp::Div:
+            *row = 0;
+            *col = 3;
+            return true;
+        case CalcOp::Mul:
+            *row = 1;
+            *col = 3;
+            return true;
+        case CalcOp::Sub:
+            *row = 2;
+            *col = 3;
+            return true;
+        case CalcOp::Add:
+            *row = 3;
+            *col = 3;
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -258,10 +362,12 @@ static void compute_layout(Surface *win, CalcRects *rects)
 
     int btn_w = (grid_w - gap * (COLS - 1)) / COLS;
     int btn_h = (grid_h - gap * (ROWS - 1)) / ROWS;
-    
-    if (btn_h < gui_scaled_metric(44)) btn_h = gui_scaled_metric(44);
+
+    if (btn_h < gui_scaled_metric(44))
+        btn_h = gui_scaled_metric(44);
     int max_btn_h = gui_scaled_metric(72);
-    if (btn_h > max_btn_h) btn_h = max_btn_h;
+    if (btn_h > max_btn_h)
+        btn_h = max_btn_h;
 
     int actual_grid_h = btn_h * ROWS + gap * (ROWS - 1);
     int grid_y_offset = (grid_h - actual_grid_h) / 2;
@@ -281,8 +387,10 @@ static void compute_layout(Surface *win, CalcRects *rects)
 static void render_display(Surface *win, CalcState *state, const CalcRects *rects)
 {
     int dr = gui_radius_md();
-    gui_fill_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr, g_gui_style.app_surface);
-    gui_draw_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr, g_gui_style.border);
+    gui_fill_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr,
+                          g_gui_style.app_surface);
+    gui_draw_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr,
+                          g_gui_style.border);
 
     const GuiFont *disp_font = gui_font_title();
     int max_w = rects->display.w - gui_space_2() * 2;
@@ -313,10 +421,11 @@ static void render_display(Surface *win, CalcState *state, const CalcRects *rect
 static void render_button(Surface *win, const CalcRects *rects, int row, int col, bool hovered, bool pressed,
                           bool armed)
 {
-    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+    if (row < 0 || row >= ROWS || col < 0 || col >= COLS)
+        return;
 
-    const Rect& r = rects->buttons[row][col];
-    const ButtonDef& def = k_buttons[row][col];
+    const Rect &r = rects->buttons[row][col];
+    const ButtonDef &def = k_buttons[row][col];
 
     int rad = gui_corner_radius(r.w, r.h, gui_radius_md());
     uint32_t bg = def.primary ? g_gui_style.accent : g_gui_style.chrome_bg;
@@ -356,10 +465,12 @@ static void render_button(Surface *win, const CalcRects *rects, int row, int col
     gui_blit_to_screen_rect(win, r.x, r.y, r.w, r.h);
 }
 
-static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int h_row, int h_col, int p_row,
-                           int p_col)
+static void calc_draw_help(Surface *win, CalcRects *rects);
+
+static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int h_row, int h_col, int p_row, int p_col)
 {
-    if (!rects->layout_valid) compute_layout(win, rects);
+    if (!rects->layout_valid)
+        compute_layout(win, rects);
 
     gui_fill_surface(win, g_gui_style.app_bg);
     render_display(win, state, rects);
@@ -374,6 +485,8 @@ static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int
                           (r == armed_r && c == armed_c));
         }
     }
+    if (rects->help_visible)
+        calc_draw_help(win, rects);
     // Commit the whole window: the background fill is content too, and a
     // partial commit would leave stale padding after theme switches.
     gui_blit_to_screen_rect(win, 0, 0, (int)win->width, (int)win->height);
@@ -381,22 +494,111 @@ static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int
 
 static void find_button_at(const CalcRects *rects, int x, int y, int *out_row, int *out_col)
 {
-    *out_row = -1; *out_col = -1;
+    *out_row = -1;
+    *out_col = -1;
     for (int r = 0; r < ROWS; r++) {
         for (int c = 0; c < COLS; c++) {
-            const Rect& b = rects->buttons[r][c];
+            const Rect &b = rects->buttons[r][c];
             if (b.w > 0 && b.h > 0 && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) {
-                *out_row = r; *out_col = c;
+                *out_row = r;
+                *out_col = c;
                 return;
             }
         }
     }
 }
 
+static void calc_copy_result(const CalcState *state)
+{
+    gui_clipboard_copy(state->display, strlen(state->display));
+}
+
+static void calc_publish_menus()
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+
+    int edit = gui_menu_model_add_menu(&model, "Edit");
+    gui_menu_model_add_item(&model, edit, "Copy Result", CALC_MENU_COPY, 0, "Ctrl+C");
+    gui_menu_model_add_separator(&model, edit);
+    gui_menu_model_add_item(&model, edit, "Clear Entry", CALC_MENU_CLEAR, 0, nullptr);
+    gui_menu_model_add_item(&model, edit, "Clear All", CALC_MENU_CLEAR_ALL, 0, "Esc");
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Calculator Help", CALC_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static void calc_handle_menu_command(CalcState *state, uint32_t cmd, CalcRects *rects, bool *redraw)
+{
+    switch (cmd) {
+        case CALC_MENU_COPY:
+            calc_copy_result(state);
+            break;
+        case CALC_MENU_CLEAR:
+            calc_dispatch_action(state, {"C", false, BtnAction::Clear, 0});
+            *redraw = true;
+            break;
+        case CALC_MENU_CLEAR_ALL:
+            calc_dispatch_action(state, {"AC", false, BtnAction::ClearAll, 0});
+            *redraw = true;
+            break;
+        case CALC_MENU_HELP:
+            rects->help_visible = true;
+            *redraw = true;
+            break;
+        default:
+            break;
+    }
+}
+
+static void calc_draw_help(Surface *win, CalcRects *rects)
+{
+    int win_w = (int)win->width;
+    int win_h = (int)win->height;
+    int box_w = gui_scaled_metric(360);
+    int box_h = gui_scaled_metric(224);
+    if (box_w > win_w - gui_space_4())
+        box_w = win_w - gui_space_4();
+    if (box_h > win_h - gui_space_4())
+        box_h = win_h - gui_space_4();
+    int box_x = (win_w - box_w) / 2;
+    int box_y = (win_h - box_h) / 2;
+    gui_fill_rect_blend(win, 0, 0, win_w, win_h, 0x80000000u);
+    gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
+                         g_gui_style.chrome_bg_alt);
+    gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Calculator Help", nullptr);
+    static const char *tips[] = {
+        "Type digits and operators on the keyboard",
+        "Enter or = evaluates, Backspace clears the entry",
+        "Esc clears everything (AC)",
+        "% divides by 100, +/- flips the sign",
+        "Edit > Copy Result copies the display (Ctrl+C)",
+    };
+    int text_x = box_x + gui_space_2();
+    int text_y = box_y + gui_card_header_h() + gui_space_2();
+    int line_h = gui_line_height();
+    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+        gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i], g_gui_style.text,
+                              g_gui_style.app_surface);
+        text_y += line_h + gui_space_1();
+    }
+    int btn_w = gui_scaled_metric(88);
+    rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
+                                      box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
+    gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
+                           "Close", true, false, false, false);
+}
+
 extern "C" int main()
 {
-    Surface win = gui_register_window_ex("Calculator", (uint32_t)gui_scaled_metric(320), (uint32_t)gui_scaled_metric(420), WIN_FLAG_RESIZABLE);
-    if (!win.buffer) return 1;
+    Surface win = gui_register_window_ex("Calculator", (uint32_t)gui_scaled_metric(320),
+                                         (uint32_t)gui_scaled_metric(420), WIN_FLAG_RESIZABLE);
+    if (!win.buffer)
+        return 1;
 
     gui_window_set_min_size(gui_scaled_metric(280), gui_scaled_metric(380));
     gui_sync_theme_from_registry();
@@ -407,6 +609,7 @@ extern "C" int main()
 
     CalcRects rects = {};
     render_full_ui(&win, &state, &rects, -1, -1, -1, -1);
+    calc_publish_menus();
 
     int hover_r = -1, hover_c = -1;
     int press_r = -1, press_c = -1;
@@ -457,6 +660,7 @@ extern "C" int main()
 
                 case EVT_FOCUS:
                     gui_sync_theme_from_registry();
+                    calc_publish_menus();
                     render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
                     break;
 
@@ -475,7 +679,20 @@ extern "C" int main()
                     break;
 
                 case EVT_KEY_DOWN:
-                    if (ev.key.c != 0 && calc_dispatch_key(&state, ev.key.c)) {
+                    if (ev.key.c == 0)
+                        break;
+                    if (rects.help_visible) {
+                        if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
+                            rects.help_visible = false;
+                            render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
+                        }
+                        break;
+                    }
+                    if ((uint8_t)ev.key.c == 3) { // Ctrl+C copies the displayed result.
+                        calc_copy_result(&state);
+                        break;
+                    }
+                    if (calc_dispatch_key(&state, ev.key.c)) {
                         render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
                     }
                     break;
@@ -485,7 +702,8 @@ extern "C" int main()
                     find_button_at(&rects, ev.mouse.x, ev.mouse.y, &r, &c);
                     if (r != hover_r || c != hover_c) {
                         int old_r = hover_r, old_c = hover_c;
-                        hover_r = r; hover_c = c;
+                        hover_r = r;
+                        hover_c = c;
                         if (old_r >= 0)
                             redraw_button(old_r, old_c);
                         if (hover_r >= 0 && (hover_r != old_r || hover_c != old_c))
@@ -503,6 +721,11 @@ extern "C" int main()
                 case EVT_MOUSE_DOWN: {
                     if (ev.mouse.button != 1)
                         break;
+                    if (rects.help_visible) {
+                        rects.help_visible = false;
+                        render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
+                        break;
+                    }
                     int r, c;
                     find_button_at(&rects, ev.mouse.x, ev.mouse.y, &r, &c);
                     if (r >= 0) {
@@ -530,7 +753,8 @@ extern "C" int main()
                     }
                     break;
 
-                default: break;
+                default:
+                    break;
             }
         }
 
@@ -540,6 +764,14 @@ extern "C" int main()
             if (gui_sync_theme_from_registry()) {
                 render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
             }
+        }
+
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd)) {
+            bool redraw = false;
+            calc_handle_menu_command(&state, menu_cmd, &rects, &redraw);
+            if (redraw)
+                render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
         }
 
         sleep_until_ticks(next_frame_ticks);

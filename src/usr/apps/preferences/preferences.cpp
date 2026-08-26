@@ -17,6 +17,12 @@ static constexpr const char *SYSTEM_BOOTSTRAP_CONFIG_PATH = "/etc/system.conf";
 static constexpr const char *WALLPAPER_CONFIG_PATH = "/data/WALLPAPR.CFG";
 static constexpr const char *WALLPAPER_BOOTSTRAP_CONFIG_PATH = "/etc/wallpaper.conf";
 
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum
+{
+    PREF_MENU_HELP = 0x80,
+};
+
 enum PrefSection
 {
     PREF_SECTION_APPEARANCE = 0,
@@ -86,6 +92,8 @@ struct PreferencesRects
     Rect transparency_toggle;
     Rect terminal_toggle;
     Rect storage_segment;
+    bool help_visible;
+    Rect help_close;
 };
 
 static Rect inflate_rect(Rect rect, int pad)
@@ -503,6 +511,55 @@ static int compute_preferences_content_height(PreferencesState *state, int detai
     return section_h;
 }
 
+static void preferences_publish_menus()
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Settings Help", PREF_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static void preferences_draw_help(Surface *win, PreferencesRects *rects)
+{
+    int win_w = (int)win->width;
+    int win_h = (int)win->height;
+    int box_w = gui_scaled_metric(430);
+    int box_h = gui_scaled_metric(238);
+    if (box_w > win_w - gui_space_4())
+        box_w = win_w - gui_space_4();
+    if (box_h > win_h - gui_space_4())
+        box_h = win_h - gui_space_4();
+    int box_x = (win_w - box_w) / 2;
+    int box_y = (win_h - box_h) / 2;
+    gui_fill_rect_blend(win, 0, 0, win_w, win_h, 0x80000000u);
+    gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
+                         g_gui_style.chrome_bg_alt);
+    gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Settings Help", nullptr);
+    static const char *tips[] = {
+        "Pick a section on the left to change its settings",   "Theme, volume and toggles apply immediately",
+        "Wallpaper Apply needs a readable .uowp path",         "Storage mode controls whether changes persist to /data",
+        "Settings marked session-only reset on the next boot",
+    };
+    int text_x = box_x + gui_space_2();
+    int text_y = box_y + gui_card_header_h() + gui_space_2();
+    int line_h = gui_line_height();
+    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+        gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i], g_gui_style.text,
+                              g_gui_style.app_surface);
+        text_y += line_h + gui_space_1();
+    }
+    int btn_w = gui_scaled_metric(88);
+    rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
+                                      box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
+    gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
+                           "Close", true, false, false, false);
+}
+
 static void draw_preferences(Surface *win, PreferencesState *state, PreferencesRects *rects, const Rect *present_rect)
 {
     if (!win || !state || !rects)
@@ -599,8 +656,8 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
                                 rects->wallpaper_field.h, state->wallpaper_path, state->field_focused,
                                 state->hovered == HOVER_WALLPAPER_FIELD);
         gui_app_draw_button_ex(win, rects->wallpaper_apply.x, rects->wallpaper_apply.y, rects->wallpaper_apply.w,
-                               rects->wallpaper_apply.h, "Apply", true, false,
-                               state->hovered == HOVER_WALLPAPER_APPLY, state->pressed == HOVER_WALLPAPER_APPLY);
+                               rects->wallpaper_apply.h, "Apply", true, false, state->hovered == HOVER_WALLPAPER_APPLY,
+                               state->pressed == HOVER_WALLPAPER_APPLY);
         gui_app_draw_button_ex(win, rects->wallpaper_default_btn.x, rects->wallpaper_default_btn.y,
                                rects->wallpaper_default_btn.w, rects->wallpaper_default_btn.h, "Default", false, false,
                                state->hovered == HOVER_WALLPAPER_DEFAULT, state->pressed == HOVER_WALLPAPER_DEFAULT);
@@ -717,6 +774,11 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
 
     gui_app_draw_header(win, &layout, "Settings", "Appearance, desktop, network, and system", nullptr);
 
+    if (rects->help_visible) {
+        preferences_draw_help(win, rects);
+        present_rect = nullptr;
+    }
+
     if (present_rect && !gui_rect_is_empty(*present_rect)) {
         gui_blit_to_screen_rect(win, present_rect->x, present_rect->y, present_rect->w, present_rect->h);
     } else {
@@ -791,6 +853,7 @@ extern "C" int main()
     PreferencesRects rects = {};
     load_preferences_state(&state, registry);
     gui_apply_theme(state.theme_mode);
+    preferences_publish_menus();
 
     uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
     bool needs_redraw = true;
@@ -824,6 +887,7 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_FOCUS) {
+                preferences_publish_menus();
                 request_redraw(true, gui_rect_make(0, 0, 0, 0));
                 continue;
             }
@@ -855,6 +919,11 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
+                if (rects.help_visible) {
+                    rects.help_visible = false;
+                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
+                    continue;
+                }
                 HoverTarget hovered = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
                 state.hovered = hovered;
                 state.field_focused = (hovered == HOVER_WALLPAPER_FIELD);
@@ -951,6 +1020,13 @@ extern "C" int main()
                     request_redraw(true, gui_rect_make(0, 0, 0, 0));
                 continue;
             }
+            if (ev.type == EVT_KEY_DOWN && rects.help_visible) {
+                if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
+                    rects.help_visible = false;
+                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
+                }
+                continue;
+            }
             if (ev.type == EVT_KEY_DOWN && state.field_focused && ev.key.c != 0) {
                 char c = ev.key.c;
                 size_t len = strlen(state.wallpaper_path);
@@ -993,6 +1069,12 @@ extern "C" int main()
             if (registry->wallpaper_active[0]) {
                 safe_copy_text(state.wallpaper_path, sizeof(state.wallpaper_path), registry->wallpaper_active);
             }
+            request_redraw(true, gui_rect_make(0, 0, 0, 0));
+        }
+
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd) && menu_cmd == PREF_MENU_HELP) {
+            rects.help_visible = true;
             request_redraw(true, gui_rect_make(0, 0, 0, 0));
         }
 

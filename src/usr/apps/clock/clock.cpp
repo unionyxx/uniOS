@@ -8,6 +8,12 @@
 #include "../../libc/unistd.h"
 #include "../../libgui/gui.h"
 
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum
+{
+    CLOCK_MENU_HELP = 0x80,
+};
+
 static inline int iabs(int v)
 {
     return v < 0 ? -v : v;
@@ -436,6 +442,55 @@ static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysT
     gui_draw_text_clipped(win, sfont, date_x, date_y, w - pad * 2, date_str, g_gui_style.text_dim, g_gui_style.app_bg);
 }
 
+static void clock_publish_menus()
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Clock Help", CLOCK_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static void clock_draw_help(Surface *surf, Rect *help_close)
+{
+    int win_w = (int)surf->width;
+    int win_h = (int)surf->height;
+    int box_w = gui_scaled_metric(360);
+    int box_h = gui_scaled_metric(196);
+    if (box_w > win_w - gui_space_4())
+        box_w = win_w - gui_space_4();
+    if (box_h > win_h - gui_space_4())
+        box_h = win_h - gui_space_4();
+    int box_x = (win_w - box_w) / 2;
+    int box_y = (win_h - box_h) / 2;
+    gui_fill_rect_blend(surf, 0, 0, win_w, win_h, 0x80000000u);
+    gui_draw_panel_inset(surf, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
+                         g_gui_style.chrome_bg_alt);
+    gui_draw_card_header(surf, box_x + 1, box_y + 1, box_w - 2, "Clock Help", nullptr);
+    static const char *tips[] = {
+        "The hands sweep continuously, synced to the RTC",
+        "The analog face and digital readout show the same time",
+        "Resize the window; the face follows the smaller axis",
+    };
+    int text_x = box_x + gui_space_2();
+    int text_y = box_y + gui_card_header_h() + gui_space_2();
+    int line_h = gui_line_height();
+    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+        gui_draw_text_clipped(surf, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i],
+                              g_gui_style.text, g_gui_style.app_surface);
+        text_y += line_h + gui_space_1();
+    }
+    int btn_w = gui_scaled_metric(88);
+    *help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
+                                box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
+    gui_app_draw_button_ex(surf, help_close->x, help_close->y, help_close->w, help_close->h, "Close", true, false,
+                           false, false);
+}
+
 extern "C" int main()
 {
     int win_w = gui_scaled_metric(360);
@@ -504,6 +559,9 @@ extern "C" int main()
     ClockCache cache = {};
     int cx = 0, cy = 0, face_r = 0, w = 0, h = 0;
     bool needs_full_redraw = true;
+    bool help_visible = false;
+    Rect help_close = {0, 0, 0, 0};
+    clock_publish_menus();
 
     while (true) {
         Event ev = {};
@@ -527,6 +585,30 @@ extern "C" int main()
                 }
                 continue;
             }
+            if (ev.type == EVT_FOCUS) {
+                clock_publish_menus();
+                continue;
+            }
+            if (ev.type == EVT_KEY_DOWN && help_visible) {
+                if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
+                    help_visible = false;
+                    needs_full_redraw = true;
+                }
+                continue;
+            }
+            if (ev.type == EVT_MOUSE_DOWN && help_visible) {
+                if (ev.mouse.button == 1) {
+                    help_visible = false;
+                    needs_full_redraw = true;
+                }
+                continue;
+            }
+        }
+
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd) && menu_cmd == CLOCK_MENU_HELP) {
+            help_visible = true;
+            needs_full_redraw = true;
         }
 
         registry = gui_registry();
@@ -724,8 +806,10 @@ extern "C" int main()
         blit_cache_to_window(&cache, &backbuffer);
         draw_clock_face_hands(&backbuffer, cx, cy, face_r, continuous_seconds);
         draw_clock_text(&backbuffer, cx, cy, face_r, &current_os_time);
+        if (help_visible)
+            clock_draw_help(&backbuffer, &help_close);
 
-        if (full_frame) {
+        if (full_frame || help_visible) {
             memcpy(win.buffer, backbuffer.buffer, (size_t)backbuffer_stride * win.height * sizeof(uint32_t));
             gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
         } else {
@@ -752,8 +836,7 @@ extern "C" int main()
 
             for (int y = fy0; y < fy1; y++) {
                 memcpy(&win.buffer[(size_t)y * backbuffer_stride + fx0],
-                       &backbuffer.buffer[(size_t)y * backbuffer_stride + fx0],
-                       (size_t)(fx1 - fx0) * sizeof(uint32_t));
+                       &backbuffer.buffer[(size_t)y * backbuffer_stride + fx0], (size_t)(fx1 - fx0) * sizeof(uint32_t));
             }
             for (int y = text_top; y < (int)win.height; y++) {
                 memcpy(&win.buffer[(size_t)y * backbuffer_stride], &backbuffer.buffer[(size_t)y * backbuffer_stride],

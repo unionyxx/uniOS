@@ -8,6 +8,12 @@
 #include "../../libc/unistd.h"
 #include "../../libgui/gui.h"
 
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum
+{
+    CAL_MENU_HELP = 0x80,
+};
+
 struct CalendarState
 {
     int year;
@@ -118,6 +124,8 @@ struct CalendarRects
     Rect next_btn;
     Rect today_btn;
     Rect day_cells[6][7];
+    bool help_visible;
+    Rect help_close;
 };
 
 static bool point_in_rect(const Rect &rect, int x, int y)
@@ -141,6 +149,56 @@ static void draw_chevron(Surface *win, int cx, int cy, int size, bool left, uint
     }
 }
 
+static void calendar_publish_menus()
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Calendar Help", CAL_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static void calendar_draw_help(Surface *win, CalendarRects *rects)
+{
+    int win_w = (int)win->width;
+    int win_h = (int)win->height;
+    int box_w = gui_scaled_metric(360);
+    int box_h = gui_scaled_metric(224);
+    if (box_w > win_w - gui_space_4())
+        box_w = win_w - gui_space_4();
+    if (box_h > win_h - gui_space_4())
+        box_h = win_h - gui_space_4();
+    int box_x = (win_w - box_w) / 2;
+    int box_y = (win_h - box_h) / 2;
+    gui_fill_rect_blend(win, 0, 0, win_w, win_h, 0x80000000u);
+    gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
+                         g_gui_style.chrome_bg_alt);
+    gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Calendar Help", nullptr);
+    static const char *tips[] = {
+        "Click a day to select it, or use the arrow keys",
+        "Page Up / Page Down or the wheel change the month",
+        "T jumps to today, the Today button does too",
+        "Dimmed days belong to the previous or next month",
+    };
+    int text_x = box_x + gui_space_2();
+    int text_y = box_y + gui_card_header_h() + gui_space_2();
+    int line_h = gui_line_height();
+    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+        gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i], g_gui_style.text,
+                              g_gui_style.app_surface);
+        text_y += line_h + gui_space_1();
+    }
+    int btn_w = gui_scaled_metric(88);
+    rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
+                                      box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
+    gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
+                           "Close", true, false, false, false);
+}
+
 static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rects, int hover_day_row,
                           int hover_day_col, int hover_arrow, bool hover_today, bool today_pressed)
 {
@@ -159,9 +217,8 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     const GuiFont *def_font = gui_font_default();
     int line_h = gui_line_height();
 
-    static const char *month_names[] = {"January", "February", "March", "April",
-                                         "May", "June", "July", "August",
-                                         "September", "October", "November", "December"};
+    static const char *month_names[] = {"January", "February", "March",     "April",   "May",      "June",
+                                        "July",    "August",   "September", "October", "November", "December"};
     static const char *day_labels[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
     char header[64];
@@ -169,7 +226,8 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     int header_w = gui_measure_text(title_font, header);
     int header_x = (w - header_w) / 2;
     int header_y = top_pad;
-    gui_draw_text_clipped(win, title_font, header_x, header_y, w - pad * 2, header, g_gui_style.text, g_gui_style.app_bg);
+    gui_draw_text_clipped(win, title_font, header_x, header_y, w - pad * 2, header, g_gui_style.text,
+                          g_gui_style.app_bg);
 
     int arrow_size = gui_scaled_metric(8);
     int arrow_y = header_y + line_h / 2;
@@ -201,10 +259,13 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     int cells_y = grid_y + day_label_h;
     int start_wd = weekday(state->year, state->month, 1);
     int dim = days_in_month(state->year, state->month);
-    
+
     int prev_m = state->month - 1;
     int prev_y = state->year;
-    if (prev_m < 1) { prev_m = 12; prev_y--; }
+    if (prev_m < 1) {
+        prev_m = 12;
+        prev_y--;
+    }
     int prev_dim = days_in_month(prev_y, prev_m);
 
     int current_month_day = 1;
@@ -247,10 +308,12 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
                 fg = g_gui_style.text_muted;
                 next_month_day++;
             } else {
-                bool is_today = state->year == state->today_year && state->month == state->today_month && current_month_day == state->today_day;
+                bool is_today = state->year == state->today_year && state->month == state->today_month &&
+                                current_month_day == state->today_day;
                 bool is_selected = current_month_day == state->selected_day;
 
-                bg = is_selected ? g_gui_style.accent : (is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_surface);
+                bg = is_selected ? g_gui_style.accent
+                                 : (is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_surface);
                 fg = is_selected ? 0xFFFFFFFFu : (is_today ? g_gui_style.accent : g_gui_style.text);
                 border = is_today ? g_gui_style.accent : g_gui_style.border;
 
@@ -275,6 +338,9 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
     rects->today_btn = gui_rect_make((w - today_w) / 2, h - pad - gui_app_control_h(), today_w, gui_app_control_h());
     gui_app_draw_button_ex(win, rects->today_btn.x, rects->today_btn.y, rects->today_btn.w, rects->today_btn.h,
                            viewing_today_month ? "Today" : "Go to Today", false, false, hover_today, today_pressed);
+
+    if (rects->help_visible)
+        calendar_draw_help(win, rects);
 }
 
 static void find_day_at(CalendarRects *rects, int x, int y, int *out_row, int *out_col)
@@ -318,6 +384,7 @@ extern "C" int main()
     CalendarState state = {};
     calendar_init(&state);
     CalendarRects rects = {};
+    calendar_publish_menus();
 
     int hover_row = -1, hover_col = -1;
     int hover_arrow = 0;
@@ -355,6 +422,7 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_FOCUS) {
+                calendar_publish_menus();
                 needs_redraw = true;
                 continue;
             }
@@ -399,6 +467,11 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
+                if (rects.help_visible) {
+                    rects.help_visible = false;
+                    needs_redraw = true;
+                    continue;
+                }
                 if (point_in_rect(rects.prev_btn, ev.mouse.x, ev.mouse.y)) {
                     calendar_prev_month(&state);
                     hover_row = hover_col = -1;
@@ -448,6 +521,13 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_KEY_DOWN) {
+                if (rects.help_visible) {
+                    if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
+                        rects.help_visible = false;
+                        needs_redraw = true;
+                    }
+                    continue;
+                }
                 uint8_t key = (uint8_t)ev.key.c;
                 if (ev.key.c == 't' || ev.key.c == 'T') {
                     calendar_goto_today(&state);
@@ -488,6 +568,12 @@ extern "C" int main()
             if (gui_sync_theme_from_registry()) {
                 needs_redraw = true;
             }
+        }
+
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd) && menu_cmd == CAL_MENU_HELP) {
+            rects.help_visible = true;
+            needs_redraw = true;
         }
 
         SysTime now;
