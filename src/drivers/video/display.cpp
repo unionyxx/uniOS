@@ -113,6 +113,14 @@ struct ComposeBufferSlot
 };
 static ComposeBufferSlot s_compose_buffers[MAX_COMPOSE_BUFFERS] = {};
 static uint32_t s_compose_active_index = 0;
+// Partial CPU composes must seed the new buffer from what is currently on
+// screen. Reading the VRAM front buffer back over PCIe is a slow non-posted
+// stall, so prefer the last compose slot (plain RAM) that still mirrors the
+// screen. s_front_present_epoch advances on every successful present; the
+// seed slot is only trusted while no newer present has landed.
+static uint64_t s_front_present_epoch = 0;
+static ComposeBufferSlot *s_compose_seed_slot = nullptr;
+static uint64_t s_compose_seed_epoch = 0;
 static constexpr uint64_t k_cpu_render_buffer_flags = PTE_PRESENT | PTE_WRITABLE | PTE_NX;
 
 static uint64_t display_buffer_bytes(uint32_t stride, uint32_t height)
@@ -421,6 +429,8 @@ void display_complete_present(DisplayHead *head, uint32_t sequence, uint32_t res
     head->status.last_present_ticks = timer_get_ticks();
     head->status.last_present_result = result;
     head->status.flags = 0;
+    if (result == DISPLAY_PRESENT_RESULT_OK)
+        s_front_present_epoch++;
 #ifdef DEBUG
     uint32_t refresh_millihz = head->caps.measured_refresh_millihz ? head->caps.measured_refresh_millihz
                                                                    : head->current_mode.nominal_refresh_millihz;
@@ -2431,7 +2441,20 @@ static uint32_t compose_submit_cpu(DisplayDevice *device, const DisplayComposeRe
 
     if (!display_damage_is_full_frame(rects, rect_count, device->primary_head.caps)) {
         DisplayHead *head = &device->primary_head;
-        if (head->front_buffer_index < head->buffer_count) {
+        // Prefer seeding from the RAM compose slot that still mirrors the
+        // screen; reading the VRAM front buffer back over PCIe stalls on
+        // non-posted reads.
+        if (s_compose_seed_slot && s_compose_seed_epoch == s_front_present_epoch &&
+            s_compose_seed_slot != compose_slot && s_compose_seed_slot->dma.virt != 0 &&
+            s_compose_seed_slot->buffer.cpu_mapping == reinterpret_cast<uint32_t *>(s_compose_seed_slot->dma.virt) &&
+            s_compose_seed_slot->buffer.full_frame_valid &&
+            s_compose_seed_slot->buffer.width == device->primary_head.caps.width &&
+            s_compose_seed_slot->buffer.height == device->primary_head.caps.height) {
+            display_copy_buffer_rows(dst, dst_stride, s_compose_seed_slot->buffer.cpu_mapping,
+                                     s_compose_seed_slot->buffer.stride, device->primary_head.caps.width,
+                                     device->primary_head.caps.height);
+            seeded_from_front_buffer = true;
+        } else if (head->front_buffer_index < head->buffer_count) {
             const DisplayBuffer &front = head->buffers[head->front_buffer_index];
             if (front.cpu_mapping && front.stride != 0 && front.width == device->primary_head.caps.width &&
                 front.height == device->primary_head.caps.height && front.full_frame_valid) {
@@ -2533,8 +2556,11 @@ static uint32_t compose_submit_cpu(DisplayDevice *device, const DisplayComposeRe
         seeded_from_front_buffer || display_damage_is_full_frame(rects, rect_count, device->primary_head.caps);
     uint32_t submitted = display_present_buffer_internal(device, compose_slot->buffer, rects, rect_count,
                                                          request.frame_sequence, request.flags);
-    if (submitted != 0)
+    if (submitted != 0) {
         compose_slot->in_flight_sequence = submitted;
+        s_compose_seed_slot = compose_slot;
+        s_compose_seed_epoch = s_front_present_epoch;
+    }
     return submitted;
 }
 
@@ -2639,6 +2665,9 @@ void display_init(const BootFramebuffer *fb)
     s_display_event_head = 0;
     s_display_event_tail = 0;
     s_compose_active_index = 0;
+    s_front_present_epoch = 0;
+    s_compose_seed_slot = nullptr;
+    s_compose_seed_epoch = 0;
     s_device.boot_framebuffer = fb;
     s_device.ops = &g_gop_backend_ops;
     s_device.backend_kind = DisplayBackendKind::FirmwareFramebuffer;
