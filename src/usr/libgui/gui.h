@@ -199,6 +199,18 @@ int gui_set_window_owner_pid(uint32_t pid);
 int gui_set_window_title(const char *title);
 bool gui_window_title_matches(const char *window_title, const char *app_title);
 void gui_notify(const char *title, const char *message);
+
+void gui_menu_model_reset(MenuModel *model);
+int gui_menu_model_add_menu(MenuModel *model, const char *name);
+bool gui_menu_model_add_item(MenuModel *model, int menu_index, const char *label, uint32_t id, uint32_t flags,
+                             const char *accel);
+bool gui_menu_model_add_separator(MenuModel *model, int menu_index);
+bool gui_menu_publish(const MenuModel *model);
+bool gui_menu_take_command(uint32_t *out_id);
+
+bool gui_clipboard_copy(const char *text, size_t len);
+bool gui_clipboard_paste(char *out, size_t out_size, size_t *out_len);
+
 int gui_request_focus(void);
 int gui_sync_window_size(Surface *s);
 int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h);
@@ -325,6 +337,8 @@ int gui_popup_menu_height(const GuiMenuItem *items, int count);
 int gui_popup_menu_width(const GuiMenuItem *items, int count, int min_width);
 int gui_popup_menu_hit_test(const GuiMenuItem *items, int count, int x, int y, int w, int mx, int my);
 void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index);
+void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
+                             const char *const *accel_labels, const bool *checked_flags);
 
 void gui_draw_cursor(Surface *s, int32_t x, int32_t y);
 void gui_draw_cursor_kind(Surface *s, int32_t x, int32_t y, GuiCursorKind kind);
@@ -474,7 +488,7 @@ static inline void gui_draw_card(Surface *s, int x, int y, int w, int h, const c
 }
 
 static inline void gui_draw_card_header_ext(Surface *s, int x, int y, int w, int r, const char *title,
-                                           const char *detail)
+                                            const char *detail)
 {
     int header_h = gui_card_header_h();
     gui_fill_top_rounded_panel(s, x, y, w, header_h, gui_corner_radius(w, header_h, r), g_gui_style.chrome_bg);
@@ -590,7 +604,6 @@ static inline int gui_draw_wrapped_value(Surface *s, int x, int y, int w, const 
 
     return line_count * gui_line_height();
 }
-
 
 static inline int gui_draw_detail_item(Surface *s, int x, int y, int w, const char *label, const char *value,
                                        uint32_t bg)

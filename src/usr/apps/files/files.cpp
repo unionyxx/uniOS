@@ -43,6 +43,7 @@ enum DialogMode
     DIALOG_RENAME,
     DIALOG_COPY,
     DIALOG_MOVE,
+    DIALOG_HELP,
 };
 
 enum MenuKind
@@ -64,6 +65,22 @@ enum MenuCommand
     CMD_DELETE,
     CMD_COPY,
     CMD_MOVE,
+};
+
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum FilesMenuId
+{
+    FILES_MENU_NEW_FOLDER = 1,
+    FILES_MENU_RENAME,
+    FILES_MENU_DELETE,
+    FILES_MENU_CUT,
+    FILES_MENU_COPY,
+    FILES_MENU_PASTE,
+    FILES_MENU_REFRESH,
+    FILES_MENU_UP,
+    FILES_MENU_GO_PLACE = 0x20,  // + place index
+    FILES_MENU_GO_VOLUME = 0x40, // + visible volume index
+    FILES_MENU_HELP = 0x80,
 };
 
 namespace {
@@ -102,7 +119,7 @@ struct AppState
     int selected_volume_row;
     char window_title[96];
 };
-}
+} // namespace
 
 struct LayoutCache
 {
@@ -829,6 +846,11 @@ static bool confirm_dialog(AppState *state)
     if (!state || state->dialog_mode == DIALOG_NONE)
         return false;
 
+    if (state->dialog_mode == DIALOG_HELP) {
+        close_dialog(state);
+        return true;
+    }
+
     char input[sizeof(state->dialog_input)] = {};
     trim_ascii_whitespace(state->dialog_input, input, sizeof(input));
     char err[160] = {};
@@ -964,6 +986,8 @@ static void draw_dialog(Surface *win, AppState *state, LayoutCache *cache)
 
     int box_w = gui_scaled_metric(360);
     int box_h = gui_scaled_metric(152);
+    if (state->dialog_mode == DIALOG_HELP)
+        box_h = gui_scaled_metric(232);
     if (box_w > (int)win->width - gui_space_4())
         box_w = (int)win->width - gui_space_4();
     if (box_h > view_h - gui_space_4())
@@ -985,6 +1009,35 @@ static void draw_dialog(Surface *win, AppState *state, LayoutCache *cache)
     gui_draw_card_header(win, cache->dialog_box.x + 1, cache->dialog_box.y + 1, cache->dialog_box.w - 2,
                          state->dialog_title, nullptr);
 
+    if (state->dialog_mode == DIALOG_HELP) {
+        static const char *tips[] = {
+            "Click a folder to select it, Enter opens it.",
+            "Backspace or Left arrow goes up one level.",
+            "Right-click items to copy, move, rename, delete.",
+            "Edit > Cut/Copy then Paste moves items between folders.",
+            "Storage home lists every mounted volume.",
+        };
+        cache->dialog_field = gui_rect_make(0, 0, 0, 0);
+        int text_x = cache->dialog_box.x + gui_space_2();
+        int text_y = cache->dialog_box.y + gui_card_header_h() + gui_space_2();
+        int line_h = gui_line_height();
+        for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+            gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, cache->dialog_box.w - gui_space_4(), tips[i],
+                                  g_gui_style.text, g_gui_style.app_surface);
+            text_y += line_h + gui_space_1();
+        }
+        int btn_w = gui_scaled_metric(88);
+        cache->dialog_cancel = gui_rect_make(0, 0, 0, 0);
+        cache->dialog_ok =
+            gui_rect_make(cache->dialog_box.x + cache->dialog_box.w - gui_space_2() - btn_w,
+                          cache->dialog_box.y + cache->dialog_box.h - gui_space_2() - gui_app_control_h(), btn_w,
+                          gui_app_control_h());
+        bool hover_ok = state->have_mouse && rect_contains(cache->dialog_ok, state->mouse_x, state->mouse_y);
+        gui_app_draw_button_ex(win, cache->dialog_ok.x, cache->dialog_ok.y, cache->dialog_ok.w, cache->dialog_ok.h,
+                               "Close", true, false, hover_ok, state->dialog_pressed == 1);
+        return;
+    }
+
     cache->dialog_field =
         gui_rect_make(cache->dialog_box.x + gui_space_2(), cache->dialog_box.y + gui_card_header_h() + gui_space_2(),
                       cache->dialog_box.w - gui_space_4(), gui_app_control_h());
@@ -1000,8 +1053,7 @@ static void draw_dialog(Surface *win, AppState *state, LayoutCache *cache)
     bool hover_ok = state->have_mouse && rect_contains(cache->dialog_ok, state->mouse_x, state->mouse_y);
     bool hover_cancel = state->have_mouse && rect_contains(cache->dialog_cancel, state->mouse_x, state->mouse_y);
     gui_app_draw_button_ex(win, cache->dialog_cancel.x, cache->dialog_cancel.y, cache->dialog_cancel.w,
-                           cache->dialog_cancel.h, "Cancel", false, false, hover_cancel,
-                           state->dialog_pressed == 2);
+                           cache->dialog_cancel.h, "Cancel", false, false, hover_cancel, state->dialog_pressed == 2);
     gui_app_draw_button_ex(win, cache->dialog_ok.x, cache->dialog_ok.y, cache->dialog_ok.w, cache->dialog_ok.h, "OK",
                            true, false, hover_ok, state->dialog_pressed == 1);
 }
@@ -1348,6 +1400,219 @@ static void execute_menu_command(AppState *state, MenuCommand command)
     }
 }
 
+static bool files_has_selection(const AppState *state)
+{
+    return !state->volume_home && state->selected_row >= 0 && state->selected_row < state->row_count;
+}
+
+static void files_publish_menus(AppState *state)
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+    bool writable = storage_is_writable(state);
+    bool has_sel = files_has_selection(state);
+    bool in_dir = !state->volume_home;
+
+    int file = gui_menu_model_add_menu(&model, "File");
+    gui_menu_model_add_item(&model, file, "New Folder...", FILES_MENU_NEW_FOLDER,
+                            writable && in_dir ? 0 : MENU_FLAG_DISABLED, "Ctrl+N");
+    gui_menu_model_add_separator(&model, file);
+    gui_menu_model_add_item(&model, file, "Rename...", FILES_MENU_RENAME, has_sel && writable ? 0 : MENU_FLAG_DISABLED,
+                            nullptr);
+    gui_menu_model_add_item(&model, file, "Delete", FILES_MENU_DELETE, has_sel && writable ? 0 : MENU_FLAG_DISABLED,
+                            nullptr);
+
+    int edit = gui_menu_model_add_menu(&model, "Edit");
+    gui_menu_model_add_item(&model, edit, "Cut", FILES_MENU_CUT, has_sel && writable ? 0 : MENU_FLAG_DISABLED,
+                            "Ctrl+X");
+    gui_menu_model_add_item(&model, edit, "Copy", FILES_MENU_COPY, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+C");
+    gui_menu_model_add_item(&model, edit, "Paste", FILES_MENU_PASTE, writable && in_dir ? 0 : MENU_FLAG_DISABLED,
+                            "Ctrl+V");
+    gui_menu_model_add_separator(&model, edit);
+    gui_menu_model_add_item(&model, edit, "Refresh", FILES_MENU_REFRESH, 0, nullptr);
+
+    int go = gui_menu_model_add_menu(&model, "Go");
+    gui_menu_model_add_item(&model, go, "Up", FILES_MENU_UP, in_dir ? 0 : MENU_FLAG_DISABLED, nullptr);
+    gui_menu_model_add_separator(&model, go);
+    for (int i = 0; i < MAX_PLACES; i++) {
+        bool checked = in_dir && path_equals(state->current_path, k_places[i].path);
+        gui_menu_model_add_item(&model, go, k_places[i].label, FILES_MENU_GO_PLACE + (uint32_t)i,
+                                checked ? MENU_FLAG_CHECKED : 0, nullptr);
+    }
+    int vol_count = visible_volume_count(state);
+    if (vol_count > 0) {
+        gui_menu_model_add_separator(&model, go);
+        for (int i = 0; i < vol_count && i < 8; i++) {
+            int vi = visible_volume_index_at(state, i);
+            if (vi < 0)
+                continue;
+            bool checked = state->active_volume == vi;
+            gui_menu_model_add_item(&model, go, state->volumes[vi].display_name, FILES_MENU_GO_VOLUME + (uint32_t)i,
+                                    checked ? MENU_FLAG_CHECKED : 0, nullptr);
+        }
+    }
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Files Help", FILES_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static bool files_clipboard_path(const char *prefix, char *out, size_t out_size)
+{
+    char clip[640];
+    size_t len = 0;
+    if (!gui_clipboard_paste(clip, sizeof(clip), &len))
+        return false;
+    size_t plen = strlen(prefix);
+    if (len < plen + 1 || strncmp(clip, prefix, plen) != 0)
+        return false;
+    strncpy(out, clip + plen, out_size - 1);
+    out[out_size - 1] = '\0';
+    return true;
+}
+
+static void files_cut_or_copy(AppState *state, bool cut)
+{
+    if (!files_has_selection(state))
+        return;
+    const FileRow &row = state->rows[state->selected_row];
+    char text[600];
+    snprintf(text, sizeof(text), "%s:%s", cut ? "cut" : "copy", row.path);
+    if (gui_clipboard_copy(text, strlen(text))) {
+        char msg[300];
+        snprintf(msg, sizeof(msg), "%s %s", cut ? "Cut" : "Copied", row.name);
+        set_status(state, msg);
+    } else {
+        set_status(state, "Clipboard unavailable");
+    }
+}
+
+static void files_paste(AppState *state)
+{
+    if (state->volume_home || !storage_is_writable(state))
+        return;
+    char src[512];
+    bool cut;
+    if (files_clipboard_path("cut:", src, sizeof(src)))
+        cut = true;
+    else if (files_clipboard_path("copy:", src, sizeof(src)))
+        cut = false;
+    else {
+        set_status(state, "Clipboard has no file");
+        return;
+    }
+    const char *base = strrchr(src, '/');
+    base = base ? base + 1 : src;
+    if (!base[0] || !validate_simple_name(base)) {
+        set_status(state, "Clipboard has no file");
+        return;
+    }
+    if (path_is_within(state->current_path, src)) {
+        set_status(state, "Cannot paste a folder into itself");
+        return;
+    }
+    struct VNodeStat st = {};
+    if (stat(src, &st) != 0) {
+        set_status(state, "Clipboard item no longer exists");
+        return;
+    }
+    FileRow row = {};
+    strncpy(row.path, src, sizeof(row.path) - 1);
+    row.is_dir = st.is_dir;
+    char dst[512];
+    join_path(state->current_path, base, dst, sizeof(dst));
+    char err[160] = {};
+    bool ok;
+    if (cut)
+        ok = move_entry(&row, dst, err, sizeof(err));
+    else if (row.is_dir)
+        ok = copy_directory_tree(row.path, dst, 0, err, sizeof(err));
+    else
+        ok = copy_file_stream(row.path, dst, err, sizeof(err));
+    if (ok) {
+        set_status(state, cut ? "Move complete" : "Copy complete");
+        load_directory(state);
+    } else {
+        set_status(state, err[0] ? err : "Paste failed");
+    }
+}
+
+static void files_handle_menu_command(AppState *state, uint32_t cmd)
+{
+    if (!state || cmd == 0)
+        return;
+    bool writable = storage_is_writable(state);
+    bool has_sel = files_has_selection(state);
+
+    if (cmd == FILES_MENU_NEW_FOLDER) {
+        if (writable && !state->volume_home)
+            open_dialog(state, DIALOG_NEW_FOLDER, "New Folder", "");
+        return;
+    }
+    if (cmd == FILES_MENU_RENAME) {
+        if (has_sel && writable)
+            open_dialog(state, DIALOG_RENAME, "Rename", state->rows[state->selected_row].name);
+        return;
+    }
+    if (cmd == FILES_MENU_DELETE) {
+        if (!has_sel || !writable)
+            return;
+        char err[160] = {};
+        if (delete_selected(&state->rows[state->selected_row], err, sizeof(err))) {
+            set_status(state, "Item deleted");
+            load_directory(state);
+        } else {
+            set_status(state, err[0] ? err : "Delete failed");
+        }
+        return;
+    }
+    if (cmd == FILES_MENU_CUT) {
+        if (has_sel && writable)
+            files_cut_or_copy(state, true);
+        return;
+    }
+    if (cmd == FILES_MENU_COPY) {
+        if (has_sel)
+            files_cut_or_copy(state, false);
+        return;
+    }
+    if (cmd == FILES_MENU_PASTE) {
+        files_paste(state);
+        return;
+    }
+    if (cmd == FILES_MENU_REFRESH) {
+        refresh_volumes(state);
+        select_default_location(state, false);
+        if (!state->volume_home)
+            load_directory(state);
+        return;
+    }
+    if (cmd == FILES_MENU_UP) {
+        if (!state->volume_home)
+            navigate_up(state);
+        return;
+    }
+    if (cmd >= FILES_MENU_GO_PLACE && cmd < FILES_MENU_GO_VOLUME) {
+        int index = (int)(cmd - FILES_MENU_GO_PLACE);
+        if (index >= 0 && index < MAX_PLACES)
+            activate_place(state, index);
+        return;
+    }
+    if (cmd >= FILES_MENU_GO_VOLUME && cmd < FILES_MENU_HELP) {
+        int index = visible_volume_index_at(state, (int)(cmd - FILES_MENU_GO_VOLUME));
+        if (index >= 0)
+            enter_volume(state, index);
+        return;
+    }
+    if (cmd == FILES_MENU_HELP) {
+        open_dialog(state, DIALOG_HELP, "Files Help", "");
+        return;
+    }
+}
+
 extern "C" int main()
 {
     Surface win = gui_register_window_ex("Files", (uint32_t)gui_scaled_metric(860), (uint32_t)gui_scaled_metric(540),
@@ -1361,8 +1626,10 @@ extern "C" int main()
     AppState *state = static_cast<AppState *>(malloc(sizeof(AppState)));
     LayoutCache *cache = static_cast<LayoutCache *>(malloc(sizeof(LayoutCache)));
     if (!state || !cache) {
-        if (state) free(state);
-        if (cache) free(cache);
+        if (state)
+            free(state);
+        if (cache)
+            free(cache);
         return 1;
     }
     memset(state, 0, sizeof(AppState));
@@ -1565,17 +1832,34 @@ extern "C" int main()
                 if (state->menu_kind != MENU_NONE) {
                     close_menu(state);
                 }
+                if (state->dialog_mode == DIALOG_NONE && ev.key.c > 0 && ev.key.c < 32) {
+                    bool handled = true;
+                    if (ev.key.c == 14)
+                        files_handle_menu_command(state, FILES_MENU_NEW_FOLDER);
+                    else if (ev.key.c == 24)
+                        files_handle_menu_command(state, FILES_MENU_CUT);
+                    else if (ev.key.c == 3)
+                        files_handle_menu_command(state, FILES_MENU_COPY);
+                    else if (ev.key.c == 22)
+                        files_handle_menu_command(state, FILES_MENU_PASTE);
+                    else
+                        handled = false;
+                    if (handled) {
+                        state->needs_redraw = true;
+                        continue;
+                    }
+                }
                 if (state->dialog_mode != DIALOG_NONE) {
                     if (ev.key.c == '\n' || ev.key.c == '\r')
                         confirm_dialog(state);
                     else if (ev.key.c == 27)
                         close_dialog(state);
-                    else if (ev.key.c == '\b' || ev.key.c == 127) {
+                    else if (state->dialog_mode != DIALOG_HELP && (ev.key.c == '\b' || ev.key.c == 127)) {
                         size_t len = strlen(state->dialog_input);
                         if (len > 0)
                             state->dialog_input[len - 1] = '\0';
                         state->needs_redraw = true;
-                    } else if (ev.key.c >= 32) {
+                    } else if (state->dialog_mode != DIALOG_HELP && ev.key.c >= 32) {
                         size_t len = strlen(state->dialog_input);
                         if (len + 1 < sizeof(state->dialog_input)) {
                             state->dialog_input[len] = ev.key.c;
@@ -1635,9 +1919,17 @@ extern "C" int main()
                 state->needs_redraw = true;
         }
 
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd)) {
+            files_handle_menu_command(state, menu_cmd);
+            state->needs_redraw = true;
+        }
+
         if (state->needs_redraw) {
             draw_files(&win, state, cache);
             state->needs_redraw = false;
+            if (registry && registry->focused_owner_pid == self_pid)
+                files_publish_menus(state);
         } else {
             sleep_ms(35);
         }

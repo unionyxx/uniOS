@@ -12,6 +12,17 @@ extern "C" {
 #define MENUBAR_HEIGHT 36
 #define MENUBAR_CANVAS_HEIGHT 272
 #define TITLE_BAR_HEIGHT 24
+#define MENU_MAX_MENUS 8
+#define MENU_MAX_ITEMS 16
+#define MENU_LABEL_MAX 20
+#define MENU_ACCEL_MAX 7
+#define MENU_FLAG_DISABLED 0x1u
+#define MENU_FLAG_CHECKED 0x2u
+#define MENU_CLIPBOARD_CAP 4095u
+// Menu command IDs at or above this value are handled by the menubar itself
+// and are never dispatched to the publishing app.
+#define MENU_CMD_RESERVED_BASE 0xF000u
+#define MENU_CMD_ABOUT_UNIOS 0xF000u
 #define WIN_FLAG_TRANSPARENT 0x1u
 #define WIN_FLAG_SYSTEM 0x2u
 #define WIN_FLAG_RESIZABLE 0x4u
@@ -96,7 +107,38 @@ typedef struct WindowEntry
     volatile bool request_minimize;
     volatile bool request_maximize;
     volatile bool request_restore;
+    // Menu command dispatch: the menubar writes menu_command_id then bumps
+    // menu_command_seq. The owning app polls and consumes each new seq.
+    volatile uint32_t menu_command_seq;
+    volatile uint32_t menu_command_id;
 } WindowEntry;
+
+typedef struct MenuItem
+{
+    char label[MENU_LABEL_MAX]; // empty => separator row
+    char accel[MENU_ACCEL_MAX]; // display text, e.g. "Ctrl+S"; empty = none
+    uint16_t id;                // 0 = separator
+    uint8_t flags;              // MENU_FLAG_DISABLED | MENU_FLAG_CHECKED
+    uint8_t reserved;
+} MenuItem;
+
+typedef struct MenuDef
+{
+    char name[8];
+    uint8_t count;
+    MenuItem items[MENU_MAX_ITEMS];
+} MenuDef;
+
+// Published by the focused app; the menubar renders it only while
+// owner_pid == focused_owner_pid. Writer bumps seq before and after the
+// payload (store fences around both); the reader requires a stable seq.
+typedef struct MenuModel
+{
+    volatile uint32_t owner_pid;
+    volatile uint32_t seq;
+    uint8_t menu_count;
+    MenuDef menus[MENU_MAX_MENUS];
+} MenuModel;
 
 static inline bool window_entry_has_buffer_handle(const WindowEntry *entry)
 {
@@ -149,6 +191,15 @@ typedef struct Registry
     volatile uint32_t notify_generation;
     char notify_title[64];
     char notify_message[128];
+
+    // Focused app's published menu model (see MenuModel).
+    MenuModel menu_model;
+
+    // System text clipboard: write text behind store fences, then bump
+    // clipboard_seq. Readers require a stable seq across the copy.
+    volatile uint32_t clipboard_seq;
+    volatile uint32_t clipboard_len; // 0..MENU_CLIPBOARD_CAP
+    char clipboard[MENU_CLIPBOARD_CAP + 1];
 
     volatile uint32_t window_count;
     WindowEntry windows[MAX_WINDOWS];

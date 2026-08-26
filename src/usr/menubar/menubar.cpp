@@ -519,10 +519,213 @@ static void launch_preferences(Registry *reg)
     }
 }
 
+// App menus: the focused app publishes a MenuModel into the registry; the
+// menubar renders it, appends the composed Window menu, and dispatches item
+// commands back through the window's WindowEntry.
+#define MENUBAR_WINOP_MINIMIZE 0xE001u
+#define MENUBAR_WINOP_MAXRESTORE 0xE002u
+#define MENUBAR_WINOP_CLOSE 0xE003u
+#define MENUBAR_WINLIST_BASE 0x10000u
+#define MENUBAR_WINLIST_MAX 8
+#define MENUBAR_DROPDOWN_MAX_ROWS (MENU_MAX_ITEMS + 1 + MENUBAR_WINLIST_MAX)
+
+static MenuModel g_model_snapshot = {};
+static uint32_t g_model_seq = 0;
+static bool g_model_valid = false;
+static int g_open_app_menu = -1;
+static int g_app_menu_btn_count = 0;
+static int g_app_menu_btn_x[MENU_MAX_MENUS + 1];
+static int g_app_menu_btn_w[MENU_MAX_MENUS + 1];
+
+struct AppMenuDropdown
+{
+    char labels[MENUBAR_DROPDOWN_MAX_ROWS][MENU_LABEL_MAX];
+    char accels[MENUBAR_DROPDOWN_MAX_ROWS][MENU_ACCEL_MAX];
+    GuiMenuItem items[MENUBAR_DROPDOWN_MAX_ROWS];
+    bool checked[MENUBAR_DROPDOWN_MAX_ROWS];
+    uint32_t cmds[MENUBAR_DROPDOWN_MAX_ROWS];
+    int count;
+    int width;
+    int height;
+};
+
+struct ComposedAppMenus
+{
+    bool valid;
+    int count;
+    char names[MENU_MAX_MENUS + 1][8];
+    AppMenuDropdown menus[MENU_MAX_MENUS + 1];
+};
+
+static ComposedAppMenus g_composed = {};
+
+static bool update_model_snapshot(Registry *reg, uint32_t focused_pid)
+{
+    MenuModel *src = &reg->menu_model;
+    bool valid = false;
+    uint32_t seq1 = src->seq;
+    if ((seq1 & 1u) == 0u && focused_pid != 0 && src->owner_pid == focused_pid) {
+        memcpy(&g_model_snapshot, (const void *)src, sizeof(g_model_snapshot));
+        asm volatile("sfence" ::: "memory");
+        if (src->seq == seq1)
+            valid = true;
+    }
+    bool changed = (valid != g_model_valid) || (valid && seq1 != g_model_seq);
+    g_model_valid = valid;
+    g_model_seq = valid ? seq1 : 0u;
+    if (!valid && g_open_app_menu >= 0) {
+        g_open_app_menu = -1;
+        changed = true;
+    }
+    return changed;
+}
+
+static void dropdown_push_item(AppMenuDropdown &d, const char *label, uint32_t cmd, bool enabled, bool checked,
+                               const char *accel)
+{
+    if (d.count >= MENUBAR_DROPDOWN_MAX_ROWS)
+        return;
+    int i = d.count++;
+    d.labels[i][0] = '\0';
+    d.accels[i][0] = '\0';
+    if (label) {
+        strncpy(d.labels[i], label, MENU_LABEL_MAX - 1);
+        d.labels[i][MENU_LABEL_MAX - 1] = '\0';
+    }
+    if (accel) {
+        strncpy(d.accels[i], accel, MENU_ACCEL_MAX - 1);
+        d.accels[i][MENU_ACCEL_MAX - 1] = '\0';
+    }
+    d.items[i] = {d.labels[i], enabled, label == nullptr || label[0] == '\0'};
+    d.checked[i] = checked;
+    d.cmds[i] = cmd;
+}
+
+static void dropdown_finish(AppMenuDropdown &d)
+{
+    d.width = gui_popup_menu_width(d.items, d.count, gui_scaled_metric(MENU_MIN_W));
+    d.height = gui_popup_menu_height(d.items, d.count);
+}
+
+static ComposedAppMenus &compose_app_menus(Registry *reg)
+{
+    g_composed = {};
+    g_composed.valid = g_model_valid;
+    if (!g_composed.valid) {
+        g_app_menu_btn_count = 0;
+        return g_composed;
+    }
+
+    for (uint32_t m = 0; m < g_model_snapshot.menu_count && m < MENU_MAX_MENUS; m++) {
+        const MenuDef &src = g_model_snapshot.menus[m];
+        strncpy(g_composed.names[g_composed.count], src.name, sizeof(g_composed.names[0]) - 1);
+        g_composed.names[g_composed.count][sizeof(g_composed.names[0]) - 1] = '\0';
+        AppMenuDropdown &d = g_composed.menus[g_composed.count];
+        for (uint32_t it = 0; it < src.count && it < MENU_MAX_ITEMS; it++) {
+            const MenuItem &mi = src.items[it];
+            if (mi.label[0] == '\0' || mi.id == 0) {
+                dropdown_push_item(d, nullptr, 0, false, false, nullptr);
+                continue;
+            }
+            dropdown_push_item(d, mi.label, mi.id, (mi.flags & MENU_FLAG_DISABLED) == 0,
+                               (mi.flags & MENU_FLAG_CHECKED) != 0, mi.accel);
+        }
+        dropdown_finish(d);
+        g_composed.count++;
+    }
+
+    FocusedWindowInfo focus = {};
+    snapshot_focused_window(reg, &focus);
+    strncpy(g_composed.names[g_composed.count], "Window", sizeof(g_composed.names[0]) - 1);
+    AppMenuDropdown &d = g_composed.menus[g_composed.count];
+    dropdown_push_item(d, "Minimize", MENUBAR_WINOP_MINIMIZE, focus.valid, false, nullptr);
+    dropdown_push_item(d, focus.state == WIN_MAXIMIZED ? "Restore" : "Maximize", MENUBAR_WINOP_MAXRESTORE, focus.valid,
+                       false, nullptr);
+    dropdown_push_item(d, "Close", MENUBAR_WINOP_CLOSE, focus.valid, false, nullptr);
+    dropdown_push_item(d, nullptr, 0, false, false, nullptr);
+    uint32_t win_count = reg->window_count;
+    if (win_count > MAX_WINDOWS)
+        win_count = MAX_WINDOWS;
+    int listed = 0;
+    for (uint32_t slot = 2; slot < win_count && listed < MENUBAR_WINLIST_MAX; slot++) {
+        WindowEntry *entry = &reg->windows[slot];
+        if (!window_entry_present(entry) || entry->state == WIN_HIDDEN)
+            continue;
+        dropdown_push_item(d, entry->title, MENUBAR_WINLIST_BASE + slot, true, (int)slot == focus.slot, nullptr);
+        listed++;
+    }
+    dropdown_finish(d);
+    g_composed.count++;
+
+    int x = g_logo_btn_x + g_logo_btn_w + gui_scaled_metric(8);
+    const GuiFont *menu_font = gui_font_default();
+    int pad = gui_scaled_metric(10);
+    for (int j = 0; j < g_composed.count; j++) {
+        int text_w = gui_measure_text(menu_font, g_composed.names[j]);
+        g_app_menu_btn_x[j] = x;
+        g_app_menu_btn_w[j] = text_w + pad * 2;
+        x += g_app_menu_btn_w[j] + gui_scaled_metric(2);
+    }
+    g_app_menu_btn_count = g_composed.count;
+    return g_composed;
+}
+
+static void handle_app_menu_command(Registry *reg, uint32_t cmd)
+{
+    if (!reg || cmd == 0)
+        return;
+    if (cmd >= MENUBAR_WINLIST_BASE) {
+        WindowEntry *entry = window_entry_by_slot(reg, (int)(cmd - MENUBAR_WINLIST_BASE), true);
+        if (entry) {
+            if (entry->state == WIN_MINIMIZED || entry->state == WIN_HIDDEN)
+                entry->request_restore = true;
+            entry->request_focus = true;
+            asm volatile("sfence" ::: "memory");
+        }
+        return;
+    }
+    if (cmd == MENUBAR_WINOP_MINIMIZE || cmd == MENUBAR_WINOP_MAXRESTORE || cmd == MENUBAR_WINOP_CLOSE) {
+        FocusedWindowInfo focus = {};
+        snapshot_focused_window(reg, &focus);
+        if (!focus.valid)
+            return;
+        if (cmd == MENUBAR_WINOP_MINIMIZE)
+            request_window_action(reg, focus.slot, 1);
+        else if (cmd == MENUBAR_WINOP_MAXRESTORE)
+            request_window_action(reg, focus.slot, 2);
+        else
+            request_window_action(reg, focus.slot, 0);
+        return;
+    }
+    if (cmd >= MENU_CMD_RESERVED_BASE) {
+        if (cmd == MENU_CMD_ABOUT_UNIOS)
+            launch_about(reg);
+        return;
+    }
+    WindowEntry *entry = window_entry_by_slot(reg, reg->focused_window);
+    if (!entry)
+        return;
+    entry->menu_command_id = cmd;
+    asm volatile("sfence" ::: "memory");
+    __sync_add_and_fetch(&entry->menu_command_seq, 1u);
+}
+
+static int app_menu_button_at(int mx, int my)
+{
+    if (my < logo_y() || my >= logo_y() + logo_h())
+        return -1;
+    for (int j = 0; j < g_app_menu_btn_count; j++) {
+        if (mx >= g_app_menu_btn_x[j] && mx < g_app_menu_btn_x[j] + g_app_menu_btn_w[j])
+            return j;
+    }
+    return -1;
+}
+
 static void request_system_power_action(Registry *reg, int syscall_number)
 {
     if (reg) {
         g_menu_open = false;
+        g_open_app_menu = -1;
         reg->mb_clicked = false;
         reg->mb_menu_dismiss_requested = false;
         asm volatile("sfence" ::: "memory");
@@ -586,8 +789,10 @@ void draw_menubar(Surface *canvas, Registry *reg)
 
         int mx = pointer_local_x(reg);
         int my = pointer_local_y(reg);
-        logo_hot = g_menu_open || (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() && my < logo_y() + logo_h());
-        date_hot = reg->cp_open || (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() && my < logo_y() + logo_h());
+        logo_hot = g_menu_open || (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() &&
+                                   my < logo_y() + logo_h());
+        date_hot = reg->cp_open || (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() &&
+                                    my < logo_y() + logo_h());
     }
     if (logo_hot) {
         uint32_t logo_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
@@ -601,14 +806,40 @@ void draw_menubar(Surface *canvas, Registry *reg)
     int center_x = g_logo_btn_x + (g_logo_btn_w - text_w) / 2;
     draw_menubar_text_clipped(canvas, app_font, center_x, app_text_y, g_logo_btn_w, "uniOS", text_color, is_light);
 
-    int x = menubar_content_x();
+    int title_x = menubar_content_x();
+    if (reg && g_model_valid) {
+        ComposedAppMenus &cm = compose_app_menus(reg);
+        if (cm.valid && cm.count > 0) {
+            uint32_t hot_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
+            int mx = pointer_local_x(reg);
+            int my = pointer_local_y(reg);
+            for (int j = 0; j < cm.count; j++) {
+                int bx = g_app_menu_btn_x[j];
+                int bw = g_app_menu_btn_w[j];
+                bool hot =
+                    (g_open_app_menu == j) || (mx >= bx && mx < bx + bw && my >= logo_y() && my < logo_y() + logo_h());
+                if (hot)
+                    gui_fill_rounded_rect(canvas, bx, logo_y(), bw, logo_h(), gui_radius_sm(), hot_fill);
+                int name_w = gui_measure_text(menu_font, cm.names[j]);
+                draw_menubar_text_clipped(canvas, menu_font, bx + (bw - name_w) / 2, menu_text_y, bw, cm.names[j],
+                                          text_color, is_light);
+            }
+            title_x = g_app_menu_btn_x[cm.count - 1] + g_app_menu_btn_w[cm.count - 1] + gui_scaled_metric(12);
+        }
+    }
+
+    int x = title_x;
     FocusedWindowInfo focus = {};
     if (snapshot_focused_window(reg, &focus)) {
+        int max_w = menubar_title_max_w();
+        int available = g_date_btn_x - gui_scaled_metric(12) - x;
+        if (available < max_w)
+            max_w = available > 0 ? available : 0;
         int title_w = gui_measure_text(app_font, focus.title);
-        if (title_w > menubar_title_max_w())
-            title_w = menubar_title_max_w();
-        draw_menubar_text_clipped(canvas, app_font, x, app_text_y, menubar_title_max_w(), focus.title, g_gui_style.text,
-                                  is_light);
+        if (title_w > max_w)
+            title_w = max_w;
+        if (max_w > 0)
+            draw_menubar_text_clipped(canvas, app_font, x, app_text_y, max_w, focus.title, g_gui_style.text, is_light);
         x += title_w + gui_scaled_metric(24);
     }
     (void)x;
@@ -631,6 +862,18 @@ void draw_menubar(Surface *canvas, Registry *reg)
 
     if (g_menu_open)
         draw_menu(canvas, reg, pointer_local_x(reg), pointer_local_y(reg));
+
+    if (g_open_app_menu >= 0) {
+        ComposedAppMenus &cm = compose_app_menus(reg);
+        if (cm.valid && g_open_app_menu < cm.count) {
+            AppMenuDropdown &d = cm.menus[g_open_app_menu];
+            int bx = g_app_menu_btn_x[g_open_app_menu];
+            int hovered = gui_popup_menu_hit_test(d.items, d.count, bx, menu_y(), d.width, pointer_local_x(reg),
+                                                  pointer_local_y(reg));
+            gui_draw_popup_menu_ext(canvas, bx, menu_y(), d.width, d.items, d.count, hovered,
+                                    (const char *const *)d.accels, d.checked);
+        }
+    }
 }
 
 int get_hovered_item(Registry *reg)
@@ -641,14 +884,25 @@ int get_hovered_item(Registry *reg)
     if (g_menu_open) {
         SystemMenuModel model = build_system_menu_model(reg);
         return gui_popup_menu_hit_test(model.items, model.count, menu_x(), menu_y(), model.width, mx, my);
-    } else {
-        if (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() && my < logo_y() + logo_h()) {
-            return 99; // uniOS Logo
-        }
-        if (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() && my < logo_y() + logo_h()) {
-            return 100; // Date/Control Panel button
-        }
     }
+    if (g_open_app_menu >= 0) {
+        ComposedAppMenus &cm = compose_app_menus(reg);
+        if (cm.valid && g_open_app_menu < cm.count) {
+            AppMenuDropdown &d = cm.menus[g_open_app_menu];
+            return gui_popup_menu_hit_test(d.items, d.count, g_app_menu_btn_x[g_open_app_menu], menu_y(), d.width, mx,
+                                           my);
+        }
+        return -1;
+    }
+    if (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() && my < logo_y() + logo_h()) {
+        return 99; // uniOS Logo
+    }
+    if (mx >= g_date_btn_x && mx < g_date_btn_x + g_date_btn_w && my >= logo_y() && my < logo_y() + logo_h()) {
+        return 100; // Date/Control Panel button
+    }
+    int button = app_menu_button_at(mx, my);
+    if (button >= 0)
+        return 200 + button;
     return -1;
 }
 
@@ -658,6 +912,10 @@ static Rect hover_item_rect(int item)
         return {g_logo_btn_x, logo_y(), g_logo_btn_w, logo_h()};
     if (item == 100)
         return {g_date_btn_x, logo_y(), g_date_btn_w, logo_h()};
+    if (item >= 200 && item - 200 < g_app_menu_btn_count) {
+        int j = item - 200;
+        return {g_app_menu_btn_x[j], logo_y(), g_app_menu_btn_w[j], logo_h()};
+    }
     return {0, 0, 0, 0};
 }
 
@@ -710,6 +968,7 @@ extern "C" int main(int argc, char **argv)
     int last_min = -1;
     int last_hovered = -1;
     bool last_menu_open = g_menu_open;
+    int last_open_app_menu = g_open_app_menu;
     int last_focused_slot = -2;
     uint32_t last_focused_state = 0xFFFFFFFFu;
     uint32_t last_settings_generation = registry->settings_generation;
@@ -739,16 +998,41 @@ extern "C" int main(int argc, char **argv)
 
         bool clicked = registry->mb_clicked;
         bool dismiss_requested = registry->mb_menu_dismiss_requested;
+        bool model_changed = update_model_snapshot(registry, registry->focused_owner_pid);
+        if (!g_model_valid && g_open_app_menu >= 0)
+            g_open_app_menu = -1;
         if (dismiss_requested) {
             g_menu_open = false;
+            g_open_app_menu = -1;
             registry->mb_menu_dismiss_requested = false;
             asm volatile("sfence" ::: "memory");
         }
         if (clicked) {
-            if (g_menu_open) {
+            int mx = click_local_x(registry);
+            int my = click_local_y(registry);
+            if (g_open_app_menu >= 0) {
+                ComposedAppMenus &cm = compose_app_menus(registry);
+                bool consumed = false;
+                if (cm.valid && g_open_app_menu < cm.count) {
+                    AppMenuDropdown &d = cm.menus[g_open_app_menu];
+                    int item = gui_popup_menu_hit_test(d.items, d.count, g_app_menu_btn_x[g_open_app_menu], menu_y(),
+                                                       d.width, mx, my);
+                    if (item >= 0) {
+                        handle_app_menu_command(registry, d.cmds[item]);
+                        g_open_app_menu = -1;
+                        consumed = true;
+                    }
+                }
+                if (!consumed) {
+                    int opened = app_menu_button_at(mx, my);
+                    if (opened == g_open_app_menu)
+                        opened = -1;
+                    if (opened >= 0)
+                        g_menu_open = false;
+                    g_open_app_menu = opened;
+                }
+            } else if (g_menu_open) {
                 SystemMenuModel model = build_system_menu_model(registry);
-                int mx = click_local_x(registry);
-                int my = click_local_y(registry);
                 int item = gui_popup_menu_hit_test(model.items, model.count, menu_x(), menu_y(), model.width, mx, my);
                 if (item >= 0) {
                     if (item == 0)
@@ -767,11 +1051,15 @@ extern "C" int main(int argc, char **argv)
                         request_system_power_action(registry, SYS_POWEROFF);
                     g_menu_open = false;
                 } else {
-                    g_menu_open = false;
+                    int opened = app_menu_button_at(mx, my);
+                    if (opened >= 0) {
+                        g_menu_open = false;
+                        g_open_app_menu = opened;
+                    } else {
+                        g_menu_open = false;
+                    }
                 }
             } else {
-                int mx = click_local_x(registry);
-                int my = click_local_y(registry);
                 if (mx >= g_logo_btn_x && mx < g_logo_btn_x + g_logo_btn_w && my >= logo_y() &&
                     my < logo_y() + logo_h()) {
                     g_menu_open = true;
@@ -779,6 +1067,10 @@ extern "C" int main(int argc, char **argv)
                            my < logo_y() + logo_h()) {
                     registry->cp_toggle_requested = true;
                     asm volatile("sfence" ::: "memory");
+                } else {
+                    int opened = app_menu_button_at(mx, my);
+                    if (opened >= 0)
+                        g_open_app_menu = opened;
                 }
             }
             registry->mb_clicked = false;
@@ -805,9 +1097,11 @@ extern "C" int main(int argc, char **argv)
             last_cp_open = registry->cp_open;
         }
 
+        bool app_menu_state_changed = (g_open_app_menu != last_open_app_menu);
         if (clicked || theme_changed || blur_changed || time_changed || hover_changed ||
-            g_menu_open != last_menu_open || focus_changed || cp_state_changed) {
-            int target_h = g_menu_open ? menu_total_h() : menubar_h();
+            g_menu_open != last_menu_open || app_menu_state_changed || focus_changed || cp_state_changed ||
+            model_changed) {
+            int target_h = (g_menu_open || g_open_app_menu >= 0) ? menu_total_h() : menubar_h();
             if (registry->windows[0].h != target_h) {
                 registry->windows[0].h = target_h;
                 asm volatile("sfence" ::: "memory");
@@ -821,6 +1115,14 @@ extern "C" int main(int argc, char **argv)
                 if (g_menu_open) {
                     SystemMenuModel model = build_system_menu_model(registry);
                     hover_rect = Rect{menu_x(), menu_y(), model.width, model.height};
+                } else if (g_open_app_menu >= 0) {
+                    hover_rect = {0, 0, (int)screen_w, menubar_h()};
+                    ComposedAppMenus &cm = compose_app_menus(registry);
+                    if (cm.valid && g_open_app_menu < cm.count) {
+                        AppMenuDropdown &d = cm.menus[g_open_app_menu];
+                        Rect dd = {g_app_menu_btn_x[g_open_app_menu], menu_y(), d.width, d.height};
+                        hover_rect = gui_rect_union(hover_rect, dd);
+                    }
                 } else {
                     // Damage both the old and new hover targets; the logo and
                     // date buttons each track hover independently.
@@ -851,6 +1153,18 @@ extern "C" int main(int argc, char **argv)
                 dirty = has_dirty ? gui_rect_union(dirty, menu_rect) : menu_rect;
                 has_dirty = true;
             }
+            if (app_menu_state_changed || model_changed) {
+                Rect mid = {g_logo_btn_x + g_logo_btn_w, 0, g_date_btn_x - g_logo_btn_x - g_logo_btn_w, menubar_h()};
+                dirty = has_dirty ? gui_rect_union(dirty, mid) : mid;
+                has_dirty = true;
+                ComposedAppMenus &cm = compose_app_menus(registry);
+                if (cm.valid) {
+                    for (int j = 0; j < cm.count; j++) {
+                        Rect dd = {g_app_menu_btn_x[j], menu_y(), cm.menus[j].width, cm.menus[j].height};
+                        dirty = gui_rect_union(dirty, dd);
+                    }
+                }
+            }
             if (time_changed) {
                 Rect time_rect = {(int)screen_w - gui_scaled_metric(220), 0, gui_scaled_metric(220), menubar_h()};
                 dirty = has_dirty ? gui_rect_union(dirty, time_rect) : time_rect;
@@ -864,6 +1178,14 @@ extern "C" int main(int argc, char **argv)
                     SystemMenuModel model = build_system_menu_model(registry);
                     Rect menu_rect = {menu_x(), menu_y(), model.width, model.height};
                     dirty = gui_rect_union(dirty, menu_rect);
+                }
+                if (g_open_app_menu >= 0) {
+                    ComposedAppMenus &cm = compose_app_menus(registry);
+                    if (cm.valid && g_open_app_menu < cm.count) {
+                        AppMenuDropdown &d = cm.menus[g_open_app_menu];
+                        Rect dd = {g_app_menu_btn_x[g_open_app_menu], menu_y(), d.width, d.height};
+                        dirty = gui_rect_union(dirty, dd);
+                    }
                 }
             }
             if (theme_changed || blur_changed) {
@@ -888,6 +1210,7 @@ extern "C" int main(int argc, char **argv)
             }
             last_hovered = current_hovered;
             last_menu_open = g_menu_open;
+            last_open_app_menu = g_open_app_menu;
             last_focused_slot = focused_slot;
             last_focused_state = focused_state;
             if (focus.valid) {
@@ -898,7 +1221,7 @@ extern "C" int main(int argc, char **argv)
             }
         }
         reap_exited_children();
-        if (g_menu_open || current_hovered != -1)
+        if (g_menu_open || g_open_app_menu >= 0 || current_hovered != -1)
             sleep_ms(4);
         else
             sleep_ms(20);

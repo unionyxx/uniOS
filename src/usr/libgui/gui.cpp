@@ -1,15 +1,15 @@
 #include "gui.h"
-#include "gui_canvas_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <uapi/syscalls.h>
 #include <unistd.h>
-#include <sys/mman.h>
 
 #include "../libc/log.h"
 #include "../libc/syscall.h"
+#include "gui_canvas_utils.h"
 
 static Registry *g_registry = NULL;
 extern "C" {
@@ -30,6 +30,9 @@ static constexpr int k_system_menu_gap_px = 6;
 static constexpr int k_system_menu_item_h_px = 24;
 static constexpr int k_system_menu_item_count = 9;
 static constexpr int k_system_menu_extra_h_px = 6;
+// Worst-case dropdown: an app menu (MENU_MAX_ITEMS) plus a separator and the
+// menubar-composed Window list. Drives the shared menubar canvas height.
+static constexpr int k_menubar_canvas_max_rows = MENU_MAX_ITEMS + 1 + 8;
 
 #include <drivers/video/font.h>
 
@@ -340,7 +343,7 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     } else {
         syscall1(SYS_SHM_UNMAP, static_cast<uint64_t>(old_shm_id));
     }
-    
+
     g_retired_window_buffers[retired_slot].shm_id = old_shm_id;
     g_retired_window_buffers[retired_slot].generation = generation;
     return true;
@@ -1580,9 +1583,8 @@ int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_
     asm volatile("sfence" ::: "memory");
     damage_push(&g_my_window->damage, x, y, w, h);
     uint32_t resize_serial = g_my_window->resize_serial;
-    if (resize_serial != 0 && g_my_window->buffer_resize_serial != resize_serial &&
-        g_my_window->w > 0 && g_my_window->h > 0 &&
-        s->width >= static_cast<uint32_t>(g_my_window->w) &&
+    if (resize_serial != 0 && g_my_window->buffer_resize_serial != resize_serial && g_my_window->w > 0 &&
+        g_my_window->h > 0 && s->width >= static_cast<uint32_t>(g_my_window->w) &&
         s->height >= static_cast<uint32_t>(g_my_window->h)) {
         g_my_window->buffer_resize_serial = resize_serial;
     }
@@ -1931,6 +1933,149 @@ void gui_notify(const char *title, const char *message)
     asm volatile("sfence" ::: "memory");
 }
 
+void gui_menu_model_reset(MenuModel *model)
+{
+    if (!model)
+        return;
+    memset(model, 0, sizeof(*model));
+}
+
+int gui_menu_model_add_menu(MenuModel *model, const char *name)
+{
+    if (!model || !name || !name[0] || model->menu_count >= MENU_MAX_MENUS)
+        return -1;
+    MenuDef *def = &model->menus[model->menu_count];
+    memset(def, 0, sizeof(*def));
+    strncpy(def->name, name, sizeof(def->name) - 1);
+    def->name[sizeof(def->name) - 1] = '\0';
+    return (int)model->menu_count++;
+}
+
+bool gui_menu_model_add_item(MenuModel *model, int menu_index, const char *label, uint32_t id, uint32_t flags,
+                             const char *accel)
+{
+    if (!model || menu_index < 0 || menu_index >= (int)model->menu_count || !label || !label[0])
+        return false;
+    MenuDef *def = &model->menus[menu_index];
+    if (def->count >= MENU_MAX_ITEMS)
+        return false;
+    MenuItem *item = &def->items[def->count];
+    memset(item, 0, sizeof(*item));
+    strncpy(item->label, label, sizeof(item->label) - 1);
+    item->label[sizeof(item->label) - 1] = '\0';
+    if (accel) {
+        strncpy(item->accel, accel, sizeof(item->accel) - 1);
+        item->accel[sizeof(item->accel) - 1] = '\0';
+    }
+    item->id = (uint16_t)id;
+    item->flags = (uint8_t)(flags & 0xFFu);
+    def->count++;
+    return true;
+}
+
+bool gui_menu_model_add_separator(MenuModel *model, int menu_index)
+{
+    if (!model || menu_index < 0 || menu_index >= (int)model->menu_count)
+        return false;
+    MenuDef *def = &model->menus[menu_index];
+    if (def->count >= MENU_MAX_ITEMS)
+        return false;
+    memset(&def->items[def->count], 0, sizeof(MenuItem));
+    def->count++;
+    return true;
+}
+
+bool gui_menu_publish(const MenuModel *model)
+{
+    Registry *registry = gui_registry();
+    if (!registry || !model || model->menu_count > MENU_MAX_MENUS)
+        return false;
+    if (!g_my_window)
+        return false;
+
+    MenuModel *slot = const_cast<MenuModel *>(&registry->menu_model);
+    uint32_t owner_pid = g_my_window->owner_pid;
+
+    // Bump to an odd seq to mark the payload in flight, write, then bump to
+    // an even seq. Readers accept only a stable even seq.
+    uint32_t begin_seq = __sync_add_and_fetch(&slot->seq, 1u);
+    if ((begin_seq & 1u) == 0u)
+        begin_seq = __sync_add_and_fetch(&slot->seq, 1u);
+    asm volatile("sfence" ::: "memory");
+
+    slot->owner_pid = owner_pid;
+    slot->menu_count = model->menu_count;
+    memcpy(const_cast<MenuDef *>(slot->menus), model->menus, sizeof(model->menus));
+    asm volatile("sfence" ::: "memory");
+    __sync_add_and_fetch(&slot->seq, 1u);
+    return true;
+}
+
+bool gui_menu_take_command(uint32_t *out_id)
+{
+    static uint32_t last_seq = 0;
+    if (!out_id || !g_my_window)
+        return false;
+    uint32_t seq = g_my_window->menu_command_seq;
+    if (seq == last_seq)
+        return false;
+    last_seq = seq;
+    *out_id = g_my_window->menu_command_id;
+    return true;
+}
+
+bool gui_clipboard_copy(const char *text, size_t len)
+{
+    Registry *registry = gui_registry();
+    if (!registry || (!text && len > 0))
+        return false;
+    if (len > MENU_CLIPBOARD_CAP)
+        len = MENU_CLIPBOARD_CAP;
+
+    uint32_t begin_seq = __sync_add_and_fetch(&registry->clipboard_seq, 1u);
+    if ((begin_seq & 1u) == 0u)
+        begin_seq = __sync_add_and_fetch(&registry->clipboard_seq, 1u);
+    asm volatile("sfence" ::: "memory");
+
+    if (len > 0)
+        memcpy(registry->clipboard, text, len);
+    registry->clipboard[len] = '\0';
+    registry->clipboard_len = (uint32_t)len;
+    asm volatile("sfence" ::: "memory");
+    __sync_add_and_fetch(&registry->clipboard_seq, 1u);
+    return true;
+}
+
+bool gui_clipboard_paste(char *out, size_t out_size, size_t *out_len)
+{
+    Registry *registry = gui_registry();
+    if (!registry || !out || out_size == 0)
+        return false;
+
+    for (int attempt = 0; attempt < 8; attempt++) {
+        uint32_t seq_before = registry->clipboard_seq;
+        if ((seq_before & 1u) != 0u)
+            continue;
+        uint32_t len = registry->clipboard_len;
+        if (len > MENU_CLIPBOARD_CAP)
+            len = MENU_CLIPBOARD_CAP;
+        size_t copy_len = len < out_size - 1 ? len : out_size - 1;
+        if (copy_len > 0)
+            memcpy(out, const_cast<const char *>(registry->clipboard), copy_len);
+        out[copy_len] = '\0';
+        asm volatile("sfence" ::: "memory");
+        if (registry->clipboard_seq == seq_before) {
+            if (out_len)
+                *out_len = copy_len;
+            return copy_len > 0;
+        }
+    }
+    out[0] = '\0';
+    if (out_len)
+        *out_len = 0;
+    return false;
+}
+
 Registry *gui_registry(void)
 {
     if (!g_registry) {
@@ -2053,7 +2198,9 @@ int gui_system_menubar_canvas_h(void)
     int menu_item_h = scaled_metric_floor(k_system_menu_item_h_px);
     int menu_gap = scaled_metric_floor(k_system_menu_gap_px);
     int menu_extra_h = scaled_metric_floor(k_system_menu_extra_h_px);
-    int total_h = gui_menubar_h() + menu_gap + (menu_item_h * k_system_menu_item_count) + menu_extra_h;
+    int rows =
+        k_system_menu_item_count > k_menubar_canvas_max_rows ? k_system_menu_item_count : k_menubar_canvas_max_rows;
+    int total_h = gui_menubar_h() + menu_gap + (menu_item_h * rows) + menu_extra_h;
     return total_h;
 }
 
@@ -2541,7 +2688,42 @@ int gui_popup_menu_hit_test(const GuiMenuItem *items, int count, int x, int y, i
     return -1;
 }
 
-void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index)
+static void draw_popup_checkmark(Surface *s, int x, int y, int size, uint32_t fg)
+{
+    if (!s || !s->buffer || s->pitch == 0 || size < 6)
+        return;
+    uint32_t stride = s->pitch / 4u;
+    auto plot = [&](int px, int py) {
+        if (px < 0 || py < 0 || (uint32_t)px >= s->width || (uint32_t)py >= s->height)
+            return;
+        uint32_t *dst = &s->buffer[(uint32_t)py * stride + (uint32_t)px];
+        *dst = gui_blend_straight_opaque_dst_coverage(*dst, fg, 255);
+    };
+    auto stroke = [&](int x0, int y0, int x1, int y1) {
+        int dx = x1 - x0;
+        int dy = y1 - y0;
+        int steps = dx < 0 ? -dx : dx;
+        int ady = dy < 0 ? -dy : dy;
+        if (ady > steps)
+            steps = ady;
+        if (steps == 0) {
+            plot(x0, y0);
+            return;
+        }
+        for (int i = 0; i <= steps; i++) {
+            int px = x0 + dx * i / steps;
+            int py = y0 + dy * i / steps;
+            plot(px, py);
+            plot(px + 1, py);
+            plot(px, py + 1);
+        }
+    };
+    stroke(x + size / 10, y + size * 55 / 100, x + size * 38 / 100, y + size * 82 / 100);
+    stroke(x + size * 38 / 100, y + size * 82 / 100, x + size * 9 / 10, y + size / 5);
+}
+
+void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
+                             const char *const *accel_labels, const bool *checked_flags)
 {
     if (!s || !items || count <= 0 || w <= 0)
         return;
@@ -2563,6 +2745,8 @@ void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *ite
     gui_draw_panel_inset_ext(s, x, y, w, menu_h, radius, g_gui_style.app_surface, g_gui_style.border,
                              g_gui_style.chrome_bg_alt);
 
+    int check_size = item_h / 2;
+    int check_gap = gui_scaled_metric(4);
     for (int i = 0; i < count; i++) {
         bool hovered = i == hovered_index && !items[i].separator && items[i].enabled;
         uint32_t row_bg = hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_surface;
@@ -2579,16 +2763,37 @@ void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *ite
                     row_r = gui_radius_sm();
                 gui_fill_rounded_rect(s, row_x, y_cursor, row_w, item_h, row_r, row_bg);
             }
+            bool checked = checked_flags && checked_flags[i];
+            const char *accel = accel_labels ? accel_labels[i] : nullptr;
+            int accel_w = 0;
+            if (accel && accel[0])
+                accel_w = gui_measure_text(gui_font_default(), accel);
             int text_y = gui_align_text_y(gui_font_default(), y_cursor, item_h);
             int text_x = x + outer_pad_x + row_pad_x;
-            int text_w = w - (outer_pad_x + row_pad_x) * 2;
-            gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, text_w, items[i].label ? items[i].label : "",
-                                  fg, row_bg);
+            if (checked) {
+                draw_popup_checkmark(s, text_x, y_cursor + (item_h - check_size) / 2, check_size, fg);
+                text_x += check_size + check_gap;
+            }
+            int text_right = x + w - outer_pad_x - row_pad_x;
+            if (accel_w > 0) {
+                gui_draw_text_clipped(s, gui_font_default(), text_right - accel_w, text_y, accel_w, accel,
+                                      items[i].enabled ? g_gui_style.text_muted : fg, row_bg);
+                text_right -= accel_w + check_gap * 2;
+            }
+            int text_w = text_right - text_x;
+            if (text_w > 0)
+                gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, text_w,
+                                      items[i].label ? items[i].label : "", fg, row_bg);
         }
         y_cursor += items[i].separator ? popup_menu_separator_h() : item_h;
         if (i + 1 < count)
             y_cursor += row_gap;
     }
+}
+
+void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index)
+{
+    gui_draw_popup_menu_ext(s, x, y, w, items, count, hovered_index, nullptr, nullptr);
 }
 
 struct CursorAssetDescriptor
@@ -2915,7 +3120,7 @@ void gui_draw_cursor_kind(Surface *s, int32_t x, int32_t y, GuiCursorKind kind)
         {0, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
         {1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
 
-    const uint8_t(*cursor_data)[16] = arrow_data;
+    const uint8_t (*cursor_data)[16] = arrow_data;
     switch (kind) {
         case GUI_CURSOR_MOVE:
             cursor_data = move_data;
