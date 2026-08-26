@@ -34,6 +34,7 @@
 #include <libk/kstring.h>
 #include <stddef.h>
 #include <uapi/signal.h>
+#include <uapi/sound.h>
 
 using kstd::unique_ptr;
 using kstring::string_view;
@@ -1601,6 +1602,28 @@ extern "C" int64_t sys_ftruncate(int fd, uint64_t size)
     return res;
 }
 
+// Repositions the per-fd read/write offset. SEEK_SET/CUR/END come from
+// uapi/fs.h; the underlying vfs_seek is already race-checked against fd
+// reuse via the vnode pointer comparison.
+extern "C" int64_t sys_lseek(int fd, int64_t offset, int whence)
+{
+    if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)
+        return -22; // -EINVAL
+
+    Process *p = process_get_current();
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
+        return -9; // -EBADF
+
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    const bool valid = p->fd_table[fd].used && p->fd_table[fd].vnode;
+    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    if (!valid)
+        return -9; // -EBADF
+
+    const int64_t res = vfs_seek(fd, offset, whence);
+    return res < 0 ? -22 : res; // -EINVAL: resulting offset would be negative
+}
+
 // Size of an open vnode (lets userspace validate a memfd-backed buffer
 // before mapping it; mapping past EOF faults on first access).
 static uint64_t sys_fsize(int fd)
@@ -2049,6 +2072,10 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             Process *p = process_get_current();
             if (!p)
                 return static_cast<uint64_t>(-1);
+#ifdef DEBUG
+            DEBUG_WARN("munmap: pid=%llu addr=0x%llx len=0x%llx", (unsigned long long)p->pid, (unsigned long long)arg1,
+                       (unsigned long long)arg2);
+#endif
             return munmap_process_range(p, arg1, static_cast<size_t>(arg2)) ? 0 : static_cast<uint64_t>(-1);
         }
         case SYS_DISPLAY_GET_CAPS: {
@@ -2667,6 +2694,14 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_SOUND_WRITE: {
             if (!validate_user_ptr(reinterpret_cast<const void *>(arg1), static_cast<size_t>(arg2), false))
                 return static_cast<uint64_t>(-1);
+            if (sound_stream_active()) {
+                // Streaming mode: block until every byte is queued in the
+                // kernel ring. Returns the byte count on success.
+                int64_t written = sound_stream_write(reinterpret_cast<const void *>(arg1), static_cast<uint32_t>(arg2));
+                if (written < 0)
+                    return static_cast<uint64_t>(-1);
+                return static_cast<uint64_t>(written);
+            }
             sound_play(reinterpret_cast<uint8_t *>(const_cast<void *>(reinterpret_cast<const void *>(arg1))),
                        static_cast<uint32_t>(arg2));
             return 0;
@@ -3074,6 +3109,57 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // survives only until close/eviction and is lost on power cut.
             vfs_sync();
             return 0;
+        case SYS_LSEEK:
+            return sys_lseek(static_cast<int>(arg1), static_cast<int64_t>(arg2), static_cast<int>(arg3));
+        case SYS_SOUND_STREAM_OPEN: {
+            if (!sound_is_initialized())
+                return static_cast<uint64_t>(-19); // -ENODEV
+            if (arg3 != 16 || (arg2 != 1 && arg2 != 2) || arg1 == 0 || arg1 > 192000)
+                return static_cast<uint64_t>(-22); // -EINVAL
+            return sound_stream_open(static_cast<uint32_t>(arg1), static_cast<uint32_t>(arg2),
+                                     static_cast<uint32_t>(arg3))
+                       ? 0
+                       : static_cast<uint64_t>(-12); // -ENOMEM: stream ring unavailable
+        }
+        case SYS_SOUND_STREAM_END:
+            sound_stream_end();
+            return 0;
+        case SYS_SOUND_STOP:
+            sound_stream_stop();
+            return 0;
+        case SYS_SOUND_PAUSE: {
+            if (!sound_is_initialized() || !sound_stream_active())
+                return static_cast<uint64_t>(-22); // -EINVAL
+            if (sound_is_playing() && !sound_is_paused())
+                sound_pause();
+            return 0;
+        }
+        case SYS_SOUND_RESUME: {
+            if (!sound_is_initialized() || !sound_stream_active())
+                return static_cast<uint64_t>(-22); // -EINVAL
+            if (sound_is_playing() && sound_is_paused())
+                sound_resume();
+            return 0;
+        }
+        case SYS_SOUND_STATUS: {
+            if (!validate_user_ptr(reinterpret_cast<void *>(arg1), sizeof(sound_status), true))
+                return static_cast<uint64_t>(-14); // -EFAULT
+            sound_status st = {};
+            if (!sound_stream_status(&st))
+                return static_cast<uint64_t>(-22); // -EINVAL
+            STAC();
+            *reinterpret_cast<sound_status *>(arg1) = st;
+            CLAC();
+            return 0;
+        }
+        case SYS_SOUND_VOLUME: {
+            if (!sound_is_initialized())
+                return static_cast<uint64_t>(-19); // -ENODEV
+            if (arg1 > SOUND_VOLUME_MAX)
+                return static_cast<uint64_t>(-22); // -EINVAL
+            sound_set_volume(static_cast<uint8_t>(arg1));
+            return 0;
+        }
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

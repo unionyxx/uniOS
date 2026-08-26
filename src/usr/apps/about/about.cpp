@@ -6,6 +6,7 @@
 #include <uapi/event.h>
 #include <uapi/sysinfo.h>
 
+#include "../../libc/log.h"
 #include "../../libc/unistd.h"
 #include "../../libgui/gui.h"
 
@@ -505,11 +506,18 @@ extern "C" int main()
             if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
                 size_t needed = (size_t)(win.pitch / 4) * win.height;
                 if (needed > back_capacity) {
-                    uint32_t *grown = (uint32_t *)realloc(back_data, needed * sizeof(uint32_t));
+                    // Explicit malloc/copy/free instead of realloc: if the old
+                    // region was unmapped out from under us, the copy faults at
+                    // a recognizable site instead of inside libc realloc.
+                    uint32_t *grown = (uint32_t *)malloc(needed * sizeof(uint32_t));
                     if (!grown) {
                         free(back_data);
                         return 1;
                     }
+                    LOG_INFO("about", "backbuffer grow: old=%p new=%p old_px=%zu new_px=%zu", (void *)back_data,
+                             (void *)grown, back_capacity, needed);
+                    memcpy(grown, back_data, back_capacity * sizeof(uint32_t));
+                    free(back_data);
                     back_data = grown;
                     back_capacity = needed;
                 }
