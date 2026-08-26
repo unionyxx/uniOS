@@ -192,6 +192,13 @@ typedef struct Registry
     char notify_title[64];
     char notify_message[128];
 
+    // Launcher -> app open request: the launcher writes open_path behind
+    // store fences and bumps open_generation, then fork/execs the viewer.
+    // The launched app takes the path at startup and clears the generation.
+    // Single slot: a second request overwrites a still-pending one.
+    volatile uint32_t open_generation;
+    char open_path[256];
+
     // Focused app's published menu model (see MenuModel).
     MenuModel menu_model;
 

@@ -1933,6 +1933,46 @@ void gui_notify(const char *title, const char *message)
     asm volatile("sfence" ::: "memory");
 }
 
+bool gui_open_request_submit(const char *path)
+{
+    Registry *registry = gui_registry();
+    if (!registry || !path || !path[0])
+        return false;
+    strncpy(registry->open_path, path, sizeof(registry->open_path) - 1);
+    registry->open_path[sizeof(registry->open_path) - 1] = '\0';
+    asm volatile("sfence" ::: "memory");
+    __sync_fetch_and_add(&registry->open_generation, 1u);
+    asm volatile("sfence" ::: "memory");
+    return true;
+}
+
+bool gui_open_request_take(char *out, size_t out_size)
+{
+    if (!out || out_size == 0)
+        return false;
+    out[0] = '\0';
+    Registry *registry = gui_registry();
+    if (!registry)
+        return false;
+    // Seqlock-style snapshot: the launcher bumps open_generation after
+    // writing open_path, so a copy bracketed by two equal generation reads
+    // cannot observe a torn path. Retry briefly if one lands mid-write.
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint32_t gen = registry->open_generation;
+        if (gen == 0)
+            return false;
+        asm volatile("lfence" ::: "memory");
+        strncpy(out, registry->open_path, out_size - 1);
+        out[out_size - 1] = '\0';
+        asm volatile("lfence" ::: "memory");
+        if (registry->open_generation == gen) {
+            __sync_lock_test_and_set(&registry->open_generation, 0u);
+            return out[0] != '\0';
+        }
+    }
+    return false;
+}
+
 void gui_menu_model_reset(MenuModel *model)
 {
     if (!model)

@@ -252,6 +252,20 @@ libgui = static_library(
   cpp_args : user_cpp_args,
 )
 
+libmedia = static_library(
+  'uni_libmedia',
+  [
+    'src/usr/libmedia/media_image.cpp',
+    'src/usr/libmedia/png_codec.cpp',
+    'src/usr/libmedia/jpeg_codec.cpp',
+    'src/usr/libmedia/bmp_codec.cpp',
+    'src/usr/libmedia/gif_codec.cpp',
+    'src/usr/libmedia/qoi_codec.cpp',
+  ],
+  include_directories : [kernel_inc, user_inc],
+  cpp_args : user_cpp_args,
+)
+
 app_sources = {
   'shell' : ['src/usr/shell'],
   'init' : ['src/usr/init'],
@@ -266,6 +280,7 @@ app_sources = {
   'clock' : ['src/usr/apps/clock'],
   'calendar' : ['src/usr/apps/calendar'],
   'calculator' : ['src/usr/apps/calculator'],
+  'imageviewer' : ['src/usr/apps/imageviewer'],
 }
 
 user_apps = {}
@@ -286,6 +301,12 @@ foreach app_name, search_roots : app_sources
   app_link_with = [crt0, libc]
   if app_name != 'shell' and app_name != 'init'
     app_link_with += [libgui]
+  endif
+  # Heavy libraries linked without --whole-archive: only translation units
+  # that resolve undefined symbols are pulled into the final binary.
+  app_link_with_lazy = []
+  if app_name == 'imageviewer'
+    app_link_with_lazy += [libmedia]
   endif
   app_archive = static_library(
     '@0@_objs'.format(app_name),
@@ -311,10 +332,13 @@ foreach app_name, search_roots : app_sources
     app_archive,
     '--no-whole-archive',
   ]
+  foreach lazy_lib : app_link_with_lazy
+    app_link_command += [lazy_lib]
+  endforeach
 
   app_target = custom_target(
     app_name,
-    input : [user_linker_script, app_archive] + app_link_with,
+    input : [user_linker_script, app_archive] + app_link_with + app_link_with_lazy,
     output : '@0@.elf'.format(app_name),
     command : app_link_command,
   )

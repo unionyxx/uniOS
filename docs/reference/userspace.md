@@ -44,13 +44,22 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 
 Apps poll kernel events themselves with `poll_event/wait_event` (`SYS_GET_EVENT`).
 
+## libmedia
+
+`src/usr/libmedia/` is a freestanding image codec library with no libc file I/O: callers load a whole file into memory and decode from the buffer.
+
+- **API** (`media_image.h`): `media_image_decode(data, size, out)` dispatches on magic bytes, `media_image_scale` does bilinear resize, `media_image_free` releases the result. Output is straight-alpha ARGB8888 (`A<<24 | R<<16 | G<<8 | B`).
+- **Codecs**: PNG (zlib/DEFLATE, all color types, tRNS, 1/2/4/8/16-bit), baseline JPEG (Huffman, fixed-point IDCT, bilinear JFIF chroma upsampling, BT.601 full-range conversion), GIF (bounded LZW, interlace, transparency as alpha-zero palette color), BMP (24/32-bit BI_RGB), QOI.
+- **Limits**: `MEDIA_MAX_DIMENSION` 16384, `MEDIA_MAX_PIXELS` 16 Mi pixels (64 MiB ARGB). Progressive JPEG and Adam7 PNG are rejected; allocations go through libc `malloc`.
+- Verified by a host-side harness against PIL references and hand-crafted malformed inputs.
+
 ## Building Apps
 
 Per `meson.build`:
 
 - `crt0` is assembled from `crt0.asm` (NASM elf64).
-- `libc` and `libgui` are static libraries built freestanding (`-fno-exceptions -fno-rtti -mno-red-zone`, no stack protector, no PIE).
-- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`.
+- `libc`, `libgui`, and `libmedia` are static libraries built freestanding (`-fno-exceptions -fno-rtti -mno-red-zone`, no stack protector, no PIE).
+- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `imageviewer`), so only referenced codec objects are pulled in.
 - Each app ELF is staged as `/bin/<name>.elf` and packed into `unifs.img`.
 
-Current apps: shell, init, wm, menubar, dock, files, terminal, latitude, about, preferences, clock, calendar, calculator. Adding an app requires a map entry (see [Building and running](build.md)).
+Current apps: shell, init, wm, menubar, dock, files, terminal, latitude, about, preferences, clock, calendar, calculator, imageviewer. Adding an app requires a map entry (see [Building and running](build.md)).

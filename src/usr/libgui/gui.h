@@ -211,6 +211,11 @@ bool gui_menu_take_command(uint32_t *out_id);
 bool gui_clipboard_copy(const char *text, size_t len);
 bool gui_clipboard_paste(char *out, size_t out_size, size_t *out_len);
 
+// Open-request handoff (see Registry.open_generation): the launcher submits a
+// path before fork/exec; the launched app takes it once at startup.
+bool gui_open_request_submit(const char *path);
+bool gui_open_request_take(char *out, size_t out_size);
+
 int gui_request_focus(void);
 int gui_sync_window_size(Surface *s);
 int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h);
