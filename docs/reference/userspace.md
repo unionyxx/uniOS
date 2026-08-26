@@ -59,7 +59,7 @@ Per `meson.build`:
 
 - `crt0` is assembled from `crt0.asm` (NASM elf64).
 - `libc`, `libgui`, and `libmedia` are static libraries built freestanding (`-fno-exceptions -fno-rtti -mno-red-zone`, no stack protector, no PIE).
-- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `imageviewer`), so only referenced codec objects are pulled in.
+- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `files` and `imageviewer`), so only referenced codec objects are pulled in.
 - Each app ELF is staged as `/bin/<name>.elf` and packed into `unifs.img`.
 
 Current apps: shell, init, wm, menubar, dock, files, terminal, latitude, about, preferences, clock, calendar, calculator, imageviewer. Adding an app requires a map entry (see [Building and running](build.md)).
