@@ -1,4 +1,5 @@
 #include <drivers/apic/ioapic.h>
+#include <drivers/class/hid/input.h>
 #include <drivers/class/hid/ps2_keyboard.h>
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/pic.h>
@@ -34,6 +35,10 @@ static uint8_t extended_scancode = 0; // For 0xE0 prefixed scancodes
 // Shift+Arrow for text selection
 #define KEY_SHIFT_LEFT 0x90
 #define KEY_SHIFT_RIGHT 0x91
+#define KEY_SHIFT_UP 0x92
+#define KEY_SHIFT_DOWN 0x93
+#define KEY_SHIFT_HOME 0x94
+#define KEY_SHIFT_END 0x95
 
 // US keyboard layout (lowercase)
 static const char scancode_to_ascii[128] = {
@@ -119,10 +124,10 @@ void ps2_keyboard_handler()
                 alt_held = 1;
                 return; // Right Alt
             case 0x48:
-                push_char(KEY_UP_ARROW);
+                push_char(shift_held ? KEY_SHIFT_UP : KEY_UP_ARROW);
                 return; // Up arrow
             case 0x50:
-                push_char(KEY_DOWN_ARROW);
+                push_char(shift_held ? KEY_SHIFT_DOWN : KEY_DOWN_ARROW);
                 return; // Down arrow
             case 0x4B:  // Left arrow
                 push_char(shift_held ? KEY_SHIFT_LEFT : KEY_LEFT_ARROW);
@@ -131,7 +136,7 @@ void ps2_keyboard_handler()
                 push_char(shift_held ? KEY_SHIFT_RIGHT : KEY_RIGHT_ARROW);
                 return;
             case 0x47:
-                push_char(KEY_HOME);
+                push_char(shift_held ? KEY_SHIFT_HOME : KEY_HOME);
                 return; // Home
             case 0x49:
                 push_char(KEY_PAGEUP);
@@ -140,7 +145,7 @@ void ps2_keyboard_handler()
                 push_char(KEY_PAGEDOWN);
                 return; // Page Down
             case 0x4F:
-                push_char(KEY_END);
+                push_char(shift_held ? KEY_SHIFT_END : KEY_END);
                 return; // End
             case 0x53:
                 push_char(KEY_DELETE);
@@ -203,7 +208,7 @@ void ps2_keyboard_handler()
         // Convert letter to control code (a=1, b=2, ..., z=26)
         if (c >= 'a' && c <= 'z') {
             char ctrl_c = c - 'a' + 1;
-            if (ctrl_c == 3) {
+            if (ctrl_c == 3 && input_ctrl_c_to_signal()) {
                 signal_send_current(2); // SIGINT
                 return;
             }

@@ -6,8 +6,8 @@ Input comes from PS/2 controllers and USB HID devices, is merged in the kernel i
 
 `src/drivers/class/hid/ps2_keyboard.cpp` uses ports `0x60`/`0x64` with scan code set 1:
 
-- `0xE0` extended prefix decodes arrows, Home/End, Delete, Page Up/Down into special characters (`0x80-0x88`, `0x90/0x91` with shift).
-- Modifier tracking (shift/ctrl/alt/capslock), Ctrl+letter control codes, Ctrl+C sends SIGINT to the current process, Alt+Space triggers the desktop launcher.
+- `0xE0` extended prefix decodes arrows, Home/End, Delete, Page Up/Down into special characters (`0x80-0x88`; with shift held, left/right/up/down/Home/End become `0x90-0x95` for selection).
+- Modifier tracking (shift/ctrl/alt/capslock), Ctrl+letter control codes, Alt+Space triggers the desktop launcher. Ctrl+C sends SIGINT to the current process only in a terminal/desktop context (`input_ctrl_c_to_signal()`); while a GUI app is focused the `0x03` control char is delivered instead so apps can bind it (Edit > Copy).
 - A 256-byte lock-free ring buffer holds decoded characters; IRQ1 (vector 33).
 
 ## PS/2 Mouse

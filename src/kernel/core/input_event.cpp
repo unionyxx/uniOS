@@ -89,6 +89,37 @@ uint64_t gui_get_focus_pid()
     return s_gui_focus_pid;
 }
 
+static bool name_is_terminal(const Process *p)
+{
+    static const char k_terminal[] = "terminal.elf";
+    if (!p)
+        return false;
+    for (int i = 0; i < (int)sizeof(k_terminal); i++) {
+        char a = p->name[i];
+        char b = k_terminal[i];
+        if (a != b)
+            return false;
+        if (a == '\0')
+            return true;
+    }
+    return true;
+}
+
+bool input_ctrl_c_to_signal(void)
+{
+    uint64_t wm_pid = s_gui_wm_pid;
+    uint64_t focus_pid = s_gui_focus_pid;
+    if (wm_pid == 0)
+        return true; // no GUI session: classic signal behavior
+    if (focus_pid == 0 || focus_pid == wm_pid)
+        return true; // desktop focus: nothing to deliver the char to
+    Process *focus = process_find_by_pid(focus_pid);
+    if (!focus)
+        return true;
+    // The terminal hosts the shell; keep job-control semantics there.
+    return name_is_terminal(focus);
+}
+
 void pump_events()
 {
     input_poll();

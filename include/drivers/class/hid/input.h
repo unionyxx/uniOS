@@ -8,6 +8,10 @@ void input_poll();
 bool input_keyboard_has_char();
 char input_keyboard_get_char();
 bool input_keyboard_available();
+// True when Ctrl+C should synthesize SIGINT (terminal/desktop context);
+// false when a GUI app is focused and the control char should be delivered
+// instead (apps bind it, e.g. Edit > Copy).
+bool input_ctrl_c_to_signal(void);
 struct InputMouseState
 {
     int32_t x;
