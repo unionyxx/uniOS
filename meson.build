@@ -235,6 +235,7 @@ libc = static_library(
     'src/usr/libc/socket.c',
     'src/usr/libc/wav.c',
     'src/usr/libc/log.c',
+    'src/usr/libc/math.c',
   ],
   include_directories : user_inc,
   c_args : user_c_args,
@@ -247,6 +248,16 @@ libgui = static_library(
     'src/usr/libgui/gui.cpp',
     'src/usr/libgui/font.cpp',
     'src/usr/libgui/image.cpp',
+  ],
+  include_directories : [kernel_inc, user_inc],
+  cpp_args : user_cpp_args,
+)
+
+libapp = static_library(
+  'uni_libapp',
+  [
+    'src/usr/libapp/app.cpp',
+    'src/usr/libapp/widgets.cpp',
   ],
   include_directories : [kernel_inc, user_inc],
   cpp_args : user_cpp_args,
@@ -300,7 +311,7 @@ foreach app_name, search_roots : app_sources
   app_files = files(source_paths)
   app_link_with = [crt0, libc]
   if app_name != 'shell' and app_name != 'init'
-    app_link_with += [libgui]
+    app_link_with += [libapp, libgui]
   endif
   # Heavy libraries linked without --whole-archive: only translation units
   # that resolve undefined symbols are pulled into the final binary.
