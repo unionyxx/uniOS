@@ -261,10 +261,9 @@ void app_set_frame_ticks(App *app, uint64_t frame_ticks)
     app->config.frame_ticks = frame_ticks;
 }
 
-void app_commit(App *app)
+// Publish whatever is currently dirty; the caller decides when on_draw runs.
+static void app_publish(App *app)
 {
-    if (!app || !app_needs_draw(app))
-        return;
     bool full = app->dirty_full;
     int rect_count = app->dirty_count;
     Rect rects[APP_DIRTY_MAX];
@@ -273,10 +272,8 @@ void app_commit(App *app)
     app->dirty_full = false;
     app->dirty_count = 0;
 
-    if (!app->config.on_draw || !app->canvas.buffer)
+    if (!app->canvas.buffer || !app->window.buffer)
         return;
-
-    app->config.on_draw(app, &app->canvas);
 
     auto log_first_frame = [&]() {
 #ifdef DEBUG
@@ -314,7 +311,17 @@ void app_commit(App *app)
         app_copy_rect_to_window(app, r.x, r.y, r.w, r.h);
         gui_blit_to_screen_rect(&app->window, r.x, r.y, r.w, r.h);
     }
-    log_first_frame();
+    if (rect_count > 0)
+        log_first_frame();
+}
+
+void app_commit(App *app)
+{
+    if (!app || !app_needs_draw(app))
+        return;
+    if (app->config.on_draw && app->canvas.buffer)
+        app->config.on_draw(app, &app->canvas);
+    app_publish(app);
 }
 
 // Drain all pending GUI events; returns false when the window was closed.
@@ -427,8 +434,11 @@ int app_run(const AppConfig *config, void *user)
             break;
 
         if (app->config.frame_ticks > 0) {
-            app_invalidate_all(app);
-            app_commit(app);
+            // Continuous mode: draw every frame; the app decides what to
+            // publish by invalidating rects during on_draw.
+            if (app->config.on_draw && app->canvas.buffer)
+                app->config.on_draw(app, &app->canvas);
+            app_publish(app);
             sleep_until_ticks(app->next_frame_ticks);
             uint64_t now = get_ticks();
             app->next_frame_ticks += app->config.frame_ticks;

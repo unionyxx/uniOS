@@ -2874,8 +2874,7 @@ void gui_draw_chrome_ring(Surface *s, int x, int y, int w, int h, int radius, ui
     gui_fill_rounded_rect(s, x, y, w, h, r, colors.outline);
     if (w > border * 2 && h > border * 2) {
         gui_fill_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.frame_fill);
-        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r,
-                              colors.inner_stroke);
+        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.inner_stroke);
     }
 }
 
@@ -2895,8 +2894,7 @@ void gui_draw_chrome_frame(Surface *s, int x, int y, int w, int h, int radius, u
         gui_fill_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.frame_fill);
     if (w > body_inset * 2 && h > body_inset * 2) {
         gui_fill_rounded_rect(s, x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2, body_r, body);
-        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r,
-                              colors.inner_stroke);
+        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.inner_stroke);
     }
 }
 
@@ -2975,8 +2973,8 @@ void gui_draw_dialog(Surface *s, int view_w, int view_h, int view_scroll_y, cons
     int r = gui_corner_radius(panel.w, panel.h, dialog_panel_radius());
     gui_draw_panel_shadow(s, panel.x, panel.y, panel.w, panel.h, r);
     gui_draw_chrome_frame(s, panel.x, panel.y, panel.w, panel.h, r, g_gui_style.app_surface, true);
-    gui_draw_card_header_ext(s, panel.x + 1, panel.y + 1, panel.w - 2, gui_corner_radius(panel.w - 2, panel.h - 2, r - 1),
-                             title, nullptr);
+    gui_draw_card_header_ext(s, panel.x + 1, panel.y + 1, panel.w - 2,
+                             gui_corner_radius(panel.w - 2, panel.h - 2, r - 1), title, nullptr);
 
     int text_x = panel.x + gui_space_2();
     int text_w = panel.w - gui_space_4();

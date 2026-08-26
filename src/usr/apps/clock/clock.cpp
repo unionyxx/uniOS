@@ -6,7 +6,8 @@
 #include <uapi/sysinfo.h>
 
 #include "../../libc/unistd.h"
-#include "../../libgui/gui.h"
+#include "../../libapp/app.h"
+#include "../../libapp/widgets.h"
 
 // Menubar command IDs (dispatched through WindowEntry.menu_command_id).
 enum
@@ -127,10 +128,11 @@ static void draw_aa_line_thick(Surface *win, float x1, float y1, float x2, float
     float len = fast_sqrt(len_sq);
 
     if (len < 0.5f) {
-        if (thickness > 1)
+        if (thickness > 1) {
             gui_fill_circle(win, (int)(x1 + 0.5f), (int)(y1 + 0.5f), thickness / 2, color);
-        else
+        } else {
             clock_blend_pixel(win, (int)(x1 + 0.5f), (int)(y1 + 0.5f), color, 255);
+        }
         return;
     }
 
@@ -175,8 +177,8 @@ static void draw_aa_line_thick(Surface *win, float x1, float y1, float x2, float
             if (dot <= 0.0f) {
                 dist = fast_sqrt(wx * wx + wy * wy);
             } else if (dot >= len) {
-                float ex = (float)px + 0.5f - x2;
-                float ey = (float)py + 0.5f - y2;
+                float ex = (float)px - x2;
+                float ey = (float)py - y2;
                 dist = fast_sqrt(ex * ex + ey * ey);
             } else {
                 dist = fabs_float(wx * ny - wy * nx);
@@ -394,7 +396,7 @@ static void rebuild_cache(ClockCache *cache, Surface *win, int cx, int cy, int f
     cache->valid = true;
 }
 
-static void blit_cache_to_window(ClockCache *cache, Surface *win)
+static void blit_cache_to_canvas(ClockCache *cache, Surface *win)
 {
     if (!cache || !cache->valid || !win || !win->buffer)
         return;
@@ -452,8 +454,318 @@ static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysT
     gui_draw_text_clipped(win, sfont, date_x, date_y, w - pad * 2, date_str, g_gui_style.text_dim, g_gui_style.app_bg);
 }
 
-static void clock_publish_menus()
+struct ClockApp
 {
+    ClockCache cache;
+    SysTime current_os_time;
+
+    // Smooth clock model. A monotonic counter (TSC when available: it keeps
+    // running even while scheduler-timer IRQs are masked) free-runs the hands,
+    // and an RTC phase servo trims it into alignment. Each RTC second boundary
+    // feeds a rate-limited correction, so the hands sweep continuously and
+    // never snap, freeze, or reverse.
+    bool use_tsc;
+    double counter_hz;
+    uint64_t anchor_counter;
+    double anchor_seconds;
+    bool anchored;
+    double correction;
+    double correction_target;
+    double prev_rtc_seconds;
+    uint64_t prev_obs_counter;
+    uint64_t last_counter;
+    double candidate_seconds;
+    int candidate_reads;
+    double ticks_per_second;
+    bool ticks_rate_locked;
+    int seed_rejects;
+    double relock_candidate;
+    int relock_reads;
+    bool have_cross_ticks;
+    uint64_t last_cross_ticks;
+
+    bool needs_full_redraw;
+    bool resized;
+    WidgetHelp help;
+};
+
+// Advance the RTC phase servo and return the smooth dial position in seconds.
+static double clock_servo_tick(App *app, ClockApp *st, double dt)
+{
+    bool rtc_ok = get_time(&st->current_os_time) == 0 && !clock_rtc_fallback(&st->current_os_time);
+    uint64_t now_counter = st->use_tsc ? clock_read_tsc() : get_ticks();
+    uint64_t after_counter = st->use_tsc ? get_ticks() : now_counter;
+    uint64_t obs_counter = now_counter + (after_counter - now_counter) / 2;
+
+    if (rtc_ok) {
+        double rtc_seconds = os_dial_seconds(&st->current_os_time);
+
+        if (rtc_seconds == st->prev_rtc_seconds) {
+            st->candidate_reads = 0;
+        } else {
+            double step = dial_step(st->prev_rtc_seconds, rtc_seconds);
+            bool accept;
+
+            if (step == 1.0) {
+                accept = true;
+            } else {
+                // Missed boundaries (stalled frames) or a CMOS glitch: trust
+                // the value only after two consecutive matching reads.
+                if (rtc_seconds == st->candidate_seconds)
+                    st->candidate_reads++;
+                else {
+                    st->candidate_seconds = rtc_seconds;
+                    st->candidate_reads = 1;
+                }
+                accept = st->candidate_reads >= 2;
+            }
+
+            if (accept) {
+                st->candidate_reads = 0;
+
+                // Scheduler ticks per RTC second, measured across boundary
+                // observations: paces the frame loop at the true rate (and is
+                // the tick-clock rate estimate when TSC is unavailable).
+                uint64_t now_ticks = st->use_tsc ? get_ticks() : now_counter;
+                if (st->have_cross_ticks && step > 0.0 && now_ticks > st->last_cross_ticks) {
+                    double per_second = (double)(now_ticks - st->last_cross_ticks) / step;
+                    if (!st->ticks_rate_locked) {
+                        if ((per_second >= st->ticks_per_second * 0.5 && per_second <= st->ticks_per_second * 2.0) ||
+                            ++st->seed_rejects >= 3) {
+                            st->ticks_per_second = per_second;
+                            st->ticks_rate_locked = true;
+                        }
+                    } else if (per_second >= st->ticks_per_second * 0.75 &&
+                               per_second <= st->ticks_per_second * 1.3334) {
+                        st->ticks_per_second = st->ticks_per_second * 0.5 + per_second * 0.5;
+                        st->relock_reads = 0;
+                    } else {
+                        // A single corrupted interval (e.g. scheduler ticks
+                        // paused) must not re-lock the rate outright; require
+                        // several consistent readings first.
+                        if (st->relock_reads > 0 &&
+                            fabs_double(per_second - st->relock_candidate) <= per_second * 0.15)
+                            st->relock_reads++;
+                        else {
+                            st->relock_candidate = per_second;
+                            st->relock_reads = 1;
+                        }
+                        if (st->relock_reads >= 3) {
+                            st->ticks_per_second = per_second;
+                            st->relock_reads = 0;
+                        }
+                    }
+                    uint64_t frame_ticks = (uint64_t)(st->ticks_per_second * 0.016);
+                    app_set_frame_ticks(app, frame_ticks ? frame_ticks : 1);
+                }
+                st->have_cross_ticks = true;
+                st->last_cross_ticks = now_ticks;
+
+                if (!st->anchored) {
+                    st->anchor_seconds = rtc_seconds;
+                    st->anchor_counter = obs_counter;
+                    st->anchored = true;
+                    st->correction = 0.0;
+                    st->correction_target = 0.0;
+                    if (!st->use_tsc && st->ticks_per_second > 0.0)
+                        st->counter_hz = st->ticks_per_second;
+                } else {
+                    double display_at_obs = st->anchor_seconds +
+                                            ((double)obs_counter - (double)st->anchor_counter) / st->counter_hz +
+                                            st->correction;
+                    double err_now = dial_step(rtc_seconds, display_at_obs);
+
+                    if (err_now > 2.0 || err_now < -2.0) {
+                        // A genuine wall-clock discontinuity (RTC was set,
+                        // resume from suspend): a single visible step is the
+                        // only sane response.
+                        st->anchor_seconds = rtc_seconds;
+                        st->anchor_counter = obs_counter;
+                        st->correction = 0.0;
+                        st->correction_target = 0.0;
+                        if (!st->use_tsc && st->ticks_per_second > 0.0)
+                            st->counter_hz = st->ticks_per_second;
+                    } else {
+                        double bracket_seconds = (double)(obs_counter - st->prev_obs_counter) / st->counter_hz;
+                        if (bracket_seconds > 0.0 && bracket_seconds <= 0.1 && step == 1.0) {
+                            // The RTC boundary is bracketed by the previous and
+                            // current observations; servo out the residual phase
+                            // without any discontinuity.
+                            double boundary_counter =
+                                (double)st->prev_obs_counter +
+                                (double)(obs_counter - st->prev_obs_counter) * 0.5;
+                            double display_at_boundary =
+                                st->anchor_seconds + (boundary_counter - (double)st->anchor_counter) / st->counter_hz +
+                                st->correction;
+                            double err = dial_step(rtc_seconds, display_at_boundary);
+                            st->correction_target = st->correction - err;
+                            if (st->correction_target > 5.0)
+                                st->correction_target = 5.0;
+                            else if (st->correction_target < -5.0)
+                                st->correction_target = -5.0;
+                        }
+                        // Wide bracket (missed frames): the free-running counter
+                        // already keeps true time and the boundary cannot be
+                        // localized (err_now is contaminated by the sub-second
+                        // phase), so leave the correction alone; the next tight
+                        // bracket re-measures any residual.
+                    }
+
+                    {
+                        // Re-anchor to the current counter so the elapsed math
+                        // stays precise and the accumulated correction is folded
+                        // into the anchor (it integrates any counter-rate bias,
+                        // so it must not grow unbounded); continuity preserved.
+                        double display_now = st->anchor_seconds +
+                                             ((double)now_counter - (double)st->anchor_counter) / st->counter_hz +
+                                             st->correction;
+                        st->anchor_seconds = wrap_dial_seconds(display_now);
+                        st->anchor_counter = now_counter;
+                        st->correction_target -= st->correction;
+                        st->correction = 0.0;
+                        if (!st->use_tsc && st->ticks_per_second > 0.0)
+                            st->counter_hz = st->ticks_per_second;
+                    }
+                }
+
+                st->prev_rtc_seconds = rtc_seconds;
+            }
+        }
+        st->prev_obs_counter = obs_counter;
+    }
+
+    // Apply the RTC correction at a bounded rate: hand speed stays within
+    // [0.7x, 1.3x], so motion is always forward and smooth.
+    double corr_diff = st->correction_target - st->correction;
+    if (corr_diff != 0.0) {
+        double rate = corr_diff * 2.0;
+        if (rate > 0.3)
+            rate = 0.3;
+        else if (rate < -0.3)
+            rate = -0.3;
+        double dc = rate * dt;
+        if (corr_diff > 0.0 && dc > corr_diff)
+            dc = corr_diff;
+        else if (corr_diff < 0.0 && dc < corr_diff)
+            dc = corr_diff;
+        st->correction += dc;
+        if (st->correction_target - st->correction > -0.0001 && st->correction_target - st->correction < 0.0001)
+            st->correction = st->correction_target;
+    }
+
+    double elapsed_seconds =
+        now_counter >= st->anchor_counter ? (double)(now_counter - st->anchor_counter) / st->counter_hz : 0.0;
+    st->last_counter = now_counter;
+    return wrap_dial_seconds(st->anchor_seconds + elapsed_seconds + st->correction);
+}
+
+static void clock_draw_help(Surface *canvas)
+{
+    static const char *tips[] = {
+        "The hands sweep continuously, synced to the RTC",
+        "The analog face and digital readout show the same time",
+        "Resize the window; the face follows the smaller axis",
+    };
+    widget_help_draw(canvas, (int)canvas->width, (int)canvas->height, 0, "Clock Help", tips, 3);
+}
+
+static void clock_draw(App *app, Surface *canvas)
+{
+    ClockApp *st = (ClockApp *)app_user(app);
+
+    uint64_t now_counter = st->use_tsc ? clock_read_tsc() : get_ticks();
+    double dt = 0.0;
+    if (now_counter > st->last_counter)
+        dt = (double)(now_counter - st->last_counter) / st->counter_hz;
+    double continuous_seconds = clock_servo_tick(app, st, dt);
+
+    int w = (int)canvas->width;
+    int h = (int)canvas->height;
+    int pad = clock_face_pad();
+
+    int face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(52));
+    if (face_r < gui_scaled_metric(60))
+        face_r = gui_scaled_metric(60);
+
+    int cx = w / 2;
+    int cy = h / 2 - gui_scaled_metric(12);
+
+    bool full_frame = st->needs_full_redraw || st->resized;
+    if (full_frame) {
+        rebuild_cache(&st->cache, canvas, cx, cy, face_r);
+        st->needs_full_redraw = false;
+        st->resized = false;
+    }
+
+    blit_cache_to_canvas(&st->cache, canvas);
+    draw_clock_face_hands(canvas, cx, cy, face_r, continuous_seconds);
+    draw_clock_text(canvas, cx, cy, face_r, &st->current_os_time);
+    if (st->help.open)
+        clock_draw_help(canvas);
+
+    if (full_frame || st->help.open) {
+        app_invalidate_all(app);
+    } else {
+        // Only the face (hands sweep) and the text below it change frame
+        // to frame: publish damage for those regions instead of the whole
+        // window to keep the compositor load low at 60 fps.
+        int fx0 = cx - face_r - 2;
+        int fy0 = cy - face_r - 2;
+        int fx1 = cx + face_r + 2;
+        int fy1 = cy + face_r + 2;
+        if (fx0 < 0)
+            fx0 = 0;
+        if (fy0 < 0)
+            fy0 = 0;
+        if (fx1 > (int)canvas->width)
+            fx1 = (int)canvas->width;
+        if (fy1 > (int)canvas->height)
+            fy1 = (int)canvas->height;
+        int text_top = cy + face_r + clock_face_text_gap();
+        if (text_top < 0)
+            text_top = 0;
+        if (text_top > (int)canvas->height)
+            text_top = (int)canvas->height;
+
+        if (fx1 > fx0 && fy1 > fy0)
+            app_invalidate(app, fx0, fy0, fx1 - fx0, fy1 - fy0);
+        if (text_top < (int)canvas->height)
+            app_invalidate(app, 0, text_top, (int)canvas->width, (int)canvas->height - text_top);
+    }
+}
+
+static void clock_event(App *app, const Event *ev)
+{
+    ClockApp *st = (ClockApp *)app_user(app);
+    switch (ev->type) {
+        case EVT_WINDOW_RESIZE:
+            st->resized = true;
+            break;
+        case EVT_KEY_DOWN:
+            if (st->help.open && widget_help_event(&st->help, ev))
+                app_invalidate_all(app);
+            break;
+        case EVT_MOUSE_DOWN:
+            if (st->help.open && widget_help_event(&st->help, ev))
+                app_invalidate_all(app);
+            break;
+        default:
+            break;
+    }
+}
+
+static void clock_menu(App *app, uint32_t cmd)
+{
+    ClockApp *st = (ClockApp *)app_user(app);
+    if (cmd == CLOCK_MENU_HELP) {
+        st->help.open = true;
+        app_invalidate_all(app);
+    }
+}
+
+static void clock_menus(App *app)
+{
+    (void)app;
     MenuModel model;
     gui_menu_model_reset(&model);
 
@@ -465,383 +777,52 @@ static void clock_publish_menus()
     gui_menu_publish(&model);
 }
 
-static void clock_draw_help(Surface *surf, Rect *help_close)
+static void clock_settings(App *app)
 {
-    static const char *tips[] = {
-        "The hands sweep continuously, synced to the RTC",
-        "The analog face and digital readout show the same time",
-        "Resize the window; the face follows the smaller axis",
-    };
-    int win_w = (int)surf->width;
-    int win_h = (int)surf->height;
-    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
-    gui_draw_dialog(surf, win_w, win_h, 0, &layout, "Clock Help", tips, (int)(sizeof(tips) / sizeof(tips[0])), nullptr,
-                    "Close", false, false, nullptr, false, false);
-    *help_close = layout.confirm;
+    ClockApp *st = (ClockApp *)app_user(app);
+    invalidate_cache(&st->cache);
+    st->needs_full_redraw = true;
 }
 
 extern "C" int main()
 {
-    int win_w = gui_scaled_metric(360);
-    int win_h = gui_scaled_metric(420);
-    Surface win = gui_register_window_ex("Clock", (uint32_t)win_w, (uint32_t)win_h, WIN_FLAG_RESIZABLE);
-    if (!win.buffer)
-        return 1;
-
-    gui_window_set_min_size(gui_scaled_metric(280), gui_scaled_metric(320));
-    gui_sync_theme_from_registry();
-    gui_request_focus();
-
-    uint32_t backbuffer_stride = win.pitch / 4;
-    uint32_t *backbuffer_data = (uint32_t *)malloc((size_t)backbuffer_stride * win.height * sizeof(uint32_t));
-    if (!backbuffer_data)
-        return 1;
-    Surface backbuffer = win;
-    backbuffer.buffer = backbuffer_data;
-    backbuffer.owns_buffer = false;
+    static ClockApp st = {};
 
     SystemProfile profile = {};
     uint32_t nominal_tick_hz = 1000;
     if (get_sysinfo(&profile) == 0 && profile.timer_hz != 0)
         nominal_tick_hz = profile.timer_hz;
 
-    SysTime current_os_time = {};
-
-    // Smooth clock model. A monotonic counter (TSC when available: it keeps
-    // running even while scheduler-timer IRQs are masked) free-runs the hands,
-    // and an RTC phase servo trims it into alignment. Each RTC second boundary
-    // feeds a rate-limited correction, so the hands sweep continuously and
-    // never snap, freeze, or reverse.
     uint64_t tsc_mhz = get_tsc_freq();
-    bool use_tsc = tsc_mhz != 0;
-    bool rtc_valid = get_time(&current_os_time) == 0 && !clock_rtc_fallback(&current_os_time);
+    st.use_tsc = tsc_mhz != 0;
+    bool rtc_valid = get_time(&st.current_os_time) == 0 && !clock_rtc_fallback(&st.current_os_time);
 
-    double counter_hz = use_tsc ? (double)tsc_mhz * 1000000.0 : (double)nominal_tick_hz;
-    uint64_t anchor_counter = use_tsc ? clock_read_tsc() : get_ticks();
-    double anchor_seconds = rtc_valid ? os_dial_seconds(&current_os_time) : 0.0;
-    bool anchored = rtc_valid;
+    st.counter_hz = st.use_tsc ? (double)tsc_mhz * 1000000.0 : (double)nominal_tick_hz;
+    st.anchor_counter = st.use_tsc ? clock_read_tsc() : get_ticks();
+    st.anchor_seconds = rtc_valid ? os_dial_seconds(&st.current_os_time) : 0.0;
+    st.anchored = rtc_valid;
+    st.prev_rtc_seconds = st.anchor_seconds;
+    st.prev_obs_counter = st.anchor_counter;
+    st.last_counter = st.anchor_counter;
+    st.candidate_seconds = -1.0;
+    st.ticks_per_second = (double)nominal_tick_hz;
+    st.needs_full_redraw = true;
 
-    double correction = 0.0;
-    double correction_target = 0.0;
-    double prev_rtc_seconds = anchor_seconds;
-    uint64_t prev_obs_counter = anchor_counter;
-    uint64_t last_counter = anchor_counter;
-    double candidate_seconds = -1.0;
-    int candidate_reads = 0;
+    AppConfig config = {};
+    config.title = "Clock";
+    config.width = gui_scaled_metric(360);
+    config.height = gui_scaled_metric(420);
+    config.min_width = gui_scaled_metric(280);
+    config.min_height = gui_scaled_metric(320);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.frame_ticks = (uint64_t)(st.ticks_per_second * 0.016);
+    if (config.frame_ticks == 0)
+        config.frame_ticks = 1;
+    config.on_draw = clock_draw;
+    config.on_event = clock_event;
+    config.on_menu = clock_menu;
+    config.on_menus = clock_menus;
+    config.on_settings = clock_settings;
 
-    double ticks_per_second = (double)nominal_tick_hz;
-    bool ticks_rate_locked = false;
-    int seed_rejects = 0;
-    double relock_candidate = 0.0;
-    int relock_reads = 0;
-    bool have_cross_ticks = false;
-    uint64_t last_cross_ticks = 0;
-
-    uint64_t frame_ticks = (uint64_t)(ticks_per_second * 0.016);
-    if (frame_ticks == 0)
-        frame_ticks = 1;
-    uint64_t next_frame_ticks = get_ticks() + frame_ticks;
-
-    Registry *registry = gui_registry();
-    uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
-
-    ClockCache cache = {};
-    int cx = 0, cy = 0, face_r = 0, w = 0, h = 0;
-    bool needs_full_redraw = true;
-    bool help_visible = false;
-    Rect help_close = {0, 0, 0, 0};
-    clock_publish_menus();
-
-    while (true) {
-        Event ev = {};
-        bool resized = false;
-
-        while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE) {
-                free(backbuffer_data);
-                return 0;
-            }
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
-                resized = true;
-                free(backbuffer_data);
-                backbuffer_stride = win.pitch / 4;
-                backbuffer_data = (uint32_t *)malloc((size_t)backbuffer_stride * win.height * sizeof(uint32_t));
-                backbuffer = win;
-                backbuffer.buffer = backbuffer_data;
-                if (!backbuffer_data) {
-                    free(cache.buffer);
-                    return 1;
-                }
-                continue;
-            }
-            if (ev.type == EVT_FOCUS) {
-                clock_publish_menus();
-                continue;
-            }
-            if (ev.type == EVT_KEY_DOWN && help_visible) {
-                if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
-                    help_visible = false;
-                    needs_full_redraw = true;
-                }
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_DOWN && help_visible) {
-                if (ev.mouse.button == 1) {
-                    help_visible = false;
-                    needs_full_redraw = true;
-                }
-                continue;
-            }
-        }
-
-        uint32_t menu_cmd = 0;
-        if (gui_menu_take_command(&menu_cmd) && menu_cmd == CLOCK_MENU_HELP) {
-            help_visible = true;
-            needs_full_redraw = true;
-        }
-
-        registry = gui_registry();
-        bool theme_changed = false;
-        if (registry && registry->settings_generation != last_settings_generation) {
-            last_settings_generation = registry->settings_generation;
-            theme_changed = gui_sync_theme_from_registry();
-        }
-
-        uint64_t now_counter = use_tsc ? clock_read_tsc() : get_ticks();
-        uint64_t now_ticks = use_tsc ? get_ticks() : now_counter;
-
-        double dt = 0.0;
-        if (now_counter > last_counter)
-            dt = (double)(now_counter - last_counter) / counter_hz;
-        last_counter = now_counter;
-
-        bool rtc_ok = get_time(&current_os_time) == 0 && !clock_rtc_fallback(&current_os_time);
-        uint64_t after_counter = use_tsc ? clock_read_tsc() : get_ticks();
-        uint64_t obs_counter = now_counter + (after_counter - now_counter) / 2;
-
-        if (rtc_ok) {
-            double rtc_seconds = os_dial_seconds(&current_os_time);
-
-            if (rtc_seconds == prev_rtc_seconds) {
-                candidate_reads = 0;
-            } else {
-                double step = dial_step(prev_rtc_seconds, rtc_seconds);
-                bool accept;
-
-                if (step == 1.0) {
-                    accept = true;
-                } else {
-                    // Missed boundaries (stalled frames) or a CMOS glitch: trust
-                    // the value only after two consecutive matching reads.
-                    if (rtc_seconds == candidate_seconds)
-                        candidate_reads++;
-                    else {
-                        candidate_seconds = rtc_seconds;
-                        candidate_reads = 1;
-                    }
-                    accept = candidate_reads >= 2;
-                }
-
-                if (accept) {
-                    candidate_reads = 0;
-
-                    // Scheduler ticks per RTC second, measured across boundary
-                    // observations: paces the frame loop at the true rate (and is
-                    // the tick-clock rate estimate when TSC is unavailable).
-                    if (have_cross_ticks && step > 0.0 && now_ticks > last_cross_ticks) {
-                        double per_second = (double)(now_ticks - last_cross_ticks) / step;
-                        if (!ticks_rate_locked) {
-                            if ((per_second >= ticks_per_second * 0.5 && per_second <= ticks_per_second * 2.0) ||
-                                ++seed_rejects >= 3) {
-                                ticks_per_second = per_second;
-                                ticks_rate_locked = true;
-                            }
-                        } else if (per_second >= ticks_per_second * 0.75 && per_second <= ticks_per_second * 1.3334) {
-                            ticks_per_second = ticks_per_second * 0.5 + per_second * 0.5;
-                            relock_reads = 0;
-                        } else {
-                            // A single corrupted interval (e.g. scheduler ticks
-                            // paused) must not re-lock the rate outright; require
-                            // several consistent readings first.
-                            if (relock_reads > 0 && fabs_double(per_second - relock_candidate) <= per_second * 0.15)
-                                relock_reads++;
-                            else {
-                                relock_candidate = per_second;
-                                relock_reads = 1;
-                            }
-                            if (relock_reads >= 3) {
-                                ticks_per_second = per_second;
-                                relock_reads = 0;
-                            }
-                        }
-                        frame_ticks = (uint64_t)(ticks_per_second * 0.016);
-                        if (frame_ticks == 0)
-                            frame_ticks = 1;
-                    }
-                    have_cross_ticks = true;
-                    last_cross_ticks = now_ticks;
-
-                    if (!anchored) {
-                        anchor_seconds = rtc_seconds;
-                        anchor_counter = obs_counter;
-                        anchored = true;
-                        correction = 0.0;
-                        correction_target = 0.0;
-                        if (!use_tsc && ticks_per_second > 0.0)
-                            counter_hz = ticks_per_second;
-                    } else {
-                        double display_at_obs =
-                            anchor_seconds + ((double)obs_counter - (double)anchor_counter) / counter_hz + correction;
-                        double err_now = dial_step(rtc_seconds, display_at_obs);
-
-                        if (err_now > 2.0 || err_now < -2.0) {
-                            // A genuine wall-clock discontinuity (RTC was set,
-                            // resume from suspend): a single visible step is the
-                            // only sane response.
-                            anchor_seconds = rtc_seconds;
-                            anchor_counter = obs_counter;
-                            correction = 0.0;
-                            correction_target = 0.0;
-                            if (!use_tsc && ticks_per_second > 0.0)
-                                counter_hz = ticks_per_second;
-                        } else {
-                            double bracket_seconds = (double)(obs_counter - prev_obs_counter) / counter_hz;
-                            if (bracket_seconds > 0.0 && bracket_seconds <= 0.1 && step == 1.0) {
-                                // The RTC boundary is bracketed by the previous and
-                                // current observations; servo out the residual phase
-                                // without any discontinuity.
-                                double boundary_counter =
-                                    (double)prev_obs_counter + (double)(obs_counter - prev_obs_counter) * 0.5;
-                                double display_at_boundary = anchor_seconds +
-                                                             (boundary_counter - (double)anchor_counter) / counter_hz +
-                                                             correction;
-                                double err = dial_step(rtc_seconds, display_at_boundary);
-                                correction_target = correction - err;
-                                if (correction_target > 5.0)
-                                    correction_target = 5.0;
-                                else if (correction_target < -5.0)
-                                    correction_target = -5.0;
-                            }
-                            // Wide bracket (missed frames): the free-running counter
-                            // already keeps true time and the boundary cannot be
-                            // localized (err_now is contaminated by the sub-second
-                            // phase), so leave the correction alone; the next tight
-                            // bracket re-measures any residual.
-                        }
-
-                        {
-                            // Re-anchor to the current counter so the elapsed math
-                            // stays precise and the accumulated correction is folded
-                            // into the anchor (it integrates any counter-rate bias,
-                            // so it must not grow unbounded); continuity preserved.
-                            double display_now = anchor_seconds +
-                                                 ((double)now_counter - (double)anchor_counter) / counter_hz +
-                                                 correction;
-                            anchor_seconds = wrap_dial_seconds(display_now);
-                            anchor_counter = now_counter;
-                            correction_target -= correction;
-                            correction = 0.0;
-                            if (!use_tsc && ticks_per_second > 0.0)
-                                counter_hz = ticks_per_second;
-                        }
-                    }
-
-                    prev_rtc_seconds = rtc_seconds;
-                }
-            }
-            prev_obs_counter = obs_counter;
-        }
-
-        // Apply the RTC correction at a bounded rate: hand speed stays within
-        // [0.7x, 1.3x], so motion is always forward and smooth.
-        double corr_diff = correction_target - correction;
-        if (corr_diff != 0.0) {
-            double rate = corr_diff * 2.0;
-            if (rate > 0.3)
-                rate = 0.3;
-            else if (rate < -0.3)
-                rate = -0.3;
-            double dc = rate * dt;
-            if (corr_diff > 0.0 && dc > corr_diff)
-                dc = corr_diff;
-            else if (corr_diff < 0.0 && dc < corr_diff)
-                dc = corr_diff;
-            correction += dc;
-            if (correction_target - correction > -0.0001 && correction_target - correction < 0.0001)
-                correction = correction_target;
-        }
-
-        double elapsed_seconds =
-            now_counter >= anchor_counter ? (double)(now_counter - anchor_counter) / counter_hz : 0.0;
-        double continuous_seconds = wrap_dial_seconds(anchor_seconds + elapsed_seconds + correction);
-
-        w = (int)win.width;
-        h = (int)win.height;
-        int pad = clock_face_pad();
-
-        face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(52));
-        if (face_r < gui_scaled_metric(60))
-            face_r = gui_scaled_metric(60);
-
-        cx = w / 2;
-        cy = h / 2 - gui_scaled_metric(12);
-
-        bool full_frame = needs_full_redraw || resized || theme_changed;
-        if (full_frame) {
-            rebuild_cache(&cache, &win, cx, cy, face_r);
-            needs_full_redraw = false;
-        }
-
-        blit_cache_to_window(&cache, &backbuffer);
-        draw_clock_face_hands(&backbuffer, cx, cy, face_r, continuous_seconds);
-        draw_clock_text(&backbuffer, cx, cy, face_r, &current_os_time);
-        if (help_visible)
-            clock_draw_help(&backbuffer, &help_close);
-
-        if (full_frame || help_visible) {
-            memcpy(win.buffer, backbuffer.buffer, (size_t)backbuffer_stride * win.height * sizeof(uint32_t));
-            gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
-        } else {
-            // Only the face (hands sweep) and the text below it change frame
-            // to frame: publish damage for those regions instead of the whole
-            // window to keep the compositor load low at 60 fps.
-            int fx0 = cx - face_r - 2;
-            int fy0 = cy - face_r - 2;
-            int fx1 = cx + face_r + 2;
-            int fy1 = cy + face_r + 2;
-            if (fx0 < 0)
-                fx0 = 0;
-            if (fy0 < 0)
-                fy0 = 0;
-            if (fx1 > (int)win.width)
-                fx1 = (int)win.width;
-            if (fy1 > (int)win.height)
-                fy1 = (int)win.height;
-            int text_top = cy + face_r + clock_face_text_gap();
-            if (text_top < 0)
-                text_top = 0;
-            if (text_top > (int)win.height)
-                text_top = (int)win.height;
-
-            for (int y = fy0; y < fy1; y++) {
-                memcpy(&win.buffer[(size_t)y * backbuffer_stride + fx0],
-                       &backbuffer.buffer[(size_t)y * backbuffer_stride + fx0], (size_t)(fx1 - fx0) * sizeof(uint32_t));
-            }
-            for (int y = text_top; y < (int)win.height; y++) {
-                memcpy(&win.buffer[(size_t)y * backbuffer_stride], &backbuffer.buffer[(size_t)y * backbuffer_stride],
-                       (size_t)backbuffer_stride * sizeof(uint32_t));
-            }
-
-            if (fx1 > fx0 && fy1 > fy0)
-                gui_blit_to_screen_rect(&win, fx0, fy0, fx1 - fx0, fy1 - fy0);
-            if (text_top < (int)win.height)
-                gui_blit_to_screen_rect(&win, 0, text_top, win.width, win.height - text_top);
-        }
-
-        sleep_until_ticks(next_frame_ticks);
-        uint64_t frame_now = get_ticks();
-        next_frame_ticks += frame_ticks;
-        if (frame_now > next_frame_ticks)
-            next_frame_ticks = frame_now + frame_ticks;
-    }
+    return app_run(&config, &st);
 }

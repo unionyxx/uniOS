@@ -6,7 +6,7 @@
 
 #include "../../libc/log.h"
 #include "../../libc/unistd.h"
-#include "../../libgui/gui.h"
+#include "../../libapp/app.h"
 #include "../../libmedia/media_image.h"
 
 namespace {
@@ -24,7 +24,9 @@ struct ViewerState
     media_image scaled;
     int scaled_w, scaled_h;
     char path[256];
+    char open_path[256];
     ViewerStatus status;
+    bool initialized;
 };
 
 const char *base_name(const char *path)
@@ -224,8 +226,22 @@ void draw_viewer(Surface *s, ViewerState *st)
     blend_image_onto(s, x0, y0, show);
 }
 
-void imageviewer_publish_menus()
+void imageviewer_draw(App *app, Surface *canvas)
 {
+    ViewerState *st = (ViewerState *)app_user(app);
+    if (!st->initialized) {
+        st->initialized = true;
+        if (st->open_path[0])
+            viewer_load(st, st->open_path);
+        else
+            viewer_update_title(st);
+    }
+    draw_viewer(canvas, st);
+}
+
+void imageviewer_menus(App *app)
+{
+    (void)app;
     MenuModel model;
     gui_menu_model_reset(&model);
     int help = gui_menu_model_add_menu(&model, "Help");
@@ -237,84 +253,22 @@ void imageviewer_publish_menus()
 
 extern "C" int main()
 {
-    char open_path[256] = {};
-    bool have_open = gui_open_request_take(open_path, sizeof(open_path));
-
-    Surface win = gui_register_window_ex("Image Viewer", (uint32_t)gui_scaled_metric(860),
-                                         (uint32_t)gui_scaled_metric(560), WIN_FLAG_RESIZABLE);
-    if (!win.buffer)
-        return 1;
-    gui_window_set_min_size(gui_scaled_metric(320), gui_scaled_metric(240));
-
-    gui_sync_theme_from_registry();
-    gui_request_focus();
-    imageviewer_publish_menus();
-
-    ViewerState st = {};
-    if (have_open)
-        viewer_load(&st, open_path);
+    static ViewerState st = {};
+    if (gui_open_request_take(st.open_path, sizeof(st.open_path)))
+        st.open_path[sizeof(st.open_path) - 1] = '\0';
     else
-        viewer_update_title(&st);
+        st.open_path[0] = '\0';
 
-    size_t back_capacity = (size_t)(win.pitch / 4) * win.height;
-    uint32_t *back_data = (uint32_t *)malloc(back_capacity * sizeof(uint32_t));
-    if (!back_data)
-        return 1;
-    Surface backbuffer = win;
-    backbuffer.buffer = back_data;
-    backbuffer.owns_buffer = false;
+    AppConfig config = {};
+    config.title = "Image Viewer";
+    config.width = gui_scaled_metric(860);
+    config.height = gui_scaled_metric(560);
+    config.min_width = gui_scaled_metric(320);
+    config.min_height = gui_scaled_metric(240);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.idle_ms = 33;
+    config.on_draw = imageviewer_draw;
+    config.on_menus = imageviewer_menus;
 
-    bool needs_redraw = true;
-    Registry *registry = gui_registry();
-    uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
-
-    while (true) {
-        Event ev = {};
-        while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE) {
-                viewer_reset(&st);
-                free(back_data);
-                return 0;
-            }
-            if (ev.type == EVT_FOCUS) {
-                imageviewer_publish_menus();
-                continue;
-            }
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
-                size_t needed = (size_t)(win.pitch / 4) * win.height;
-                if (needed > back_capacity) {
-                    uint32_t *grown = (uint32_t *)malloc(needed * sizeof(uint32_t));
-                    if (!grown) {
-                        viewer_reset(&st);
-                        free(back_data);
-                        return 1;
-                    }
-                    memcpy(grown, back_data, back_capacity * sizeof(uint32_t));
-                    free(back_data);
-                    back_data = grown;
-                    back_capacity = needed;
-                }
-                backbuffer = win;
-                backbuffer.buffer = back_data;
-                backbuffer.owns_buffer = false;
-                needs_redraw = true;
-            }
-        }
-
-        registry = gui_registry();
-        if (registry && registry->settings_generation != last_settings_generation) {
-            last_settings_generation = registry->settings_generation;
-            if (gui_sync_theme_from_registry())
-                needs_redraw = true;
-        }
-
-        if (needs_redraw) {
-            draw_viewer(&backbuffer, &st);
-            memcpy(win.buffer, backbuffer.buffer, back_capacity * sizeof(uint32_t));
-            gui_blit_to_screen_rect(&win, 0, 0, static_cast<int32_t>(win.width), static_cast<int32_t>(win.height));
-            needs_redraw = false;
-        }
-
-        sleep_ms(33);
-    }
+    return app_run(&config, &st);
 }

@@ -333,37 +333,48 @@ static void draw_dock_glass(Surface *canvas, Registry *registry, int panel_x, in
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
     bool solid = registry && registry->transparency_level >= 255;
 
-    uint32_t soft_shadow = is_light ? 0x10000000u : 0x12000000u;
-    uint32_t key_shadow = is_light ? 0x18000000u : 0x1A000000u;
-    uint32_t tint_color = is_light ? 0x80FFFFFFu : 0x801B1D21u;
-    uint32_t border_color = is_light ? 0x56FFFFFFu : 0x22FFFFFFu;
-    uint32_t inner_highlight = is_light ? 0x38FFFFFFu : 0x10FFFFFFu;
+    // Approximate glass body color: drives the chrome-ring color derivation
+    // and is the solid-mode fill.
+    uint32_t body = is_light ? 0xFFF7F9FCu : 0xFF141820u;
 
-    gui_fill_rounded_rect(canvas, panel_x, panel_y + gui_scaled_metric(5), panel_w, panel_h, radius, soft_shadow);
-    gui_fill_rounded_rect(canvas, panel_x, panel_y + gui_scaled_metric(2), panel_w, panel_h, radius, key_shadow);
+    // Drop shadow: the canonical layer stack, restricted to the region below
+    // the panel's top-corner band. Shadow pixels under the translucent glass
+    // bleed through the anti-aliased corner coverage as dark artifacts
+    // (visible on light wallpapers); below the body the blur replaces them,
+    // so only the band under the bottom corners and the drop below the panel
+    // ever show — identical shape to a full-panel shadow.
+    int shadow_top = panel_y + radius;
+    int shadow_h_base = panel_h - radius;
+    if (shadow_h_base > 0) {
+        gui_fill_rounded_rect(canvas, panel_x, shadow_top, panel_w, shadow_h_base + gui_scaled_metric(6), radius,
+                              0x08000000u);
+        gui_fill_rounded_rect(canvas, panel_x, shadow_top, panel_w, shadow_h_base + gui_scaled_metric(3), radius,
+                              0x0C000000u);
+        gui_fill_rounded_rect(canvas, panel_x, shadow_top, panel_w, shadow_h_base + gui_scaled_metric(1), radius,
+                              0x10000000u);
+    }
 
     if (solid) {
-        uint32_t fill = is_light ? 0xFFF7F9FCu : 0xFF141820u;
-        uint32_t stroke = is_light ? 0xFFD8DEE8u : 0xFF333842u;
-        uint32_t inner = is_light ? 0xFFFFFFFFu : 0xFF242A33u;
-        gui_fill_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, fill);
-        gui_draw_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, stroke);
-        if (panel_w > 4 && panel_h > 4) {
-            gui_draw_rounded_rect(canvas, panel_x + 1, panel_y + 1, panel_w - 2, panel_h - 2,
-                                  gui_corner_radius(panel_w - 2, panel_h - 2, radius - 1), inner);
-        }
+        gui_draw_chrome_frame(canvas, panel_x, panel_y, panel_w, panel_h, radius, body, true);
         return;
     }
 
-    bool blur_ready = ensure_blur_surface(registry, canvas->width, canvas->height);
-    if (blur_ready)
-        blit_blur_rounded_rect(canvas, &g_blur_surface, panel_x, panel_y, panel_w, panel_h, radius);
+    // Chrome ring first: its silhouette fills are opaque, so the glass body
+    // must be painted afterwards, inset like window client content.
+    gui_draw_chrome_ring(canvas, panel_x, panel_y, panel_w, panel_h, radius, body, true);
 
-    gui_fill_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, tint_color);
-    gui_draw_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, border_color);
-    if (panel_w > 4 && panel_h > 4) {
-        gui_draw_rounded_rect(canvas, panel_x + 1, panel_y + 1, panel_w - 2, panel_h - 2,
-                              gui_corner_radius(panel_w - 2, panel_h - 2, radius - 1), inner_highlight);
+    int border = gui_chrome_border();
+    int inset = border + gui_chrome_detail_inset();
+    int inner_w = panel_w - inset * 2;
+    int inner_h = panel_h - inset * 2;
+    int inner_r = gui_corner_radius(inner_w, inner_h, radius - inset);
+    if (inner_w > 0 && inner_h > 0) {
+        uint32_t tint_color = is_light ? 0x80FFFFFFu : 0x801B1D21u;
+        bool blur_ready = ensure_blur_surface(registry, canvas->width, canvas->height);
+        if (blur_ready)
+            blit_blur_rounded_rect(canvas, &g_blur_surface, panel_x + inset, panel_y + inset, inner_w, inner_h,
+                                   inner_r);
+        gui_fill_rounded_rect(canvas, panel_x + inset, panel_y + inset, inner_w, inner_h, inner_r, tint_color);
     }
 }
 
