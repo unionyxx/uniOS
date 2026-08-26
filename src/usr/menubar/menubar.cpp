@@ -657,7 +657,13 @@ static ComposedAppMenus &compose_app_menus(Registry *reg)
     dropdown_finish(d);
     g_composed.count++;
 
-    int x = g_logo_btn_x + g_logo_btn_w + gui_scaled_metric(8);
+    int x = menubar_content_x();
+    if (focus.valid) {
+        int title_w = gui_measure_text(gui_font_title(), focus.title);
+        if (title_w > menubar_title_max_w())
+            title_w = menubar_title_max_w();
+        x += title_w + gui_scaled_metric(24);
+    }
     const GuiFont *menu_font = gui_font_default();
     int pad = gui_scaled_metric(10);
     for (int j = 0; j < g_composed.count; j++) {
@@ -806,7 +812,17 @@ void draw_menubar(Surface *canvas, Registry *reg)
     int center_x = g_logo_btn_x + (g_logo_btn_w - text_w) / 2;
     draw_menubar_text_clipped(canvas, app_font, center_x, app_text_y, g_logo_btn_w, "uniOS", text_color, is_light);
 
-    int title_x = menubar_content_x();
+    int x = menubar_content_x();
+    FocusedWindowInfo focus = {};
+    if (snapshot_focused_window(reg, &focus)) {
+        int title_w = gui_measure_text(app_font, focus.title);
+        if (title_w > menubar_title_max_w())
+            title_w = menubar_title_max_w();
+        draw_menubar_text_clipped(canvas, app_font, x, app_text_y, menubar_title_max_w(), focus.title, g_gui_style.text,
+                                  is_light);
+        x += title_w + gui_scaled_metric(24);
+    }
+
     if (reg && g_model_valid) {
         ComposedAppMenus &cm = compose_app_menus(reg);
         if (cm.valid && cm.count > 0) {
@@ -824,23 +840,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
                 draw_menubar_text_clipped(canvas, menu_font, bx + (bw - name_w) / 2, menu_text_y, bw, cm.names[j],
                                           text_color, is_light);
             }
-            title_x = g_app_menu_btn_x[cm.count - 1] + g_app_menu_btn_w[cm.count - 1] + gui_scaled_metric(12);
         }
-    }
-
-    int x = title_x;
-    FocusedWindowInfo focus = {};
-    if (snapshot_focused_window(reg, &focus)) {
-        int max_w = menubar_title_max_w();
-        int available = g_date_btn_x - gui_scaled_metric(12) - x;
-        if (available < max_w)
-            max_w = available > 0 ? available : 0;
-        int title_w = gui_measure_text(app_font, focus.title);
-        if (title_w > max_w)
-            title_w = max_w;
-        if (max_w > 0)
-            draw_menubar_text_clipped(canvas, app_font, x, app_text_y, max_w, focus.title, g_gui_style.text, is_light);
-        x += title_w + gui_scaled_metric(24);
     }
     (void)x;
 
