@@ -7,9 +7,9 @@
 #include <uapi/syscalls.h>
 #include <unistd.h>
 
+#include "../../libapp/app.h"
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
-#include "../../libapp/app.h"
 #include "../../libgui/gui.h"
 
 static constexpr int MAX_LINES = 2048;
@@ -3581,8 +3581,7 @@ static void latitude_event(App *app, const Event *ev)
     switch (ev->type) {
         case EVT_UNFOCUS:
         case EVT_MOUSE_LEAVE: {
-            bool changed =
-                state->hovered != HOVER_NONE || state->project_hovered >= 0 || state->outline_hovered >= 0;
+            bool changed = state->hovered != HOVER_NONE || state->project_hovered >= 0 || state->outline_hovered >= 0;
             state->hovered = HOVER_NONE;
             state->project_hovered = -1;
             state->outline_hovered = -1;
@@ -3625,9 +3624,8 @@ static void latitude_event(App *app, const Event *ev)
                 state->first_line += ev->mouse.scroll_y < 0 ? 3 : -3;
                 // Stop at the point where the last line is at the bottom of
                 // the view, not when only one line remains.
-                int max_first = state->visible_lines > 1
-                                    ? max_int(0, state->buffer->line_count - state->visible_lines)
-                                    : max_int(0, state->buffer->line_count - 1);
+                int max_first = state->visible_lines > 1 ? max_int(0, state->buffer->line_count - state->visible_lines)
+                                                         : max_int(0, state->buffer->line_count - 1);
                 state->first_line = clamp_int(state->first_line, 0, max_first);
                 state->needs_redraw = true;
             } else if (point_in_rect(rects->sidebar_rect, ev->mouse.x, ev->mouse.y)) {
@@ -3716,9 +3714,8 @@ static void latitude_event(App *app, const Event *ev)
                 state->needs_redraw = true;
             } else if (target == HOVER_PROJECT_ROW && state->project_hovered >= 0) {
                 uint64_t now = get_ticks();
-                bool double_click =
-                    state->last_project_click_row == state->project_hovered &&
-                    now - state->last_project_click_ticks < 450;
+                bool double_click = state->last_project_click_row == state->project_hovered &&
+                                    now - state->last_project_click_ticks < 450;
                 state->project_selected = state->project_hovered;
                 state->focus = FOCUS_PROJECT;
                 clear_field_focus(state);

@@ -21,8 +21,8 @@ enum
     WIDGET_NONE = 0,
     WIDGET_CHANGED = 1 << 0,
     WIDGET_CLICKED = 1 << 1,
-    WIDGET_FIELD_BLUR = 1 << 2,    // text field lost focus
-    WIDGET_FIELD_ENTER = 1 << 3,   // Enter pressed in a focused text field
+    WIDGET_FIELD_BLUR = 1 << 2,  // text field lost focus
+    WIDGET_FIELD_ENTER = 1 << 3, // Enter pressed in a focused text field
     WIDGET_DIALOG_CONFIRM = 1 << 4,
     WIDGET_DIALOG_CANCEL = 1 << 5,
     WIDGET_DIALOG_DISMISS = 1 << 6, // click outside the dialog panel

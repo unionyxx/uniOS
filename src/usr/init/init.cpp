@@ -58,8 +58,7 @@ static Registry *wait_for_desktop_registry()
                 registry = (Registry *)reg_ptr;
         }
 
-        if (registry && registry->magic == REGISTRY_MAGIC &&
-            gui_shm_id_is_valid(registry->mb_shm_id) &&
+        if (registry && registry->magic == REGISTRY_MAGIC && gui_shm_id_is_valid(registry->mb_shm_id) &&
             gui_shm_id_is_valid(registry->dk_shm_id))
             return registry;
 
@@ -124,12 +123,6 @@ extern "C" int main(int argc, char **argv)
     if (launch_terminal) {
         spawn_process("Terminal", "/bin/terminal.elf");
     }
-
-#ifdef DEBUG
-    // Temporary verification hook (removed after the libapp migration):
-    // spawn the app under test so smoke runs exercise it.
-    spawn_process("Test App", "/bin/files.elf");
-#endif
 
     int status = 0;
     while (true) {

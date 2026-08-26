@@ -4,9 +4,9 @@
 #include <string.h>
 #include <uapi/event.h>
 
-#include "../../libc/unistd.h"
 #include "../../libapp/app.h"
 #include "../../libapp/widgets.h"
+#include "../../libc/unistd.h"
 
 static constexpr int COLS = 4;
 static constexpr int ROWS = 5;

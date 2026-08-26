@@ -4,9 +4,9 @@
 #include <string.h>
 #include <uapi/event.h>
 
+#include "../../libapp/app.h"
 #include "../../libc/log.h"
 #include "../../libc/unistd.h"
-#include "../../libapp/app.h"
 #include "../../libmedia/media_image.h"
 
 namespace {

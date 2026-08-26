@@ -5,9 +5,9 @@
 #include <uapi/event.h>
 #include <uapi/sysinfo.h>
 
-#include "../../libc/unistd.h"
 #include "../../libapp/app.h"
 #include "../../libapp/widgets.h"
+#include "../../libc/unistd.h"
 
 // Menubar command IDs (dispatched through WindowEntry.menu_command_id).
 enum
@@ -543,8 +543,7 @@ static double clock_servo_tick(App *app, ClockApp *st, double dt)
                         // A single corrupted interval (e.g. scheduler ticks
                         // paused) must not re-lock the rate outright; require
                         // several consistent readings first.
-                        if (st->relock_reads > 0 &&
-                            fabs_double(per_second - st->relock_candidate) <= per_second * 0.15)
+                        if (st->relock_reads > 0 && fabs_double(per_second - st->relock_candidate) <= per_second * 0.15)
                             st->relock_reads++;
                         else {
                             st->relock_candidate = per_second;
@@ -592,8 +591,7 @@ static double clock_servo_tick(App *app, ClockApp *st, double dt)
                             // current observations; servo out the residual phase
                             // without any discontinuity.
                             double boundary_counter =
-                                (double)st->prev_obs_counter +
-                                (double)(obs_counter - st->prev_obs_counter) * 0.5;
+                                (double)st->prev_obs_counter + (double)(obs_counter - st->prev_obs_counter) * 0.5;
                             double display_at_boundary =
                                 st->anchor_seconds + (boundary_counter - (double)st->anchor_counter) / st->counter_hz +
                                 st->correction;

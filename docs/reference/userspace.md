@@ -25,7 +25,8 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 - **wav**: userspace RIFF/WAV parser used by the shell `play` command.
 - **log**: leveled `[sec.mmm] scope [mark] message` logging to stdout.
 - **config_utils**: `key=value` config readers/writers used for `SYSTEM.CFG` and wallpaper settings.
-- **cxx.cpp**: global `new`/`delete` over malloc, and a `__cxa_pure_virtual` fault handler.
+- **math**: freestanding `sqrt/sin/cos/tan/fabs/fmod` (plus `f` variants) — bit-seeded Newton sqrt (machine epsilon across the full double range) and range-reduced Taylor trig, so apps never hand-roll math.
+- **cxx.cpp**: global `new`/`delete` over malloc, a `__cxa_pure_virtual` fault handler, and the static-object runtime glue (`__cxa_guard_acquire/release/abort`, `__cxa_atexit`/`__cxa_finalize`/`__dso_handle` — single-threaded fast-path guards; static destructors are not run at exit because process teardown reclaims everything).
 
 ## libgui
 
@@ -44,7 +45,17 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 - **App menus**: a focused app builds a `MenuModel` locally (`gui_menu_model_reset/add_menu/add_item/add_separator`) and publishes it with `gui_menu_publish` (registry slot guarded by an odd/even seq protocol); the menubar renders it and dispatches activated item IDs through the window entry, which the app consumes with `gui_menu_take_command`. IDs >= `MENU_CMD_RESERVED_BASE` are menubar-owned. `gui_clipboard_copy`/`gui_clipboard_paste` move text through the registry clipboard (4095-byte cap, seq-stable reads), shared by all apps.
 - **Frame waits**: `gui_wait_frame/gui_poll_frame` wrap display event waits for FLIP_COMPLETE/VBLANK.
 
-Apps poll kernel events themselves with `poll_event/wait_event` (`SYS_GET_EVENT`).
+## libapp
+
+`src/usr/libapp/` is the application runtime and widget kit that every graphical app is built on. It owns the window, the double-buffered canvas, the event loop, resize/theme/menu/focus plumbing, and damage publishing, so an app supplies only drawing and interaction logic.
+
+- **Runtime** (`app.h`): an app fills an `AppConfig` (title, size, min size, `WIN_FLAG_*`, pacing, callbacks) and calls `app_run`. The runtime registers the window, allocates a private backbuffer canvas, and loops. `on_draw(canvas)` paints a whole frame into the canvas; the app marks what changed with `app_invalidate`/`app_invalidate_all` and the runtime copies only those rects to the window and publishes damage. `on_event` receives input and lifecycle events (close is handled by the runtime as a clean exit; resize arrives after the window and canvas were re-synced; scroll arrives after invalidation). `on_menu` gets menubar commands, `on_menus` rebuilds the model at startup and on focus gain (call `app_publish_menus` to refresh otherwise), `on_settings` fires after a registry settings-generation change and theme re-sync, and `on_idle` runs each iteration for periodic work.
+- **Pacing**: `frame_ticks == 0` runs event-driven — `on_draw` only when something was invalidated, sleeping `idle_ms` (default 16) when idle. `frame_ticks > 0` runs continuous — `on_draw` every frame, paced with `sleep_until_ticks` and catch-up (`app_set_frame_ticks` adjusts the interval live).
+- **Scrollable content**: `app_set_content_size` grows the window backing and canvas so the whole content is retained and the WM scrolls it (`app_scroll_x/y` read the offset); call it at the start of a frame, before drawing into the grown area.
+- **Manual mode**: apps with an extra event source use `app_create`/`app_pump`/`app_commit`/`app_destroy` instead of `app_run` to interleave GUI plumbing with their own loop — the terminal does this around its epoll shell pipe and incremental renderer, with `on_draw` left unset so it keeps drawing to the window directly.
+- **Widgets** (`widgets.h`): stateful controls over the immediate-mode libgui primitives. Each owns its hover/press/focus/value state; `*_event` returns `WIDGET_*` bitmasks (`WIDGET_CHANGED` = invalidate the rect) and `*_draw` renders. Provided: buttons (release-to-apply with drag-away cancel, optional fire-on-down), toggle rows, sliders (live drag with `gui_app_slider_track_rect` hit-testing and a release-to-persist click), segmented controls, text fields (caller-owned buffer, Enter/Escape, click-outside blur), popup menus (viewport-clamped placement), modal dialogs (confirm/cancel/dismiss with an optional field), help overlays, and a shared rect hit-test helper.
+
+Apps that bypass libapp still poll kernel events directly with `poll_event/wait_event` (`SYS_GET_EVENT`).
 
 ## libmedia
 
@@ -60,8 +71,8 @@ Apps poll kernel events themselves with `poll_event/wait_event` (`SYS_GET_EVENT`
 Per `meson.build`:
 
 - `crt0` is assembled from `crt0.asm` (NASM elf64).
-- `libc`, `libgui`, and `libmedia` are static libraries built freestanding (`-fno-exceptions -fno-rtti -mno-red-zone`, no stack protector, no PIE).
-- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `files` and `imageviewer`), so only referenced codec objects are pulled in.
+- `libc`, `libgui`, `libapp`, and `libmedia` are static libraries built freestanding (`-fno-exceptions -fno-rtti -mno-red-zone`, no stack protector, no PIE).
+- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libapp + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `files` and `imageviewer`), so only referenced codec objects are pulled in.
 - Each app ELF is staged as `/bin/<name>.elf` and packed into `unifs.img`.
 
 Current apps: shell, init, wm, menubar, dock, files, terminal, latitude, about, preferences, clock, calendar, calculator, imageviewer. Adding an app requires a map entry (see [Building and running](build.md)).

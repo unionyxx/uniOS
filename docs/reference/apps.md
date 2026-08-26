@@ -27,6 +27,8 @@ Occupies window slot 1: Files, Image Viewer, Latitude, Terminal, Calculator, Cal
 
 ## Applications
 
+Every app is built on the libapp runtime (`on_draw`/`on_event`/`on_menu`/`on_menus`/`on_settings`/`on_idle` callbacks over a managed window and canvas — see [Userspace runtime](userspace.md)); window registration, the event loop, resize/theme/menu plumbing, and damage publishing are shared infrastructure, not per-app code. The terminal additionally drives its own loop in manual mode around the shell pipe.
+
 | App | Description |
 | --- | --- |
 | **terminal** | Terminal emulator hosting the shell over pipes; epoll on shell output plus GUI events (~16 ms idle poll); per-cell colors with an ANSI CSI subset (clear, cursor home/move, erase line, SGR foreground colors); 2048-line scrollback that holds its position while output streams; blinking caret while focused; starts 80x25. Mouse drag selects output (tinted with the accent color; the selection is in viewport coordinates and clears on scroll, resize, new output, or Clear Screen); copy goes to the system clipboard with Ctrl+X or Edit > Copy (Ctrl+C stays SIGINT), and paste writes the clipboard into the shell with Ctrl+V or right-click. Publishes app menus: Edit (Copy/Paste/Select All/Clear Screen), View (Zoom In / Zoom Out / Actual Size — a font-step offset persisted as `terminal_zoom`, menu-driven because Ctrl+=/- collapse to plain '='/'-' at the PS/2 layer), and Help (tips overlay, About). |

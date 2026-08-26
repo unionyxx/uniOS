@@ -6,12 +6,12 @@
 #include <uapi/fs.h>
 #include <uapi/gui.h>
 
+#include "../../libapp/app.h"
+#include "../../libapp/widgets.h"
 #include "../../libc/config_utils.h"
 #include "../../libc/log.h"
 #include "../../libc/unistd.h"
 #include "../../libc/wallpaper_defaults.h"
-#include "../../libapp/app.h"
-#include "../../libapp/widgets.h"
 
 static constexpr const char *SYSTEM_CONFIG_PATH = "/data/SYSTEM.CFG";
 static constexpr const char *SYSTEM_BOOTSTRAP_CONFIG_PATH = "/etc/system.conf";
@@ -462,23 +462,21 @@ static void draw_preferences(App *app, Surface *win)
         bool stacked_controls = content_w < gui_scaled_metric(420);
         if (stacked_controls) {
             st->wallpaper_rect = gui_rect_make(content_x, controls_y, content_w, gui_app_control_h());
-            st->apply.rect =
-                gui_rect_make(content_x, st->wallpaper_rect.y + st->wallpaper_rect.h + gui_space_1(),
-                              (content_w - gui_space_1()) / 2, gui_app_control_h());
+            st->apply.rect = gui_rect_make(content_x, st->wallpaper_rect.y + st->wallpaper_rect.h + gui_space_1(),
+                                           (content_w - gui_space_1()) / 2, gui_app_control_h());
             st->def.rect = gui_rect_make(st->apply.rect.x + st->apply.rect.w + gui_space_1(), st->apply.rect.y,
                                          content_x + content_w - (st->apply.rect.x + st->apply.rect.w + gui_space_1()),
                                          gui_app_control_h());
         } else {
             st->wallpaper_rect = gui_rect_make(
                 content_x, controls_y, content_w - (apply_w + default_w + gui_space_1() * 2), gui_app_control_h());
-            st->apply.rect = gui_rect_make(
-                st->wallpaper_rect.x + st->wallpaper_rect.w + gui_space_1(), st->wallpaper_rect.y,
-                apply_w, gui_app_control_h());
+            st->apply.rect = gui_rect_make(st->wallpaper_rect.x + st->wallpaper_rect.w + gui_space_1(),
+                                           st->wallpaper_rect.y, apply_w, gui_app_control_h());
             st->def.rect = gui_rect_make(st->apply.rect.x + st->apply.rect.w + gui_space_1(), st->apply.rect.y,
                                          default_w, gui_app_control_h());
         }
-        widget_field_draw(win, &st->wallpaper, st->wallpaper_rect.x, st->wallpaper_rect.y,
-                          st->wallpaper_rect.w, st->wallpaper_rect.h);
+        widget_field_draw(win, &st->wallpaper, st->wallpaper_rect.x, st->wallpaper_rect.y, st->wallpaper_rect.w,
+                          st->wallpaper_rect.h);
         widget_button_draw(win, &st->apply, "Apply", true, false);
         widget_button_draw(win, &st->def, "Default", false, false);
 
@@ -509,8 +507,8 @@ static void draw_preferences(App *app, Surface *win)
         int row_h = gui_app_row_tall_h();
         st->ethernet.rect = gui_rect_make(content_x, content_y, content_w, row_h);
         st->dhcp.rect = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
-        widget_toggle_draw(win, &st->ethernet, "Ethernet", "Use the wired Ethernet stack when a supported NIC is present",
-                           state->ethernet_enabled);
+        widget_toggle_draw(win, &st->ethernet, "Ethernet",
+                           "Use the wired Ethernet stack when a supported NIC is present", state->ethernet_enabled);
         widget_toggle_draw(win, &st->dhcp, "DHCP", "Request address, gateway, and DNS over Ethernet",
                            state->ethernet_use_dhcp);
         int note_y = st->dhcp.rect.y + st->dhcp.rect.h + gui_space_2();
@@ -572,8 +570,10 @@ static void draw_preferences(App *app, Surface *win)
 
     if (st->help.open) {
         static const char *tips[] = {
-            "Pick a section on the left to change its settings", "Theme, volume and toggles apply immediately",
-            "Wallpaper Apply needs a readable .uowp path", "Storage mode controls whether changes persist to /data",
+            "Pick a section on the left to change its settings",
+            "Theme, volume and toggles apply immediately",
+            "Wallpaper Apply needs a readable .uowp path",
+            "Storage mode controls whether changes persist to /data",
             "Settings marked session-only reset on the next boot",
         };
         widget_help_draw(win, view_w, view_h, scroll_y, "Settings Help", tips, 5);
@@ -697,8 +697,7 @@ static void preferences_event(App *app, const Event *ev)
             }
             if (widget_toggle_event(&st->transparency, ev) & WIDGET_CLICKED) {
                 state->transparency_level = (state->transparency_level > 200) ? 180 : 255;
-                apply_system_settings(state, registry, "Transparency updated",
-                                      "Transparency applied for this session");
+                apply_system_settings(state, registry, "Transparency updated", "Transparency applied for this session");
                 app_invalidate_all(app);
                 break;
             }
@@ -725,7 +724,8 @@ static void preferences_event(App *app, const Event *ev)
             }
             if (widget_toggle_event(&st->dhcp, ev) & WIDGET_CLICKED) {
                 state->ethernet_use_dhcp = !state->ethernet_use_dhcp;
-                apply_network_settings(state, registry, "DHCP updated", "Ethernet DHCP setting applied for this session");
+                apply_network_settings(state, registry, "DHCP updated",
+                                       "Ethernet DHCP setting applied for this session");
                 app_invalidate_all(app);
                 break;
             }
@@ -836,9 +836,8 @@ static void preferences_idle(App *app)
 {
     PreferencesApp *st = (PreferencesApp *)app_user(app);
     Registry *registry = gui_registry();
-    int current_storage_mode = registry && registry->storage_mode <= STORAGE_MODE_WRITABLE
-                                   ? (int)registry->storage_mode
-                                   : get_storage_mode();
+    int current_storage_mode =
+        registry && registry->storage_mode <= STORAGE_MODE_WRITABLE ? (int)registry->storage_mode : get_storage_mode();
     if (current_storage_mode >= STORAGE_MODE_OFF && current_storage_mode <= STORAGE_MODE_WRITABLE &&
         current_storage_mode != st->state.storage_mode) {
         st->state.storage_mode = current_storage_mode;

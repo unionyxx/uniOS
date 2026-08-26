@@ -6,10 +6,10 @@
 #include <uapi/syscalls.h>
 #include <unistd.h>
 
-#include "../../libc/config_utils.h"
-#include "../../libc/syscall.h"
 #include "../../libapp/app.h"
 #include "../../libapp/widgets.h"
+#include "../../libc/config_utils.h"
+#include "../../libc/syscall.h"
 #include "../../libgui/gui.h"
 #include "../../libmedia/media_image.h"
 
@@ -1994,9 +1994,8 @@ static void files_idle(App *app)
     AppState *state = &st->state;
 
     Registry *registry = gui_registry();
-    int current_storage_mode = registry && registry->storage_mode <= STORAGE_MODE_WRITABLE
-                                   ? (int)registry->storage_mode
-                                   : get_storage_mode();
+    int current_storage_mode =
+        registry && registry->storage_mode <= STORAGE_MODE_WRITABLE ? (int)registry->storage_mode : get_storage_mode();
     if (current_storage_mode != state->storage_mode) {
         refresh_volumes(state);
         select_default_location(state, false);

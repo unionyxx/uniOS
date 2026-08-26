@@ -5,9 +5,9 @@
 #include <uapi/event.h>
 #include <uapi/sysinfo.h>
 
-#include "../../libc/unistd.h"
 #include "../../libapp/app.h"
 #include "../../libapp/widgets.h"
+#include "../../libc/unistd.h"
 
 // Menubar command IDs (dispatched through WindowEntry.menu_command_id).
 enum
