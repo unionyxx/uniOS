@@ -1128,12 +1128,12 @@ static void draw_menu(Surface *win, AppState *state, LayoutCache *cache)
 
 static inline int files_icon_cell_w()
 {
-    return gui_scaled_metric(104);
+    return gui_scaled_metric(112);
 }
 
 static inline int files_icon_cell_h()
 {
-    return gui_scaled_metric(96);
+    return gui_scaled_metric(130);
 }
 
 // Shape-based fallback icon: folder = tab + body, file = page with text
@@ -1190,7 +1190,7 @@ static const Surface *files_type_icon(int kind)
         static const char *const names[FILES_TYPE_ICON_COUNT] = {"folder", "file", "file-image"};
         char path[64];
         snprintf(path, sizeof(path), "/usr/share/appicons/%s.uoic", names[kind]);
-        if (!gui_load_uoic(path, 40, (uint32_t)gui_ui_scale_pct(), &g_type_icons[kind]))
+        if (!gui_load_uoic(path, 80, (uint32_t)gui_ui_scale_pct(), &g_type_icons[kind]))
             memset(&g_type_icons[kind], 0, sizeof(g_type_icons[kind]));
     }
     return g_type_icons[kind].buffer ? &g_type_icons[kind] : nullptr;
@@ -1333,7 +1333,7 @@ static void refresh_thumb(AppState *state, int index)
     if (!ok)
         return;
 
-    int box = gui_scaled_metric(40);
+    int box = gui_scaled_metric(80);
     int tw = 1, th = 1;
     if (full.width > 0 && full.height > 0) {
         if (full.width >= full.height) {
@@ -1370,7 +1370,7 @@ static void draw_file_icon_cell(Surface *win, AppState *state, const Rect &cell,
         gui_fill_rounded_rect(win, cell.x, cell.y, cell.w, cell.h, rad, g_gui_style.chrome_bg_alt);
     }
 
-    int icon_size = gui_scaled_metric(40);
+    int icon_size = gui_scaled_metric(80);
     int icon_x = cell.x + (cell.w - icon_size) / 2;
     int icon_y = cell.y + gui_space_2();
 
@@ -1410,8 +1410,19 @@ static void draw_file_icon_cell(Surface *win, AppState *state, const Rect &cell,
     }
 
     int label_y = icon_y + icon_size + gui_space_1();
-    gui_draw_text_clipped(win, gui_font_default(), cell.x + gui_space_1(), label_y, cell.w - gui_space_2(), row.name,
-                          g_gui_style.text, g_gui_style.app_surface);
+    uint32_t cell_bg = g_gui_style.app_surface;
+    if (selected)
+        cell_bg = g_gui_style.accent_soft;
+    else if (hovered)
+        cell_bg = g_gui_style.chrome_bg_alt;
+    int max_label_w = cell.w - gui_space_2();
+    int label_w = gui_measure_text(gui_font_default(), row.name);
+    int label_x = cell.x + (cell.w - label_w) / 2;
+    if (label_w > max_label_w) {
+        label_x = cell.x + gui_space_1();
+        label_w = max_label_w;
+    }
+    gui_draw_text_clipped(win, gui_font_default(), label_x, label_y, label_w, row.name, g_gui_style.text, cell_bg);
 }
 
 static int compute_files_content_height(AppState *state, int content_w)
