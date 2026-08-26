@@ -1,5 +1,9 @@
 #include <kernel/elf.h>
 #include <kernel/ktest.h>
+#include <kernel/mm/heap.h>
+#include <kernel/mm/vma.h>
+#include <kernel/mm/vmm.h>
+#include <kernel/process.h>
 #include <libk/kstring.h>
 
 namespace {
@@ -204,6 +208,110 @@ KTEST(elf_validate_rejects_dangling_entry)
     make_valid(e);
     e.ehdr.e_entry = 0x500000; // outside the only segment
     KTEST_EXPECT(!validate(e));
+}
+
+// Regression: the BSS zero-fill must be clamped to each page. Before the fix,
+// pages deep in the BSS (vaddr + filesz below page_vaddr) computed the zero
+// range from the unclamped file_hi, wrapping the write backwards into
+// unrelated physical memory below the segment's frame and silently shredding
+// whatever lived there — the "very large PT_LOAD segments corrupt the system"
+// bug. Load a multi-page-BSS segment into a scratch address space and verify
+// every BSS byte is zero while the file-backed bytes survive.
+KTEST(elf_load_user_zeroes_multipage_bss_in_bounds)
+{
+    constexpr uint64_t k_vaddr = 0x4005B0;                    // unaligned, like real binaries
+    constexpr uint64_t k_filesz = 0x108;                      // payload bytes
+    constexpr uint64_t k_memsz = k_filesz + 4 * 4096 + 0x240; // ~4.6 pages of BSS
+    constexpr uint64_t k_entry = k_vaddr;
+
+    struct [[gnu::packed]] LoadElf
+    {
+        Elf64_Ehdr ehdr;
+        Elf64_Phdr phdr;
+        uint8_t payload[k_filesz];
+    };
+
+    static LoadElf e;
+    kstring::zero_memory(&e, sizeof(e));
+    *reinterpret_cast<uint32_t *>(e.ehdr.e_ident) = ELF_MAGIC;
+    e.ehdr.e_ident[4] = ELFCLASS64;
+    e.ehdr.e_ident[5] = ELFDATA2LSB;
+    e.ehdr.e_type = ET_EXEC;
+    e.ehdr.e_machine = EM_X86_64;
+    e.ehdr.e_entry = k_entry;
+    e.ehdr.e_phoff = sizeof(Elf64_Ehdr);
+    e.ehdr.e_phentsize = sizeof(Elf64_Phdr);
+    e.ehdr.e_phnum = 1;
+
+    e.phdr.p_type = PT_LOAD;
+    e.phdr.p_flags = PF_R | PF_W;
+    e.phdr.p_offset = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
+    e.phdr.p_vaddr = k_vaddr;
+    e.phdr.p_filesz = k_filesz;
+    e.phdr.p_memsz = k_memsz;
+
+    for (uint64_t i = 0; i < k_filesz; i++)
+        e.payload[i] = static_cast<uint8_t>(i * 7 + 3);
+
+    uint64_t *pml4 = vmm_create_address_space();
+    KTEST_EXPECT(pml4 != nullptr);
+
+    Process *loader = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
+    KTEST_EXPECT(loader != nullptr);
+    kstring::zero_memory(loader, sizeof(Process));
+    loader->page_table = pml4;
+    loader->vma_list = nullptr;
+
+    const uint64_t entry = elf_load_user(reinterpret_cast<const uint8_t *>(&e), sizeof(e), loader);
+    KTEST_EXPECT(entry == k_entry);
+
+    const uint64_t hhdm = vmm_get_hhdm_offset();
+
+    // File-backed bytes survived the copy. vmm_virt_to_phys_in already folds
+    // in the page offset, so the HHDM address lands on the exact byte.
+    bool data_ok = true;
+    for (uint64_t off = 0; off < k_filesz && data_ok; off++) {
+        const uint64_t phys = vmm_virt_to_phys_in(pml4, k_vaddr + off);
+        if (!phys) {
+            data_ok = false;
+            break;
+        }
+        const uint8_t got = *reinterpret_cast<const uint8_t *>(phys + hhdm);
+        if (got != static_cast<uint8_t>(off * 7 + 3))
+            data_ok = false;
+    }
+    KTEST_EXPECT(data_ok);
+
+    // Every BSS byte across the whole multi-page tail reads back zero.
+    bool bss_zero = true;
+    uint64_t va = k_vaddr + k_filesz;
+    const uint64_t seg_end = k_vaddr + k_memsz;
+    while (va < seg_end && bss_zero) {
+        const uint64_t page_va = va & ~0xFFFULL;
+        const uint64_t phys = vmm_virt_to_phys_in(pml4, page_va);
+        if (!phys) {
+            bss_zero = false;
+            break;
+        }
+        const uint8_t *page = reinterpret_cast<const uint8_t *>(phys + hhdm);
+        const uint64_t start = va - page_va;
+        uint64_t stop = page_va + 4096;
+        if (stop > seg_end)
+            stop = seg_end;
+        for (uint64_t b = start; b < (stop - page_va); b++) {
+            if (page[b] != 0) {
+                bss_zero = false;
+                break;
+            }
+        }
+        va = page_va + 4096;
+    }
+    KTEST_EXPECT(bss_zero);
+
+    if (loader->vma_list)
+        vma_free_all(loader->vma_list);
+    vmm_free_address_space(pml4);
+    aligned_free(loader);
 }
 
 // Overlapping PT_LOAD segments would merge W and X permissions on the shared

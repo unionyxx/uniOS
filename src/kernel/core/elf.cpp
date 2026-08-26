@@ -4,6 +4,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/panic.h>
 #include <kernel/process.h>
 #include <libk/kstring.h>
 #include <stddef.h>
@@ -192,13 +193,22 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
     for (uint64_t p = 0; p < num_pages; p++) {
         const uint64_t page_vaddr = page_base + (p * k_page_size);
         uint64_t phys = target_pml4 ? vmm_virt_to_phys_in(target_pml4, page_vaddr) : vmm_virt_to_phys(page_vaddr);
+        if (phys != 0 && !pmm_is_managed(reinterpret_cast<void *>(phys & ~(k_page_size - 1)))) {
+            // A page-table entry yielded a physical address outside managed
+            // RAM: the tables were corrupted before we got here. Fail loudly
+            // instead of dereferencing a bogus HHDM address.
+            DEBUG_ERROR("load_segment: corrupt phys 0x%llx for vaddr 0x%llx (segment vaddr 0x%llx memsz 0x%llx)",
+                        (unsigned long long)phys, (unsigned long long)page_vaddr, (unsigned long long)vaddr,
+                        (unsigned long long)memsz);
+            panic("load_segment: corrupt physical address in page tables");
+        }
         if (phys == 0) {
             void *frame = pmm_alloc_frame();
             if (!frame)
                 return false;
             phys = reinterpret_cast<uint64_t>(frame);
             const bool mapped = target_pml4 ? vmm_map_page_in(target_pml4, page_vaddr, phys, flags).ok()
-                                           : vmm_map_page(page_vaddr, phys, flags).ok();
+                                            : vmm_map_page(page_vaddr, phys, flags).ok();
             if (!mapped) {
                 pmm_free_frame(frame);
                 return false;
@@ -238,12 +248,16 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
 
         // Zero the BSS tail of this page ([filesz, memsz)) even when the page
         // already existed, so no stale file/segment data leaks into BSS.
-        const uint64_t seg_lo = page_vaddr > vaddr ? page_vaddr : vaddr;
-        const uint64_t seg_hi = (page_vaddr + k_page_size) < (vaddr + memsz) ? (page_vaddr + k_page_size)
-                                                                              : (vaddr + memsz);
+        // zero_start must be clamped to the page: on pages deep in the BSS
+        // (vaddr + filesz below page_vaddr) the unclamped subtraction wraps
+        // dest backwards and the zero-fill lands in unrelated physical memory
+        // below the segment's frame — silently shredding whatever lives there.
+        const uint64_t seg_hi =
+            (page_vaddr + k_page_size) < (vaddr + memsz) ? (page_vaddr + k_page_size) : (vaddr + memsz);
         const uint64_t file_hi = seg_hi < (vaddr + filesz) ? seg_hi : (vaddr + filesz);
-        if (seg_hi > file_hi)
-            kstring::zero_memory(dest + (file_hi - page_vaddr), seg_hi - file_hi);
+        const uint64_t zero_start = file_hi > page_vaddr ? file_hi : page_vaddr;
+        if (seg_hi > zero_start)
+            kstring::zero_memory(dest + (zero_start - page_vaddr), seg_hi - zero_start);
     }
     return true;
 }
@@ -297,11 +311,10 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
 
         const uint64_t vaddr = stack_base + static_cast<uint64_t>(i) * k_page_size;
         const uint64_t frame_phys = reinterpret_cast<uint64_t>(frame);
-        const bool mapped = target_pml4 ? vmm_map_page_in(target_pml4, vaddr, frame_phys,
-                                                          PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NX)
-                                               .ok()
-                                       : vmm_map_page(vaddr, frame_phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NX)
-                                             .ok();
+        const bool mapped =
+            target_pml4
+                ? vmm_map_page_in(target_pml4, vaddr, frame_phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NX).ok()
+                : vmm_map_page(vaddr, frame_phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NX).ok();
         if (!mapped) {
             pmm_free_frame(frame);
             for (int j = 0; j < i; j++) {

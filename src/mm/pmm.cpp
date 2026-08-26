@@ -13,6 +13,12 @@ static uint8_t *g_pmm_bitmap_buffer = nullptr;
 static Bitmap g_pmm_bitmap;
 static uint16_t *g_pmm_refcounts = nullptr;
 static size_t g_bitmap_bits = 0;
+#ifdef DEBUG
+// Frame ownership ledger: the allocation site (return address) currently
+// holding each frame, 0 when free. Catches double-allocation at the moment a
+// still-owned frame is handed out again.
+static uint64_t *g_pmm_owners = nullptr;
+#endif
 
 static uint64_t g_total_memory = 0;
 static uint64_t g_free_memory = 0;
@@ -98,8 +104,20 @@ void pmm_init()
     }
     uint64_t refcounts_size_bytes = (refcount_raw_bytes + 4095) & ~4095ULL;
 
+#ifdef DEBUG
+    uint64_t owners_raw_bytes;
+    if (__builtin_mul_overflow(max_frames, sizeof(uint64_t), &owners_raw_bytes) ||
+        owners_raw_bytes > UINT64_MAX - 4095ULL) {
+        panic("pmm: owner ledger size overflow");
+    }
+    uint64_t owners_size_bytes = (owners_raw_bytes + 4095) & ~4095ULL;
+#else
+    uint64_t owners_size_bytes = 0;
+#endif
+
     uint64_t bitmap_phys_addr = 0;
     uint64_t refcounts_phys_addr = 0;
+    uint64_t owners_phys_addr = 0;
     bool bitmap_phys_found = false;
     bool refcounts_phys_found = false;
 
@@ -115,14 +133,17 @@ void pmm_init()
                 bitmap_phys_found = true;
                 uint64_t metadata_size;
                 if (!refcounts_phys_found &&
-                    !__builtin_add_overflow(bitmap_size_bytes, refcounts_size_bytes, &metadata_size) &&
+                    !__builtin_add_overflow(bitmap_size_bytes, refcounts_size_bytes + owners_size_bytes,
+                                            &metadata_size) &&
                     length >= metadata_size) {
                     refcounts_phys_addr = base + bitmap_size_bytes;
                     refcounts_phys_found = true;
+                    owners_phys_addr = base + bitmap_size_bytes + refcounts_size_bytes;
                 }
-            } else if (!refcounts_phys_found && length >= refcounts_size_bytes) {
+            } else if (!refcounts_phys_found && length >= refcounts_size_bytes + owners_size_bytes) {
                 refcounts_phys_addr = base;
                 refcounts_phys_found = true;
+                owners_phys_addr = base + refcounts_size_bytes;
             }
 
             if (bitmap_phys_found && refcounts_phys_found)
@@ -139,6 +160,10 @@ void pmm_init()
 
     g_pmm_refcounts = reinterpret_cast<uint16_t *>(refcounts_phys_addr + vmm_get_hhdm_offset());
     kstring::zero_memory(g_pmm_refcounts, g_bitmap_bits * sizeof(uint16_t));
+#ifdef DEBUG
+    g_pmm_owners = reinterpret_cast<uint64_t *>(owners_phys_addr + vmm_get_hhdm_offset());
+    kstring::zero_memory(g_pmm_owners, g_bitmap_bits * sizeof(uint64_t));
+#endif
 
     g_pmm_bitmap.set_range(0, g_bitmap_bits, true);
 
@@ -189,6 +214,15 @@ void pmm_init()
         g_pmm_refcounts[refcounts_start_frame + i] = 1;
     g_free_memory -= refcounts_size_bytes;
 
+#ifdef DEBUG
+    uint64_t owners_start_frame = owners_phys_addr / k_frame_size;
+    uint64_t owners_frame_count = owners_size_bytes / k_frame_size;
+    g_pmm_bitmap.set_range(owners_start_frame, owners_frame_count, true);
+    for (size_t i = 0; i < owners_frame_count; i++)
+        g_pmm_refcounts[owners_start_frame + i] = 1;
+    g_free_memory -= owners_size_bytes;
+#endif
+
     reserve_frame_permanently(0);
     if (g_bitmap_bits > 1 && g_pmm_bitmap.get_hint() == 0) {
         g_pmm_bitmap.update_hint(1);
@@ -206,6 +240,17 @@ void *pmm_alloc_frame()
     }
 
     if (frame_idx != static_cast<size_t>(-1) && frame_idx < g_bitmap_bits) {
+#ifdef DEBUG
+        if (g_pmm_owners && g_pmm_owners[frame_idx] != 0) {
+            uint64_t held_by = g_pmm_owners[frame_idx];
+            spinlock_release_irqrestore(&g_pmm_lock, flags);
+            KLOG(LogModule::Mem, LogLevel::Fatal, "pmm: double-alloc of frame 0x%lx (held by %p, re-requested by %p)",
+                 frame_idx * k_frame_size, reinterpret_cast<void *>(held_by), __builtin_return_address(0));
+            panic("pmm: double-alloc of frame (details in log)");
+        }
+        if (g_pmm_owners)
+            g_pmm_owners[frame_idx] = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+#endif
         g_pmm_bitmap.set(frame_idx, true);
         g_pmm_refcounts[frame_idx] = 1;
         g_free_memory -= k_frame_size;
@@ -234,6 +279,23 @@ void *pmm_alloc_frames(size_t count)
 
     if (frame_idx != static_cast<size_t>(-1) && count <= g_bitmap_bits - frame_idx &&
         (static_cast<uint64_t>(frame_idx) + count - 1) <= g_highest_page) {
+#ifdef DEBUG
+        if (g_pmm_owners) {
+            for (size_t i = 0; i < count; i++) {
+                if (g_pmm_owners[frame_idx + i] != 0) {
+                    uint64_t held_by = g_pmm_owners[frame_idx + i];
+                    spinlock_release_irqrestore(&g_pmm_lock, flags);
+                    KLOG(LogModule::Mem, LogLevel::Fatal,
+                         "pmm: double-alloc of frame 0x%lx in range (held by %p, re-requested by %p)",
+                         (frame_idx + i) * k_frame_size, reinterpret_cast<void *>(held_by),
+                         __builtin_return_address(0));
+                    panic("pmm: double-alloc of frame in range (details in log)");
+                }
+            }
+            for (size_t i = 0; i < count; i++)
+                g_pmm_owners[frame_idx + i] = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+        }
+#endif
         g_pmm_bitmap.set_range(frame_idx, count, true);
         for (size_t i = 0; i < count; i++) {
             g_pmm_refcounts[frame_idx + i] = 1;
@@ -341,6 +403,10 @@ void pmm_refcount_dec(void *frame)
         g_pmm_bitmap.set(frame_idx, false);
         g_pmm_bitmap.update_hint(frame_idx);
         g_free_memory += k_frame_size;
+#ifdef DEBUG
+        if (g_pmm_owners)
+            g_pmm_owners[frame_idx] = 0;
+#endif
     }
 
     spinlock_release_irqrestore(&g_pmm_lock, flags);

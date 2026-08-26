@@ -27,7 +27,7 @@ The child's pid is captured before it is published to the scheduler — a fast e
 
 - Refused when other threads share the address space.
 - The ELF is validated (`\x7FELF`, ELF64, little-endian, `ET_EXEC`/`ET_DYN`, `EM_X86_64`, sane program headers). Entry must be covered by a segment, and overlapping `PT_LOAD` segments are rejected (they could merge writable and executable ranges).
-- Segments map with `USER` plus `WRITABLE` when `PF_W` and `NX` unless `PF_X`; the 32 KiB user stack maps below `0x0000700000000000`.
+- Segments map with `USER` plus `WRITABLE` when `PF_W` and `NX` unless `PF_X`; the 32 KiB user stack maps below `0x0000700000000000`. Each page's BSS tail (`[filesz, memsz)`) is zeroed with the range clamped to the page — the lower bound is `max(page start, vaddr+filesz)`, because on pages deep in a multi-page BSS the file end lies below the page and an unclamped subtraction would wrap the zero-fill into unrelated physical memory below the segment.
 - The old address space and VMAs are freed only after the new ones are installed; CR3 is switched on return to user.
 
 There is no argv/envp or aux vector: `crt0` calls `main()` with no arguments.
@@ -40,7 +40,7 @@ There is no argv/envp or aux vector: `crt0` calls `main()` with no arguments.
 2. Under the scheduler lock: becomes a Zombie with an exit status; orphans are reparented to pid 1 (or to the pid-0 kernel task when init is absent); waiters are woken.
 3. Switches to the kernel address space **before** scheduling, so the exiting core never runs on the dying task's mappings.
 
-`SYS_WAIT4` supports specific pids, any-child (`-1`), and `WNOHANG`. Reaping frees the kernel stack, address space, and VMAs — except when the page table, VMA list, or VMA lock is still shared with live threads; such zombies are parked on a deferred-free list and retried on every reap pass. Kernel-parented zombies are reaped automatically.
+`SYS_WAIT4` supports specific pids, any-child (`-1`), and `WNOHANG`. Reaping frees the kernel stack, address space, and VMAs — except when the page table, VMA list, or VMA lock is still shared with live threads; such zombies are parked on a deferred-free list and retried on every reap pass. A waitpid that finds the child in its children list but not in the global process list refuses the reap (the entry was already detached) instead of freeing a possibly deferred or dangling struct. Kernel-parented zombies are reaped automatically.
 
 ## Signals
 

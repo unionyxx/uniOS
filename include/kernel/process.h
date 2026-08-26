@@ -102,6 +102,13 @@ struct Process
 
     uint32_t preempt_count;
     uint32_t preempt_pending;
+#ifdef DEBUG
+    // Trailing canary: a wild write into the struct (heap overflow from a
+    // neighbour, stale-pointer reuse) corrupts this before the scheduler
+    // fields that keep the process list walkable. Checked by the scheduler's
+    // list-integrity guard.
+    uint64_t debug_canary;
+#endif
 };
 
 extern "C" void switch_to_task(Process *current, Process *next);

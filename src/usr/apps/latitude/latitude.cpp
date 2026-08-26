@@ -3506,16 +3506,16 @@ static void latitude_handle_menu_command(AppState *state, uint32_t cmd)
 
 struct LatitudeApp
 {
-    TextBuffer *buffer;
-    AppState *state;
-    LatitudeRects *rects;
+    TextBuffer buffer;
+    AppState state;
+    LatitudeRects rects;
 };
 
 static void latitude_draw(App *app, Surface *canvas)
 {
     LatitudeApp *lat = (LatitudeApp *)app_user(app);
-    AppState *state = lat->state;
-    draw_latitude(canvas, state, lat->rects);
+    AppState *state = &lat->state;
+    draw_latitude(canvas, state, &lat->rects);
     state->needs_redraw = false;
     app_invalidate_all(app);
 
@@ -3531,26 +3531,26 @@ static void latitude_draw(App *app, Surface *canvas)
 static void latitude_menus(App *app)
 {
     LatitudeApp *lat = (LatitudeApp *)app_user(app);
-    latitude_publish_menus(lat->state);
+    latitude_publish_menus(&lat->state);
 }
 
 static void latitude_menu(App *app, uint32_t cmd)
 {
     LatitudeApp *lat = (LatitudeApp *)app_user(app);
-    latitude_handle_menu_command(lat->state, cmd);
-    lat->state->needs_redraw = true;
+    latitude_handle_menu_command(&lat->state, cmd);
+    lat->state.needs_redraw = true;
 }
 
 static void latitude_settings(App *app)
 {
     LatitudeApp *lat = (LatitudeApp *)app_user(app);
-    lat->state->needs_redraw = true;
+    lat->state.needs_redraw = true;
 }
 
 static void latitude_idle(App *app)
 {
     LatitudeApp *lat = (LatitudeApp *)app_user(app);
-    AppState *state = lat->state;
+    AppState *state = &lat->state;
 
     uint64_t loop_ticks = get_ticks();
     if (state->button_pressed != 0 && loop_ticks - state->button_pressed_ticks >= 150) {
@@ -3575,8 +3575,8 @@ static void latitude_idle(App *app)
 static void latitude_event(App *app, const Event *ev)
 {
     LatitudeApp *lat = (LatitudeApp *)app_user(app);
-    AppState *state = lat->state;
-    LatitudeRects *rects = lat->rects;
+    AppState *state = &lat->state;
+    LatitudeRects *rects = &lat->rects;
 
     switch (ev->type) {
         case EVT_UNFOCUS:
@@ -3749,25 +3749,8 @@ static void latitude_event(App *app, const Event *ev)
 extern "C" int main()
 {
     static LatitudeApp lat = {};
-
-    // The editor's buffers are heap allocations (as before the libapp
-    // migration): keeping over a megabyte out of the ELF image avoids
-    // pressure on the kernel's exec-time segment mapping.
-    TextBuffer *buffer = static_cast<TextBuffer *>(malloc(sizeof(TextBuffer)));
-    AppState *state = static_cast<AppState *>(malloc(sizeof(AppState)));
-    LatitudeRects *rects = static_cast<LatitudeRects *>(malloc(sizeof(LatitudeRects)));
-    if (!buffer || !state || !rects) {
-        free(buffer);
-        free(state);
-        free(rects);
-        return 1;
-    }
-    memset(state, 0, sizeof(AppState));
-    memset(rects, 0, sizeof(LatitudeRects));
-
-    lat.buffer = buffer;
-    lat.state = state;
-    lat.rects = rects;
+    AppState *state = &lat.state;
+    TextBuffer *buffer = &lat.buffer;
 
     state->buffer = buffer;
     state->project_selected = -1;
@@ -3802,9 +3785,5 @@ extern "C" int main()
     config.on_settings = latitude_settings;
     config.on_idle = latitude_idle;
 
-    int rc = app_run(&config, &lat);
-    free(buffer);
-    free(state);
-    free(rects);
-    return rc;
+    return app_run(&config, &lat);
 }

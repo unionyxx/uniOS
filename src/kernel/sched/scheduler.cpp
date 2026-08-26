@@ -46,6 +46,51 @@ extern "C" void scheduler_unlock_after_switch();
 // kernel-zombie reap pass until the last sharer is gone. queue_next links.
 static Process *g_deferred_frees = nullptr;
 
+#ifdef DEBUG
+static constexpr uint64_t k_proc_canary = 0x5AFECA7A11CED0ULL;
+
+static inline void proc_canary_stamp(Process *p)
+{
+    if (p)
+        p->debug_canary = k_proc_canary;
+}
+
+// DEBUG-only integrity guard: verifies the circular process list is intact
+// and every node's canary is alive. A failure names the corrupted process
+// (pid/name) so the overwriting path can be identified. Cheap: the list is
+// short and this runs at list mutation points.
+static void proc_list_check_locked(const char *where)
+{
+    if (!g_proc_list)
+        return;
+    Process *p = g_proc_list;
+    for (int guard = 0; guard < 4096; guard++) {
+        if (p->debug_canary != k_proc_canary) {
+            KLOG(LogModule::Sched, LogLevel::Fatal, "%s: canary corrupt on pid %llu (%s)", where,
+                 (unsigned long long)p->pid, p->name);
+            panic("process struct corrupted (details in log)");
+        }
+        Process *nxt = p->next;
+        if (!nxt) {
+            KLOG(LogModule::Sched, LogLevel::Fatal, "%s: NULL next after pid %llu (%s)", where,
+                 (unsigned long long)p->pid, p->name);
+            panic("process list broken (details in log)");
+        }
+        p = nxt;
+        if (p == g_proc_list)
+            return;
+    }
+    panic("process list not circular");
+}
+#else
+static inline void proc_canary_stamp(Process *)
+{
+}
+static inline void proc_list_check_locked(const char *)
+{
+}
+#endif
+
 // Returns true when `target` was fully destroyed, false when it had to be
 // deferred because live threads still share its address space or its
 // embedded vma lock.
@@ -60,6 +105,8 @@ static bool process_free_reaped(Process *target)
 
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
+
+    proc_list_check_locked("free_reaped");
 
     Process *curr = g_proc_list;
     if (curr) {
@@ -116,6 +163,7 @@ static void retry_deferred_frees()
     while (true) {
         const uint64_t flags = interrupts_save_disable();
         spinlock_acquire(&g_sched_lock);
+        proc_list_check_locked("retry_deferred");
         Process *target = g_deferred_frees;
         if (!target) {
             spinlock_release(&g_sched_lock);
@@ -189,6 +237,7 @@ static Process *detach_kernel_zombie_locked()
 
     target->next = nullptr;
     target->sibling_next = nullptr;
+    proc_list_check_locked("detach_zombie");
     return target;
 }
 
@@ -1058,6 +1107,7 @@ void scheduler_init()
 
     kstring::zero_memory(kproc, sizeof(Process));
     event_init(kproc->event_queue);
+    proc_canary_stamp(kproc);
 
     kproc->pid = 0;
     kproc->uid = 0;
@@ -1113,6 +1163,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
 
     kstring::zero_memory(proc, sizeof(Process));
     event_init(proc->event_queue);
+    proc_canary_stamp(proc);
     proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     proc->uid = current_proc() ? current_proc()->uid : 0;
     proc->parent_pid = current_proc() ? current_proc()->pid : 0;
@@ -1166,6 +1217,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     g_proc_tail->next = proc;
     proc->next = g_proc_list;
     g_proc_tail = proc;
+    proc_list_check_locked("enqueue");
 
     proc->children_list = nullptr;
     if (current_proc()) {
@@ -1198,6 +1250,7 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
 
     kstring::zero_memory(proc, sizeof(Process));
     event_init(proc->event_queue);
+    proc_canary_stamp(proc);
     proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     proc->uid = current_proc() ? current_proc()->uid : 0;
     proc->parent_pid = current_proc() ? current_proc()->pid : 0;
@@ -1263,6 +1316,7 @@ void scheduler_enqueue_task(Process *proc)
     g_proc_tail->next = proc;
     proc->next = g_proc_list;
     g_proc_tail = proc;
+    proc_list_check_locked("enqueue");
 
     proc->children_list = nullptr;
     if (current_proc()) {
@@ -1293,6 +1347,7 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
 
     kstring::zero_memory(proc, sizeof(Process));
     event_init(proc->event_queue);
+    proc_canary_stamp(proc);
     proc->pid = 0;
     proc->uid = 0;
     proc->parent_pid = 0;
@@ -1395,6 +1450,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
         return static_cast<uint64_t>(-1);
     kstring::zero_memory(child, sizeof(Process));
     event_init(child->event_queue);
+    proc_canary_stamp(child);
 
     child->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     child->parent_pid = current_proc()->pid;
@@ -1494,6 +1550,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     g_proc_tail->next = child;
     g_proc_tail = child;
     child->next = g_proc_list;
+    proc_list_check_locked("fork");
 
     child->children_list = nullptr;
     child->sibling_next = current_proc()->children_list;
@@ -1643,7 +1700,19 @@ void process_exit(int32_t status)
                     g_proc_list = target->next;
                 if (g_proc_tail == target)
                     g_proc_tail = prev;
+            } else {
+                // The zombie is in our children list but not in the global
+                // list: it was already detached (kernel-zombie reap or a
+                // corrupted list). Freeing it here would leave a dangling
+                // node or double-free a deferred entry.
+                KLOG(LogModule::Sched, LogLevel::Error,
+                     "waitpid: pid %llu (%s) not linked in process list; refusing to reap",
+                     (unsigned long long)target->pid, target->name);
+                spinlock_release(&g_sched_lock);
+                interrupts_restore(flags);
+                return -1;
             }
+            proc_list_check_locked("waitpid");
 
             spinlock_release(&g_sched_lock);
             interrupts_restore(flags);
@@ -1763,6 +1832,7 @@ extern "C" void thread_ret();
     }
     kstring::zero_memory(thread, sizeof(Process));
     event_init(thread->event_queue);
+    proc_canary_stamp(thread);
 
     thread->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     thread->parent_pid = parent->pid;
