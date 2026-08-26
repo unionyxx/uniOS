@@ -41,7 +41,8 @@ void viewer_update_title(const ViewerState *st)
 {
     char title[64];
     if (st->status == VIEWER_LOADED) {
-        snprintf(title, sizeof(title), "%s - %dx%d", base_name(st->path), (int)st->image.width, (int)st->image.height);
+        snprintf(title, sizeof(title), "%s - %dx%d - Image Viewer", base_name(st->path), (int)st->image.width,
+                 (int)st->image.height);
     } else {
         snprintf(title, sizeof(title), "Image Viewer");
     }

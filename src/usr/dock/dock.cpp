@@ -39,6 +39,7 @@ struct DockIconAsset
 
 static constexpr DockItem k_dock_items[] = {
     {"Files", "/bin/files.elf", "F", "files", 0xFFEAF0F8},
+    {"Image Viewer", "/bin/imageviewer.elf", "I", "imageviewer", 0xFF7C3AED},
     {"Latitude", "/bin/latitude.elf", "L", "latitude", 0xFF26323F},
     {"Terminal", "/bin/terminal.elf", ">", "terminal", 0xFF151A22},
     {"Calculator", "/bin/calculator.elf", "C", "calculator", 0xFF4A90E2},
@@ -160,8 +161,7 @@ static void load_dock_icons()
         if (gui_load_uoic(path, SHELL_DOCK_ICON_SIZE / 2, (uint32_t)gui_ui_scale_pct(),
                           &g_calendar_num_assets[i].surface)) {
             g_calendar_num_assets[i].loaded = true;
-            get_surface_active_bounds(g_calendar_num_assets[i].surface,
-                                      &g_calendar_num_assets[i].active_left,
+            get_surface_active_bounds(g_calendar_num_assets[i].surface, &g_calendar_num_assets[i].active_left,
                                       &g_calendar_num_assets[i].active_right);
         }
     }

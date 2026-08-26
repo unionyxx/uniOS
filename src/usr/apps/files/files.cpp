@@ -1136,8 +1136,8 @@ static inline int files_icon_cell_h()
     return gui_scaled_metric(96);
 }
 
-// Shape-based icon: folder = tab + body, file = page with text lines. There
-// are no per-type icon assets, so geometry carries the distinction.
+// Shape-based fallback icon: folder = tab + body, file = page with text
+// lines. Used only when the per-type .uoic thumbnail assets fail to load.
 static void draw_shape_icon(Surface *win, int x, int y, int size, bool is_dir, uint32_t fg, uint32_t detail)
 {
     if (!win || size <= 0)
@@ -1164,6 +1164,112 @@ static void draw_shape_icon(Surface *win, int x, int y, int size, bool is_dir, u
         for (int i = 0; i < 3 && line_y + line_h <= y + size - r; i++) {
             gui_fill_rect(win, line_x, line_y, line_w, line_h, detail);
             line_y += gap_v;
+        }
+    }
+}
+
+enum
+{
+    FILES_TYPE_ICON_FOLDER = 0,
+    FILES_TYPE_ICON_FILE = 1,
+    FILES_TYPE_ICON_IMAGE = 2,
+    FILES_TYPE_ICON_COUNT = 3
+};
+
+static Surface g_type_icons[FILES_TYPE_ICON_COUNT] = {};
+static bool g_type_icon_attempted[FILES_TYPE_ICON_COUNT] = {};
+
+// Per-type thumbnail assets (folder / generic file / image file), loaded once
+// at icon-view size. Falls back to draw_shape_icon when an asset is missing.
+static const Surface *files_type_icon(int kind)
+{
+    if (kind < 0 || kind >= FILES_TYPE_ICON_COUNT)
+        return nullptr;
+    if (!g_type_icon_attempted[kind]) {
+        g_type_icon_attempted[kind] = true;
+        static const char *const names[FILES_TYPE_ICON_COUNT] = {"folder", "file", "file-image"};
+        char path[64];
+        snprintf(path, sizeof(path), "/usr/share/appicons/%s.uoic", names[kind]);
+        if (!gui_load_uoic(path, 40, (uint32_t)gui_ui_scale_pct(), &g_type_icons[kind]))
+            memset(&g_type_icons[kind], 0, sizeof(g_type_icons[kind]));
+    }
+    return g_type_icons[kind].buffer ? &g_type_icons[kind] : nullptr;
+}
+
+static inline uint32_t type_icon_blend_channel(uint32_t c00, uint32_t c10, uint32_t c01, uint32_t c11, uint32_t fx,
+                                               uint32_t fy)
+{
+    uint32_t inv_fx = 256u - fx;
+    uint32_t inv_fy = 256u - fy;
+    uint32_t top = c00 * inv_fx + c10 * fx;
+    uint32_t bot = c01 * inv_fx + c11 * fx;
+    return (top * inv_fy + bot * fy + 32768u) >> 16;
+}
+
+// Bilinear-scaled blit of a premultiplied-alpha UOIC surface onto the opaque
+// window canvas. The loader picks the smallest frame covering the scaled size,
+// which is not necessarily an exact match, so the draw scales to icon_size.
+static void draw_type_icon(Surface *win, const Surface *icon, int x, int y, int size)
+{
+    if (!win || !win->buffer || !icon || !icon->buffer || size <= 0 || icon->width == 0 || icon->height == 0)
+        return;
+
+    int clip_left = x < 0 ? 0 : x;
+    int clip_top = y < 0 ? 0 : y;
+    int clip_right = x + size > (int)win->width ? (int)win->width : x + size;
+    int clip_bottom = y + size > (int)win->height ? (int)win->height : y + size;
+    if (clip_left >= clip_right || clip_top >= clip_bottom)
+        return;
+
+    uint32_t dst_stride = win->pitch / 4u;
+    uint32_t src_stride = icon->pitch / 4u;
+    uint32_t src_w = icon->width;
+    uint32_t src_h = icon->height;
+
+    for (int py = clip_top; py < clip_bottom; py++) {
+        int local_y = py - y;
+        uint64_t src_y_fp = ((uint64_t)local_y * (uint64_t)src_h * 65536u) / (uint32_t)size;
+        uint32_t sy0 = (uint32_t)(src_y_fp >> 16);
+        uint32_t frac_y = ((uint32_t)src_y_fp >> 8) & 0xFFu;
+        uint32_t sy1 = sy0 + 1u < src_h ? sy0 + 1u : sy0;
+
+        uint32_t *dst_row = &win->buffer[(size_t)py * dst_stride];
+        const uint32_t *src_row0 = &icon->buffer[(size_t)sy0 * src_stride];
+        const uint32_t *src_row1 = &icon->buffer[(size_t)sy1 * src_stride];
+
+        for (int px = clip_left; px < clip_right; px++) {
+            int local_x = px - x;
+            uint64_t src_x_fp = ((uint64_t)local_x * (uint64_t)src_w * 65536u) / (uint32_t)size;
+            uint32_t sx0 = (uint32_t)(src_x_fp >> 16);
+            uint32_t frac_x = ((uint32_t)src_x_fp >> 8) & 0xFFu;
+            uint32_t sx1 = sx0 + 1u < src_w ? sx0 + 1u : sx0;
+
+            uint32_t p00 = src_row0[sx0];
+            uint32_t p10 = src_row0[sx1];
+            uint32_t p01 = src_row1[sx0];
+            uint32_t p11 = src_row1[sx1];
+
+            uint32_t a = type_icon_blend_channel(p00 >> 24, p10 >> 24, p01 >> 24, p11 >> 24, frac_x, frac_y);
+            if (a == 0)
+                continue;
+            uint32_t r = type_icon_blend_channel((p00 >> 16) & 0xFFu, (p10 >> 16) & 0xFFu, (p01 >> 16) & 0xFFu,
+                                                 (p11 >> 16) & 0xFFu, frac_x, frac_y);
+            uint32_t g = type_icon_blend_channel((p00 >> 8) & 0xFFu, (p10 >> 8) & 0xFFu, (p01 >> 8) & 0xFFu,
+                                                 (p11 >> 8) & 0xFFu, frac_x, frac_y);
+            uint32_t b = type_icon_blend_channel(p00 & 0xFFu, p10 & 0xFFu, p01 & 0xFFu, p11 & 0xFFu, frac_x, frac_y);
+            if (a > 255u)
+                a = 255u;
+
+            uint32_t &dst = dst_row[px];
+            if (a == 255u) {
+                dst = 0xFF000000u | (r << 16) | (g << 8) | b;
+            } else {
+                uint32_t ia = 255u - a;
+                uint32_t dr = (((dst >> 16) & 0xFFu) * ia + 127u) / 255u;
+                uint32_t dg = (((dst >> 8) & 0xFFu) * ia + 127u) / 255u;
+                uint32_t db = ((dst & 0xFFu) * ia + 127u) / 255u;
+                dst = 0xFF000000u | ((r + dr) << 16) | ((g + dg) << 8) | (b + db);
+            }
         }
     }
 }
@@ -1292,8 +1398,15 @@ static void draw_file_icon_cell(Surface *win, AppState *state, const Rect &cell,
         }
     }
     if (!drew_thumb) {
-        uint32_t icon_color = row.is_dir ? g_gui_style.accent : g_gui_style.text_dim;
-        draw_shape_icon(win, icon_x, icon_y, icon_size, row.is_dir, icon_color, g_gui_style.app_surface);
+        int kind = row.is_dir ? FILES_TYPE_ICON_FOLDER
+                              : (name_is_image(row.name) ? FILES_TYPE_ICON_IMAGE : FILES_TYPE_ICON_FILE);
+        const Surface *type_icon = files_type_icon(kind);
+        if (type_icon) {
+            draw_type_icon(win, type_icon, icon_x, icon_y, icon_size);
+        } else {
+            uint32_t icon_color = row.is_dir ? g_gui_style.accent : g_gui_style.text_dim;
+            draw_shape_icon(win, icon_x, icon_y, icon_size, row.is_dir, icon_color, g_gui_style.app_surface);
+        }
     }
 
     int label_y = icon_y + icon_size + gui_space_1();
