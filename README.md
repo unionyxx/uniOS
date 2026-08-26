@@ -1,6 +1,6 @@
 # uniOS
 
-`uniOS` is a custom x86-64 operating system written in freestanding C++20. It boots through the in-tree Meridian UEFI bootloader and starts a native desktop userspace session.
+uniOS is a freestanding x86-64 operating system written in C++20. It boots through the in-tree Meridian UEFI bootloader and starts a native desktop userspace session.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/site/screenshot_dark.png">
@@ -8,104 +8,110 @@
   <img alt="uniOS" src="docs/assets/site/screenshot_dark.png" width="100%">
 </picture>
 
-## Current System
+## Contents
 
-- **Bootloader**: Meridian, an in-tree x86-64 UEFI loader.
-- **Boot handoff**: Repo-owned `BootInfo` structure passed from Meridian to the kernel.
-- **Build system**: Meson + LLVM using `toolchains/llvm.ini`.
-- **Default boot image**: `boot.img`, a raw disk image with an EFI system partition and a writable `UNI_DATA` FAT32 partition.
-- **SMP**: Multi-core scheduling with per-core idle contexts, RESCHED IPIs, and sequence-acknowledged TLB shootdowns.
-- **Desktop session**: `/bin/init.elf` launches the window manager, menubar, dock, and userspace applications.
-- **Userspace**: Native ELF programs under `src/usr/`, with libc wrappers, a GUI library, shell, terminal, and desktop apps.
-- **Filesystems**: Boot content from `unifs.img`; persistent data from FAT32 mounted at `/data` when available.
-- **Drivers and subsystems**: Paging, heap allocation, preemptive scheduling, syscalls, VFS, PCI, ACPI/APIC, PS/2 input, USB/xHCI, USB HID, USB mass storage, e1000, RTL8139, IPv4, TCP (windowed send with congestion control and RTT estimation), UDP, DHCP, DNS, AC97, HDA, and framebuffer display output.
+- [Overview](#overview)
+- [Repository layout](#repository-layout)
+- [Building](#building)
+- [Running](#running)
+- [Boot images](#boot-images)
+- [Runtime](#runtime)
+- [Documentation](#documentation)
+- [License](#license)
 
-## Repository Layout
+## Overview
 
-- `src/bootloader/`: Meridian UEFI bootloader.
-- `src/kernel/`, `src/mm/`, `src/fs/`, `src/net/`, `src/drivers/`: Kernel and subsystem code.
-- `src/usr/`: Userspace runtime, libc subset, GUI library, shell, window manager, desktop services, and apps.
-- `include/`: Kernel, driver, boot, and UAPI headers.
-- `rootfs/`: Authored runtime files and config templates staged into `unifs.img`.
-- `appicons/`, `assets/`, `cursors/`: Source assets used by the asset tools.
-- `docs/`: Project site.
-- `docs/reference/`: Architecture, shell scripting, and asset format notes.
-- `tools/`: Image, filesystem, rootfs staging, asset conversion, and QEMU helper scripts.
-- `toolchains/`: Meson cross-file configuration.
+- **Boot**: Meridian, an in-tree UEFI loader, hands off a `BootInfo` structure to the kernel.
+- **Kernel**: Paging, heap, preemptive SMP scheduling with per-core idle contexts, RESCHED IPIs, sequence-acknowledged TLB shootdowns, syscalls, and a VFS.
+- **Userspace**: Native ELF programs under `src/usr/` — libc subset, GUI library, shell, terminal, and desktop apps launched by `/bin/init.elf`.
+- **Filesystems**: Boot content from `unifs.img`; persistent data from a FAT32 `UNI_DATA` volume mounted at `/data`.
+- **Drivers**: PCI, ACPI/APIC, PS/2, USB (xHCI, HID, mass storage), e1000, RTL8139, AC97, HDA, framebuffer display.
+- **Network**: IPv4, UDP, TCP (windowed send with congestion control and RTT estimation), DHCP, DNS.
 
-## Runtime Asset Formats
+## Repository layout
 
-uniOS uses generated binary asset formats in the runtime image:
+| Path | Contents |
+| --- | --- |
+| `src/bootloader/` | Meridian UEFI bootloader |
+| `src/kernel/`, `src/mm/`, `src/fs/`, `src/net/`, `src/drivers/` | Kernel and subsystems |
+| `src/usr/` | Userspace: libc, GUI library, shell, window manager, desktop services, apps |
+| `include/` | Kernel, driver, boot, and UAPI headers |
+| `rootfs/` | Runtime files and config templates staged into `unifs.img` |
+| `appicons/`, `assets/`, `cursors/` | Source assets consumed by the asset tools |
+| `docs/reference/` | Documentation source (rendered to the wiki) |
+| `tools/` | Image, filesystem, rootfs staging, asset, and QEMU helper scripts |
+| `toolchains/` | Meson cross-file configuration |
 
-- `.uoic`: Icon packages.
-- `.uocu`: Cursor packages.
-- `.uof`: Font files.
-- `.uowp`: Wallpaper packages.
+## Building
 
-The default wallpaper package is generated from `assets/wallpapers/wp_light.svg` and `assets/wallpapers/wp_dark.svg`, staged as `/usr/share/wallpapers/default.uowp`.
+Requirements:
 
-## Build Requirements
-
-- `meson` and `ninja`
-- `clang`, `clang++`, `ld.lld`, `llvm-ar`, and `llvm-strip`
+- `meson`, `ninja`
+- `clang`, `clang++`, `ld.lld`, `llvm-ar`, `llvm-strip`
 - `nasm`
-- `qemu-system-x86_64` and OVMF UEFI firmware
-- `python3` with `Pillow` and `CairoSVG` packages
+- `qemu-system-x86_64` with OVMF UEFI firmware
+- `python3` with `Pillow` and `CairoSVG`
 
-### Configure and Build
+> [!IMPORTANT]
+> The build is a Meson cross build and hard-errors without the LLVM cross file. Always pass `--cross-file toolchains/llvm.ini`.
 
-**Release image:**
 ```bash
 meson setup build/release --cross-file toolchains/llvm.ini --buildtype release
 meson compile -C build/release boot-disk iso
 ```
 
-**Debug image:**
+For a debug build (kernel tests and boot logs enabled), use `build/debug` with `--buildtype debug`, then run the smoke suite:
+
 ```bash
-meson setup build/debug --cross-file toolchains/llvm.ini --buildtype debug
-meson compile -C build/debug boot-disk iso
 meson test -C build/debug --suite smoke --print-errorlogs
 ```
 
-### Common Run Targets
+## Running
 
 ```bash
-meson compile -C build/release run          # Standard QEMU run
-meson compile -C build/release run-serial   # Run with serial console
-meson compile -C build/release run-headless # Run without VGA output
-meson compile -C build/release run-usb      # Run with USB storage emulation
-meson compile -C build/release run-qemu-net # Run with network bridge
-meson compile -C build/release run-qemu-full # Run with all features
+meson compile -C build/release run             # standard QEMU run
+meson compile -C build/release run-serial      # with serial console
+meson compile -C build/release run-headless    # without VGA output
+meson compile -C build/release run-usb         # USB storage boot
+meson compile -C build/release run-qemu-net    # with network devices
+meson compile -C build/release run-qemu-full   # USB + network + serial
 ```
 
-### Developer Checks
+Developer checks:
 
 ```bash
-meson compile -C build/debug lint
-meson compile -C build/debug analyze
+meson compile -C build/debug lint      # cppcheck
+meson compile -C build/debug analyze   # clang-tidy
 ```
 
-## Boot Images
+## Boot images
 
-The build system generates two primary boot targets:
+- **`boot.img`** — raw disk image with an EFI system partition and a writable `UNI_DATA` FAT32 partition. Recommended for most uses.
+- **`uniOS.iso`** — UEFI-bootable ISO9660 image for CD/DVD or VM ISO boot testing.
 
-- **`boot.img`**: A raw disk image with an EFI system partition and a pre-allocated, writable `UNI_DATA` FAT32 partition. This is the recommended image for most users.
-- **`uniOS.iso`**: A UEFI-bootable ISO9660 image intended for CD/DVD or VM ISO boot testing.
+Both images use the same Meridian loader and kernel. The ISO media is read-only, but uniOS discovers and mounts any accessible `UNI_DATA` partition for persistent storage.
 
-Both images use the same Meridian loader and kernel. While the ISO media itself is read-only, uniOS will automatically discover and mount any accessible `UNI_DATA` partition for persistent storage.
+> [!CAUTION]
+> Writing `boot.img` to a USB drive overwrites the entire drive. Double-check the target device before flashing.
 
-For real hardware, write `boot.img` to a USB drive as a raw disk image.
+## Runtime
 
-## Runtime Paths
+Persistent state lives on the FAT32 `UNI_DATA` volume mounted at `/data`:
 
-- **System settings**: `/data/SYSTEM.CFG` (fallback: `/etc/system.conf`)
-- **Wallpaper settings**: `/data/WALLPAPR.CFG` (fallback: `/etc/wallpaper.conf`)
-- **Default wallpaper**: `/usr/share/wallpapers/default.uowp`
-- **Persistent data**: Mounted at `/data` from FAT32 volume `UNI_DATA`
+| Path | Purpose |
+| --- | --- |
+| `/data/SYSTEM.CFG` | System settings (fallback `/etc/system.conf`) |
+| `/data/WALLPAPR.CFG` | Wallpaper settings (fallback `/etc/wallpaper.conf`) |
+| `/usr/share/wallpapers/default.uowp` | Default wallpaper, generated from `assets/wallpapers/` |
+
+Runtime assets use generated binary formats: `.uoic` (icons), `.uocu` (cursors), `.uof` (fonts), `.uowp` (wallpapers). See [Asset formats](docs/reference/formats/).
 
 ## Documentation
 
-The full documentation is rendered as the project wiki at [unionyxx.github.io/uniOS/wiki](https://unionyxx.github.io/uniOS/wiki/), generated from the markdown in `docs/reference/` (rebuild locally with `meson compile -C build/debug wiki`).
+Full documentation lives at [unionyxx.github.io/uniOS/wiki](https://unionyxx.github.io/uniOS/wiki/), generated from `docs/reference/`.
+
+> [!NOTE]
+> Render the wiki locally with `meson compile -C build/debug wiki`.
 
 - [Architecture](docs/reference/architecture.md)
 - [SMP](docs/reference/smp.md)
