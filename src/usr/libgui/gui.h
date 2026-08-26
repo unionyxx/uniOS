@@ -502,6 +502,26 @@ static inline void gui_draw_panel(Surface *s, int x, int y, int w, int h, uint32
     gui_draw_rounded_rect(s, x, y, w, h, r, border);
 }
 
+// Window-grade chrome frame: the exact multi-layer outline the WM paints
+// around windows — a crisp 1 px outline ring, a tinted transition ring and a
+// subtle inner highlight. Every floating surface (popup menus, dialogs, shell
+// overlays, dock) uses this so all outlines are pixel-identical.
+typedef struct
+{
+    uint32_t outline;
+    uint32_t frame_fill;
+    uint32_t inner_stroke;
+} GuiChromeFrameColors;
+
+// Border ring thickness and the extra body inset (both 1 px base, scaled).
+int gui_chrome_border(void);
+int gui_chrome_detail_inset(void);
+GuiChromeFrameColors gui_chrome_frame_colors(uint32_t body, bool active);
+// Full frame including the body fill.
+void gui_draw_chrome_frame(Surface *s, int x, int y, int w, int h, int radius, uint32_t body, bool active);
+// Outline rings only, for surfaces that paint their own body (glass panels).
+void gui_draw_chrome_ring(Surface *s, int x, int y, int w, int h, int radius, uint32_t body_hint, bool active);
+
 static inline void gui_draw_panel_inset_ext(Surface *s, int x, int y, int w, int h, int r, uint32_t bg, uint32_t border,
                                             uint32_t inset)
 {

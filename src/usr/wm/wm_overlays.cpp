@@ -73,8 +73,8 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 
     gui_draw_panel_shadow(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r);
 
-    gui_draw_panel_inset_ext(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
-                             g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
+    gui_draw_chrome_frame(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
+                          g_gui_style.app_surface, true);
     gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r, "Storage Mode",
                              "Choose how uniOS should expose AHCI and ATA storage");
 
@@ -153,8 +153,7 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
-    gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
+    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
 
     DirtyRect search = wm_index_search_bounds();
     const char *query = g_index.query_len > 0 ? g_index.query : "";
@@ -237,8 +236,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
     // Panel surface.
-    gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border, g_gui_style.chrome_bg_alt);
+    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
 
     // Card header.
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Control Panel", "uniOS");
@@ -315,8 +313,8 @@ void draw_toast_overlay_clipped(const DirtyRect &clip)
 
     gui_draw_panel_shadow(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius);
 
-    gui_draw_panel_inset_ext(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius,
-                             g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
+    gui_draw_chrome_frame(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius,
+                          g_gui_style.app_surface, true);
 
     int accent_x = toast_box.x + gui_space_1();
     int accent_w = gui_scaled_metric(4);
@@ -349,8 +347,7 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
     int radius = gui_radius_2xl();
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
-    gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
-                             g_gui_style.border, g_gui_style.chrome_bg_alt);
+    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Notifications", "Recent");
 
     int item_y = box.y + gui_card_header_h() + gui_space_2();

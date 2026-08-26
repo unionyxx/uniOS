@@ -1008,10 +1008,8 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     int title_bar_h = wm_title_bar_h();
     int space_1 = gui_space_1();
     int space_2 = gui_space_2();
-    int border = wm_frame_border();
-    int detail_inset = gui_scaled_metric(1);
-    if (detail_inset < 1)
-        detail_inset = 1;
+    int border = gui_chrome_border();
+    int detail_inset = gui_chrome_detail_inset();
 
     int radius = gui_radius_xl();
     int body_inset = border + detail_inset;
@@ -1023,7 +1021,6 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     if (body_radius < 0)
         body_radius = 0;
 
-    uint32_t outline_color = focused ? g_gui_style.border_hover : g_gui_style.border;
     uint32_t app_bg_color = get_window_app_background(w);
     uint32_t bar_color = app_bg_color;
     uint32_t body_color = app_bg_color;
@@ -1033,8 +1030,11 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     } else {
         title_color = focused ? 0xFF15181Du : 0xFF6E7580u;
     }
-    uint32_t frame_fill_color = mix_rgb(outline_color, body_color, focused ? 236 : 242);
-    uint32_t inner_stroke_color = mix_rgb(body_color, 0xFFFFFFFFu, focused ? 18 : 12);
+    // Same outline recipe every floating surface uses (gui_draw_chrome_frame).
+    GuiChromeFrameColors chrome = gui_chrome_frame_colors(body_color, focused);
+    uint32_t outline_color = chrome.outline;
+    uint32_t frame_fill_color = chrome.frame_fill;
+    uint32_t inner_stroke_color = chrome.inner_stroke;
 
     int lx = (dst->buffer != g_backbuffer.buffer) ? 0 : w.x;
     int ly = (dst->buffer != g_backbuffer.buffer) ? 0 : w.y - title_bar_h;
@@ -1358,10 +1358,8 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
 
     const uint32_t dst_stride = dst->pitch / 4;
     int radius = gui_radius_xl();
-    int border = wm_frame_border();
-    int detail_inset = gui_scaled_metric(1);
-    if (detail_inset < 1)
-        detail_inset = 1;
+    int border = gui_chrome_border();
+    int detail_inset = gui_chrome_detail_inset();
 
     int body_inset = border + detail_inset;
     int inner_r = radius - body_inset;

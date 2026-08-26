@@ -2764,8 +2764,7 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
 
     gui_draw_panel_shadow(s, x, y, w, menu_h, radius);
 
-    gui_draw_panel_inset_ext(s, x, y, w, menu_h, radius, g_gui_style.app_surface, g_gui_style.border,
-                             g_gui_style.chrome_bg_alt);
+    gui_draw_chrome_frame(s, x, y, w, menu_h, radius, g_gui_style.app_surface, true);
 
     int check_size = item_h / 2;
     int check_gap = gui_scaled_metric(4);
@@ -2825,6 +2824,80 @@ void gui_draw_panel_shadow(Surface *s, int32_t x, int32_t y, int32_t w, int32_t 
     gui_fill_rounded_rect(s, x + 1, y + gui_scaled_metric(6), w - 2, h, r, 0x08000000u);
     gui_fill_rounded_rect(s, x, y + gui_scaled_metric(3), w, h, r, 0x0C000000u);
     gui_fill_rounded_rect(s, x, y + gui_scaled_metric(1), w, h, r, 0x10000000u);
+}
+
+static inline uint32_t chrome_div255(uint32_t x)
+{
+    return (uint32_t)(((uint64_t)x * 0x8081u) >> 23);
+}
+
+// Same channel mix the WM uses for window frames (a weighted toward b by t).
+static inline uint32_t chrome_mix_rgb(uint32_t a, uint32_t b, uint8_t t)
+{
+    uint32_t inv = 255u - t;
+    uint32_t ar = (a >> 16) & 0xFFu, ag = (a >> 8) & 0xFFu, ab = a & 0xFFu;
+    uint32_t br = (b >> 16) & 0xFFu, bg = (b >> 8) & 0xFFu, bb = b & 0xFFu;
+    return 0xFF000000u | (chrome_div255(ar * inv + br * t) << 16) | (chrome_div255(ag * inv + bg * t) << 8) |
+           chrome_div255(ab * inv + bb * t);
+}
+
+int gui_chrome_border(void)
+{
+    int border = gui_scaled_metric(1);
+    return border < 1 ? 1 : border;
+}
+
+int gui_chrome_detail_inset(void)
+{
+    int inset = gui_scaled_metric(1);
+    return inset < 1 ? 1 : inset;
+}
+
+GuiChromeFrameColors gui_chrome_frame_colors(uint32_t body, bool active)
+{
+    GuiChromeFrameColors colors;
+    colors.outline = active ? g_gui_style.border_hover : g_gui_style.border;
+    colors.frame_fill = chrome_mix_rgb(colors.outline, body, active ? 236 : 242);
+    colors.inner_stroke = chrome_mix_rgb(body, 0xFFFFFFFFu, active ? 18 : 12);
+    return colors;
+}
+
+void gui_draw_chrome_ring(Surface *s, int x, int y, int w, int h, int radius, uint32_t body_hint, bool active)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    int border = gui_chrome_border();
+    int r = gui_corner_radius(w, h, radius);
+    int frame_r = gui_corner_radius(w - border * 2, h - border * 2, r - border);
+    GuiChromeFrameColors colors = gui_chrome_frame_colors(body_hint, active);
+
+    gui_fill_rounded_rect(s, x, y, w, h, r, colors.outline);
+    if (w > border * 2 && h > border * 2) {
+        gui_fill_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.frame_fill);
+        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r,
+                              colors.inner_stroke);
+    }
+}
+
+void gui_draw_chrome_frame(Surface *s, int x, int y, int w, int h, int radius, uint32_t body, bool active)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    int border = gui_chrome_border();
+    int body_inset = border + gui_chrome_detail_inset();
+    int r = gui_corner_radius(w, h, radius);
+    int frame_r = gui_corner_radius(w - border * 2, h - border * 2, r - border);
+    int body_r = gui_corner_radius(w - body_inset * 2, h - body_inset * 2, r - body_inset);
+    GuiChromeFrameColors colors = gui_chrome_frame_colors(body, active);
+
+    gui_fill_rounded_rect(s, x, y, w, h, r, colors.outline);
+    if (w > border * 2 && h > border * 2)
+        gui_fill_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.frame_fill);
+    if (w > body_inset * 2 && h > body_inset * 2) {
+        gui_fill_rounded_rect(s, x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2, body_r, body);
+        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r,
+                              colors.inner_stroke);
+    }
 }
 
 static int dialog_panel_radius()
@@ -2901,10 +2974,9 @@ void gui_draw_dialog(Surface *s, int view_w, int view_h, int view_scroll_y, cons
     const Rect &panel = layout->panel;
     int r = gui_corner_radius(panel.w, panel.h, dialog_panel_radius());
     gui_draw_panel_shadow(s, panel.x, panel.y, panel.w, panel.h, r);
-    gui_draw_panel_inset_ext(s, panel.x, panel.y, panel.w, panel.h, r, g_gui_style.app_surface,
-                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
-    gui_draw_card_header_ext(s, panel.x + 1, panel.y + 1, panel.w - 2,
-                             gui_corner_radius(panel.w - 2, panel.h - 2, r - 1), title, nullptr);
+    gui_draw_chrome_frame(s, panel.x, panel.y, panel.w, panel.h, r, g_gui_style.app_surface, true);
+    gui_draw_card_header_ext(s, panel.x + 1, panel.y + 1, panel.w - 2, gui_corner_radius(panel.w - 2, panel.h - 2, r - 1),
+                             title, nullptr);
 
     int text_x = panel.x + gui_space_2();
     int text_w = panel.w - gui_space_4();

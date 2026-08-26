@@ -5,7 +5,8 @@
 #include <uapi/event.h>
 
 #include "../../libc/unistd.h"
-#include "../../libgui/gui.h"
+#include "../../libapp/app.h"
+#include "../../libapp/widgets.h"
 
 static constexpr int COLS = 4;
 static constexpr int ROWS = 5;
@@ -88,9 +89,6 @@ struct CalcRects
 {
     Rect display;
     Rect buttons[ROWS][COLS];
-    bool layout_valid;
-    bool help_visible;
-    Rect help_close;
 };
 
 // Pre-computed FPU lookup table to prevent precision drift and division latency
@@ -337,6 +335,14 @@ static bool calc_op_button(CalcOp op, int *row, int *col)
     }
 }
 
+struct CalcApp
+{
+    CalcState state;
+    CalcRects rects;
+    WidgetButton buttons[ROWS][COLS];
+    WidgetHelp help;
+};
+
 static void compute_layout(Surface *win, CalcRects *rects)
 {
     int pad = gui_app_outer_padding();
@@ -373,7 +379,6 @@ static void compute_layout(Surface *win, CalcRects *rects)
             rects->buttons[row][col] = gui_rect_make(bx, by, bw, btn_h);
         }
     }
-    rects->layout_valid = true;
 }
 
 static void render_display(Surface *win, CalcState *state, const CalcRects *rects)
@@ -404,72 +409,55 @@ static void render_display(Surface *win, CalcState *state, const CalcRects *rect
 
     gui_draw_text_clipped(win, disp_font, disp_x, disp_y, rects->display.w - gui_space_4(), shown, g_gui_style.text,
                           g_gui_style.app_surface);
-    gui_blit_to_screen_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h);
 }
 
-static void render_button(Surface *win, const CalcRects *rects, int row, int col, bool hovered, bool pressed,
-                          bool armed)
+static bool calc_armed_cell(const CalcState &state, int *row, int *col)
 {
-    if (row < 0 || row >= ROWS || col < 0 || col >= COLS)
-        return;
+    *row = -1;
+    *col = -1;
+    if (state.pending == CalcOp::None || state.error)
+        return false;
+    return calc_op_button(state.pending, row, col);
+}
 
-    const Rect &r = rects->buttons[row][col];
-    const ButtonDef &def = k_buttons[row][col];
+static void calc_draw_help(Surface *win)
+{
+    static const char *tips[] = {
+        "Type digits and operators on the keyboard",
+        "Enter or = evaluates, Backspace clears the entry",
+        "Esc clears everything (AC)",
+        "% divides by 100, +/- flips the sign",
+        "Edit > Copy Result copies the display (Ctrl+C)",
+    };
+    widget_help_draw(win, (int)win->width, (int)win->height, 0, "Calculator Help", tips, 5);
+}
 
-    gui_app_draw_button_ex(win, r.x, r.y, r.w, r.h, def.label, def.primary, armed, hovered, pressed);
+static void render_full_ui(Surface *win, CalcApp *app)
+{
+    compute_layout(win, &app->rects);
 
-    if (armed && !pressed) {
-        // Pending operator stays lit: an inner accent ring marks the armed op.
+    gui_fill_surface(win, g_gui_style.app_bg);
+    render_display(win, &app->state, &app->rects);
+
+    for (int r = 0; r < ROWS; r++) {
+        for (int c = 0; c < COLS; c++) {
+            app->buttons[r][c].rect = app->rects.buttons[r][c];
+            widget_button_draw(win, &app->buttons[r][c], k_buttons[r][c].label, k_buttons[r][c].primary, false);
+        }
+    }
+
+    // Pending operator stays lit: an inner accent ring marks the armed op.
+    int armed_r, armed_c;
+    if (calc_armed_cell(app->state, &armed_r, &armed_c)) {
+        const Rect &r = app->rects.buttons[armed_r][armed_c];
         int rad = gui_corner_radius(r.w, r.h, gui_radius_md());
         if (r.w > 4 && r.h > 4)
             gui_draw_rounded_rect(win, r.x + 1, r.y + 1, r.w - 2, r.h - 2, rad > 0 ? rad - 1 : 0,
                                   g_gui_style.accent_soft);
     }
 
-    gui_blit_to_screen_rect(win, r.x, r.y, r.w, r.h);
-}
-
-static void calc_draw_help(Surface *win, CalcRects *rects);
-
-static void render_full_ui(Surface *win, CalcState *state, CalcRects *rects, int h_row, int h_col, int p_row, int p_col)
-{
-    if (!rects->layout_valid)
-        compute_layout(win, rects);
-
-    gui_fill_surface(win, g_gui_style.app_bg);
-    render_display(win, state, rects);
-
-    int armed_r = -1, armed_c = -1;
-    if (state->pending != CalcOp::None && !state->error)
-        calc_op_button(state->pending, &armed_r, &armed_c);
-
-    for (int r = 0; r < ROWS; r++) {
-        for (int c = 0; c < COLS; c++) {
-            render_button(win, rects, r, c, (r == h_row && c == h_col), (r == p_row && c == p_col),
-                          (r == armed_r && c == armed_c));
-        }
-    }
-    if (rects->help_visible)
-        calc_draw_help(win, rects);
-    // Commit the whole window: the background fill is content too, and a
-    // partial commit would leave stale padding after theme switches.
-    gui_blit_to_screen_rect(win, 0, 0, (int)win->width, (int)win->height);
-}
-
-static void find_button_at(const CalcRects *rects, int x, int y, int *out_row, int *out_col)
-{
-    *out_row = -1;
-    *out_col = -1;
-    for (int r = 0; r < ROWS; r++) {
-        for (int c = 0; c < COLS; c++) {
-            const Rect &b = rects->buttons[r][c];
-            if (b.w > 0 && b.h > 0 && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) {
-                *out_row = r;
-                *out_col = c;
-                return;
-            }
-        }
-    }
+    if (app->help.open)
+        calc_draw_help(win);
 }
 
 static void calc_copy_result(const CalcState *state)
@@ -477,8 +465,9 @@ static void calc_copy_result(const CalcState *state)
     gui_clipboard_copy(state->display, strlen(state->display));
 }
 
-static void calc_publish_menus()
+static void calc_menus(App *app)
 {
+    (void)app;
     MenuModel model;
     gui_menu_model_reset(&model);
 
@@ -496,231 +485,132 @@ static void calc_publish_menus()
     gui_menu_publish(&model);
 }
 
-static void calc_handle_menu_command(CalcState *state, uint32_t cmd, CalcRects *rects, bool *redraw)
+static void calc_draw(App *app, Surface *canvas)
 {
+    CalcApp *calc = (CalcApp *)app_user(app);
+    render_full_ui(canvas, calc);
+}
+
+static void calc_apply_action(App *app, CalcApp *calc, int r, int c)
+{
+    int armed_before_r, armed_before_c, armed_after_r, armed_after_c;
+    calc_armed_cell(calc->state, &armed_before_r, &armed_before_c);
+    calc_dispatch_action(&calc->state, k_buttons[r][c]);
+    calc_armed_cell(calc->state, &armed_after_r, &armed_after_c);
+
+    app_invalidate(app, calc->rects.display.x, calc->rects.display.y, calc->rects.display.w, calc->rects.display.h);
+    // Only the armed-operator highlight spans multiple buttons; repaint
+    // fully when it appears/moves, otherwise the single button suffices.
+    if (armed_before_r != armed_after_r || armed_before_c != armed_after_c)
+        app_invalidate_all(app);
+    else
+        app_invalidate(app, calc->rects.buttons[r][c].x, calc->rects.buttons[r][c].y, calc->rects.buttons[r][c].w,
+                       calc->rects.buttons[r][c].h);
+}
+
+static void calc_event(App *app, const Event *ev)
+{
+    CalcApp *calc = (CalcApp *)app_user(app);
+
+    switch (ev->type) {
+        case EVT_KEY_DOWN: {
+            if (ev->key.c == 0)
+                break;
+            if (calc->help.open) {
+                if (widget_help_event(&calc->help, ev))
+                    app_invalidate_all(app);
+                break;
+            }
+            if ((uint8_t)ev->key.c == 3) { // Ctrl+C copies the displayed result.
+                calc_copy_result(&calc->state);
+                break;
+            }
+            if (calc_dispatch_key(&calc->state, ev->key.c))
+                app_invalidate_all(app);
+            break;
+        }
+
+        case EVT_MOUSE_MOVE:
+        case EVT_MOUSE_DOWN:
+        case EVT_MOUSE_UP: {
+            if (calc->help.open) {
+                if (widget_help_event(&calc->help, ev))
+                    app_invalidate_all(app);
+                break;
+            }
+            for (int r = 0; r < ROWS; r++) {
+                for (int c = 0; c < COLS; c++) {
+                    int rc = widget_button_event(&calc->buttons[r][c], ev);
+                    if (rc & WIDGET_CHANGED) {
+                        const Rect &b = calc->rects.buttons[r][c];
+                        app_invalidate(app, b.x, b.y, b.w, b.h);
+                    }
+                    if (rc & WIDGET_CLICKED)
+                        calc_apply_action(app, calc, r, c);
+                }
+            }
+            break;
+        }
+
+        case EVT_UNFOCUS:
+        case EVT_MOUSE_LEAVE: {
+            for (int r = 0; r < ROWS; r++) {
+                for (int c = 0; c < COLS; c++) {
+                    if (widget_button_event(&calc->buttons[r][c], ev) & WIDGET_CHANGED) {
+                        const Rect &b = calc->rects.buttons[r][c];
+                        app_invalidate(app, b.x, b.y, b.w, b.h);
+                    }
+                }
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static void calc_menu(App *app, uint32_t cmd)
+{
+    CalcApp *calc = (CalcApp *)app_user(app);
     switch (cmd) {
         case CALC_MENU_COPY:
-            calc_copy_result(state);
+            calc_copy_result(&calc->state);
             break;
         case CALC_MENU_CLEAR:
-            calc_dispatch_action(state, {"C", false, BtnAction::Clear, 0});
-            *redraw = true;
+            calc_dispatch_action(&calc->state, {"C", false, BtnAction::Clear, 0});
+            app_invalidate_all(app);
             break;
         case CALC_MENU_CLEAR_ALL:
-            calc_dispatch_action(state, {"AC", false, BtnAction::ClearAll, 0});
-            *redraw = true;
+            calc_dispatch_action(&calc->state, {"AC", false, BtnAction::ClearAll, 0});
+            app_invalidate_all(app);
             break;
         case CALC_MENU_HELP:
-            rects->help_visible = true;
-            *redraw = true;
+            calc->help.open = true;
+            app_invalidate_all(app);
             break;
         default:
             break;
     }
 }
 
-static void calc_draw_help(Surface *win, CalcRects *rects)
-{
-    static const char *tips[] = {
-        "Type digits and operators on the keyboard",
-        "Enter or = evaluates, Backspace clears the entry",
-        "Esc clears everything (AC)",
-        "% divides by 100, +/- flips the sign",
-        "Edit > Copy Result copies the display (Ctrl+C)",
-    };
-    int win_w = (int)win->width;
-    int win_h = (int)win->height;
-    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
-    gui_draw_dialog(win, win_w, win_h, 0, &layout, "Calculator Help", tips, (int)(sizeof(tips) / sizeof(tips[0])),
-                    nullptr, "Close", false, false, nullptr, false, false);
-    rects->help_close = layout.confirm;
-}
-
 extern "C" int main()
 {
-    Surface win = gui_register_window_ex("Calculator", (uint32_t)gui_scaled_metric(320),
-                                         (uint32_t)gui_scaled_metric(420), WIN_FLAG_RESIZABLE);
-    if (!win.buffer)
-        return 1;
+    static CalcApp calc = {};
+    calc_init(&calc.state);
 
-    gui_window_set_min_size(gui_scaled_metric(280), gui_scaled_metric(380));
-    gui_sync_theme_from_registry();
-    gui_request_focus();
+    AppConfig config = {};
+    config.title = "Calculator";
+    config.width = gui_scaled_metric(320);
+    config.height = gui_scaled_metric(420);
+    config.min_width = gui_scaled_metric(280);
+    config.min_height = gui_scaled_metric(380);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.idle_ms = 16;
+    config.on_draw = calc_draw;
+    config.on_event = calc_event;
+    config.on_menu = calc_menu;
+    config.on_menus = calc_menus;
 
-    CalcState state;
-    calc_init(&state);
-
-    CalcRects rects = {};
-    render_full_ui(&win, &state, &rects, -1, -1, -1, -1);
-    calc_publish_menus();
-
-    int hover_r = -1, hover_c = -1;
-    int press_r = -1, press_c = -1;
-
-    auto armed_cell = [&](int *ar, int *ac) {
-        *ar = -1;
-        *ac = -1;
-        if (state.pending != CalcOp::None && !state.error)
-            calc_op_button(state.pending, ar, ac);
-    };
-    auto redraw_button = [&](int r, int c) {
-        int ar, ac;
-        armed_cell(&ar, &ac);
-        render_button(&win, &rects, r, c, (r == hover_r && c == hover_c), (r == press_r && c == press_c),
-                      (r == ar && c == ac));
-    };
-    auto apply_action = [&](int r, int c) {
-        int armed_before_r, armed_before_c, armed_after_r, armed_after_c;
-        armed_cell(&armed_before_r, &armed_before_c);
-        calc_dispatch_action(&state, k_buttons[r][c]);
-        armed_cell(&armed_after_r, &armed_after_c);
-        render_display(&win, &state, &rects);
-        // Only the armed-operator highlight spans multiple buttons; repaint
-        // fully when it appears/moves, otherwise the single button suffices.
-        if (armed_before_r != armed_after_r || armed_before_c != armed_after_c)
-            render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-    };
-
-    Registry *registry = gui_registry();
-    uint32_t last_settings_gen = registry ? registry->settings_generation : 0;
-    uint64_t next_frame_ticks = get_ticks() + 16;
-
-    while (true) {
-        Event ev = {};
-        while (poll_event(&ev) > 0) {
-            switch (ev.type) {
-                case EVT_WINDOW_CLOSE:
-                    return 0;
-
-                case EVT_WINDOW_RESIZE:
-                    if (gui_sync_window_size(&win) > 0) {
-                        rects.layout_valid = false;
-                        hover_r = hover_c = -1;
-                        press_r = press_c = -1;
-                        render_full_ui(&win, &state, &rects, -1, -1, -1, -1);
-                    }
-                    break;
-
-                case EVT_FOCUS:
-                    gui_sync_theme_from_registry();
-                    calc_publish_menus();
-                    render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-                    break;
-
-                case EVT_UNFOCUS:
-                case EVT_MOUSE_LEAVE:
-                    if (hover_r >= 0 || press_r >= 0) {
-                        int old_hr = hover_r, old_hc = hover_c;
-                        int old_pr = press_r, old_pc = press_c;
-                        hover_r = hover_c = -1;
-                        press_r = press_c = -1;
-                        if (old_pr >= 0)
-                            redraw_button(old_pr, old_pc);
-                        if (old_hr >= 0 && (old_hr != old_pr || old_hc != old_pc))
-                            redraw_button(old_hr, old_hc);
-                    }
-                    break;
-
-                case EVT_KEY_DOWN:
-                    if (ev.key.c == 0)
-                        break;
-                    if (rects.help_visible) {
-                        if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
-                            rects.help_visible = false;
-                            render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-                        }
-                        break;
-                    }
-                    if ((uint8_t)ev.key.c == 3) { // Ctrl+C copies the displayed result.
-                        calc_copy_result(&state);
-                        break;
-                    }
-                    if (calc_dispatch_key(&state, ev.key.c)) {
-                        render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-                    }
-                    break;
-
-                case EVT_MOUSE_MOVE: {
-                    int r, c;
-                    find_button_at(&rects, ev.mouse.x, ev.mouse.y, &r, &c);
-                    if (r != hover_r || c != hover_c) {
-                        int old_r = hover_r, old_c = hover_c;
-                        hover_r = r;
-                        hover_c = c;
-                        if (old_r >= 0)
-                            redraw_button(old_r, old_c);
-                        if (hover_r >= 0 && (hover_r != old_r || hover_c != old_c))
-                            redraw_button(hover_r, hover_c);
-                        // Moving off a pressed button cancels the press visually.
-                        if (press_r >= 0 && (press_r != hover_r || press_c != hover_c)) {
-                            int pr = press_r, pc = press_c;
-                            press_r = press_c = -1;
-                            redraw_button(pr, pc);
-                        }
-                    }
-                    break;
-                }
-
-                case EVT_MOUSE_DOWN: {
-                    if (ev.mouse.button != 1)
-                        break;
-                    if (rects.help_visible) {
-                        rects.help_visible = false;
-                        render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-                        break;
-                    }
-                    int r, c;
-                    find_button_at(&rects, ev.mouse.x, ev.mouse.y, &r, &c);
-                    if (r >= 0) {
-                        press_r = r;
-                        press_c = c;
-                        redraw_button(r, c);
-                    }
-                    break;
-                }
-
-                case EVT_MOUSE_UP:
-                    if (ev.mouse.button != 1)
-                        break;
-                    if (press_r >= 0) {
-                        int r = press_r, c = press_c;
-                        press_r = press_c = -1;
-                        // Release-to-apply: the action fires only when the
-                        // pointer is still over the pressed button, so
-                        // dragging away cancels.
-                        int up_r, up_c;
-                        find_button_at(&rects, ev.mouse.x, ev.mouse.y, &up_r, &up_c);
-                        if (up_r == r && up_c == c)
-                            apply_action(r, c);
-                        redraw_button(r, c);
-                    }
-                    break;
-
-                default:
-                    break;
-            }
-        }
-
-        registry = gui_registry();
-        if (registry && registry->settings_generation != last_settings_gen) {
-            last_settings_gen = registry->settings_generation;
-            if (gui_sync_theme_from_registry()) {
-                render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-            }
-        }
-
-        uint32_t menu_cmd = 0;
-        if (gui_menu_take_command(&menu_cmd)) {
-            bool redraw = false;
-            calc_handle_menu_command(&state, menu_cmd, &rects, &redraw);
-            if (redraw)
-                render_full_ui(&win, &state, &rects, hover_r, hover_c, press_r, press_c);
-        }
-
-        sleep_until_ticks(next_frame_ticks);
-        uint64_t frame_now = get_ticks();
-        next_frame_ticks += 16;
-        if (frame_now > next_frame_ticks)
-            next_frame_ticks = frame_now + 16;
-    }
+    return app_run(&config, &calc);
 }
