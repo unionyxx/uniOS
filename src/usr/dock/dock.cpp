@@ -76,7 +76,7 @@ static inline Rect dock_full_rect(uint32_t dock_w, uint32_t dock_h)
 }
 static inline int dock_panel_radius(int panel_w, int panel_h)
 {
-    return gui_corner_radius(panel_w, panel_h, gui_radius_2xl());
+    return gui_corner_radius(panel_w, panel_h, gui_radius_xl());
 }
 
 // Shared hover-pill (tooltip) geometry: used by the draw path and the damage

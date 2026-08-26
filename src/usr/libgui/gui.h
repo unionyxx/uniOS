@@ -474,12 +474,6 @@ static inline int gui_radius_xl(void)
     return gui_scaled_metric(16);
 }
 
-// Large floating shell panels: dock, control center, index, notifications.
-static inline int gui_radius_2xl(void)
-{
-    return gui_scaled_metric(20);
-}
-
 static inline int gui_panel_radius(int w, int h)
 {
     return gui_corner_radius(w, h, gui_radius_md());

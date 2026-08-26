@@ -2900,7 +2900,7 @@ void gui_draw_chrome_frame(Surface *s, int x, int y, int w, int h, int radius, u
 
 static int dialog_panel_radius()
 {
-    return gui_radius_lg();
+    return gui_radius_xl();
 }
 
 GuiDialogLayout gui_dialog_layout(int view_w, int view_h, int view_scroll_y, const char *const *lines, int line_count,

@@ -69,14 +69,14 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, layout.box, nullptr))
         return;
 
-    int box_r = gui_radius_2xl();
+    int box_r = gui_radius_xl();
 
     gui_draw_panel_shadow(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r);
 
     gui_draw_chrome_frame(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
                           g_gui_style.app_surface, true);
-    gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r, "Storage Mode",
-                             "Choose how uniOS should expose AHCI and ATA storage");
+    gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r - 1,
+                             "Storage Mode", "Choose how uniOS should expose AHCI and ATA storage");
 
     int text_x = layout.box.x + gui_space_2();
     int content_y = layout.box.y + gui_card_header_h() + gui_space_2();
@@ -149,7 +149,7 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_radius_2xl();
+    int radius = gui_radius_xl();
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
@@ -231,7 +231,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_radius_2xl();
+    int radius = gui_radius_xl();
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
@@ -239,7 +239,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
 
     // Card header.
-    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Control Panel", "uniOS");
+    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius - 1, "Control Panel", "uniOS");
 
     draw_control_toggle(CONTROL_ITEM_NETWORK, "Network", g_control_center.network_enabled ? "Ethernet" : "Disconnected",
                         g_control_center.network_enabled);
@@ -344,11 +344,11 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_radius_2xl();
+    int radius = gui_radius_xl();
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
     gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
-    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Notifications", "Recent");
+    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius - 1, "Notifications", "Recent");
 
     int item_y = box.y + gui_card_header_h() + gui_space_2();
     int index = g_notifications.head - 1;

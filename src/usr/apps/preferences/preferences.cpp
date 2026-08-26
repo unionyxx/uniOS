@@ -10,7 +10,8 @@
 #include "../../libc/log.h"
 #include "../../libc/unistd.h"
 #include "../../libc/wallpaper_defaults.h"
-#include "../../libgui/gui.h"
+#include "../../libapp/app.h"
+#include "../../libapp/widgets.h"
 
 static constexpr const char *SYSTEM_CONFIG_PATH = "/data/SYSTEM.CFG";
 static constexpr const char *SYSTEM_BOOTSTRAP_CONFIG_PATH = "/etc/system.conf";
@@ -32,31 +33,6 @@ enum PrefSection
     PREF_SECTION_COUNT = 4,
 };
 
-enum HoverTarget
-{
-    HOVER_NONE = 0,
-    HOVER_NAV_APPEARANCE,
-    HOVER_NAV_DESKTOP,
-    HOVER_NAV_NETWORK,
-    HOVER_NAV_SYSTEM,
-    HOVER_THEME_DARK,
-    HOVER_THEME_LIGHT,
-    HOVER_WALLPAPER_FIELD,
-    HOVER_WALLPAPER_APPLY,
-    HOVER_WALLPAPER_DEFAULT,
-    HOVER_GRID_TOGGLE,
-    HOVER_SECONDS_TOGGLE,
-    HOVER_VOLUME_SLIDER,
-    HOVER_ETHERNET_TOGGLE,
-    HOVER_ETHERNET_DHCP_TOGGLE,
-    HOVER_TERMINAL_TOGGLE,
-    HOVER_STORAGE_OFF,
-    HOVER_STORAGE_READ_ONLY,
-    HOVER_STORAGE_WRITABLE,
-    HOVER_ANIMATIONS_TOGGLE,
-    HOVER_TRANSPARENCY_TOGGLE,
-};
-
 struct PreferencesState
 {
     GuiThemeMode theme_mode;
@@ -70,43 +46,29 @@ struct PreferencesState
     char wallpaper_path[256];
     char status[128];
     int section;
-    HoverTarget hovered;
-    HoverTarget pressed;
-    bool field_focused;
-    bool volume_dragging;
 };
 
-struct PreferencesRects
+struct PreferencesApp
 {
+    PreferencesState state;
     Rect nav[PREF_SECTION_COUNT];
-    Rect theme_segment;
-    Rect wallpaper_field;
-    Rect wallpaper_apply;
-    Rect wallpaper_default_btn;
-    Rect grid_toggle;
-    Rect seconds_toggle;
-    Rect volume_slider;
-    Rect ethernet_toggle;
-    Rect ethernet_dhcp_toggle;
-    Rect animations_toggle;
-    Rect transparency_toggle;
-    Rect terminal_toggle;
-    Rect storage_segment;
-    bool help_visible;
-    Rect help_close;
+    Rect wallpaper_rect;
+    int nav_hover;
+    WidgetSegment theme;
+    WidgetSegment storage;
+    WidgetField wallpaper;
+    WidgetButton apply;
+    WidgetButton def;
+    WidgetToggle animations;
+    WidgetToggle transparency;
+    WidgetToggle grid;
+    WidgetToggle seconds;
+    WidgetToggle ethernet;
+    WidgetToggle dhcp;
+    WidgetToggle terminal;
+    WidgetSlider volume;
+    WidgetHelp help;
 };
-
-static Rect inflate_rect(Rect rect, int pad)
-{
-    if (gui_rect_is_empty(rect))
-        return rect;
-    return gui_rect_make(rect.x - pad, rect.y - pad, rect.w + pad * 2, rect.h + pad * 2);
-}
-
-static bool point_in_rect(const Rect &rect, int x, int y)
-{
-    return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
-}
 
 static bool cfg_value_enabled(const char *value, bool fallback)
 {
@@ -145,7 +107,6 @@ static void load_preferences_state(PreferencesState *state, Registry *registry)
     state->transparency_level = 180;
     state->volume_level = 75;
     state->section = PREF_SECTION_APPEARANCE;
-    state->hovered = HOVER_NONE;
     safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path),
                    wallpaper_default_path_for_theme(state->theme_mode));
 
@@ -388,87 +349,6 @@ static bool apply_wallpaper(PreferencesState *state, Registry *registry, const c
     return true;
 }
 
-static HoverTarget hovered_nav_target(int index)
-{
-    if (index == PREF_SECTION_APPEARANCE)
-        return HOVER_NAV_APPEARANCE;
-    if (index == PREF_SECTION_DESKTOP)
-        return HOVER_NAV_DESKTOP;
-    if (index == PREF_SECTION_NETWORK)
-        return HOVER_NAV_NETWORK;
-    return HOVER_NAV_SYSTEM;
-}
-
-static Rect hover_target_rect(const PreferencesRects &rects, int section, HoverTarget target)
-{
-    switch (target) {
-        case HOVER_NAV_APPEARANCE:
-            return inflate_rect(rects.nav[PREF_SECTION_APPEARANCE], 1);
-        case HOVER_NAV_DESKTOP:
-            return inflate_rect(rects.nav[PREF_SECTION_DESKTOP], 1);
-        case HOVER_NAV_NETWORK:
-            return inflate_rect(rects.nav[PREF_SECTION_NETWORK], 1);
-        case HOVER_NAV_SYSTEM:
-            return inflate_rect(rects.nav[PREF_SECTION_SYSTEM], 1);
-        case HOVER_THEME_DARK: {
-            Rect segment = rects.theme_segment;
-            if (gui_rect_is_empty(segment))
-                return segment;
-            return inflate_rect(gui_rect_make(segment.x, segment.y, segment.w / 2, segment.h), 1);
-        }
-        case HOVER_THEME_LIGHT: {
-            Rect segment = rects.theme_segment;
-            if (gui_rect_is_empty(segment))
-                return segment;
-            int half_w = segment.w / 2;
-            return inflate_rect(gui_rect_make(segment.x + half_w, segment.y, segment.w - half_w, segment.h), 1);
-        }
-        case HOVER_WALLPAPER_FIELD:
-            return inflate_rect(rects.wallpaper_field, 1);
-        case HOVER_WALLPAPER_APPLY:
-            return inflate_rect(rects.wallpaper_apply, 1);
-        case HOVER_WALLPAPER_DEFAULT:
-            return inflate_rect(rects.wallpaper_default_btn, 1);
-        case HOVER_TRANSPARENCY_TOGGLE:
-            return section == PREF_SECTION_APPEARANCE ? inflate_rect(rects.transparency_toggle, 1)
-                                                      : gui_rect_make(0, 0, 0, 0);
-        case HOVER_ANIMATIONS_TOGGLE:
-            return section == PREF_SECTION_APPEARANCE ? inflate_rect(rects.animations_toggle, 1)
-                                                      : gui_rect_make(0, 0, 0, 0);
-        case HOVER_GRID_TOGGLE:
-            return section == PREF_SECTION_DESKTOP ? inflate_rect(rects.grid_toggle, 1) : gui_rect_make(0, 0, 0, 0);
-        case HOVER_SECONDS_TOGGLE:
-            return section == PREF_SECTION_DESKTOP ? inflate_rect(rects.seconds_toggle, 1) : gui_rect_make(0, 0, 0, 0);
-        case HOVER_VOLUME_SLIDER:
-            return section == PREF_SECTION_DESKTOP ? inflate_rect(rects.volume_slider, 1) : gui_rect_make(0, 0, 0, 0);
-        case HOVER_ETHERNET_TOGGLE:
-            return section == PREF_SECTION_NETWORK ? inflate_rect(rects.ethernet_toggle, 1) : gui_rect_make(0, 0, 0, 0);
-        case HOVER_ETHERNET_DHCP_TOGGLE:
-            return section == PREF_SECTION_NETWORK ? inflate_rect(rects.ethernet_dhcp_toggle, 1)
-                                                   : gui_rect_make(0, 0, 0, 0);
-        case HOVER_TERMINAL_TOGGLE:
-            return section == PREF_SECTION_SYSTEM ? inflate_rect(rects.terminal_toggle, 1) : gui_rect_make(0, 0, 0, 0);
-        case HOVER_STORAGE_OFF:
-        case HOVER_STORAGE_READ_ONLY:
-        case HOVER_STORAGE_WRITABLE: {
-            if (section != PREF_SECTION_SYSTEM || gui_rect_is_empty(rects.storage_segment))
-                return gui_rect_make(0, 0, 0, 0);
-            int third_w = rects.storage_segment.w / 3;
-            int x = rects.storage_segment.x;
-            if (target == HOVER_STORAGE_READ_ONLY)
-                x += third_w;
-            else if (target == HOVER_STORAGE_WRITABLE)
-                x += third_w * 2;
-            int w =
-                (target == HOVER_STORAGE_WRITABLE) ? (rects.storage_segment.x + rects.storage_segment.w - x) : third_w;
-            return inflate_rect(gui_rect_make(x, rects.storage_segment.y, w, rects.storage_segment.h), 1);
-        }
-        case HOVER_NONE:
-        default:
-            return gui_rect_make(0, 0, 0, 0);
-    }
-}
-
 static int compute_preferences_content_height(PreferencesState *state, int detail_w)
 {
     int header_h = gui_card_header_h();
@@ -502,8 +382,9 @@ static int compute_preferences_content_height(PreferencesState *state, int detai
     return section_h;
 }
 
-static void preferences_publish_menus()
+static void preferences_menus(App *app)
 {
+    (void)app;
     MenuModel model;
     gui_menu_model_reset(&model);
 
@@ -515,24 +396,11 @@ static void preferences_publish_menus()
     gui_menu_publish(&model);
 }
 
-static void preferences_draw_help(Surface *win, PreferencesRects *rects)
+static void draw_preferences(App *app, Surface *win)
 {
-    static const char *tips[] = {
-        "Pick a section on the left to change its settings",   "Theme, volume and toggles apply immediately",
-        "Wallpaper Apply needs a readable .uowp path",         "Storage mode controls whether changes persist to /data",
-        "Settings marked session-only reset on the next boot",
-    };
-    int win_w = (int)win->width;
-    int win_h = (int)win->height;
-    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
-    gui_draw_dialog(win, win_w, win_h, 0, &layout, "Settings Help", tips, (int)(sizeof(tips) / sizeof(tips[0])),
-                    nullptr, "Close", false, false, nullptr, false, false);
-    rects->help_close = layout.confirm;
-}
-
-static void draw_preferences(Surface *win, PreferencesState *state, PreferencesRects *rects, const Rect *present_rect)
-{
-    if (!win || !state || !rects)
+    PreferencesApp *st = (PreferencesApp *)app_user(app);
+    PreferencesState *state = &st->state;
+    if (!win)
         return;
     GuiAppLayout layout = gui_app_begin(win);
     int view_w = layout.outer_w + layout.outer_x * 2;
@@ -548,13 +416,13 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
     int body_content_h = (stacked_nav) ? (nav_content_h + gui_app_section_gap() + detail_content_h)
                                        : (nav_content_h > detail_content_h ? nav_content_h : detail_content_h);
     int content_total = layout.body_rect.y + body_content_h + gui_app_outer_padding();
-    gui_set_content_size(win, view_w, content_total);
+    app_set_content_size(app, view_w, content_total);
 
-    memset(rects, 0, sizeof(*rects));
+    memset(st->nav, 0, sizeof(st->nav));
 
     int nav_x = layout.body_rect.x;
     int nav_y = layout.body_rect.y;
-    int scroll_y = (g_my_window) ? g_my_window->scroll_y : 0;
+    int scroll_y = app_scroll_y(app);
     if (stacked_nav)
         nav_w = layout.body_rect.w;
 
@@ -581,123 +449,87 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
 
     if (state->section == PREF_SECTION_APPEARANCE) {
         gui_draw_string(win, content_x, content_y, "Theme", g_gui_style.text_dim, g_gui_style.app_surface);
-        rects->theme_segment = gui_rect_make(content_x, content_y + gui_line_height() + gui_space_0_5(),
-                                             gui_scaled_metric(180), gui_app_control_h());
+        st->theme.rect = gui_rect_make(content_x, content_y + gui_line_height() + gui_space_0_5(),
+                                       gui_scaled_metric(180), gui_app_control_h());
         const char *theme_labels[2] = {"Dark", "Light"};
-        int hovered_seg = -1;
-        if (state->hovered == HOVER_THEME_DARK)
-            hovered_seg = 0;
-        else if (state->hovered == HOVER_THEME_LIGHT)
-            hovered_seg = 1;
-        gui_app_draw_segmented_choice(win, rects->theme_segment.x, rects->theme_segment.y, rects->theme_segment.w,
-                                      rects->theme_segment.h, theme_labels, 2,
-                                      state->theme_mode == GUI_THEME_LIGHT ? 1 : 0, hovered_seg);
+        widget_segment_draw(win, &st->theme, theme_labels, 2, state->theme_mode == GUI_THEME_LIGHT ? 1 : 0);
 
-        int wallpaper_y = rects->theme_segment.y + rects->theme_segment.h + gui_space_3();
+        int wallpaper_y = st->theme.rect.y + st->theme.rect.h + gui_space_3();
         gui_draw_string(win, content_x, wallpaper_y, "Wallpaper", g_gui_style.text_dim, g_gui_style.app_surface);
         int controls_y = wallpaper_y + gui_line_height() + gui_space_0_5();
         int apply_w = gui_scaled_metric(72);
         int default_w = gui_scaled_metric(92);
         bool stacked_controls = content_w < gui_scaled_metric(420);
         if (stacked_controls) {
-            rects->wallpaper_field = gui_rect_make(content_x, controls_y, content_w, gui_app_control_h());
-            rects->wallpaper_apply =
-                gui_rect_make(content_x, rects->wallpaper_field.y + rects->wallpaper_field.h + gui_space_1(),
+            st->wallpaper_rect = gui_rect_make(content_x, controls_y, content_w, gui_app_control_h());
+            st->apply.rect =
+                gui_rect_make(content_x, st->wallpaper_rect.y + st->wallpaper_rect.h + gui_space_1(),
                               (content_w - gui_space_1()) / 2, gui_app_control_h());
-            rects->wallpaper_default_btn = gui_rect_make(
-                rects->wallpaper_apply.x + rects->wallpaper_apply.w + gui_space_1(), rects->wallpaper_apply.y,
-                content_x + content_w - (rects->wallpaper_apply.x + rects->wallpaper_apply.w + gui_space_1()),
-                gui_app_control_h());
+            st->def.rect = gui_rect_make(st->apply.rect.x + st->apply.rect.w + gui_space_1(), st->apply.rect.y,
+                                         content_x + content_w - (st->apply.rect.x + st->apply.rect.w + gui_space_1()),
+                                         gui_app_control_h());
         } else {
-            rects->wallpaper_field = gui_rect_make(
+            st->wallpaper_rect = gui_rect_make(
                 content_x, controls_y, content_w - (apply_w + default_w + gui_space_1() * 2), gui_app_control_h());
-            rects->wallpaper_apply = gui_rect_make(rects->wallpaper_field.x + rects->wallpaper_field.w + gui_space_1(),
-                                                   rects->wallpaper_field.y, apply_w, gui_app_control_h());
-            rects->wallpaper_default_btn =
-                gui_rect_make(rects->wallpaper_apply.x + rects->wallpaper_apply.w + gui_space_1(),
-                              rects->wallpaper_apply.y, default_w, gui_app_control_h());
+            st->apply.rect = gui_rect_make(
+                st->wallpaper_rect.x + st->wallpaper_rect.w + gui_space_1(), st->wallpaper_rect.y,
+                apply_w, gui_app_control_h());
+            st->def.rect = gui_rect_make(st->apply.rect.x + st->apply.rect.w + gui_space_1(), st->apply.rect.y,
+                                         default_w, gui_app_control_h());
         }
-        gui_app_draw_text_field(win, rects->wallpaper_field.x, rects->wallpaper_field.y, rects->wallpaper_field.w,
-                                rects->wallpaper_field.h, state->wallpaper_path, state->field_focused,
-                                state->hovered == HOVER_WALLPAPER_FIELD);
-        gui_app_draw_button_ex(win, rects->wallpaper_apply.x, rects->wallpaper_apply.y, rects->wallpaper_apply.w,
-                               rects->wallpaper_apply.h, "Apply", true, false, state->hovered == HOVER_WALLPAPER_APPLY,
-                               state->pressed == HOVER_WALLPAPER_APPLY);
-        gui_app_draw_button_ex(win, rects->wallpaper_default_btn.x, rects->wallpaper_default_btn.y,
-                               rects->wallpaper_default_btn.w, rects->wallpaper_default_btn.h, "Default", false, false,
-                               state->hovered == HOVER_WALLPAPER_DEFAULT, state->pressed == HOVER_WALLPAPER_DEFAULT);
+        widget_field_draw(win, &st->wallpaper, st->wallpaper_rect.x, st->wallpaper_rect.y,
+                          st->wallpaper_rect.w, st->wallpaper_rect.h);
+        widget_button_draw(win, &st->apply, "Apply", true, false);
+        widget_button_draw(win, &st->def, "Default", false, false);
 
-        int anim_y = rects->wallpaper_default_btn.y + rects->wallpaper_default_btn.h + gui_space_3();
-        rects->animations_toggle = gui_rect_make(content_x, anim_y, content_w, gui_app_row_tall_h());
-        gui_app_draw_toggle_row(win, rects->animations_toggle.x, rects->animations_toggle.y, rects->animations_toggle.w,
-                                rects->animations_toggle.h, "Motion", "Animate window and system transitions",
-                                state->animations_enabled, false, state->hovered == HOVER_ANIMATIONS_TOGGLE);
+        int anim_y = st->def.rect.y + st->def.rect.h + gui_space_3();
+        st->animations.rect = gui_rect_make(content_x, anim_y, content_w, gui_app_row_tall_h());
+        widget_toggle_draw(win, &st->animations, "Motion", "Animate window and system transitions",
+                           state->animations_enabled);
 
-        int trans_y = rects->animations_toggle.y + rects->animations_toggle.h + gui_space_1_5();
-        rects->transparency_toggle = gui_rect_make(content_x, trans_y, content_w, gui_app_row_tall_h());
-        gui_app_draw_toggle_row(win, rects->transparency_toggle.x, rects->transparency_toggle.y,
-                                rects->transparency_toggle.w, rects->transparency_toggle.h, "Transparency",
-                                "Use transparent menu bar and Dock surfaces", state->transparency_level < 255, false,
-                                state->hovered == HOVER_TRANSPARENCY_TOGGLE);
+        int trans_y = st->animations.rect.y + st->animations.rect.h + gui_space_1_5();
+        st->transparency.rect = gui_rect_make(content_x, trans_y, content_w, gui_app_row_tall_h());
+        widget_toggle_draw(win, &st->transparency, "Transparency", "Use transparent menu bar and Dock surfaces",
+                           state->transparency_level < 255);
 
-        gui_draw_string(win, content_x, rects->transparency_toggle.y + rects->transparency_toggle.h + gui_space_2(),
+        gui_draw_string(win, content_x, st->transparency.rect.y + st->transparency.rect.h + gui_space_2(),
                         state->status, g_gui_style.text_muted, g_gui_style.app_surface);
     } else if (state->section == PREF_SECTION_DESKTOP) {
         int row_h = gui_app_row_tall_h();
-        rects->grid_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
-        rects->seconds_toggle = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
-        int slider_y = rects->seconds_toggle.y + rects->seconds_toggle.h + gui_space_1_5();
-        rects->volume_slider = gui_rect_make(content_x, slider_y, content_w, gui_app_slider_h());
-        gui_app_draw_toggle_row(win, rects->grid_toggle.x, rects->grid_toggle.y, rects->grid_toggle.w,
-                                rects->grid_toggle.h, "Show desktop grid", nullptr,
-                                (state->system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) != 0, false,
-                                state->hovered == HOVER_GRID_TOGGLE);
-        gui_app_draw_toggle_row(win, rects->seconds_toggle.x, rects->seconds_toggle.y, rects->seconds_toggle.w,
-                                rects->seconds_toggle.h, "Show seconds in menu bar clock", nullptr,
-                                (state->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0, false,
-                                state->hovered == HOVER_SECONDS_TOGGLE);
-        gui_app_draw_slider(win, rects->volume_slider.x, rects->volume_slider.y, rects->volume_slider.w,
-                            rects->volume_slider.h, "Volume", state->volume_level, 100,
-                            state->hovered == HOVER_VOLUME_SLIDER || state->volume_dragging);
+        st->grid.rect = gui_rect_make(content_x, content_y, content_w, row_h);
+        st->seconds.rect = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
+        int slider_y = st->seconds.rect.y + st->seconds.rect.h + gui_space_1_5();
+        st->volume.rect = gui_rect_make(content_x, slider_y, content_w, gui_app_slider_h());
+        widget_toggle_draw(win, &st->grid, "Show desktop grid", nullptr,
+                           (state->system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) != 0);
+        widget_toggle_draw(win, &st->seconds, "Show seconds in menu bar clock", nullptr,
+                           (state->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0);
+        widget_slider_draw(win, &st->volume, "Volume", 100);
     } else if (state->section == PREF_SECTION_NETWORK) {
         int row_h = gui_app_row_tall_h();
-        rects->ethernet_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
-        rects->ethernet_dhcp_toggle = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
-        gui_app_draw_toggle_row(win, rects->ethernet_toggle.x, rects->ethernet_toggle.y, rects->ethernet_toggle.w,
-                                rects->ethernet_toggle.h, "Ethernet",
-                                "Use the wired Ethernet stack when a supported NIC is present", state->ethernet_enabled,
-                                false, state->hovered == HOVER_ETHERNET_TOGGLE);
-        gui_app_draw_toggle_row(win, rects->ethernet_dhcp_toggle.x, rects->ethernet_dhcp_toggle.y,
-                                rects->ethernet_dhcp_toggle.w, rects->ethernet_dhcp_toggle.h, "DHCP",
-                                "Request address, gateway, and DNS over Ethernet", state->ethernet_use_dhcp, false,
-                                state->hovered == HOVER_ETHERNET_DHCP_TOGGLE);
-        int note_y = rects->ethernet_dhcp_toggle.y + rects->ethernet_dhcp_toggle.h + gui_space_2();
+        st->ethernet.rect = gui_rect_make(content_x, content_y, content_w, row_h);
+        st->dhcp.rect = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
+        widget_toggle_draw(win, &st->ethernet, "Ethernet", "Use the wired Ethernet stack when a supported NIC is present",
+                           state->ethernet_enabled);
+        widget_toggle_draw(win, &st->dhcp, "DHCP", "Request address, gateway, and DNS over Ethernet",
+                           state->ethernet_use_dhcp);
+        int note_y = st->dhcp.rect.y + st->dhcp.rect.h + gui_space_2();
         gui_draw_string(win, content_x, note_y, "Ethernet is the only supported network transport in this build.",
                         g_gui_style.text_muted, g_gui_style.app_surface);
         gui_draw_string(win, content_x, note_y + gui_line_height(), state->status, g_gui_style.text_muted,
                         g_gui_style.app_surface);
     } else {
-        rects->terminal_toggle = gui_rect_make(content_x, content_y, content_w, gui_app_row_tall_h());
-        gui_app_draw_toggle_row(win, rects->terminal_toggle.x, rects->terminal_toggle.y, rects->terminal_toggle.w,
-                                rects->terminal_toggle.h, "Open Terminal at startup", nullptr,
-                                (state->system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) != 0, false,
-                                state->hovered == HOVER_TERMINAL_TOGGLE);
-        int storage_y = rects->terminal_toggle.y + rects->terminal_toggle.h + gui_space_3();
+        st->terminal.rect = gui_rect_make(content_x, content_y, content_w, gui_app_row_tall_h());
+        widget_toggle_draw(win, &st->terminal, "Open Terminal at startup", nullptr,
+                           (state->system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) != 0);
+        int storage_y = st->terminal.rect.y + st->terminal.rect.h + gui_space_3();
         gui_draw_string(win, content_x, storage_y, "Storage Mode", g_gui_style.text_dim, g_gui_style.app_surface);
-        rects->storage_segment = gui_rect_make(content_x, storage_y + gui_line_height() + gui_space_0_5(),
-                                               gui_scaled_metric(260), gui_app_control_h());
+        st->storage.rect = gui_rect_make(content_x, storage_y + gui_line_height() + gui_space_0_5(),
+                                         gui_scaled_metric(260), gui_app_control_h());
         const char *storage_labels[3] = {"Off", "Read-Only", "Writable"};
-        int hovered_seg = -1;
-        if (state->hovered == HOVER_STORAGE_OFF)
-            hovered_seg = 0;
-        else if (state->hovered == HOVER_STORAGE_READ_ONLY)
-            hovered_seg = 1;
-        else if (state->hovered == HOVER_STORAGE_WRITABLE)
-            hovered_seg = 2;
-        gui_app_draw_segmented_choice(win, rects->storage_segment.x, rects->storage_segment.y, rects->storage_segment.w,
-                                      rects->storage_segment.h, storage_labels, 3, state->storage_mode, hovered_seg);
-        gui_draw_string(win, content_x, rects->storage_segment.y + rects->storage_segment.h + gui_space_2(),
-                        state->status, g_gui_style.text_muted, g_gui_style.app_surface);
+        widget_segment_draw(win, &st->storage, storage_labels, 3, state->storage_mode);
+        gui_draw_string(win, content_x, st->storage.rect.y + st->storage.rect.h + gui_space_2(), state->status,
+                        g_gui_style.text_muted, g_gui_style.app_surface);
     }
 
     if (!stacked_nav) {
@@ -721,9 +553,9 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
             item_y = sticky_nav_y + 1;
             item_w = (i == PREF_SECTION_COUNT - 1) ? (nav_x + nav_w - item_x - 1) : slot_w;
         }
-        rects->nav[i] = gui_rect_make(item_x, item_y, item_w, nav_item_h);
-        gui_app_draw_nav_item(win, rects->nav[i].x, rects->nav[i].y, rects->nav[i].w, rects->nav[i].h, nav_labels[i],
-                              nav_details[i], state->section == i, state->hovered == hovered_nav_target(i));
+        st->nav[i] = gui_rect_make(item_x, item_y, item_w, nav_item_h);
+        gui_app_draw_nav_item(win, st->nav[i].x, st->nav[i].y, st->nav[i].w, st->nav[i].h, nav_labels[i],
+                              nav_details[i], state->section == i, st->nav_hover == i);
     }
 
     if (!stacked_nav) {
@@ -738,319 +570,320 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
 
     gui_app_draw_header(win, &layout, "Settings", "Appearance, desktop, network, and system", nullptr);
 
-    if (rects->help_visible) {
-        preferences_draw_help(win, rects);
-        present_rect = nullptr;
-    }
-
-    if (present_rect && !gui_rect_is_empty(*present_rect)) {
-        gui_blit_to_screen_rect(win, present_rect->x, present_rect->y, present_rect->w, present_rect->h);
-    } else {
-        gui_blit_to_screen_rect(win, 0, 0, (int)win->width, (int)win->height);
+    if (st->help.open) {
+        static const char *tips[] = {
+            "Pick a section on the left to change its settings", "Theme, volume and toggles apply immediately",
+            "Wallpaper Apply needs a readable .uowp path", "Storage mode controls whether changes persist to /data",
+            "Settings marked session-only reset on the next boot",
+        };
+        widget_help_draw(win, view_w, view_h, scroll_y, "Settings Help", tips, 5);
     }
 }
 
-static HoverTarget update_hover_target(const PreferencesRects &rects, int section, int x, int y)
+static void preferences_draw(App *app, Surface *canvas)
 {
-    for (int i = 0; i < PREF_SECTION_COUNT; i++) {
-        if (point_in_rect(rects.nav[i], x, y))
-            return hovered_nav_target(i);
-    }
+    draw_preferences(app, canvas);
+}
 
-    if (section == PREF_SECTION_APPEARANCE) {
-        if (point_in_rect(rects.theme_segment, x, y)) {
-            int rel_x = x - rects.theme_segment.x;
-            return (rel_x < rects.theme_segment.w / 2) ? HOVER_THEME_DARK : HOVER_THEME_LIGHT;
-        }
-        if (point_in_rect(rects.wallpaper_field, x, y))
-            return HOVER_WALLPAPER_FIELD;
-        if (point_in_rect(rects.wallpaper_apply, x, y))
-            return HOVER_WALLPAPER_APPLY;
-        if (point_in_rect(rects.wallpaper_default_btn, x, y))
-            return HOVER_WALLPAPER_DEFAULT;
-        if (point_in_rect(rects.animations_toggle, x, y))
-            return HOVER_ANIMATIONS_TOGGLE;
-        if (point_in_rect(rects.transparency_toggle, x, y))
-            return HOVER_TRANSPARENCY_TOGGLE;
-    } else if (section == PREF_SECTION_DESKTOP) {
-        if (point_in_rect(rects.grid_toggle, x, y))
-            return HOVER_GRID_TOGGLE;
-        if (point_in_rect(rects.seconds_toggle, x, y))
-            return HOVER_SECONDS_TOGGLE;
-        if (point_in_rect(rects.volume_slider, x, y))
-            return HOVER_VOLUME_SLIDER;
-    } else if (section == PREF_SECTION_NETWORK) {
-        if (point_in_rect(rects.ethernet_toggle, x, y))
-            return HOVER_ETHERNET_TOGGLE;
-        if (point_in_rect(rects.ethernet_dhcp_toggle, x, y))
-            return HOVER_ETHERNET_DHCP_TOGGLE;
-    } else if (section == PREF_SECTION_SYSTEM) {
-        if (point_in_rect(rects.terminal_toggle, x, y))
-            return HOVER_TERMINAL_TOGGLE;
-        if (point_in_rect(rects.storage_segment, x, y)) {
-            int rel_x = x - rects.storage_segment.x;
-            int third_w = rects.storage_segment.w / 3;
-            if (rel_x < third_w)
-                return HOVER_STORAGE_OFF;
-            if (rel_x < third_w * 2)
-                return HOVER_STORAGE_READ_ONLY;
-            return HOVER_STORAGE_WRITABLE;
-        }
-    }
+static void preferences_sync_from_registry(PreferencesApp *st, Registry *registry)
+{
+    if (!registry)
+        return;
+    PreferencesState *state = &st->state;
+    state->theme_mode = (registry->theme_mode == GUI_THEME_LIGHT) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+    state->system_flags = registry->system_flags;
+    state->ethernet_enabled = registry->ethernet_enabled;
+    state->ethernet_use_dhcp = registry->ethernet_use_dhcp;
+    state->animations_enabled = registry->animations_enabled;
+    state->transparency_level = registry->transparency_level;
+    state->volume_level = registry->volume_level <= 100 ? registry->volume_level : 100;
+    st->volume.value = state->volume_level;
+    if (registry->wallpaper_active[0])
+        safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path), registry->wallpaper_active);
+    widget_field_set(&st->wallpaper, state->wallpaper_path);
+}
 
-    return HOVER_NONE;
+static void preferences_settings(App *app)
+{
+    PreferencesApp *st = (PreferencesApp *)app_user(app);
+    preferences_sync_from_registry(st, gui_registry());
+    app_invalidate_all(app);
+}
+
+static void preferences_menu(App *app, uint32_t cmd)
+{
+    PreferencesApp *st = (PreferencesApp *)app_user(app);
+    if (cmd == PREF_MENU_HELP) {
+        st->help.open = true;
+        app_invalidate_all(app);
+    }
+}
+
+static void preferences_clear_hover(PreferencesApp *st)
+{
+    st->nav_hover = -1;
+    widget_toggle_reset(&st->animations);
+    widget_toggle_reset(&st->transparency);
+    widget_toggle_reset(&st->grid);
+    widget_toggle_reset(&st->seconds);
+    widget_toggle_reset(&st->ethernet);
+    widget_toggle_reset(&st->dhcp);
+    widget_toggle_reset(&st->terminal);
+    widget_slider_reset(&st->volume);
+    widget_segment_reset(&st->theme);
+    widget_segment_reset(&st->storage);
+    widget_button_reset(&st->apply);
+    widget_button_reset(&st->def);
+    st->wallpaper.hovered = false;
+}
+
+static void preferences_event(App *app, const Event *ev)
+{
+    PreferencesApp *st = (PreferencesApp *)app_user(app);
+    PreferencesState *state = &st->state;
+    Registry *registry = gui_registry();
+
+    switch (ev->type) {
+        case EVT_UNFOCUS:
+        case EVT_MOUSE_LEAVE:
+            preferences_clear_hover(st);
+            app_invalidate_all(app);
+            break;
+
+        case EVT_MOUSE_MOVE: {
+            if (st->volume.dragging) {
+                if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) {
+                    state->volume_level = st->volume.value;
+                    publish_system_settings(*state, registry);
+                }
+                app_invalidate_all(app);
+                break;
+            }
+            int previous_nav = st->nav_hover;
+            st->nav_hover = widget_hit_rects(st->nav, PREF_SECTION_COUNT, ev->mouse.x, ev->mouse.y);
+            bool changed = st->nav_hover != previous_nav;
+            changed |= (widget_segment_event(&st->theme, ev, 2, nullptr) & WIDGET_CHANGED) != 0;
+            changed |= (widget_segment_event(&st->storage, ev, 3, nullptr) & WIDGET_CHANGED) != 0;
+            changed |= (widget_field_event(&st->wallpaper, st->wallpaper_rect, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_button_event(&st->apply, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_button_event(&st->def, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->animations, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->transparency, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->grid, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->seconds, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->ethernet, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->dhcp, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_toggle_event(&st->terminal, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
+            if (changed)
+                app_invalidate_all(app);
+            break;
+        }
+
+        case EVT_MOUSE_DOWN: {
+            if (ev->mouse.button != 1)
+                break;
+            if (st->help.open) {
+                if (widget_help_event(&st->help, ev))
+                    app_invalidate_all(app);
+                break;
+            }
+
+            if (widget_toggle_event(&st->animations, ev) & WIDGET_CLICKED) {
+                state->animations_enabled = !state->animations_enabled;
+                apply_system_settings(state, registry, "Animations updated", "Animations applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_toggle_event(&st->transparency, ev) & WIDGET_CLICKED) {
+                state->transparency_level = (state->transparency_level > 200) ? 180 : 255;
+                apply_system_settings(state, registry, "Transparency updated",
+                                      "Transparency applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_toggle_event(&st->grid, ev) & WIDGET_CLICKED) {
+                state->system_flags ^= SYSTEM_FLAG_SHOW_DESKTOP_GRID;
+                apply_system_settings(state, registry, "Desktop setting updated",
+                                      "Desktop setting applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_toggle_event(&st->seconds, ev) & WIDGET_CLICKED) {
+                state->system_flags ^= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
+                apply_system_settings(state, registry, "Clock setting updated",
+                                      "Clock setting applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_toggle_event(&st->ethernet, ev) & WIDGET_CLICKED) {
+                state->ethernet_enabled = !state->ethernet_enabled;
+                apply_network_settings(state, registry, "Ethernet updated",
+                                       "Ethernet setting applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_toggle_event(&st->dhcp, ev) & WIDGET_CLICKED) {
+                state->ethernet_use_dhcp = !state->ethernet_use_dhcp;
+                apply_network_settings(state, registry, "DHCP updated", "Ethernet DHCP setting applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_toggle_event(&st->terminal, ev) & WIDGET_CLICKED) {
+                state->system_flags ^= SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
+                apply_system_settings(state, registry, "Startup setting updated",
+                                      "Startup setting applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+
+            int seg_index = -1;
+            if (widget_segment_event(&st->theme, ev, 2, &seg_index) & WIDGET_CLICKED) {
+                bool wallpaper_tracks_theme = wallpaper_is_default_family_path(state->wallpaper_path);
+                state->theme_mode = (seg_index == 1) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+                if (wallpaper_tracks_theme) {
+                    safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path),
+                                   wallpaper_default_path_for_theme(state->theme_mode));
+                    widget_field_set(&st->wallpaper, state->wallpaper_path);
+                }
+                apply_system_settings(state, registry, "Theme updated", "Theme applied for this session");
+                gui_sync_theme_from_registry();
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_segment_event(&st->storage, ev, 3, &seg_index) & WIDGET_CLICKED) {
+                if (request_storage_mode_change(registry, seg_index))
+                    snprintf(state->status, sizeof(state->status), "Storage Mode update requested");
+                else
+                    snprintf(state->status, sizeof(state->status), "Failed to update Storage Mode");
+                app_invalidate_all(app);
+                break;
+            }
+
+            if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) {
+                state->volume_level = st->volume.value;
+                publish_system_settings(*state, registry);
+                app_invalidate_all(app);
+                break;
+            }
+
+            if (widget_button_event(&st->apply, ev) & WIDGET_CHANGED)
+                app_invalidate_all(app);
+            if (widget_button_event(&st->def, ev) & WIDGET_CHANGED)
+                app_invalidate_all(app);
+
+            int field_rc = widget_field_event(&st->wallpaper, st->wallpaper_rect, ev);
+            if (field_rc & WIDGET_CHANGED)
+                app_invalidate_all(app);
+
+            int nav_index = widget_hit_rects(st->nav, PREF_SECTION_COUNT, ev->mouse.x, ev->mouse.y);
+            if (nav_index >= 0 && nav_index != state->section) {
+                state->section = nav_index;
+                app_invalidate_all(app);
+            }
+            break;
+        }
+
+        case EVT_MOUSE_UP: {
+            if (ev->mouse.button != 1)
+                break;
+            if (st->volume.dragging) {
+                if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CLICKED)
+                    apply_system_settings(state, registry, "Volume updated", "Volume applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            // Release-to-apply: the wallpaper change fires on mouse-up so a
+            // drag away cancels it.
+            if (widget_button_event(&st->apply, ev) & WIDGET_CLICKED) {
+                apply_wallpaper(state, registry, state->wallpaper_path);
+                widget_field_set(&st->wallpaper, state->wallpaper_path);
+                app_invalidate_all(app);
+                break;
+            }
+            if (widget_button_event(&st->def, ev) & WIDGET_CLICKED) {
+                apply_wallpaper(state, registry, wallpaper_default_path_for_theme(state->theme_mode));
+                widget_field_set(&st->wallpaper, state->wallpaper_path);
+                app_invalidate_all(app);
+                break;
+            }
+            break;
+        }
+
+        case EVT_KEY_DOWN: {
+            if (st->help.open) {
+                if (widget_help_event(&st->help, ev))
+                    app_invalidate_all(app);
+                break;
+            }
+            int field_rc = widget_field_event(&st->wallpaper, st->wallpaper_rect, ev);
+            if (field_rc & WIDGET_FIELD_ENTER) {
+                apply_wallpaper(state, registry, state->wallpaper_path);
+                widget_field_set(&st->wallpaper, state->wallpaper_path);
+                app_invalidate_all(app);
+            } else if (field_rc & WIDGET_CHANGED) {
+                app_invalidate_all(app);
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static void preferences_idle(App *app)
+{
+    PreferencesApp *st = (PreferencesApp *)app_user(app);
+    Registry *registry = gui_registry();
+    int current_storage_mode = registry && registry->storage_mode <= STORAGE_MODE_WRITABLE
+                                   ? (int)registry->storage_mode
+                                   : get_storage_mode();
+    if (current_storage_mode >= STORAGE_MODE_OFF && current_storage_mode <= STORAGE_MODE_WRITABLE &&
+        current_storage_mode != st->state.storage_mode) {
+        st->state.storage_mode = current_storage_mode;
+        app_invalidate_all(app);
+    }
 }
 
 extern "C" int main()
 {
-    Surface win = gui_register_window_ex("Settings", (uint32_t)gui_scaled_metric(760), (uint32_t)gui_scaled_metric(460),
-                                         WIN_FLAG_RESIZABLE);
-    if (!win.buffer)
+    static PreferencesApp st = {};
+    st.nav_hover = -1;
+    load_preferences_state(&st.state, nullptr);
+    widget_field_init(&st.wallpaper, st.state.wallpaper_path, sizeof(st.state.wallpaper_path));
+
+    AppConfig config = {};
+    config.title = "Settings";
+    config.width = gui_scaled_metric(760);
+    config.height = gui_scaled_metric(460);
+    config.min_width = gui_scaled_metric(560);
+    config.min_height = gui_scaled_metric(420);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.idle_ms = 10;
+    config.on_draw = preferences_draw;
+    config.on_event = preferences_event;
+    config.on_menu = preferences_menu;
+    config.on_menus = preferences_menus;
+    config.on_settings = preferences_settings;
+    config.on_idle = preferences_idle;
+
+    App *app = app_create(&config, &st);
+    if (!app)
         return 1;
-    gui_window_set_min_size(gui_scaled_metric(560), gui_scaled_metric(420));
 
-    gui_sync_theme_from_registry();
-    gui_request_focus();
+    // The registry exists once the window is registered: seed widget state
+    // from it (theme, volume, wallpaper) before the first frame.
+    preferences_sync_from_registry(&st, gui_registry());
+    gui_apply_theme(st.state.theme_mode);
 
-    Registry *registry = gui_registry();
-    PreferencesState state = {};
-    PreferencesRects rects = {};
-    load_preferences_state(&state, registry);
-    gui_apply_theme(state.theme_mode);
-    preferences_publish_menus();
-
-    uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
-    bool needs_redraw = true;
-    bool redraw_full = true;
-    Rect redraw_rect = gui_rect_make(0, 0, 0, 0);
-
-    auto request_redraw = [&](bool full, Rect rect) {
-        needs_redraw = true;
-        if (full || gui_rect_is_empty(rect)) {
-            redraw_full = true;
-            redraw_rect = gui_rect_make(0, 0, 0, 0);
-            return;
-        }
-        if (redraw_full)
-            return;
-        redraw_rect = gui_rect_union(redraw_rect, rect);
-    };
-
-    while (true) {
-        Event ev = {};
-        while (poll_event(&ev) > 0) {
-            if (ev.type == EVT_WINDOW_CLOSE)
-                return 0;
-            if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
-                request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                continue;
-            }
-            if (ev.type == EVT_WINDOW_SCROLL) {
-                // Sticky nav/detail headers track the scroll offset.
-                request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                continue;
-            }
-            if (ev.type == EVT_FOCUS) {
-                preferences_publish_menus();
-                request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                continue;
-            }
-            if (ev.type == EVT_UNFOCUS || ev.type == EVT_MOUSE_LEAVE) {
-                HoverTarget previous_hovered = state.hovered;
-                state.hovered = HOVER_NONE;
-                state.pressed = HOVER_NONE;
-                if (previous_hovered != HOVER_NONE)
-                    request_redraw(false, hover_target_rect(rects, state.section, previous_hovered));
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_MOVE) {
-                if (state.volume_dragging && !gui_rect_is_empty(rects.volume_slider)) {
-                    Rect track = gui_app_slider_track_rect(rects.volume_slider.x, rects.volume_slider.y,
-                                                           rects.volume_slider.w, rects.volume_slider.h);
-                    uint32_t next = gui_app_slider_value_from_x(ev.mouse.x, &track, 100);
-                    if (next != state.volume_level) {
-                        state.volume_level = next;
-                        publish_system_settings(state, registry);
-                    }
-                }
-                HoverTarget previous_hovered = state.hovered;
-                HoverTarget hovered = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
-                if (hovered != state.hovered) {
-                    state.hovered = hovered;
-                    request_redraw(false, gui_rect_union(hover_target_rect(rects, state.section, previous_hovered),
-                                                         hover_target_rect(rects, state.section, hovered)));
-                }
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
-                if (rects.help_visible) {
-                    rects.help_visible = false;
-                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                    continue;
-                }
-                HoverTarget hovered = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
-                state.hovered = hovered;
-                state.field_focused = (hovered == HOVER_WALLPAPER_FIELD);
-
-                if (hovered == HOVER_NAV_APPEARANCE)
-                    state.section = PREF_SECTION_APPEARANCE;
-                else if (hovered == HOVER_NAV_DESKTOP)
-                    state.section = PREF_SECTION_DESKTOP;
-                else if (hovered == HOVER_NAV_NETWORK)
-                    state.section = PREF_SECTION_NETWORK;
-                else if (hovered == HOVER_NAV_SYSTEM)
-                    state.section = PREF_SECTION_SYSTEM;
-                else if (hovered == HOVER_THEME_DARK || hovered == HOVER_THEME_LIGHT) {
-                    bool wallpaper_tracks_theme = wallpaper_is_default_family_path(state.wallpaper_path);
-                    state.theme_mode = (hovered == HOVER_THEME_LIGHT) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
-                    if (wallpaper_tracks_theme) {
-                        safe_copy_text(state.wallpaper_path, sizeof(state.wallpaper_path),
-                                       wallpaper_default_path_for_theme(state.theme_mode));
-                    }
-                    apply_system_settings(&state, registry, "Theme updated", "Theme applied for this session");
-                    gui_sync_theme_from_registry();
-                } else if (hovered == HOVER_WALLPAPER_APPLY || hovered == HOVER_WALLPAPER_DEFAULT) {
-                    // Release-to-apply: the wallpaper change fires on mouse-up
-                    // so a drag away cancels it.
-                    state.pressed = hovered;
-                } else if (hovered == HOVER_ANIMATIONS_TOGGLE) {
-                    state.animations_enabled = !state.animations_enabled;
-                    apply_system_settings(&state, registry, "Animations updated",
-                                          "Animations applied for this session");
-                } else if (hovered == HOVER_TRANSPARENCY_TOGGLE) {
-                    state.transparency_level = (state.transparency_level > 200) ? 180 : 255;
-                    apply_system_settings(&state, registry, "Transparency updated",
-                                          "Transparency applied for this session");
-                } else if (hovered == HOVER_GRID_TOGGLE) {
-                    state.system_flags ^= SYSTEM_FLAG_SHOW_DESKTOP_GRID;
-                    apply_system_settings(&state, registry, "Desktop setting updated",
-                                          "Desktop setting applied for this session");
-                } else if (hovered == HOVER_SECONDS_TOGGLE) {
-                    state.system_flags ^= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
-                    apply_system_settings(&state, registry, "Clock setting updated",
-                                          "Clock setting applied for this session");
-                } else if (hovered == HOVER_VOLUME_SLIDER) {
-                    state.volume_dragging = true;
-                    Rect track = gui_app_slider_track_rect(rects.volume_slider.x, rects.volume_slider.y,
-                                                           rects.volume_slider.w, rects.volume_slider.h);
-                    state.volume_level = gui_app_slider_value_from_x(ev.mouse.x, &track, 100);
-                    publish_system_settings(state, registry);
-                } else if (hovered == HOVER_ETHERNET_TOGGLE) {
-                    state.ethernet_enabled = !state.ethernet_enabled;
-                    apply_network_settings(&state, registry, "Ethernet updated",
-                                           "Ethernet setting applied for this session");
-                } else if (hovered == HOVER_ETHERNET_DHCP_TOGGLE) {
-                    state.ethernet_use_dhcp = !state.ethernet_use_dhcp;
-                    apply_network_settings(&state, registry, "DHCP updated",
-                                           "Ethernet DHCP setting applied for this session");
-                } else if (hovered == HOVER_TERMINAL_TOGGLE) {
-                    state.system_flags ^= SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
-                    apply_system_settings(&state, registry, "Startup setting updated",
-                                          "Startup setting applied for this session");
-                } else if (hovered == HOVER_STORAGE_OFF || hovered == HOVER_STORAGE_READ_ONLY ||
-                           hovered == HOVER_STORAGE_WRITABLE) {
-                    int new_mode = hovered == HOVER_STORAGE_OFF        ? STORAGE_MODE_OFF
-                                   : hovered == HOVER_STORAGE_WRITABLE ? STORAGE_MODE_WRITABLE
-                                                                       : STORAGE_MODE_READ_ONLY;
-                    if (request_storage_mode_change(registry, new_mode)) {
-                        snprintf(state.status, sizeof(state.status), "Storage Mode update requested");
-                    } else {
-                        snprintf(state.status, sizeof(state.status), "Failed to update Storage Mode");
-                    }
-                }
-                request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                continue;
-            }
-            if (ev.type == EVT_MOUSE_UP && ev.mouse.button == 1) {
-                bool changed = false;
-                if (state.volume_dragging) {
-                    state.volume_dragging = false;
-                    apply_system_settings(&state, registry, "Volume updated", "Volume applied for this session");
-                    changed = true;
-                }
-                if (state.pressed != HOVER_NONE) {
-                    HoverTarget pressed = state.pressed;
-                    state.pressed = HOVER_NONE;
-                    HoverTarget over = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
-                    if (over == pressed) {
-                        if (pressed == HOVER_WALLPAPER_APPLY)
-                            apply_wallpaper(&state, registry, state.wallpaper_path);
-                        else if (pressed == HOVER_WALLPAPER_DEFAULT)
-                            apply_wallpaper(&state, registry, wallpaper_default_path_for_theme(state.theme_mode));
-                    }
-                    changed = true;
-                }
-                if (changed)
-                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                continue;
-            }
-            if (ev.type == EVT_KEY_DOWN && rects.help_visible) {
-                if ((uint8_t)ev.key.c == 27 || ev.key.c == '\n' || ev.key.c == '\r') {
-                    rects.help_visible = false;
-                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                }
-                continue;
-            }
-            if (ev.type == EVT_KEY_DOWN && state.field_focused && ev.key.c != 0) {
-                char c = ev.key.c;
-                size_t len = strlen(state.wallpaper_path);
-                if (c == '\n' || c == '\r') {
-                    apply_wallpaper(&state, registry, state.wallpaper_path);
-                    request_redraw(true, gui_rect_make(0, 0, 0, 0));
-                } else if (c == 27) {
-                    state.field_focused = false;
-                    request_redraw(false, inflate_rect(rects.wallpaper_field, 2));
-                } else if ((c == '\b' || c == 127) && len > 0) {
-                    state.wallpaper_path[len - 1] = '\0';
-                    request_redraw(false, inflate_rect(rects.wallpaper_field, 1));
-                } else if (c >= 32 && c <= 126 && len + 1 < sizeof(state.wallpaper_path)) {
-                    state.wallpaper_path[len] = c;
-                    state.wallpaper_path[len + 1] = '\0';
-                    request_redraw(false, inflate_rect(rects.wallpaper_field, 1));
-                }
-            }
-        }
-
-        registry = gui_registry();
-        int current_storage_mode = registry && registry->storage_mode <= STORAGE_MODE_WRITABLE
-                                       ? (int)registry->storage_mode
-                                       : get_storage_mode();
-        if (current_storage_mode >= STORAGE_MODE_OFF && current_storage_mode <= STORAGE_MODE_WRITABLE &&
-            current_storage_mode != state.storage_mode) {
-            state.storage_mode = current_storage_mode;
-            request_redraw(true, gui_rect_make(0, 0, 0, 0));
-        }
-        if (registry && registry->settings_generation != last_settings_generation) {
-            last_settings_generation = registry->settings_generation;
-            gui_sync_theme_from_registry();
-            state.theme_mode = (registry->theme_mode == GUI_THEME_LIGHT) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
-            state.system_flags = registry->system_flags;
-            state.ethernet_enabled = registry->ethernet_enabled;
-            state.ethernet_use_dhcp = registry->ethernet_use_dhcp;
-            state.animations_enabled = registry->animations_enabled;
-            state.transparency_level = registry->transparency_level;
-            state.volume_level = registry->volume_level <= 100 ? registry->volume_level : 100;
-            if (registry->wallpaper_active[0]) {
-                safe_copy_text(state.wallpaper_path, sizeof(state.wallpaper_path), registry->wallpaper_active);
-            }
-            request_redraw(true, gui_rect_make(0, 0, 0, 0));
-        }
-
-        uint32_t menu_cmd = 0;
-        if (gui_menu_take_command(&menu_cmd) && menu_cmd == PREF_MENU_HELP) {
-            rects.help_visible = true;
-            request_redraw(true, gui_rect_make(0, 0, 0, 0));
-        }
-
-        if (needs_redraw) {
-            draw_preferences(&win, &state, &rects, redraw_full ? nullptr : &redraw_rect);
-            needs_redraw = false;
-            redraw_full = false;
-            redraw_rect = gui_rect_make(0, 0, 0, 0);
-        } else {
-            sleep_ms(10);
-        }
+    app_invalidate_all(app);
+    app_commit(app);
+    while (app_pump(app)) {
+        app_commit(app);
+        if (!app_needs_draw(app) && !st.volume.dragging)
+            sleep_ms(config.idle_ms);
     }
-
+    app_destroy(app);
     return 0;
 }

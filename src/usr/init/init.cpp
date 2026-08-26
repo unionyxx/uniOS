@@ -128,7 +128,7 @@ extern "C" int main(int argc, char **argv)
 #ifdef DEBUG
     // Temporary verification hook (removed after the libapp migration):
     // spawn the app under test so smoke runs exercise it.
-    spawn_process("Test App", "/bin/imageviewer.elf");
+    spawn_process("Test App", "/bin/preferences.elf");
 #endif
 
     int status = 0;
