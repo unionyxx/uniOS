@@ -208,6 +208,10 @@ typedef struct DisplayStatus
     uint64_t last_present_ticks;
     uint32_t last_present_result;
     uint32_t flags;
+    uint64_t last_present_pixels;
+    uint64_t last_vram_copy_ticks;
+    uint64_t total_present_pixels;
+    uint64_t total_vram_copy_ticks;
 } DisplayStatus;
 
 typedef struct DisplaySyncPoint

@@ -145,14 +145,13 @@ static uint32_t display_convert_xrgb_to_boot_pixel(uint32_t pixel, const BootFra
     uint32_t red = display_scale_channel_to_mask((pixel >> 16) & 0xFFu, fb.red_mask_size);
     uint32_t green = display_scale_channel_to_mask((pixel >> 8) & 0xFFu, fb.green_mask_size);
     uint32_t blue = display_scale_channel_to_mask(pixel & 0xFFu, fb.blue_mask_size);
-    return (red << fb.red_mask_shift) | (green << fb.green_mask_shift) | (blue << fb.blue_mask_shift) |
-           0xFF000000u;
+    return (red << fb.red_mask_shift) | (green << fb.green_mask_shift) | (blue << fb.blue_mask_shift) | 0xFF000000u;
 }
 
 static bool display_boot_format_is_xrgb(const BootFramebuffer &fb)
 {
-    return fb.red_mask_size == 8 && fb.red_mask_shift == 16 && fb.green_mask_size == 8 &&
-           fb.green_mask_shift == 8 && fb.blue_mask_size == 8 && fb.blue_mask_shift == 0;
+    return fb.red_mask_size == 8 && fb.red_mask_shift == 16 && fb.green_mask_size == 8 && fb.green_mask_shift == 8 &&
+           fb.blue_mask_size == 8 && fb.blue_mask_shift == 0;
 }
 
 static uint64_t display_buffer_kernel_page_flags(uint32_t buffer_flags)
@@ -417,6 +416,7 @@ void display_complete_present(DisplayHead *head, uint32_t sequence, uint32_t res
             head->buffer_in_flight_sequence[i] = 0;
     }
     head->last_present_pixels = present_pixels;
+    head->total_present_pixels += present_pixels;
     head->status.completed_sequence = sequence;
     head->status.last_present_ticks = timer_get_ticks();
     head->status.last_present_result = result;
@@ -683,9 +683,20 @@ static bool gop_set_mode(DisplayDevice *device, const DisplayMode &mode);
 static bool gop_atomic_commit(DisplayDevice *device, const DisplayAtomicState &state, const DisplayMode &mode);
 
 static const DisplayBackendOps g_gop_backend_ops = {
-    "firmware-framebuffer", gop_get_caps, gop_get_status,    gop_present, gop_present_buffer,
-    gop_wait,       gop_set_mode, gop_atomic_commit, nullptr,     nullptr,
-    nullptr,        nullptr,      nullptr,           nullptr,
+    "firmware-framebuffer",
+    gop_get_caps,
+    gop_get_status,
+    gop_present,
+    gop_present_buffer,
+    gop_wait,
+    gop_set_mode,
+    gop_atomic_commit,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
 };
 
 void display_force_gop_backend(DisplayDevice *device)
@@ -2271,7 +2282,8 @@ static uint32_t compose_fast_single_layer(DisplayDevice *device, const DisplayCo
 }
 
 static uint32_t compose_submit_backend(DisplayDevice *device, const DisplayComposeRequest &request,
-                                   const Rect *damage_rects, uint32_t damage_count, PresentBackendResult *out_result)
+                                       const Rect *damage_rects, uint32_t damage_count,
+                                       PresentBackendResult *out_result)
 {
     if (out_result)
         *out_result = PresentBackendResult::PRESENT_CPU_FALLBACK;
@@ -2326,7 +2338,8 @@ static uint32_t compose_submit_backend(DisplayDevice *device, const DisplayCompo
     }
 
     if (request.cursor_buffer_handle != 0 && device->ops->backend_compose_cursor &&
-        !device->ops->backend_compose_cursor(device, request.cursor_buffer_handle, request.cursor_x, request.cursor_y)) {
+        !device->ops->backend_compose_cursor(device, request.cursor_buffer_handle, request.cursor_x,
+                                             request.cursor_y)) {
         device->primary_head.backend_compose_failure_count++;
         return 0;
     }
@@ -2369,9 +2382,9 @@ static void compose_cursor_cpu(DisplayDevice *device, uint32_t *dst, uint32_t ds
     int32_t ox1 = cursor_rect.x > damage.x ? cursor_rect.x : damage.x;
     int32_t oy1 = cursor_rect.y > damage.y ? cursor_rect.y : damage.y;
     int32_t ox2 = (cursor_rect.x + cursor_rect.w) < (damage.x + damage.w) ? (cursor_rect.x + cursor_rect.w)
-                                                                           : (damage.x + damage.w);
+                                                                          : (damage.x + damage.w);
     int32_t oy2 = (cursor_rect.y + cursor_rect.h) < (damage.y + damage.h) ? (cursor_rect.y + cursor_rect.h)
-                                                                           : (damage.y + damage.h);
+                                                                          : (damage.y + damage.h);
     if (ox2 <= ox1 || oy2 <= oy1)
         return;
 
@@ -2538,6 +2551,10 @@ static bool gop_get_status(DisplayDevice *device, DisplayStatus *out_status)
     if (!device || !out_status || !device->boot_framebuffer)
         return false;
     *out_status = device->primary_head.status;
+    out_status->last_present_pixels = device->primary_head.last_present_pixels;
+    out_status->last_vram_copy_ticks = device->primary_head.last_dma_wait_ticks;
+    out_status->total_present_pixels = device->primary_head.total_present_pixels;
+    out_status->total_vram_copy_ticks = device->primary_head.total_dma_wait_ticks;
     return true;
 }
 
@@ -2911,7 +2928,8 @@ uint32_t display_compose_submit(const DisplayComposeRequest &request)
     uint32_t damage_count = request.damage_rect_count;
 
     if (damage_count == 0 || !request.damage_rects) {
-        local_damage[0] = gui_rect_make(0, 0, (int32_t)primary_head()->caps.width, (int32_t)primary_head()->caps.height);
+        local_damage[0] =
+            gui_rect_make(0, 0, (int32_t)primary_head()->caps.width, (int32_t)primary_head()->caps.height);
         damage_count = 1u;
     } else if (damage_count > kMaxLocalDamageRects) {
         // Never truncate damage. Collapse excessive damage into one safe clipped
@@ -2964,7 +2982,8 @@ uint32_t display_compose_submit(const DisplayComposeRequest &request)
         return fast_submitted;
 
     PresentBackendResult backend_result = PresentBackendResult::PRESENT_CPU_FALLBACK;
-    uint32_t backend_submitted = compose_submit_backend(&s_device, request, local_damage, damage_count, &backend_result);
+    uint32_t backend_submitted =
+        compose_submit_backend(&s_device, request, local_damage, damage_count, &backend_result);
     if (backend_submitted != 0 && backend_result != PresentBackendResult::PRESENT_CPU_FALLBACK)
         return backend_submitted;
 

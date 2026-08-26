@@ -19,7 +19,7 @@ The display path is built on the UEFI GOP framebuffer handed off by Meridian. Th
 
 The KMS-style syscall surface (`include/uapi/display.h`, syscalls 247-262; see [System calls](syscalls.md)):
 
-- **Caps/status/connectors/modes**: geometry, pixel format, refresh (from EDID timing detection), capability flags (compositor present, copy path), connector and mode enumeration with full timing data.
+- **Caps/status/connectors/modes**: geometry, pixel format, refresh (from EDID timing detection), capability flags (compositor present, copy path), connector and mode enumeration with full timing data. Status carries present-sequence tracking plus present telemetry: `last_present_pixels`, `last_vram_copy_ticks`, `total_present_pixels`, `total_vram_copy_ticks` (VRAM copy duration in timer ticks and pixels pushed, for write-bandwidth measurement).
 - **Buffers**: create/destroy kernel DMA-backed buffers, map them into the caller at `0x340000000` (up to 16 objects), grant WM access.
 - **Present**: copy-path present with caller-supplied damage rects (up to 128), `sfence` semantics, present-sequence tracking.
 - **Compose**: the compositor submits up to 32 layers with up to 32 damage rects; the kernel composites into DMA compose buffers (up to 3) and presents. Layers carry blend/scale/cursor parameters.

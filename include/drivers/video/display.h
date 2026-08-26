@@ -96,6 +96,7 @@ struct DisplayHead
     uint64_t next_deadline_tick;
     uint32_t deadline_remainder;
     uint64_t last_present_pixels;
+    uint64_t total_present_pixels;
     DisplayMode current_mode;
     DisplayMode preferred_mode;
     uint32_t last_submitted_layers;
