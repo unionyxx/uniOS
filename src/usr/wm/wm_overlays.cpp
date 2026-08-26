@@ -1,5 +1,84 @@
 #include "wm_core.h"
 
+void wm_stats_overlay_bounds(DirtyRect *out_box, DirtyRect *out_damage)
+{
+    int w = gui_scaled_metric(330);
+    int h = gui_scaled_metric(112);
+    int margin = gui_space_2();
+    DirtyRect box = {margin, wm_menubar_h() + margin, w, h};
+    if (out_box)
+        *out_box = box;
+    if (out_damage)
+        *out_damage = rect_expand(box, gui_scaled_metric(10));
+}
+
+static void stats_format_ms(char *out, size_t size, uint64_t cycles)
+{
+    uint64_t us = wm_tsc_to_us(cycles);
+    snprintf(out, size, "%llu.%02llu", static_cast<unsigned long long>(us / 1000u),
+             static_cast<unsigned long long>((us % 1000u) / 10u));
+}
+
+void draw_stats_overlay_clipped(const DirtyRect &clip)
+{
+    if (!g_backbuffer.buffer || (g_system_flags & SYSTEM_FLAG_SHOW_DEBUG_STATS) == 0)
+        return;
+
+    DirtyRect box = {};
+    DirtyRect damage = {};
+    wm_stats_overlay_bounds(&box, &damage);
+    if (!rect_intersection(clip, damage, nullptr))
+        return;
+
+    DisplayStatus status = {};
+    display_get_status(&status);
+
+    int radius = gui_radius_md();
+    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
+    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+
+    const GuiFont *mono = gui_font_mono();
+    int lh = gui_font_line_height(mono) + 2;
+    int text_x = box.x + gui_space_1_5();
+    int text_y = box.y + gui_space_1();
+    int max_w = box.w - gui_space_3();
+    char line[96];
+    char a[24];
+    char b[24];
+
+    stats_format_ms(a, sizeof(a), g_frame_stats.last_frame_ticks);
+    stats_format_ms(b, sizeof(b), g_frame_stats.max_frame_ticks);
+    snprintf(line, sizeof(line), "frame %sms max %sms", a, b);
+    gui_draw_text_clipped(&g_backbuffer, mono, text_x, text_y, max_w, line, g_gui_style.text, g_gui_style.app_surface);
+    text_y += lh;
+
+    stats_format_ms(a, sizeof(a), g_frame_stats.last_compose_ticks);
+    stats_format_ms(b, sizeof(b), g_frame_stats.last_present_ticks);
+    snprintf(line, sizeof(line), "comp %sms pres %sms skip %llu", a, b,
+             static_cast<unsigned long long>(g_frame_stats.frames_skipped));
+    gui_draw_text_clipped(&g_backbuffer, mono, text_x, text_y, max_w, line, g_gui_style.text, g_gui_style.app_surface);
+    text_y += lh;
+
+    stats_format_ms(a, sizeof(a), g_frame_stats.last_input_to_submit_ticks);
+    snprintf(line, sizeof(line), "in>sub %sms dmg %llukpx %ur", a,
+             static_cast<unsigned long long>(g_frame_stats.last_dirty_area / 1000u), g_frame_stats.last_dirty_rects);
+    gui_draw_text_clipped(&g_backbuffer, mono, text_x, text_y, max_w, line, g_gui_style.text, g_gui_style.app_surface);
+    text_y += lh;
+
+    snprintf(line, sizeof(line), "vram %llu px %llu ticks", static_cast<unsigned long long>(status.last_present_pixels),
+             static_cast<unsigned long long>(status.last_vram_copy_ticks));
+    gui_draw_text_clipped(&g_backbuffer, mono, text_x, text_y, max_w, line, g_gui_style.text_dim,
+                          g_gui_style.app_surface);
+    text_y += lh;
+
+    snprintf(line, sizeof(line), "sub %llu built %llu swcur %llu",
+             static_cast<unsigned long long>(g_frame_stats.frames_submitted),
+             static_cast<unsigned long long>(g_frame_stats.frames_built),
+             static_cast<unsigned long long>(g_frame_stats.cursor_software_frames));
+    gui_draw_text_clipped(&g_backbuffer, mono, text_x, text_y, max_w, line, g_gui_style.text_dim,
+                          g_gui_style.app_surface);
+}
+
 static uint32_t storage_prompt_scrim_color()
 {
     uint32_t base = g_gui_style.app_bg ? g_gui_style.app_bg : g_gui_chrome.desktop_bg;

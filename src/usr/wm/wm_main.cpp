@@ -17,6 +17,25 @@ uint32_t g_presentbuffer_slot_count = 0;
 uint32_t g_presentbuffer_active_slot = 0;
 DisplayQueueState g_display_queue = {};
 WmFrameStats g_frame_stats = {};
+WmBenchState g_bench = {};
+static uint64_t g_tsc_freq_cached = 0;
+
+uint64_t wm_tsc_now(void)
+{
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+uint64_t wm_tsc_to_us(uint64_t cycles)
+{
+    if (g_tsc_freq_cached == 0)
+        g_tsc_freq_cached = get_tsc_freq();
+    if (g_tsc_freq_cached == 0)
+        return 0;
+    return cycles / (g_tsc_freq_cached / 1000000u);
+}
 
 Window g_windows[MAX_WINDOWS];
 int g_window_count = 0;
@@ -166,6 +185,110 @@ void wm_stats_note_stale_repair(int rect_count)
 {
     if (rect_count > 0)
         g_frame_stats.stale_slot_repairs += static_cast<uint64_t>(rect_count);
+}
+
+static void wm_bench_finish(Registry *registry)
+{
+    if (g_bench.win_index >= 0 && g_bench.win_index < g_window_count) {
+        Window &w = g_windows[g_bench.win_index];
+        Window old = w;
+        w.x = g_bench.origin_x;
+        w.y = g_bench.origin_y;
+        w.w = g_bench.origin_w;
+        w.h = g_bench.origin_h;
+        mark_window_transition_damage(old, w);
+    }
+    uint64_t frames = g_frame_stats.frames_submitted - g_bench.start_submitted;
+    uint64_t compose_ticks = g_frame_stats.total_compose_ticks - g_bench.start_compose_total;
+    uint64_t present_ticks = g_frame_stats.total_present_ticks - g_bench.start_present_total;
+    uint64_t dirty_area = g_frame_stats.dirty_area_accum - g_bench.start_dirty_area_accum;
+    LOG_INFO("wm",
+             "bench %s done: %llu frames, compose avg %llu us, present avg %llu us, frame max %llu us, "
+             "dirty avg %llu kpx",
+             g_bench.resize_mode ? "resize" : "drag", static_cast<unsigned long long>(frames),
+             static_cast<unsigned long long>(frames ? wm_tsc_to_us(compose_ticks) / frames : 0),
+             static_cast<unsigned long long>(frames ? wm_tsc_to_us(present_ticks) / frames : 0),
+             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.max_frame_ticks)),
+             static_cast<unsigned long long>(frames ? dirty_area / frames / 1000u : 0));
+    registry->system_flags &= ~(SYSTEM_FLAG_WM_BENCH_DRAG | SYSTEM_FLAG_WM_BENCH_RESIZE);
+    smp_wmb();
+    g_bench = {};
+}
+
+void wm_bench_tick(Registry *registry)
+{
+    if (!registry)
+        return;
+    bool drag_flag = (registry->system_flags & SYSTEM_FLAG_WM_BENCH_DRAG) != 0;
+    bool resize_flag = (registry->system_flags & SYSTEM_FLAG_WM_BENCH_RESIZE) != 0;
+
+    if (!g_bench.active) {
+        if (!drag_flag && !resize_flag)
+            return;
+        int idx = -1;
+        for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
+            if (is_window_visible(g_windows[i]) && g_windows[i].buffer) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            LOG_WARN("wm", "bench: no visible user window, aborting");
+            registry->system_flags &= ~(SYSTEM_FLAG_WM_BENCH_DRAG | SYSTEM_FLAG_WM_BENCH_RESIZE);
+            smp_wmb();
+            return;
+        }
+        Window &w = g_windows[idx];
+        g_bench = {};
+        g_bench.active = true;
+        g_bench.resize_mode = resize_flag;
+        g_bench.win_index = idx;
+        g_bench.origin_x = w.x;
+        g_bench.origin_y = w.y;
+        g_bench.origin_w = w.w;
+        g_bench.origin_h = w.h;
+        g_bench.frames_target = 1000;
+        g_bench.start_submitted = g_frame_stats.frames_submitted;
+        g_bench.start_compose_total = g_frame_stats.total_compose_ticks;
+        g_bench.start_present_total = g_frame_stats.total_present_ticks;
+        g_bench.start_max_frame_ticks = g_frame_stats.max_frame_ticks;
+        g_bench.start_dirty_area_accum = g_frame_stats.dirty_area_accum;
+        LOG_INFO("wm", "bench: starting %s benchmark (%llu frames)", resize_flag ? "resize" : "drag",
+                 static_cast<unsigned long long>(g_bench.frames_target));
+        return;
+    }
+
+    uint64_t done = g_frame_stats.frames_submitted - g_bench.start_submitted;
+    if (done >= g_bench.frames_target || g_bench.win_index < 0 || g_bench.win_index >= g_window_count) {
+        wm_bench_finish(registry);
+        return;
+    }
+
+    Window &w = g_windows[g_bench.win_index];
+    Window old = w;
+    if (!g_bench.resize_mode) {
+        int step = static_cast<int>(done % 512u);
+        int phase = step < 256 ? step : 512 - step;
+        int span_x = static_cast<int>(g_screen.width) - w.w;
+        int span_y = static_cast<int>(g_screen.height) - w.h;
+        w.x = span_x > 0 ? (phase * span_x) / 255 : w.x;
+        w.y = span_y > 0 ? (phase * span_y) / 255 : w.y;
+    } else {
+        int step = static_cast<int>(done % 256u);
+        int phase = step < 128 ? step : 256 - step;
+        int max_w = static_cast<int>(g_screen.width);
+        int max_h = static_cast<int>(g_screen.height) - wm_menubar_h();
+        int min_w = w.min_w > 0 ? w.min_w : 240;
+        int min_h = w.min_h > 0 ? w.min_h : 160;
+        w.w = min_w + ((max_w > min_w ? max_w - min_w : 0) * phase) / 127;
+        w.h = min_h + ((max_h > min_h ? max_h - min_h : 0) * phase) / 127;
+        w.x = g_bench.origin_x;
+        w.y = g_bench.origin_y;
+    }
+    if (w.x != old.x || w.y != old.y || w.w != old.w || w.h != old.h) {
+        mark_window_transition_damage(old, w);
+        invalidate_window_visibility_cache();
+    }
 }
 
 static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
@@ -1052,20 +1175,15 @@ extern "C" int main(int argc, char **argv)
     sync_control_center_state_from_registry(registry);
     Event ev;
 
-    uint64_t drag_frames = 0;
-    uint64_t drag_events_ticks = 0;
-    uint64_t drag_move_ticks = 0;
-    uint64_t drag_compose_ticks = 0;
-    uint64_t drag_present_ticks = 0;
-    uint64_t drag_wait_ticks = 0;
-    uint64_t drag_total_ticks = 0;
-    uint64_t drag_start_log_ticks = 0;
+    wm_tsc_to_us(1);
 
     while (true) {
         uint64_t t0 = get_ticks();
+        uint64_t frame_tsc_start = wm_tsc_now();
         uint64_t t_events_start = get_ticks();
         uint32_t event_budget = 32;
         while (event_budget-- > 0 && get_event(&ev)) {
+            g_frame_stats.last_input_ticks = wm_tsc_now();
             if (ev.type == EVT_MOUSE_MOVE) {
                 g_input.pending_mouse_x = ev.mouse.x;
                 g_input.pending_mouse_y = ev.mouse.y;
@@ -1961,6 +2079,17 @@ extern "C" int main(int argc, char **argv)
             }
         }
 
+        // Scripted compositor benchmark: drives synthetic drag/resize geometry
+        // changes so frame cost is measurable without manual input.
+        wm_bench_tick(registry);
+
+        // Keep the stats overlay repainting while it is visible.
+        if ((g_system_flags & SYSTEM_FLAG_SHOW_DEBUG_STATS) != 0) {
+            DirtyRect stats_damage = {};
+            wm_stats_overlay_bounds(nullptr, &stats_damage);
+            enqueue_damage_rect(stats_damage.x, stats_damage.y, stats_damage.w, stats_damage.h);
+        }
+
         if (!g_dirty_frame_ready && g_dirty_count > 0) {
             if (g_window_visibility_cache_dirty) {
                 refresh_window_cache();
@@ -2110,6 +2239,7 @@ extern "C" int main(int argc, char **argv)
                 bool has_compose_union = false;
                 int dirty_count = clamp_dirty_rect_count(g_dirty_count);
 
+                uint64_t compose_tsc_start = wm_tsc_now();
                 for (int d = 0; d < dirty_count; d++) {
                     DirtyRect &r = g_dirty_rects[d];
                     if (r.w <= 0 || r.h <= 0)
@@ -2127,6 +2257,8 @@ extern "C" int main(int argc, char **argv)
                     }
                     gui_blit_rect(&g_presentbuffer, &g_backbuffer, r.x, r.y, r.x, r.y, r.w, r.h);
                 }
+                g_frame_stats.last_compose_ticks = wm_tsc_now() - compose_tsc_start;
+                g_frame_stats.total_compose_ticks += g_frame_stats.last_compose_ticks;
 
                 if (has_compose_union) {
                     capture_shell_backdrop_for_rect(compose_union, const_cast<Registry *>(registry));
@@ -2166,9 +2298,18 @@ extern "C" int main(int argc, char **argv)
 
         if (g_dirty_frame_ready && action == wm::PresentPolicyDecision::Submit) {
             asm volatile("sfence" ::: "memory");
+            uint64_t present_tsc_start = wm_tsc_now();
             uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
                                          frame_seq, g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
+            uint64_t present_tsc_end = wm_tsc_now();
             if (sub) {
+                g_frame_stats.last_present_ticks = present_tsc_end - present_tsc_start;
+                g_frame_stats.total_present_ticks += g_frame_stats.last_present_ticks;
+                g_frame_stats.last_frame_ticks = present_tsc_end - frame_tsc_start;
+                if (g_frame_stats.last_frame_ticks > g_frame_stats.max_frame_ticks)
+                    g_frame_stats.max_frame_ticks = g_frame_stats.last_frame_ticks;
+                if (g_frame_stats.last_input_ticks != 0)
+                    g_frame_stats.last_input_to_submit_ticks = present_tsc_end - g_frame_stats.last_input_ticks;
                 if (g_presentbuffer_slot_count) {
                     g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = sub;
                 }
@@ -2181,6 +2322,21 @@ extern "C" int main(int argc, char **argv)
                     g_windows[i].last_rendered_h = g_windows[i].h;
                 }
                 g_frame_stats.frames_submitted++;
+#ifdef DEBUG
+                if ((g_frame_stats.frames_submitted % 120u) == 0) {
+                    LOG_INFO("wm",
+                             "stats: sub=%llu skip=%llu comp=%lluus pres=%lluus frame=%lluus max=%lluus "
+                             "dmg=%llukpx in>sub=%lluus",
+                             static_cast<unsigned long long>(g_frame_stats.frames_submitted),
+                             static_cast<unsigned long long>(g_frame_stats.frames_skipped),
+                             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_compose_ticks)),
+                             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_present_ticks)),
+                             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_frame_ticks)),
+                             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.max_frame_ticks)),
+                             static_cast<unsigned long long>(g_frame_stats.last_dirty_area / 1000u),
+                             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_input_to_submit_ticks)));
+                }
+#endif
                 last_seq = sub;
                 frame_seq = sub + 1;
                 g_dirty_count = 0;

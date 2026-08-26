@@ -57,6 +57,13 @@ On every focus transition the WM posts `EVT_FOCUS`/`EVT_UNFOCUS` to the affected
 - Blur: the WM owns menubar/dock blur surfaces (two-pass box blur or material blur), regenerated on backdrop changes; disabled on copy-path backends.
 - Overlays: the Index launcher (app catalog + system actions, fuzzy scoring), control center, right-click menus, storage mode prompt, and toast notifications (4 s, 32-slot ring).
 
+## Debug Telemetry and Benchmarking
+
+The WM keeps a `WmFrameStats` block updated during the frame loop: built/submitted/skipped frame counts, dirty rect count and area, full vs clipped repaints, stale-slot repairs, cursor path counts, and TSC-timed compose/present/frame durations plus input-to-submit latency.
+
+- `SYSTEM_FLAG_SHOW_DEBUG_STATS` renders a mono-font overlay (below the menubar, left) showing last/max frame time, compose/present ms, input-to-submit latency, damage kpx + rect count, and the kernel's last VRAM copy pixels/ticks from `DisplayStatus`.
+- `SYSTEM_FLAG_WM_BENCH_DRAG` / `SYSTEM_FLAG_WM_BENCH_RESIZE` run a scripted 1000-frame benchmark: the WM drives synthetic window translation (drag) or geometry oscillation (resize) on the first visible user window, measures compose/present/frame costs and dirty area, logs a summary line, restores the window, and clears the flag. No manual input is needed, so deltas are reproducible on hardware.
+
 ## Settings
 
 The WM loads settings from `/data/SYSTEM.CFG` (fallback `/etc/system.conf`), applies them, and persists changes during idle frames. Settings propagate live to clients through the registry's `settings_generation` counter. See [Runtime configuration](config.md).

@@ -173,6 +173,33 @@ struct WmFrameStats
     uint32_t max_dirty_rects;
     uint64_t max_dirty_area;
     uint32_t present_queue_depth;
+    uint64_t last_compose_ticks;
+    uint64_t total_compose_ticks;
+    uint64_t last_present_ticks;
+    uint64_t total_present_ticks;
+    uint64_t last_frame_ticks;
+    uint64_t max_frame_ticks;
+    uint64_t last_input_ticks;
+    uint64_t last_input_to_submit_ticks;
+    uint64_t last_vram_copy_ticks;
+    uint64_t last_present_pixels;
+};
+
+struct WmBenchState
+{
+    bool active;
+    bool resize_mode;
+    int win_index;
+    int origin_x;
+    int origin_y;
+    int origin_w;
+    int origin_h;
+    uint64_t frames_target;
+    uint64_t start_submitted;
+    uint64_t start_compose_total;
+    uint64_t start_present_total;
+    uint64_t start_max_frame_ticks;
+    uint64_t start_dirty_area_accum;
 };
 
 struct RuntimeGuiSettings
@@ -338,6 +365,7 @@ extern uint32_t g_presentbuffer_slot_count;
 extern uint32_t g_presentbuffer_active_slot;
 extern DisplayQueueState g_display_queue;
 extern WmFrameStats g_frame_stats;
+extern WmBenchState g_bench;
 
 extern Window g_windows[MAX_WINDOWS];
 extern int g_window_count;
@@ -791,4 +819,9 @@ struct NotificationCenterState
 extern NotificationCenterState g_notifications;
 void wm_push_notification(const char *title, const char *message);
 void draw_toast_overlay_clipped(const DirtyRect &clip);
+void draw_stats_overlay_clipped(const DirtyRect &clip);
+void wm_stats_overlay_bounds(DirtyRect *out_box, DirtyRect *out_damage);
+void wm_bench_tick(Registry *registry);
+uint64_t wm_tsc_now(void);
+uint64_t wm_tsc_to_us(uint64_t cycles);
 void draw_notification_center_clipped(const DirtyRect &clip, int start_y);

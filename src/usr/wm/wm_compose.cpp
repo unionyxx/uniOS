@@ -41,6 +41,7 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
     if (g_control_center.open)
         draw_control_center_overlay_clipped(r);
     draw_toast_overlay_clipped(r);
+    draw_stats_overlay_clipped(r);
 }
 
 static bool subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect &cut)
@@ -54,10 +55,14 @@ static bool subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect 
         }
 
         int fragments = 0;
-        if (overlap.y > current.y) fragments++;
-        if (overlap.y + overlap.h < current.y + current.h) fragments++;
-        if (overlap.x > current.x) fragments++;
-        if (overlap.x + overlap.w < current.x + current.w) fragments++;
+        if (overlap.y > current.y)
+            fragments++;
+        if (overlap.y + overlap.h < current.y + current.h)
+            fragments++;
+        if (overlap.x > current.x)
+            fragments++;
+        if (overlap.x + overlap.w < current.x + current.w)
+            fragments++;
 
         if (*count - 1 + fragments > MAX_VISIBLE_REGIONS) {
             return false;
@@ -73,7 +78,8 @@ static bool subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect 
             (*count)++;
         }
         if (overlap.y + overlap.h < current.y + current.h) {
-            regions[*count] = {current.x, overlap.y + overlap.h, current.w, (current.y + current.h) - (overlap.y + overlap.h)};
+            regions[*count] = {current.x, overlap.y + overlap.h, current.w,
+                               (current.y + current.h) - (overlap.y + overlap.h)};
             (*count)++;
         }
         if (overlap.x > current.x) {
@@ -81,7 +87,8 @@ static bool subtract_rect_local(DirtyRect *regions, int *count, const DirtyRect 
             (*count)++;
         }
         if (overlap.x + overlap.w < current.x + current.w) {
-            regions[*count] = {overlap.x + overlap.w, overlap.y, (current.x + current.w) - (overlap.x + overlap.w), overlap.h};
+            regions[*count] = {overlap.x + overlap.w, overlap.y, (current.x + current.w) - (overlap.x + overlap.w),
+                               overlap.h};
             (*count)++;
         }
     }
@@ -136,7 +143,7 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
         int region_count = g_window_visible_region_count[i];
         if (region_count > MAX_VISIBLE_REGIONS)
             region_count = MAX_VISIBLE_REGIONS;
-        
+
         bool focused = (i == focused_index);
         bool hovered_frame = (i == hover_frame_index);
         int hover_btn = hovered_frame ? hover_button : -1;
@@ -177,6 +184,7 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
     if (g_control_center.open)
         draw_control_center_overlay_clipped(r);
     draw_toast_overlay_clipped(r);
+    draw_stats_overlay_clipped(r);
     return true;
 }
 
