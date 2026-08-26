@@ -38,7 +38,7 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 - **Fonts** (`.uof`): atlas-based bitmap fonts with per-size loading, ASCII fast tables, alpha LUTs, measurement and clipped text drawing, built-in bitmap fallback.
 - **Images**: `.uoic` icon, `.uocu` cursor, and `.uowp` wallpaper loaders with entry selection by size/scale/variant, including a QOI decoder and scaled-cover blitting.
 - **Window protocol**: registration, resize handling, damage commits — see [Window manager](wm.md).
-- **System integration**: `gui_set_window_title` updates the window's titlebar live (the WM recomposes it on change); `gui_notify` posts a toast through the registry (`notify_generation`) that the WM displays like its own notifications.
+- **System integration**: `gui_set_window_title` updates the window's titlebar live (the WM recomposes it on change); `gui_notify` posts a toast through the registry (`notify_generation`) that the WM displays like its own notifications. `gui_window_title_matches` is the shared app-identity test for registry window slots: a window matches its app on an exact title or a `detail - App` suffix, so apps that rename their window (Files, Latitude) stay discoverable by the dock, menubar, and WM launchers.
 - **Frame waits**: `gui_wait_frame/gui_poll_frame` wrap display event waits for FLIP_COMPLETE/VBLANK.
 
 Apps poll kernel events themselves with `poll_event/wait_event` (`SYS_GET_EVENT`).

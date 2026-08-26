@@ -1898,6 +1898,25 @@ int gui_set_window_title(const char *title)
     return 0;
 }
 
+bool gui_window_title_matches(const char *window_title, const char *app_title)
+{
+    if (!window_title || !window_title[0] || !app_title || !app_title[0])
+        return false;
+    if (strcmp(window_title, app_title) == 0)
+        return true;
+
+    // Apps rename their windows to "detail - App" (e.g. "data - Files"); the
+    // app identity is the segment after the last " - " separator.
+    size_t window_len = strlen(window_title);
+    size_t app_len = strlen(app_title);
+    if (window_len < app_len + 3)
+        return false;
+    if (strcmp(window_title + window_len - app_len, app_title) != 0)
+        return false;
+    const char *sep = window_title + window_len - app_len - 3;
+    return sep[0] == ' ' && sep[1] == '-' && sep[2] == ' ';
+}
+
 void gui_notify(const char *title, const char *message)
 {
     Registry *registry = gui_registry();

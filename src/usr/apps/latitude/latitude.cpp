@@ -2732,7 +2732,7 @@ extern "C" int main()
                         } else {
                             state->pending_confirm = 1;
                             state->pending_confirm_ticks = get_ticks();
-                            set_status(state, "Unsaved changes — click New again to discard");
+                            set_status(state, "Unsaved changes - click New again to discard");
                             state->needs_redraw = true;
                         }
                     } else {
@@ -2759,7 +2759,7 @@ extern "C" int main()
                         } else {
                             state->pending_confirm = 2;
                             state->pending_confirm_ticks = get_ticks();
-                            set_status(state, "Unsaved changes — click Reload again to discard");
+                            set_status(state, "Unsaved changes - click Reload again to discard");
                             state->needs_redraw = true;
                         }
                     } else {
@@ -2837,10 +2837,10 @@ extern "C" int main()
             // Keep the titlebar in sync with the open file.
             char title[128];
             if (state->buffer->title[0])
-                snprintf(title, sizeof(title), "%s%s — Latitude", state->buffer->modified ? "* " : "",
+                snprintf(title, sizeof(title), "%s%s - Latitude", state->buffer->modified ? "* " : "",
                          state->buffer->title);
             else
-                snprintf(title, sizeof(title), "%suntitled — Latitude", state->buffer->modified ? "* " : "");
+                snprintf(title, sizeof(title), "%suntitled - Latitude", state->buffer->modified ? "* " : "");
             gui_set_window_title(title);
         } else {
             sleep_ms(10);

@@ -401,19 +401,7 @@ static bool window_entry_usable(const WindowEntry *entry)
 
 static bool window_entry_title_equals(const WindowEntry &entry, const char *title)
 {
-    if (!title)
-        return false;
-
-    size_t i = 0;
-    for (; i < sizeof(entry.title); i++) {
-        char entry_ch = entry.title[i];
-        char title_ch = title[i];
-        if (entry_ch != title_ch)
-            return false;
-        if (entry_ch == '\0')
-            return true;
-    }
-    return title[i] == '\0';
+    return gui_window_title_matches(entry.title, title);
 }
 
 static bool window_title_matches_item(const WindowEntry &entry, const DockItem &item)

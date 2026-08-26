@@ -17,11 +17,11 @@ Startup order:
 
 ## Menubar
 
-Occupies window slot 0. Renders a canvas taller than the visible strip (for dropdown menus) into a shared block and pushes damage. Contents: uniOS logo menu, focused window title, and a clock/date button (`Mon D  HH:MM`, seconds optional) that toggles the control center (`cp_toggle_requested`; the WM also toggles it for clicks in the rightmost 120 px). Hover damage tracks the logo and date buttons independently. The system menu offers About, Settings, Close/Minimize/Maximize of the focused window, Restart, and Shut Down. Launchers focus an existing window by title or fork+exec the app.
+Occupies window slot 0. Renders a canvas taller than the visible strip (for dropdown menus) into a shared block and pushes damage. Contents: uniOS logo menu, focused window title, and a clock/date button (`Mon D  HH:MM`, seconds optional) that toggles the control center (`cp_toggle_requested`; the WM also toggles it for clicks in the rightmost 120 px). Hover damage tracks the logo and date buttons independently. The system menu offers About, Settings, Close/Minimize/Maximize of the focused window, Restart, and Shut Down. Launchers focus an existing window by app title (`gui_window_title_matches`) or fork+exec the app.
 
 ## Dock
 
-Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, Settings. Icons come from `.uoic` packages (the calendar composes day/number assets over its base icon). Running windows get indicator dots; clicks cycle matching windows starting after the focused one, or launch. Launching shows a hollow pending indicator and suppresses duplicate launches until the window registers (8 s timeout); clicks flash a brief pressed state. The dock renders a glass panel over a blurred backdrop and publishes its width in the registry.
+Occupies window slot 1: Files, Latitude, Terminal, Calculator, Calendar, Clock, Settings. Icons come from `.uoic` packages (the calendar composes day/number assets over its base icon). Running windows get indicator dots; clicks cycle matching windows starting after the focused one, or launch. Window-to-app matching uses `gui_window_title_matches` (exact title or `detail - App` suffix), so dynamically retitled windows like `data - Files` still count as running. Launching shows a hollow pending indicator and suppresses duplicate launches until the window registers (8 s timeout); clicks flash a brief pressed state. The dock renders a glass panel over a blurred backdrop and publishes its width in the registry.
 
 ## Applications
 

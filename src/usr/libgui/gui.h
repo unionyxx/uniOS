@@ -197,6 +197,7 @@ Surface gui_register_window(const char *title, uint32_t width, uint32_t height);
 Surface gui_register_window_ex(const char *title, uint32_t width, uint32_t height, uint32_t flags);
 int gui_set_window_owner_pid(uint32_t pid);
 int gui_set_window_title(const char *title);
+bool gui_window_title_matches(const char *window_title, const char *app_title);
 void gui_notify(const char *title, const char *message);
 int gui_request_focus(void);
 int gui_sync_window_size(Surface *s);

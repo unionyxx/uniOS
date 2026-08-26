@@ -1162,12 +1162,15 @@ static void draw_files(Surface *win, AppState *state, LayoutCache *cache)
 
     // Keep the titlebar in sync with the location being browsed.
     char title[96];
-    if (state->volume_home)
-        snprintf(title, sizeof(title), "Files — Storage");
-    else if (state->load_failed)
-        snprintf(title, sizeof(title), "Files — %s", state->current_path);
-    else
-        snprintf(title, sizeof(title), "Files — %s", path_basename(state->current_path));
+    if (state->volume_home) {
+        snprintf(title, sizeof(title), "Storage - Files");
+    } else {
+        const char *label = state->load_failed ? state->current_path : path_basename(state->current_path);
+        if (!label || !label[0] || strcmp(label, "/") == 0)
+            snprintf(title, sizeof(title), "Files");
+        else
+            snprintf(title, sizeof(title), "%s - Files", label);
+    }
     if (strcmp(title, state->window_title) != 0) {
         strncpy(state->window_title, title, sizeof(state->window_title) - 1);
         state->window_title[sizeof(state->window_title) - 1] = '\0';
