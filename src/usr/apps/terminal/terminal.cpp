@@ -10,6 +10,7 @@
 #include <uapi/sysinfo.h>
 #include <unistd.h>
 
+#include "../../libapp/app.h"
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
 #include "../../libc/wallpaper_defaults.h"
@@ -283,10 +284,8 @@ public:
             free(m_history_fg);
     }
 
-    void init(uint32_t width, uint32_t height)
+    void init(uint32_t width, uint32_t height, const Surface &window)
     {
-        gui_fonts_init();
-        gui_sync_theme_from_registry();
         m_cursor_x = 0;
         m_cursor_y = 0;
         m_scroll_offset = 0;
@@ -295,7 +294,7 @@ public:
         m_ansi_state = 0;
         m_ansi_idx = 0;
         memset(m_ansi_buf, 0, sizeof(m_ansi_buf));
-        memset(&m_window, 0, sizeof(m_window));
+        m_window = window;
 
         m_history_len = (uint16_t *)malloc(sizeof(uint16_t) * TERM_HISTORY_LINES);
         m_history_text = (char *)malloc((size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN);
@@ -307,13 +306,8 @@ public:
         memset(m_history_fg, 0, (size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN * sizeof(uint32_t));
         reset_history();
 
-        m_window = gui_register_window_ex("Terminal", width * term_cell_w() + term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE,
-                                          height * term_cell_h() + term_pad_y() * 2, WIN_FLAG_RESIZABLE);
         if (!m_window.buffer)
             return;
-        gui_window_set_min_size((int)(term_cell_w() * 48u + (uint32_t)term_pad_x() * 2u + TERM_SCROLLBAR_RESERVE),
-                                (int)(term_cell_h() * 14u + (uint32_t)term_pad_y() * 2u));
-
         if (!resize_grid(width, height))
             return;
         draw_chrome();
@@ -542,12 +536,12 @@ public:
         m_needs_full_redraw = false;
     }
 
-    bool sync_resize()
+    // Recompute the cell grid from the current window size. The runtime
+    // re-syncs the window backing before resize events arrive, so this only
+    // reflows the grid.
+    bool reflow_grid()
     {
-        if (!m_ready)
-            return false;
-        int resized = gui_sync_window_size(&m_window);
-        if (resized <= 0)
+        if (!m_ready && !m_window.buffer)
             return false;
 
         uint32_t content_w = (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE))
@@ -562,6 +556,11 @@ public:
         if (new_height == 0)
             new_height = 1;
         return resize_grid(new_width, new_height);
+    }
+
+    bool sync_resize()
+    {
+        return reflow_grid();
     }
 
     // Re-derive the grid from the current window size after the font (and
@@ -1268,6 +1267,149 @@ static void term_handle_menu_command(TerminalEmulator &term, uint32_t cmd, int s
     }
 }
 
+// The terminal owns an extra event source (the shell pipe via epoll) and an
+// incremental renderer, so it runs the libapp runtime in manual mode:
+// app_create/app_pump handle window lifecycle, resize, theme and menubar
+// plumbing, while the shell loop below keeps its own pacing.
+struct TermRun
+{
+    TerminalEmulator *term;
+    bool needs_render;
+    bool shell_alive;
+    int pipe_to_shell;
+    uint64_t last_activity_ticks;
+    bool menu_focus_dirty;
+};
+
+static void term_event(App *app, const Event *ev)
+{
+    TermRun *run = (TermRun *)app_user(app);
+    TerminalEmulator &term = *run->term;
+
+    switch (ev->type) {
+        case EVT_WINDOW_RESIZE:
+            if (term.sync_resize())
+                run->needs_render = true;
+            break;
+
+        case EVT_FOCUS:
+            term.set_focused(true);
+            run->last_activity_ticks = get_ticks();
+            run->menu_focus_dirty = true;
+            run->needs_render = true;
+            break;
+
+        case EVT_UNFOCUS:
+            term.set_focused(false);
+            run->needs_render = true;
+            break;
+
+        case EVT_MOUSE_SCROLL: {
+            int delta = ev->mouse.scroll_y * 3;
+            term.scroll_history(delta);
+            run->needs_render = true;
+            break;
+        }
+
+        case EVT_MOUSE_LEAVE:
+            term.sel_stop_drag();
+            break;
+
+        case EVT_MOUSE_DOWN:
+            if (term.help_visible()) {
+                if (ev->mouse.button == 1) {
+                    term.hide_help();
+                    run->needs_render = true;
+                }
+                break;
+            }
+            if (ev->mouse.button == 1) {
+                term.sel_start(ev->mouse.x, ev->mouse.y);
+                run->needs_render = true;
+            } else if (ev->mouse.button == 2) {
+                if (run->shell_alive)
+                    term_paste_to(run->pipe_to_shell);
+                run->last_activity_ticks = get_ticks();
+                run->needs_render = true;
+            }
+            break;
+
+        case EVT_MOUSE_MOVE:
+            if (term.sel_extend(ev->mouse.x, ev->mouse.y))
+                run->needs_render = true;
+            break;
+
+        case EVT_MOUSE_UP:
+            if (ev->mouse.button == 1) {
+                term.sel_finish();
+                run->needs_render = true;
+            }
+            break;
+
+        case EVT_KEY_DOWN: {
+            if (ev->key.c == 0)
+                break;
+            char c = (char)ev->key.c;
+            if (term.help_visible()) {
+                if ((uint8_t)c == 27 || c == '\n' || c == '\r') {
+                    term.hide_help();
+                    run->needs_render = true;
+                }
+                break;
+            }
+            if ((uint8_t)c == KEY_PAGEUP) {
+                term.scroll_history((int)term.height() / 2);
+                run->needs_render = true;
+                break;
+            }
+            if ((uint8_t)c == KEY_PAGEDOWN) {
+                term.scroll_history(-(int)term.height() / 2);
+                run->needs_render = true;
+                break;
+            }
+            if ((uint8_t)c == 24) { // Ctrl+X copies the selection (Ctrl+C is SIGINT).
+                term_copy_selection(term);
+                break;
+            }
+            if ((uint8_t)c == 22) { // Ctrl+V pastes the clipboard into the shell.
+                if (run->shell_alive)
+                    term_paste_to(run->pipe_to_shell);
+                run->last_activity_ticks = get_ticks();
+                run->needs_render = true;
+                break;
+            }
+
+            if (term.get_scroll_offset() > 0) {
+                term.reset_scroll();
+                run->needs_render = true;
+            }
+
+            if (run->shell_alive) {
+                if (write(run->pipe_to_shell, &c, 1) < 0)
+                    run->shell_alive = false;
+            }
+            run->last_activity_ticks = get_ticks();
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static void term_menu(App *app, uint32_t cmd)
+{
+    TermRun *run = (TermRun *)app_user(app);
+    term_handle_menu_command(*run->term, cmd, run->pipe_to_shell, &run->shell_alive, &run->needs_render);
+}
+
+static void term_settings(App *app)
+{
+    TermRun *run = (TermRun *)app_user(app);
+    run->term->theme_changed();
+    run->needs_render = true;
+}
+
 extern "C" int main(int argc, char **argv)
 {
     (void)argc;
@@ -1279,26 +1421,47 @@ extern "C" int main(int argc, char **argv)
     if (g_term_zoom > TERM_ZOOM_MAX)
         g_term_zoom = TERM_ZOOM_MAX;
 
-    TerminalEmulator term;
-    term.init(80, 25);
-    if (!term.ready())
+    gui_fonts_init();
+
+    AppConfig config = {};
+    config.title = "Terminal";
+    config.width = (int)(80 * term_cell_w() + (uint32_t)term_pad_x() * 2u + TERM_SCROLLBAR_RESERVE);
+    config.height = (int)(25 * term_cell_h() + (uint32_t)term_pad_y() * 2u);
+    config.min_width = (int)(term_cell_w() * 48u + (uint32_t)term_pad_x() * 2u + TERM_SCROLLBAR_RESERVE);
+    config.min_height = (int)(term_cell_h() * 14u + (uint32_t)term_pad_y() * 2u);
+    config.flags = WIN_FLAG_RESIZABLE;
+    config.on_event = term_event;
+    config.on_menu = term_menu;
+    config.on_settings = term_settings;
+
+    static TermRun run = {};
+    App *app = app_create(&config, &run);
+    if (!app)
         return 1;
 
-    gui_request_focus();
+    static TerminalEmulator term;
+    term.init(80, 25, *app_window(app));
+    if (!term.ready()) {
+        app_destroy(app);
+        return 1;
+    }
+    run.term = &term;
+    run.shell_alive = true;
+    run.last_activity_ticks = get_ticks();
+    run.menu_focus_dirty = true;
+
     term.render_all();
-    Registry *registry = gui_registry();
-    uint32_t last_settings_generation = registry ? registry->settings_generation : 0;
 
     bool last_menu_sel = term.sel_has();
     bool last_menu_clip = false;
     int last_menu_zoom = g_term_zoom;
-    bool menu_focus_dirty = true;
 
     int pipe_to_shell[2];
     int pipe_from_shell[2];
     if (pipe(pipe_to_shell) < 0 || pipe(pipe_from_shell) < 0) {
         term.write_string("terminal: failed to create pipes\n");
         term.render_all();
+        app_destroy(app);
         return 1;
     }
 
@@ -1306,6 +1469,7 @@ extern "C" int main(int argc, char **argv)
     if (shell_pid < 0) {
         term.write_string("terminal: failed to fork child process\n");
         term.render_all();
+        app_destroy(app);
         return 1;
     }
 
@@ -1328,11 +1492,13 @@ extern "C" int main(int argc, char **argv)
     // Parent: terminal GUI emulator
     close(pipe_to_shell[0]);
     close(pipe_from_shell[1]);
+    run.pipe_to_shell = pipe_to_shell[1];
 
     int epfd = epoll_create(1);
     if (epfd < 0) {
         term.write_string("terminal: failed to create epoll instance\n");
         term.render_all();
+        app_destroy(app);
         return 1;
     }
 
@@ -1342,208 +1508,88 @@ extern "C" int main(int argc, char **argv)
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, pipe_from_shell[0], &ev) < 0) {
         term.write_string("terminal: failed to configure epoll\n");
         term.render_all();
+        app_destroy(app);
         return 1;
     }
 
-    bool shell_alive = true;
-    uint64_t last_activity_ticks = get_ticks();
     bool last_blink_on = true;
     while (true) {
         bool saw_event = false;
-        Event gui_ev = {};
-        bool needs_render = false;
+        run.needs_render = false;
 
-        // 1. Poll GUI events
-        while (poll_event(&gui_ev) > 0) {
-            saw_event = true;
-            if (gui_ev.type == EVT_WINDOW_CLOSE) {
-                return 0;
-            }
-            if (gui_ev.type == EVT_WINDOW_RESIZE) {
-                if (term.sync_resize()) {
-                    needs_render = true;
-                }
-                continue;
-            }
-            if (gui_ev.type == EVT_FOCUS) {
-                term.set_focused(true);
-                last_activity_ticks = get_ticks();
-                menu_focus_dirty = true;
-                needs_render = true;
-                continue;
-            }
-            if (gui_ev.type == EVT_UNFOCUS) {
-                term.set_focused(false);
-                needs_render = true;
-                continue;
-            }
-            if (gui_ev.type == EVT_MOUSE_SCROLL) {
-                int delta = gui_ev.mouse.scroll_y * 3;
-                term.scroll_history(delta);
-                needs_render = true;
-                continue;
-            }
-            if (gui_ev.type == EVT_MOUSE_LEAVE) {
-                term.sel_stop_drag();
-                continue;
-            }
-            if (gui_ev.type == EVT_MOUSE_DOWN) {
-                if (term.help_visible()) {
-                    if (gui_ev.mouse.button == 1) {
-                        term.hide_help();
-                        needs_render = true;
-                    }
-                    continue;
-                }
-                if (gui_ev.mouse.button == 1) {
-                    term.sel_start(gui_ev.mouse.x, gui_ev.mouse.y);
-                    needs_render = true;
-                } else if (gui_ev.mouse.button == 2) {
-                    if (shell_alive)
-                        term_paste_to(pipe_to_shell[1]);
-                    last_activity_ticks = get_ticks();
-                    needs_render = true;
-                }
-                continue;
-            }
-            if (gui_ev.type == EVT_MOUSE_MOVE) {
-                if (term.sel_extend(gui_ev.mouse.x, gui_ev.mouse.y))
-                    needs_render = true;
-                continue;
-            }
-            if (gui_ev.type == EVT_MOUSE_UP) {
-                if (gui_ev.mouse.button == 1) {
-                    term.sel_finish();
-                    needs_render = true;
-                }
-                continue;
-            }
-            if (gui_ev.type == EVT_KEY_DOWN && gui_ev.key.c != 0) {
-                char c = (char)gui_ev.key.c;
-                if (term.help_visible()) {
-                    if ((uint8_t)c == 27 || c == '\n' || c == '\r') {
-                        term.hide_help();
-                        needs_render = true;
-                    }
-                    continue;
-                }
-                if ((uint8_t)c == KEY_PAGEUP) {
-                    term.scroll_history((int)term.height() / 2);
-                    needs_render = true;
-                    continue;
-                }
-                if ((uint8_t)c == KEY_PAGEDOWN) {
-                    term.scroll_history(-(int)term.height() / 2);
-                    needs_render = true;
-                    continue;
-                }
-                if ((uint8_t)c == 24) { // Ctrl+X copies the selection (Ctrl+C is SIGINT).
-                    term_copy_selection(term);
-                    continue;
-                }
-                if ((uint8_t)c == 22) { // Ctrl+V pastes the clipboard into the shell.
-                    if (shell_alive)
-                        term_paste_to(pipe_to_shell[1]);
-                    last_activity_ticks = get_ticks();
-                    needs_render = true;
-                    continue;
-                }
-
-                if (term.get_scroll_offset() > 0) {
-                    term.reset_scroll();
-                    needs_render = true;
-                }
-
-                if (shell_alive) {
-                    if (write(pipe_to_shell[1], &c, 1) < 0)
-                        shell_alive = false;
-                }
-                last_activity_ticks = get_ticks();
-                continue;
-            }
-        }
+        // 1. Drain GUI events, theme sync and menubar commands through the
+        //    runtime; the callbacks above set run.needs_render.
+        if (!app_pump(app))
+            break;
 
         // 2. Poll/Read shell output if alive. Drain everything the pipe
         //    holds before rendering so bursty output costs one redraw, not
         //    one redraw per chunk (the visible "word-by-word" effect).
-        if (shell_alive) {
-            int timeout = (needs_render || saw_event) ? 0 : 16;
+        if (run.shell_alive) {
+            int timeout = (run.needs_render) ? 0 : 16;
             struct epoll_event events[1];
             int n = epoll_wait(epfd, events, 1, timeout);
             char read_buf[4096];
-            for (int drain = 0; shell_alive && n > 0 && drain < 16; drain++) {
+            for (int drain = 0; run.shell_alive && n > 0 && drain < 16; drain++) {
                 int bytes_read = read(pipe_from_shell[0], read_buf, sizeof(read_buf));
                 if (bytes_read > 0) {
                     term.write_bytes(read_buf, (size_t)bytes_read);
-                    needs_render = true;
+                    run.needs_render = true;
                     saw_event = true;
-                    last_activity_ticks = get_ticks();
+                    run.last_activity_ticks = get_ticks();
                     // read() blocks on an empty pipe: only keep draining
                     // while epoll says more data is already pending.
                     n = epoll_wait(epfd, events, 1, 0);
                     continue;
                 }
                 if (bytes_read == 0) {
-                    shell_alive = false;
+                    run.shell_alive = false;
                     term.write_string("\r\n[Process completed]\r\n");
-                    needs_render = true;
+                    run.needs_render = true;
                     saw_event = true;
                 }
                 break;
             }
         }
 
-        // 3. Theme change sync
-        registry = gui_registry();
-        if (registry && registry->settings_generation != last_settings_generation) {
-            last_settings_generation = registry->settings_generation;
-            if (gui_sync_theme_from_registry()) {
-                term.theme_changed();
-            }
-            needs_render = true;
-        }
-
-        uint32_t menu_cmd = 0;
-        if (gui_menu_take_command(&menu_cmd)) {
-            term_handle_menu_command(term, menu_cmd, pipe_to_shell[1], &shell_alive, &needs_render);
-        }
-
         // Republish the menu model when Copy/Paste availability or focus
         // changes so the menubar's enabled-state stays honest.
+        Registry *registry = gui_registry();
         bool clip_nonempty = registry && registry->clipboard_len > 0;
         bool sel_has_now = term.sel_has();
-        if (term.focused() && (menu_focus_dirty || sel_has_now != last_menu_sel || clip_nonempty != last_menu_clip ||
-                               g_term_zoom != last_menu_zoom)) {
+        if (term.focused() && (run.menu_focus_dirty || sel_has_now != last_menu_sel ||
+                               clip_nonempty != last_menu_clip || g_term_zoom != last_menu_zoom)) {
             term_publish_menus(term, clip_nonempty);
             last_menu_sel = sel_has_now;
             last_menu_clip = clip_nonempty;
             last_menu_zoom = g_term_zoom;
-            menu_focus_dirty = false;
+            run.menu_focus_dirty = false;
         }
 
-        // 4. Cursor blink: solid for a moment after activity, then a steady
+        // 3. Cursor blink: solid for a moment after activity, then a steady
         //    530 ms phase while focused; hidden when the window is unfocused.
         uint64_t now_ticks = get_ticks();
         bool blink_on;
         if (!term.focused()) {
             blink_on = false;
-        } else if (now_ticks - last_activity_ticks < 530) {
+        } else if (now_ticks - run.last_activity_ticks < 530) {
             blink_on = true;
         } else {
-            blink_on = (((now_ticks - last_activity_ticks) / 530) % 2) == 0;
+            blink_on = (((now_ticks - run.last_activity_ticks) / 530) % 2) == 0;
         }
         if (blink_on != last_blink_on) {
             last_blink_on = blink_on;
             term.set_blink_on(blink_on);
-            needs_render = true;
+            run.needs_render = true;
         }
 
-        if (needs_render) {
+        if (run.needs_render) {
             term.render_all();
-        } else if (!shell_alive && !saw_event) {
+        } else if (!run.shell_alive && !saw_event) {
             sleep_ms(16);
         }
     }
 
+    app_destroy(app);
     return 0;
 }
