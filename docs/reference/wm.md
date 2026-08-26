@@ -63,6 +63,7 @@ The WM keeps a `WmFrameStats` block updated during the frame loop: built/submitt
 
 - `SYSTEM_FLAG_SHOW_DEBUG_STATS` renders a mono-font overlay (below the menubar, left) showing last/max frame time, compose/present ms, input-to-submit latency, damage kpx + rect count, and the kernel's last VRAM copy pixels/ticks from `DisplayStatus`.
 - `SYSTEM_FLAG_WM_BENCH_DRAG` / `SYSTEM_FLAG_WM_BENCH_RESIZE` run a scripted 1000-frame benchmark: the WM drives synthetic window translation (drag) or geometry oscillation (resize) on the first visible user window, measures compose/present/frame costs and dirty area, logs a summary line, restores the window, and clears the flag. No manual input is needed, so deltas are reproducible on hardware.
+- `SYSTEM_FLAG_WM_PIXEL_SELFTEST` runs the libgui SIMD pixel-op self-test at startup and logs PASS/FAIL. Debug builds always run it at boot. See [Userspace runtime](userspace.md#libgui).
 
 ## Settings
 

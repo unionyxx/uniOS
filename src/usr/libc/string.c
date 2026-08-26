@@ -1,5 +1,7 @@
 #include "string.h"
 
+#include <emmintrin.h>
+
 size_t strlen(const char *s)
 {
     size_t len = 0;
@@ -108,19 +110,27 @@ char *strstr(const char *haystack, const char *needle)
 void *memset(void *dst, int c, size_t n)
 {
     uint8_t *d = (uint8_t *)dst;
-    uint64_t val8 = (uint8_t)c;
-    uint64_t val64 =
-        (val8 << 56) | (val8 << 48) | (val8 << 40) | (val8 << 32) | (val8 << 24) | (val8 << 16) | (val8 << 8) | val8;
 
-    while (n && ((uintptr_t)d & 7)) {
+    while (n && ((uintptr_t)d & 15)) {
         *d++ = (uint8_t)c;
         n--;
     }
 
-    while (n >= 8) {
-        *(uint64_t *)d = val64;
-        d += 8;
-        n -= 8;
+    if (n >= 16) {
+        __m128i v = _mm_set1_epi8((char)c);
+        while (n >= 64) {
+            _mm_store_si128((__m128i *)(d + 0), v);
+            _mm_store_si128((__m128i *)(d + 16), v);
+            _mm_store_si128((__m128i *)(d + 32), v);
+            _mm_store_si128((__m128i *)(d + 48), v);
+            d += 64;
+            n -= 64;
+        }
+        while (n >= 16) {
+            _mm_store_si128((__m128i *)d, v);
+            d += 16;
+            n -= 16;
+        }
     }
 
     while (n--)
@@ -133,17 +143,26 @@ void *memcpy(void *dst, const void *src, size_t n)
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
 
-    if (((uintptr_t)d & 7) == ((uintptr_t)s & 7)) {
-        while (n && ((uintptr_t)d & 7)) {
-            *d++ = *s++;
-            n--;
-        }
-        while (n >= 8) {
-            *(uint64_t *)d = *(const uint64_t *)s;
-            d += 8;
-            s += 8;
-            n -= 8;
-        }
+    while (n && ((uintptr_t)d & 15)) {
+        *d++ = *s++;
+        n--;
+    }
+
+    while (n >= 64) {
+        _mm_store_si128((__m128i *)(d + 0), _mm_loadu_si128((const __m128i *)(s + 0)));
+        _mm_store_si128((__m128i *)(d + 16), _mm_loadu_si128((const __m128i *)(s + 16)));
+        _mm_store_si128((__m128i *)(d + 32), _mm_loadu_si128((const __m128i *)(s + 32)));
+        _mm_store_si128((__m128i *)(d + 48), _mm_loadu_si128((const __m128i *)(s + 48)));
+        d += 64;
+        s += 64;
+        n -= 64;
+    }
+
+    while (n >= 16) {
+        _mm_store_si128((__m128i *)d, _mm_loadu_si128((const __m128i *)s));
+        d += 16;
+        s += 16;
+        n -= 16;
     }
 
     while (n--)
@@ -155,14 +174,52 @@ void *memmove(void *dst, const void *src, size_t n)
 {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
+    if (d == s || n == 0)
+        return dst;
+
     if (d < s) {
+        while (n && ((uintptr_t)d & 15)) {
+            *d++ = *s++;
+            n--;
+        }
+        while (n >= 64) {
+            _mm_store_si128((__m128i *)(d + 0), _mm_loadu_si128((const __m128i *)(s + 0)));
+            _mm_store_si128((__m128i *)(d + 16), _mm_loadu_si128((const __m128i *)(s + 16)));
+            _mm_store_si128((__m128i *)(d + 32), _mm_loadu_si128((const __m128i *)(s + 32)));
+            _mm_store_si128((__m128i *)(d + 48), _mm_loadu_si128((const __m128i *)(s + 48)));
+            d += 64;
+            s += 64;
+            n -= 64;
+        }
+        while (n >= 16) {
+            _mm_store_si128((__m128i *)d, _mm_loadu_si128((const __m128i *)s));
+            d += 16;
+            s += 16;
+            n -= 16;
+        }
         while (n--)
             *d++ = *s++;
     } else {
-        d += n;
-        s += n;
-        while (n--)
-            *--d = *--s;
+        // Backward copy: align the moving tail, then stream 16B stores downward.
+        while (n && ((uintptr_t)(d + n) & 15)) {
+            n--;
+            d[n] = s[n];
+        }
+        while (n >= 64) {
+            n -= 64;
+            _mm_store_si128((__m128i *)(d + n + 48), _mm_loadu_si128((const __m128i *)(s + n + 48)));
+            _mm_store_si128((__m128i *)(d + n + 32), _mm_loadu_si128((const __m128i *)(s + n + 32)));
+            _mm_store_si128((__m128i *)(d + n + 16), _mm_loadu_si128((const __m128i *)(s + n + 16)));
+            _mm_store_si128((__m128i *)(d + n), _mm_loadu_si128((const __m128i *)(s + n)));
+        }
+        while (n >= 16) {
+            n -= 16;
+            _mm_store_si128((__m128i *)(d + n), _mm_loadu_si128((const __m128i *)(s + n)));
+        }
+        while (n > 0) {
+            n--;
+            d[n] = s[n];
+        }
     }
     return dst;
 }

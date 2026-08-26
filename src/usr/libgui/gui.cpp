@@ -10,6 +10,7 @@
 #include "../libc/log.h"
 #include "../libc/syscall.h"
 #include "gui_canvas_utils.h"
+#include "gui_pixops.h"
 
 static Registry *g_registry = NULL;
 extern "C" {
@@ -554,19 +555,7 @@ void gui_fill_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint3
     uint32_t pitch_u32 = s->pitch / 4;
     uint32_t *first_row = &s->buffer[static_cast<size_t>(y) * pitch_u32 + static_cast<size_t>(x)];
 
-    int32_t i = 0;
-    for (; i + 7 < w; i += 8) {
-        first_row[i + 0] = color;
-        first_row[i + 1] = color;
-        first_row[i + 2] = color;
-        first_row[i + 3] = color;
-        first_row[i + 4] = color;
-        first_row[i + 5] = color;
-        first_row[i + 6] = color;
-        first_row[i + 7] = color;
-    }
-    for (; i < w; i++)
-        first_row[i] = color;
+    pix_fill_row(first_row, static_cast<uint32_t>(w), color);
 
     if (h > 1) {
         size_t row_bytes = static_cast<size_t>(w) * sizeof(uint32_t);
@@ -1394,6 +1383,11 @@ void gui_blit_alpha(Surface *dest, Surface *src, int32_t dx, int32_t dy)
 
         uint32_t *drow = &dest->buffer[static_cast<size_t>(dy + y) * dp + static_cast<size_t>(dx)];
         uint32_t *srow = &src->buffer[static_cast<size_t>(sy + y) * sp + static_cast<size_t>(sx)];
+
+        if (!overlap) {
+            pix_blend_row_premultiplied(drow, srow, static_cast<uint32_t>(w));
+            continue;
+        }
 
         for (int32_t x = start_x; x != end_x; x += step_x) {
             uint32_t pixel = srow[x];

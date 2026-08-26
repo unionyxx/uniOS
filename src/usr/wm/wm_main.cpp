@@ -1,3 +1,4 @@
+#include "../libgui/gui_pixops.h"
 #include "wm_core.h"
 
 Surface g_screen;
@@ -31,10 +32,10 @@ uint64_t wm_tsc_now(void)
 uint64_t wm_tsc_to_us(uint64_t cycles)
 {
     if (g_tsc_freq_cached == 0)
-        g_tsc_freq_cached = get_tsc_freq();
+        g_tsc_freq_cached = get_tsc_freq(); // MHz (SYS_GET_TSC_FREQ contract)
     if (g_tsc_freq_cached == 0)
         return 0;
-    return cycles / (g_tsc_freq_cached / 1000000u);
+    return cycles / g_tsc_freq_cached;
 }
 
 Window g_windows[MAX_WINDOWS];
@@ -966,6 +967,16 @@ extern "C" int main(int argc, char **argv)
     syscall1(SYS_GUI_REGISTER_WM, 0);
     RuntimeGuiSettings runtime_settings = load_runtime_settings();
     g_system_flags = runtime_settings.system_flags;
+    bool run_pixops_selftest = (g_system_flags & SYSTEM_FLAG_WM_PIXEL_SELFTEST) != 0;
+#ifdef DEBUG
+    run_pixops_selftest = true;
+#endif
+    if (run_pixops_selftest) {
+        bool pixops_ok = gui_pixops_self_test();
+        LOG_INFO("wm", "pixel op self-test: %s", pixops_ok ? "PASS" : "FAIL");
+        if (!pixops_ok)
+            LOG_ERROR("wm", "SIMD pixel ops diverge from scalar reference; rendering may be corrupt");
+    }
     g_control_center.network_enabled = runtime_settings.ethernet_enabled;
     g_control_center.animations_enabled = runtime_settings.animations_enabled;
     g_control_center.transparency_level = runtime_settings.transparency_level;

@@ -248,6 +248,7 @@ libgui = static_library(
     'src/usr/libgui/gui.cpp',
     'src/usr/libgui/font.cpp',
     'src/usr/libgui/image.cpp',
+    'src/usr/libgui/gui_pixops.cpp',
   ],
   include_directories : [kernel_inc, user_inc],
   cpp_args : user_cpp_args,
