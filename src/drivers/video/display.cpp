@@ -2657,6 +2657,9 @@ void display_init(const BootFramebuffer *fb)
     primary_head()->buffers[0].full_frame_valid = true;
     primary_head()->buffer_in_flight_sequence[0] = 0;
     primary_head()->caps.flags |= DISPLAY_FLAG_HAS_COMPOSITOR;
+    // gop_present copies inline and completes before returning: userspace may
+    // render directly into the presented buffer (no async reader).
+    primary_head()->caps.flags |= DISPLAY_FLAG_SYNCHRONOUS_PRESENT;
     sync_primary_topology(&s_device);
 }
 
