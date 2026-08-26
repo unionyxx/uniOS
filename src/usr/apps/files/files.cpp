@@ -330,7 +330,7 @@ static bool copy_file_stream(const char *src, const char *dst, char *error, size
     char tmp_path[512];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmpcopy", dst);
     unlink(tmp_path);
-    int out_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC);
+    int out_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out_fd < 0) {
         close(in_fd);
         snprintf(error, error_size, "open failed for %s", tmp_path);

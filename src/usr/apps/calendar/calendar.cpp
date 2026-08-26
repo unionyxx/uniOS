@@ -504,7 +504,7 @@ extern "C" int main()
 
         if (needs_redraw && backbuffer_data) {
             draw_calendar(&backbuffer, &state, &rects, hover_row, hover_col, hover_arrow, hover_today, today_pressed);
-            memcpy(win.buffer, backbuffer.buffer, win.height * win.pitch);
+            memcpy(win.buffer, backbuffer.buffer, (size_t)win.height * win.pitch);
             gui_blit_to_screen_rect(&win, 0, 0, win.width, win.height);
             needs_redraw = false;
         }

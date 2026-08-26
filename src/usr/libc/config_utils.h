@@ -56,7 +56,7 @@ static inline bool cfg_write_text_file(const char *path, const char *contents)
 {
     if (!path || !contents)
         return false;
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
         return false;
     size_t len = strlen(contents);

@@ -360,7 +360,7 @@ bool execute_single_command(const char *cmd, const char *piped_input)
         char resolved[256];
         shell_resolve_path(redirect_file, resolved);
         int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-        redirect_fd = open(resolved, flags);
+        redirect_fd = open(resolved, flags, 0644);
         if (redirect_fd < 0) {
             printf("shell: failed to open '%s' for redirection\n", redirect_file);
             shell_set_status(1);

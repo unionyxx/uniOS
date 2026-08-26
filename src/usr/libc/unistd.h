@@ -8,7 +8,7 @@ extern "C" {
 void exit(int status);
 int read(int fd, void *buf, size_t count);
 int write(int fd, const void *buf, size_t count);
-int open(const char *pathname, int flags);
+int open(const char *pathname, int flags, ...);
 void close(int fd);
 int fork(void);
 int exec(const char *path);

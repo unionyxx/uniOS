@@ -325,7 +325,7 @@ void Terminal::scroll_up()
 
     int rows_to_move = m_height_chars - 1;
     kstring::memmove(m_text_buffer.get(), m_text_buffer.get() + m_width_chars,
-                     rows_to_move * m_width_chars * sizeof(Cell));
+                     (size_t)rows_to_move * m_width_chars * sizeof(Cell));
 
     int last_row_idx = (m_height_chars - 1) * m_width_chars;
     for (int col = 0; col < m_width_chars; col++) {

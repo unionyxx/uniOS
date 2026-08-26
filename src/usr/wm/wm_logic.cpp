@@ -2409,14 +2409,18 @@ void update_storage_prompt_hover(int mx, int my)
 
 static void ensure_default_storage_file(const char *path, const char *fallback_path)
 {
-    VNodeStat st = {};
-    if (!path || !fallback_path || (stat(path, &st) == 0 && !st.is_dir))
+    if (!path || !fallback_path)
         return;
+    int probe = open(path, O_RDONLY);
+    if (probe >= 0) {
+        close(probe);
+        return;
+    }
 
     int in = open(fallback_path, O_RDONLY);
     if (in < 0)
         return;
-    int out = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    int out = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) {
         close(in);
         return;

@@ -343,7 +343,7 @@ static bool dir_chain_load(FAT32Filesystem *fs, uint32_t dir_cluster, DirChain *
         return false;
 
     out->clusters = static_cast<uint32_t *>(malloc(sizeof(uint32_t) * cluster_count));
-    out->data = static_cast<uint8_t *>(malloc(out->cluster_size * cluster_count));
+    out->data = static_cast<uint8_t *>(malloc((size_t)out->cluster_size * cluster_count));
     if (!out->clusters || !out->data) {
         free(out->clusters);
         free(out->data);
@@ -429,7 +429,7 @@ static bool dir_chain_extend(DirChain *chain, uint32_t required_entries)
         chain->clusters = new_clusters;
 
         uint8_t *new_data =
-            static_cast<uint8_t *>(realloc(chain->data, chain->cluster_size * (chain->cluster_count + 1)));
+            static_cast<uint8_t *>(realloc(chain->data, (size_t)chain->cluster_size * (chain->cluster_count + 1)));
         if (!new_data)
             return false;
         chain->data = new_data;

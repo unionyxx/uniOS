@@ -895,7 +895,7 @@ extern "C" int main(int argc, char **argv)
         return 1;
     Surface local_canvas = {local_buffer, dock_w, dock_h, dock_w * 4, true, 0};
 
-    memset(local_buffer, 0, dock_w * dock_h * 4);
+    memset(local_buffer, 0, (size_t)dock_w * dock_h * 4);
     draw_dock(&local_canvas, registry, -1);
     gui_copy_to_canvas((volatile uint32_t *)canvas_ptr, local_buffer, dock_w, dock_h);
     submit_damage(registry->windows[1], dock_full_rect(dock_w, dock_h));

@@ -375,9 +375,7 @@ static int open_file_for_save(const char *path)
     if (!path || !path[0])
         return -1;
 
-    // O_CREAT needs a creation mode. Go through the raw syscall wrapper so we can
-    // supply it even on libc builds whose open() shim only exposes two arguments.
-    return (int)syscall3(SYS_OPEN, (uint64_t)path, (uint64_t)(O_WRONLY | O_CREAT | O_TRUNC), 0644);
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 }
 
 static Language detect_language(const char *path)

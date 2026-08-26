@@ -1,5 +1,6 @@
 #include "unistd.h"
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <uapi/fs.h>
@@ -27,9 +28,16 @@ int read(int fd, void *buf, size_t count)
     return (int)syscall3(SYS_READ, (uint64_t)fd, (uint64_t)buf, count);
 }
 
-int open(const char *pathname, int flags)
+int open(const char *pathname, int flags, ...)
 {
-    return (int)syscall2(SYS_OPEN, (uint64_t)pathname, (uint64_t)flags);
+    uint64_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (uint64_t)(unsigned)va_arg(ap, int);
+        va_end(ap);
+    }
+    return (int)syscall3(SYS_OPEN, (uint64_t)pathname, (uint64_t)flags, mode);
 }
 
 void close(int fd)

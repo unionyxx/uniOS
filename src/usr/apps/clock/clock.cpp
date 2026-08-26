@@ -449,7 +449,7 @@ extern "C" int main()
     gui_request_focus();
 
     uint32_t backbuffer_stride = win.pitch / 4;
-    uint32_t *backbuffer_data = (uint32_t *)malloc(backbuffer_stride * win.height * sizeof(uint32_t));
+    uint32_t *backbuffer_data = (uint32_t *)malloc((size_t)backbuffer_stride * win.height * sizeof(uint32_t));
     if (!backbuffer_data)
         return 1;
     Surface backbuffer = win;
@@ -518,7 +518,7 @@ extern "C" int main()
                 resized = true;
                 free(backbuffer_data);
                 backbuffer_stride = win.pitch / 4;
-                backbuffer_data = (uint32_t *)malloc(backbuffer_stride * win.height * sizeof(uint32_t));
+                backbuffer_data = (uint32_t *)malloc((size_t)backbuffer_stride * win.height * sizeof(uint32_t));
                 backbuffer = win;
                 backbuffer.buffer = backbuffer_data;
                 if (!backbuffer_data) {

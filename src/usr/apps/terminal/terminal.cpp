@@ -714,8 +714,8 @@ private:
         if (new_width == 0 || new_height == 0)
             return false;
 
-        Cell *new_grid = (Cell *)malloc(new_width * new_height * sizeof(Cell));
-        Cell *new_presented = (Cell *)malloc(new_width * new_height * sizeof(Cell));
+        Cell *new_grid = (Cell *)malloc((size_t)new_width * new_height * sizeof(Cell));
+        Cell *new_presented = (Cell *)malloc((size_t)new_width * new_height * sizeof(Cell));
         if (!new_grid || !new_presented) {
             if (new_grid)
                 free(new_grid);

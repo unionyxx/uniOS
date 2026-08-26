@@ -205,7 +205,8 @@ static void xhci_parse_protocols()
                  dw0, dw1, dw2, port_off, port_off + port_cnt - 1);
 
             if (port_off > 0) {
-                for (uint8_t p = port_off; p < port_off + port_cnt; p++) {
+                const uint32_t port_end = (uint32_t)port_off + port_cnt;
+                for (uint32_t p = port_off; p < port_end && p < 256; p++) {
                     g_xhci.port_protocols[p] = major;
                 }
             }

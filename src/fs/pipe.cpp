@@ -234,7 +234,7 @@ bool pipe_is_ready(VNode *node, uint32_t events, uint32_t *out_occurred)
         if (p->write_closed)
             occurred |= EPOLLIN | EPOLLHUP;
     } else {
-        if (PIPE_BUFFER_SIZE - p->count > 0 && !p->read_closed)
+        if (p->count < PIPE_BUFFER_SIZE && !p->read_closed)
             occurred |= EPOLLOUT;
         if (p->read_closed)
             occurred |= EPOLLERR | EPOLLHUP;

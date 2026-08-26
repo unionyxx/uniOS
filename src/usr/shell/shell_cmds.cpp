@@ -120,8 +120,16 @@ void cmd_ls(const char *path)
     }
     resolved[255] = '\0';
 
+    int fd = open(resolved, O_RDONLY);
+    if (fd < 0) {
+        printf("ls: cannot access '%s': No such file or directory\n", target[0] ? target : resolved);
+        set_status(1);
+        return;
+    }
+
     struct VNodeStat target_stat;
     if (stat(resolved, &target_stat) < 0) {
+        close(fd);
         printf("ls: cannot access '%s': No such file or directory\n", target[0] ? target : resolved);
         set_status(1);
         return;
@@ -138,13 +146,7 @@ void cmd_ls(const char *path)
         } else {
             printf("%s\n", target[0] ? target : resolved);
         }
-        return;
-    }
-
-    int fd = open(resolved, O_RDONLY);
-    if (fd < 0) {
-        printf("ls: cannot access '%s': No such file or directory\n", resolved);
-        set_status(1);
+        close(fd);
         return;
     }
 
@@ -276,7 +278,7 @@ void cmd_touch(const char *filename)
     }
     char resolved[256];
     shell_resolve_path(filename, resolved);
-    int fd = open(resolved, O_WRONLY | O_CREAT);
+    int fd = open(resolved, O_WRONLY | O_CREAT, 0644);
     if (fd >= 0) {
         close(fd);
     } else {
@@ -346,20 +348,21 @@ void cmd_cp(const char *args)
     shell_resolve_path(src, resolved_src);
     shell_resolve_path(dst, resolved_dst);
 
-    struct VNodeStat st;
-    if (stat(resolved_src, &st) < 0 || st.is_dir) {
+    int in = open(resolved_src, O_RDONLY);
+    if (in < 0) {
         printf("cp: cannot stat '%s'\n", src);
         set_status(1);
         return;
     }
 
-    int in = open(resolved_src, O_RDONLY);
-    if (in < 0) {
-        printf("cp: cannot open '%s'\n", src);
+    struct VNodeStat st;
+    if (stat(resolved_src, &st) < 0 || st.is_dir) {
+        close(in);
+        printf("cp: cannot stat '%s'\n", src);
         set_status(1);
         return;
     }
-    int out = open(resolved_dst, O_WRONLY | O_CREAT | O_TRUNC);
+    int out = open(resolved_dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) {
         close(in);
         printf("cp: cannot create '%s'\n", dst);
@@ -494,10 +497,17 @@ void cmd_exec(const char *args)
 
 static uint64_t du_path(const char *path, int depth, bool print_each)
 {
-    struct VNodeStat st;
-    if (stat(path, &st) < 0)
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
         return 0;
+
+    struct VNodeStat st;
+    if (stat(path, &st) < 0) {
+        close(fd);
+        return 0;
+    }
     if (!st.is_dir) {
+        close(fd);
         if (print_each) {
             printf("%llu\t%s\n", (unsigned long long)st.size, path);
         }
@@ -505,9 +515,6 @@ static uint64_t du_path(const char *path, int depth, bool print_each)
     }
 
     uint64_t total = 0;
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
     char name[256];
     while (depth < 16 && syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
@@ -654,7 +661,7 @@ static void write_text_to_file(const char *args, bool append)
     char resolved[256];
     shell_resolve_path(path, resolved);
     int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-    int fd = open(resolved, flags);
+    int fd = open(resolved, flags, 0644);
     if (fd < 0) {
         printf("%s: cannot open '%s'\n", append ? "append" : "write", path);
         set_status(1);
@@ -788,18 +795,20 @@ char *get_file_data(const char *filename, const char *piped_input, uint64_t *out
     if (filename && filename[0]) {
         char resolved[256];
         shell_resolve_path(filename, resolved);
-        struct VNodeStat st;
-        if (stat(resolved, &st) < 0)
-            return nullptr;
         int fd = open(resolved, O_RDONLY);
         if (fd < 0)
             return nullptr;
-        char *data = (char *)malloc((size_t)st.size + 1);
+        int64_t file_size = fsize(fd);
+        if (file_size < 0) {
+            close(fd);
+            return nullptr;
+        }
+        char *data = (char *)malloc((size_t)file_size + 1);
         if (!data) {
             close(fd);
             return nullptr;
         }
-        int64_t bytes_read = read(fd, data, (size_t)st.size);
+        int64_t bytes_read = read(fd, data, (size_t)file_size);
         close(fd);
         if (bytes_read < 0) {
             free(data);
