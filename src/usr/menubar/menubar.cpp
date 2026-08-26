@@ -541,6 +541,7 @@ struct AppMenuDropdown
 {
     char labels[MENUBAR_DROPDOWN_MAX_ROWS][MENU_LABEL_MAX];
     char accels[MENUBAR_DROPDOWN_MAX_ROWS][MENU_ACCEL_MAX];
+    const char *accel_ptrs[MENUBAR_DROPDOWN_MAX_ROWS];
     GuiMenuItem items[MENUBAR_DROPDOWN_MAX_ROWS];
     bool checked[MENUBAR_DROPDOWN_MAX_ROWS];
     uint32_t cmds[MENUBAR_DROPDOWN_MAX_ROWS];
@@ -588,6 +589,7 @@ static void dropdown_push_item(AppMenuDropdown &d, const char *label, uint32_t c
     int i = d.count++;
     d.labels[i][0] = '\0';
     d.accels[i][0] = '\0';
+    d.accel_ptrs[i] = d.accels[i];
     if (label) {
         strncpy(d.labels[i], label, MENU_LABEL_MAX - 1);
         d.labels[i][MENU_LABEL_MAX - 1] = '\0';
@@ -870,8 +872,8 @@ void draw_menubar(Surface *canvas, Registry *reg)
             int bx = g_app_menu_btn_x[g_open_app_menu];
             int hovered = gui_popup_menu_hit_test(d.items, d.count, bx, menu_y(), d.width, pointer_local_x(reg),
                                                   pointer_local_y(reg));
-            gui_draw_popup_menu_ext(canvas, bx, menu_y(), d.width, d.items, d.count, hovered,
-                                    (const char *const *)d.accels, d.checked);
+            gui_draw_popup_menu_ext(canvas, bx, menu_y(), d.width, d.items, d.count, hovered, d.accel_ptrs,
+                                    d.checked);
         }
     }
 }
