@@ -294,14 +294,55 @@ void sound_play(const char *path)
     syscall1(SYS_SOUND_PLAY, (uint64_t)path);
 }
 
-void sound_write(const void *data, uint32_t size)
+int64_t sound_write(const void *data, uint32_t size)
 {
-    syscall2(SYS_SOUND_WRITE, (uint64_t)data, (uint64_t)size);
+    return (int64_t)syscall2(SYS_SOUND_WRITE, (uint64_t)data, (uint64_t)size);
 }
 
 void sound_config(uint32_t sample_rate, uint8_t channels, uint8_t bits_per_sample)
 {
     syscall3(SYS_SOUND_CONFIG, (uint64_t)sample_rate, (uint64_t)channels, (uint64_t)bits_per_sample);
+}
+
+int64_t sound_stream_open(uint32_t sample_rate, uint32_t channels, uint32_t bits_per_sample)
+{
+    return (int64_t)syscall3(SYS_SOUND_STREAM_OPEN, (uint64_t)sample_rate, (uint64_t)channels,
+                             (uint64_t)bits_per_sample);
+}
+
+void sound_stream_end(void)
+{
+    syscall0(SYS_SOUND_STREAM_END);
+}
+
+void sound_stop(void)
+{
+    syscall0(SYS_SOUND_STOP);
+}
+
+void sound_pause(void)
+{
+    syscall0(SYS_SOUND_PAUSE);
+}
+
+void sound_resume(void)
+{
+    syscall0(SYS_SOUND_RESUME);
+}
+
+int64_t sound_status(struct sound_status *out)
+{
+    return (int64_t)syscall1(SYS_SOUND_STATUS, (uint64_t)out);
+}
+
+int64_t sound_volume(uint32_t level)
+{
+    return (int64_t)syscall1(SYS_SOUND_VOLUME, (uint64_t)level);
+}
+
+int64_t lseek(int fd, int64_t offset, int whence)
+{
+    return (int64_t)syscall3(SYS_LSEEK, (uint64_t)fd, (uint64_t)offset, (uint64_t)whence);
 }
 
 extern void __sigret(void);

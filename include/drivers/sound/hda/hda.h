@@ -224,6 +224,13 @@ struct HdAudioDevice
 
     uint32_t played_bytes; // Total amount of played bytes (out of sound_data_size).
 
+    // Streaming playback: the dispatcher feeds PCM incrementally through
+    // stream_refill instead of one big sound_data buffer.
+    bool stream_mode;
+    uint32_t (*stream_refill)(uint8_t *dst, uint32_t len); // returns bytes supplied (< len = source draining)
+    uint32_t stream_valid_bytes;                           // real data bytes fed so far (rest is silence)
+    bool stream_exhausted;                                 // source drained; stop once valid bytes consumed
+
     // Input/Recording support.
     uint64_t input_stream;                    // Address of input stream descriptor.
     DMAAllocation input_buffer_entries_dma;   // DMA allocation for input buffer entries.
@@ -252,6 +259,9 @@ void hda_set_bits_per_sample(uint8_t bits_per_sample);
 void hda_set_sample_rate(uint32_t sample_rate);
 
 void hda_play(uint8_t *data, uint32_t size);
+// Streaming variant: DMA ring is filled (and refilled) through `refill`.
+// The ring is pre-filled at start; a short return from `refill` pads silence.
+void hda_stream_start(uint32_t (*refill)(uint8_t *dst, uint32_t len));
 void hda_resume();
 void hda_pause();
 void hda_stop();

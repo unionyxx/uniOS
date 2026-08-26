@@ -38,7 +38,7 @@ A fixed table of 512 entries, one 4 KiB page each, with last-access accounting f
 - `rmdir` requires an empty directory.
 - `rename` requires both parents on the same filesystem ops table and write permission.
 
-There is no `lseek` syscall; offsets move through read/write and kernel-internal seek only.
+`SYS_LSEEK` repositions a descriptor offset (`SEEK_SET/CUR/END`); it re-checks the fd table under the fd lock and returns `-9` EBADF for a reused/closed fd or `-22` EINVAL for a negative result or bad whence.
 
 ## Pipes
 

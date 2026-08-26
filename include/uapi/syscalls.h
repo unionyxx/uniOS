@@ -100,6 +100,14 @@
 #define SYS_FD_TRANSFER    278
 #define SYS_FSIZE          279
 #define SYS_SYNC           280
+#define SYS_LSEEK 281
+#define SYS_SOUND_STREAM_OPEN 282
+#define SYS_SOUND_STREAM_END 283
+#define SYS_SOUND_STOP 284
+#define SYS_SOUND_PAUSE 285
+#define SYS_SOUND_RESUME 286
+#define SYS_SOUND_STATUS 287
+#define SYS_SOUND_VOLUME 288
 
 /* Futex Opcodes */
 #define FUTEX_WAIT         0

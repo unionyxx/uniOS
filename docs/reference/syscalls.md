@@ -12,7 +12,7 @@ Userspace invokes syscalls with the `syscall` instruction via inline wrappers (`
 - On return, pending signals are checked, volatile registers are zeroed (no kernel state leaks to user), and `o64 sysret` returns. Non-canonical `rcx` takes an `iretq` fallback instead.
 - A legacy `int 0x80` gate (DPL 3) reaches the same handler; userspace does not use it.
 
-Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and up) return negative errno values (`-4` EINTR, `-9` EBADF, `-12` ENOMEM, `-14` EFAULT, `-22` EINVAL, `-24` EMFILE). User pointers are validated against the process VMA list; string copies are bounded; data copies use SMAP-aware fixup paths.
+Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and up) return negative errno values (`-4` EINTR, `-9` EBADF, `-12` ENOMEM, `-14` EFAULT, `-19` ENODEV, `-22` EINVAL, `-24` EMFILE, `-32` EPIPE). User pointers are validated against the process VMA list; string copies are bounded; data copies use SMAP-aware fixup paths.
 
 ## Files and Descriptors
 
@@ -33,6 +33,7 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 | 277 | `SYS_FTRUNCATE` | Truncate open file (FAT32: to 0 only) |
 | 279 | `SYS_FSIZE` | Size of an open file (used to validate memfd buffers) |
 | 280 | `SYS_SYNC` | Flush page cache and filesystem state |
+| 281 | `SYS_LSEEK` | Reposition fd offset (`SEEK_SET/CUR/END` from `uapi/fs.h`) |
 
 ## Processes, Threads, Signals
 
@@ -67,7 +68,14 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 
 | # | Name | Purpose |
 | --- | --- | --- |
-| 205-207 | `SYS_SOUND_PLAY/WRITE/CONFIG` | File playback, raw PCM, stream format |
+| 205-207 | `SYS_SOUND_PLAY/WRITE/CONFIG` | File playback, raw PCM push, stream format |
+| 282 | `SYS_SOUND_STREAM_OPEN` | Open streaming playback (rate, channels, 16-bit); stops previous playback |
+| 283 | `SYS_SOUND_STREAM_END` | No more stream data; drain queued PCM then auto-close |
+| 284 | `SYS_SOUND_STOP` | Abort the stream and stop the card |
+| 285 | `SYS_SOUND_PAUSE` | Pause stream playback (idempotent) |
+| 286 | `SYS_SOUND_RESUME` | Resume stream playback (idempotent) |
+| 287 | `SYS_SOUND_STATUS` | Fill `sound_status` (`uapi/sound.h`): played/queued bytes, format, flags |
+| 288 | `SYS_SOUND_VOLUME` | Card master volume 0-100 |
 | 208 | `SYS_FB_INFO` | Framebuffer geometry |
 | 209 | `SYS_FB_MMAP` | Map the framebuffer at `0x200000000` (WC) |
 | 210 | `SYS_GET_EVENT` | Pop an event from the process queue (blocking flag) |

@@ -67,9 +67,21 @@ uint64_t get_tsc_freq(void);
 int get_event(struct Event *ev);
 int wait_event(struct Event *ev);
 int poll_event(struct Event *ev);
+#include <uapi/sound.h>
 void sound_play(const char *path);
-void sound_write(const void *data, uint32_t size);
+// In streaming mode (after sound_stream_open) this blocks until every byte is
+// queued and returns the byte count; otherwise it plays a whole PCM buffer.
+// Negative return = error.
+int64_t sound_write(const void *data, uint32_t size);
 void sound_config(uint32_t sample_rate, uint8_t channels, uint8_t bits_per_sample);
+int64_t sound_stream_open(uint32_t sample_rate, uint32_t channels, uint32_t bits_per_sample);
+void sound_stream_end(void);
+void sound_stop(void);
+void sound_pause(void);
+void sound_resume(void);
+int64_t sound_status(struct sound_status *out);
+int64_t sound_volume(uint32_t level);
+int64_t lseek(int fd, int64_t offset, int whence);
 
 int futex(volatile uint32_t *uaddr, int op, uint32_t val);
 int thread_create(void (*fn)(void), void *arg, void *stack_addr, void *frame);

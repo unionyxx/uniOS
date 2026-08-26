@@ -88,6 +88,13 @@ struct Ac97Device
                                    // start).
 
     uint32_t played_bytes; // Total amount of played bytes (out of sound_data_size).
+
+    // Streaming playback: the dispatcher feeds PCM incrementally through
+    // stream_refill instead of one big sound_data buffer.
+    bool stream_mode;
+    uint32_t (*stream_refill)(uint8_t *dst, uint32_t len); // returns bytes supplied (< len = source draining)
+    uint32_t stream_valid_bytes;                           // real data bytes fed so far (rest is silence)
+    bool stream_exhausted;                                 // source drained; stop once valid bytes consumed
 };
 
 bool ac97_is_initialized();
@@ -108,6 +115,9 @@ void ac97_play_wav_file(const char *filename);
 void ac97_play_pcm_file(const char *filename);
 
 void ac97_play(uint8_t *data, uint32_t size);
+// Streaming variant: DMA ring is filled (and refilled) through `refill`.
+// The ring is pre-filled at start; a short return from `refill` pads silence.
+void ac97_stream_start(uint32_t (*refill)(uint8_t *dst, uint32_t len));
 void ac97_resume();
 void ac97_pause();
 void ac97_stop();

@@ -131,6 +131,11 @@ void ac97_reset()
     // Do not free this one! It's pointer to file system file data!
     ac97_info.sound_data = nullptr;
     ac97_info.sound_data_size = 0;
+
+    ac97_info.stream_mode = false;
+    ac97_info.stream_refill = nullptr;
+    ac97_info.stream_valid_bytes = 0;
+    ac97_info.stream_exhausted = false;
 }
 
 // Set master volume.
@@ -265,20 +270,9 @@ void ac97_play_pcm_file(const char *filename)
     ac97_play(data_ptr, data_size);
 }
 
-// Play PCM byte array.
-void ac97_play(uint8_t *data, uint32_t size)
+// Reset the PCM-out stream and wait for the hardware to acknowledge.
+static void ac97_reset_stream_registers()
 {
-    if (!ac97_info.is_initialized) {
-        DEBUG_ERROR("ac97 device is not initialized");
-        return;
-    }
-
-    // Do not play if sound card is already busy. In future we may add sound mixing.
-    if (ac97_info.is_playing) {
-        DEBUG_WARN("already playing! stop current playback before playing next sound");
-        return;
-    }
-
     // Reset stream.
     outb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL, AC97_NABM_PCM_OUT_CONTROL_RESET);
 
@@ -288,8 +282,7 @@ void ac97_play(uint8_t *data, uint32_t size)
     {
         // Bounded wait: a wedged codec must not hang playback/stop forever.
         uint32_t reset_tries = 100000;
-        while ((inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) &&
-               reset_tries > 0) {
+        while ((inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) && reset_tries > 0) {
             io_wait();
             reset_tries--;
         }
@@ -299,21 +292,12 @@ void ac97_play(uint8_t *data, uint32_t size)
 
     // Clear status.
     outw(ac97_info.nabm + AC97_NABM_PCM_OUT_STATUS, 0x1C);
+}
 
-    DEBUG_INFO("playing sound data ptr: %p | data size: %d", data, size);
-
-    // Set sound data source.
-    ac97_info.sound_data = data;
-    ac97_info.sound_data_size = size;
-
-    // Copy new buffer data (bounded to avoid reading past source)
-    size_t copy_size = (size < ac97_info.sound_buffers_dma.size) ? size : ac97_info.sound_buffers_dma.size;
-    memcpy((void *)ac97_info.sound_buffers_dma.virt, data, copy_size);
-    // Zero remaining buffer if source was smaller
-    if (copy_size < ac97_info.sound_buffers_dma.size) {
-        memset((void *)(ac97_info.sound_buffers_dma.virt + copy_size), 0, ac97_info.sound_buffers_dma.size - copy_size);
-    }
-
+// Program the BDL and start DMA. The DMA ring must already hold the initial
+// audio data.
+static void ac97_begin_playback()
+{
     DEBUG_INFO("filling buffer entries");
 
     // Fill entries.
@@ -340,6 +324,91 @@ void ac97_play(uint8_t *data, uint32_t size)
     // Let everyone know audio is playing.
     ac97_info.is_paused = false;
     ac97_info.is_playing = true;
+}
+
+// Play PCM byte array.
+void ac97_play(uint8_t *data, uint32_t size)
+{
+    if (!ac97_info.is_initialized) {
+        DEBUG_ERROR("ac97 device is not initialized");
+        return;
+    }
+
+    // Do not play if sound card is already busy. In future we may add sound mixing.
+    if (ac97_info.is_playing) {
+        DEBUG_WARN("already playing! stop current playback before playing next sound");
+        return;
+    }
+
+    ac97_reset_stream_registers();
+
+    DEBUG_INFO("playing sound data ptr: %p | data size: %d", data, size);
+
+    // Set sound data source.
+    ac97_info.sound_data = data;
+    ac97_info.sound_data_size = size;
+    ac97_info.stream_mode = false;
+    ac97_info.stream_refill = nullptr;
+    ac97_info.stream_valid_bytes = 0;
+    ac97_info.stream_exhausted = false;
+    ac97_info.current_buffer_entry = 0;
+    ac97_info.buffer_entry_offset = 0;
+    ac97_info.played_bytes = 0;
+
+    // Copy new buffer data (bounded to avoid reading past source)
+    size_t copy_size = (size < ac97_info.sound_buffers_dma.size) ? size : ac97_info.sound_buffers_dma.size;
+    memcpy((void *)ac97_info.sound_buffers_dma.virt, data, copy_size);
+    // Zero remaining buffer if source was smaller
+    if (copy_size < ac97_info.sound_buffers_dma.size) {
+        memset((void *)(ac97_info.sound_buffers_dma.virt + copy_size), 0, ac97_info.sound_buffers_dma.size - copy_size);
+    }
+
+    ac97_begin_playback();
+}
+
+void ac97_stream_start(uint32_t (*refill)(uint8_t *dst, uint32_t len))
+{
+    if (!ac97_info.is_initialized) {
+        DEBUG_ERROR("ac97 device is not initialized");
+        return;
+    }
+
+    if (ac97_info.is_playing) {
+        DEBUG_WARN("already playing! stop current playback before starting a stream");
+        return;
+    }
+
+    if (!refill) {
+        DEBUG_ERROR("ac97_stream_start without refill callback");
+        return;
+    }
+
+    ac97_reset_stream_registers();
+
+    ac97_info.sound_data = nullptr;
+    ac97_info.sound_data_size = 0;
+    ac97_info.stream_mode = true;
+    ac97_info.stream_refill = refill;
+    ac97_info.stream_valid_bytes = 0;
+    ac97_info.stream_exhausted = false;
+    ac97_info.current_buffer_entry = 0;
+    ac97_info.buffer_entry_offset = 0;
+    ac97_info.played_bytes = 0;
+
+    // Pre-fill the whole DMA ring through the callback so playback starts
+    // with real data instead of a ring of silence.
+    uint8_t *ring = (uint8_t *)ac97_info.sound_buffers_dma.virt;
+    for (uint32_t i = 0; i < AC97_BUFFER_ENTRY_COUNT; i++) {
+        uint8_t *dst = ring + (uint64_t)i * AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE;
+        uint32_t got = refill(dst, AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+        if (got < AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE) {
+            memset(dst + got, 0, AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE - got);
+            ac97_info.stream_exhausted = true;
+        }
+        ac97_info.stream_valid_bytes += got;
+    }
+
+    ac97_begin_playback();
 }
 
 // Resume playback if we played something before.
@@ -410,8 +479,7 @@ void ac97_stop()
     {
         // Bounded wait: a wedged codec must not hang playback/stop forever.
         uint32_t reset_tries = 100000;
-        while ((inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) &&
-               reset_tries > 0) {
+        while ((inb(ac97_info.nabm + AC97_NABM_PCM_OUT_CONTROL) & AC97_NABM_PCM_OUT_CONTROL_RESET) && reset_tries > 0) {
             io_wait();
             reset_tries--;
         }
@@ -425,6 +493,23 @@ void ac97_stop()
     DEBUG_INFO("stopped playback");
 }
 
+// Fill one just-consumed BDL slot. Legacy mode copies from the fixed
+// sound_data buffer; stream mode pulls from the dispatcher's refill callback.
+static void ac97_refill_entry(uint8_t *dst, uint32_t src_offset)
+{
+    if (ac97_info.stream_mode) {
+        uint32_t got = ac97_info.stream_refill ? ac97_info.stream_refill(dst, AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE) : 0;
+        if (got < AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE) {
+            memset(dst + got, 0, AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE - got);
+            ac97_info.stream_exhausted = true;
+        }
+        ac97_info.stream_valid_bytes += got;
+        return;
+    }
+    sound_fill_dma_buffer(dst, ac97_info.sound_data, ac97_info.sound_data_size, src_offset,
+                          AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+}
+
 void ac97_poll()
 {
     // Check if initialized and playing.
@@ -432,8 +517,15 @@ void ac97_poll()
         return;
     }
 
-    // Do not play further than source sound data.
-    if (ac97_info.played_bytes >= ac97_info.sound_data_size) {
+    if (ac97_info.stream_mode) {
+        // Stop once every real byte supplied by the refill source has been
+        // consumed (rest of the ring is silence padding).
+        if (ac97_info.stream_exhausted && ac97_info.played_bytes >= ac97_info.stream_valid_bytes) {
+            ac97_stop();
+            return;
+        }
+    } else if (ac97_info.played_bytes >= ac97_info.sound_data_size) {
+        // Do not play further than source sound data.
         ac97_stop();
         return;
     }
@@ -457,8 +549,7 @@ void ac97_poll()
                               (AC97_BUFFER_ENTRY_COUNT * ac97_info.buffer_entry_offset + (AC97_BUFFER_ENTRY_COUNT - 1));
         uint8_t *dst = (uint8_t *)(ac97_info.sound_buffers_dma.virt +
                                    (AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE * (AC97_BUFFER_ENTRY_COUNT - 1)));
-        sound_fill_dma_buffer(dst, ac97_info.sound_data, ac97_info.sound_data_size, src_offset,
-                              AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+        ac97_refill_entry(dst, src_offset);
     }
 
     // Refill previous buffer with fresh data.
@@ -468,8 +559,7 @@ void ac97_poll()
             (AC97_BUFFER_ENTRY_COUNT * (ac97_info.buffer_entry_offset + 1) + ac97_info.current_buffer_entry);
         uint8_t *dst = (uint8_t *)(ac97_info.sound_buffers_dma.virt +
                                    (AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE * ac97_info.current_buffer_entry));
-        sound_fill_dma_buffer(dst, ac97_info.sound_data, ac97_info.sound_data_size, src_offset,
-                              AC97_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+        ac97_refill_entry(dst, src_offset);
 
         // Now we can move to next entry.
         ac97_info.current_buffer_entry++;

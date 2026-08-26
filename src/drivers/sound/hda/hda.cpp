@@ -589,6 +589,11 @@ void hda_reset()
 
     hda_info.sound_data = nullptr;
     hda_info.sound_data_size = 0;
+
+    hda_info.stream_mode = false;
+    hda_info.stream_refill = nullptr;
+    hda_info.stream_valid_bytes = 0;
+    hda_info.stream_exhausted = false;
 }
 uint32_t hda_send_command(uint32_t codec, uint32_t node, uint32_t verb, uint32_t command)
 {
@@ -752,19 +757,9 @@ uint16_t hda_return_sound_data_format(uint32_t sample_rate, uint32_t channels, u
     return data_format;
 }
 
-void hda_play(uint8_t *data, uint32_t size)
+// Reset and stop the output stream, waiting for the hardware to acknowledge.
+static void hda_reset_stream_registers()
 {
-    if (!hda_info.is_initialized) {
-        DEBUG_ERROR("hd audio device is not initialized");
-        return;
-    }
-
-    // Do not play if sound card is already busy. In future we may add sound mixing.
-    if (hda_info.is_playing) {
-        DEBUG_WARN("already playing! stop current playback before playing next sound");
-        return;
-    }
-
     // Reset stream registers.
     mmio_write8((void *)(hda_info.output_stream + HDA_STREAM_DESCRIPTOR_STREAM_CONTROL_1),
                 HDA_STREAM_CONTROL_STREAM_IN_RESET);
@@ -798,21 +793,12 @@ void hda_play(uint8_t *data, uint32_t size)
             break;
         }
     }
+}
 
-    DEBUG_INFO("playing sound data ptr: %p | data size: %d", data, size);
-
-    hda_info.sound_data = data;
-    hda_info.sound_data_size = size;
-
-    // Copy new buffer data (bounded to avoid reading past source)
-    size_t copy_size = (size < hda_info.sound_buffers_dma.size) ? size : hda_info.sound_buffers_dma.size;
-    memcpy((void *)hda_info.sound_buffers_dma.virt, data, copy_size);
-    // Zero remaining buffer if source was smaller
-    if (copy_size < hda_info.sound_buffers_dma.size) {
-        memset((void *)(hda_info.sound_buffers_dma.virt + copy_size), 0, hda_info.sound_buffers_dma.size - copy_size);
-    }
-
-    // Copy new buffer data (bounded to avoid reading past source)
+// Program the BDL and stream format, then start DMA. The DMA ring must
+// already hold the initial audio data.
+static void hda_begin_playback()
+{
     uint64_t mem_offset = 0;
     for (uint32_t i = 0; i < HDA_BUFFER_ENTRY_COUNT; i++) {
         hda_info.buffer_entries[i].buffer = hda_info.sound_buffers_dma.phys + mem_offset;
@@ -855,6 +841,89 @@ void hda_play(uint8_t *data, uint32_t size)
 
     hda_info.is_paused = false;
     hda_info.is_playing = true;
+}
+
+void hda_play(uint8_t *data, uint32_t size)
+{
+    if (!hda_info.is_initialized) {
+        DEBUG_ERROR("hd audio device is not initialized");
+        return;
+    }
+
+    // Do not play if sound card is already busy. In future we may add sound mixing.
+    if (hda_info.is_playing) {
+        DEBUG_WARN("already playing! stop current playback before playing next sound");
+        return;
+    }
+
+    hda_reset_stream_registers();
+
+    DEBUG_INFO("playing sound data ptr: %p | data size: %d", data, size);
+
+    hda_info.sound_data = data;
+    hda_info.sound_data_size = size;
+    hda_info.stream_mode = false;
+    hda_info.stream_refill = nullptr;
+    hda_info.stream_valid_bytes = 0;
+    hda_info.stream_exhausted = false;
+    hda_info.current_buffer_entry = 0;
+    hda_info.buffer_entry_offset = 0;
+    hda_info.played_bytes = 0;
+
+    // Copy new buffer data (bounded to avoid reading past source)
+    size_t copy_size = (size < hda_info.sound_buffers_dma.size) ? size : hda_info.sound_buffers_dma.size;
+    memcpy((void *)hda_info.sound_buffers_dma.virt, data, copy_size);
+    // Zero remaining buffer if source was smaller
+    if (copy_size < hda_info.sound_buffers_dma.size) {
+        memset((void *)(hda_info.sound_buffers_dma.virt + copy_size), 0, hda_info.sound_buffers_dma.size - copy_size);
+    }
+
+    hda_begin_playback();
+}
+
+void hda_stream_start(uint32_t (*refill)(uint8_t *dst, uint32_t len))
+{
+    if (!hda_info.is_initialized) {
+        DEBUG_ERROR("hd audio device is not initialized");
+        return;
+    }
+
+    if (hda_info.is_playing) {
+        DEBUG_WARN("already playing! stop current playback before starting a stream");
+        return;
+    }
+
+    if (!refill) {
+        DEBUG_ERROR("hda_stream_start without refill callback");
+        return;
+    }
+
+    hda_reset_stream_registers();
+
+    hda_info.sound_data = nullptr;
+    hda_info.sound_data_size = 0;
+    hda_info.stream_mode = true;
+    hda_info.stream_refill = refill;
+    hda_info.stream_valid_bytes = 0;
+    hda_info.stream_exhausted = false;
+    hda_info.current_buffer_entry = 0;
+    hda_info.buffer_entry_offset = 0;
+    hda_info.played_bytes = 0;
+
+    // Pre-fill the whole DMA ring through the callback so playback starts
+    // with real data instead of a ring of silence.
+    uint8_t *ring = (uint8_t *)hda_info.sound_buffers_dma.virt;
+    for (uint32_t i = 0; i < HDA_BUFFER_ENTRY_COUNT; i++) {
+        uint8_t *dst = ring + (uint64_t)i * HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE;
+        uint32_t got = refill(dst, HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+        if (got < HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE) {
+            memset(dst + got, 0, HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE - got);
+            hda_info.stream_exhausted = true;
+        }
+        hda_info.stream_valid_bytes += got;
+    }
+
+    hda_begin_playback();
 }
 
 void hda_resume()
@@ -949,6 +1018,23 @@ void hda_stop()
     DEBUG_INFO("stopped playback");
 }
 
+// Fill one just-consumed BDL slot. Legacy mode copies from the fixed
+// sound_data buffer; stream mode pulls from the dispatcher's refill callback.
+static void hda_refill_entry(uint8_t *dst, uint32_t src_offset)
+{
+    if (hda_info.stream_mode) {
+        uint32_t got = hda_info.stream_refill ? hda_info.stream_refill(dst, HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE) : 0;
+        if (got < HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE) {
+            memset(dst + got, 0, HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE - got);
+            hda_info.stream_exhausted = true;
+        }
+        hda_info.stream_valid_bytes += got;
+        return;
+    }
+    sound_fill_dma_buffer(dst, hda_info.sound_data, hda_info.sound_data_size, src_offset,
+                          HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+}
+
 void hda_poll()
 {
     // Fast path: check flags first (most common case is not playing)
@@ -956,8 +1042,15 @@ void hda_poll()
         return;
     }
 
-    // Do not play further than source sound data.
-    if (hda_info.played_bytes >= hda_info.sound_data_size) {
+    if (hda_info.stream_mode) {
+        // Stop once every real byte supplied by the refill source has been
+        // consumed (rest of the ring is silence padding).
+        if (hda_info.stream_exhausted && hda_info.played_bytes >= hda_info.stream_valid_bytes) {
+            hda_stop();
+            return;
+        }
+    } else if (hda_info.played_bytes >= hda_info.sound_data_size) {
+        // Do not play further than source sound data.
         hda_stop();
         return;
     }
@@ -975,8 +1068,7 @@ void hda_poll()
                               (HDA_BUFFER_ENTRY_COUNT * hda_info.buffer_entry_offset + (HDA_BUFFER_ENTRY_COUNT - 1));
         uint8_t *dst = (uint8_t *)(hda_info.sound_buffers_dma.virt +
                                    (HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * (HDA_BUFFER_ENTRY_COUNT - 1)));
-        sound_fill_dma_buffer(dst, hda_info.sound_data, hda_info.sound_data_size, src_offset,
-                              HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+        hda_refill_entry(dst, src_offset);
     }
 
     // Refill previous buffer with fresh data.
@@ -986,8 +1078,7 @@ void hda_poll()
             (HDA_BUFFER_ENTRY_COUNT * (hda_info.buffer_entry_offset + 1) + hda_info.current_buffer_entry);
         uint8_t *dst = (uint8_t *)(hda_info.sound_buffers_dma.virt +
                                    (HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE * hda_info.current_buffer_entry));
-        sound_fill_dma_buffer(dst, hda_info.sound_data, hda_info.sound_data_size, src_offset,
-                              HDA_BUFFER_ENTRY_SOUND_BUFFER_SIZE);
+        hda_refill_entry(dst, src_offset);
 
         // Now we can move to next entry.
         hda_info.current_buffer_entry++;

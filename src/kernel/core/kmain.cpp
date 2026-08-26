@@ -526,6 +526,9 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
             net_poll();
             poll_counter = 0;
         }
+        // Audio DMA refills and stream bookkeeping. Cheap no-op when no
+        // playback is active; blocking sound writers rely on this pump.
+        sound_poll();
 
         scheduler_yield();
         asm volatile("hlt");
