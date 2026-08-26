@@ -30,6 +30,14 @@ static constexpr uint8_t KEY_PAGEUP = 0x87;
 static constexpr uint8_t KEY_PAGEDOWN = 0x88;
 static constexpr uint8_t KEY_SHIFT_LEFT = 0x90;
 static constexpr uint8_t KEY_SHIFT_RIGHT = 0x91;
+static constexpr uint8_t KEY_SHIFT_UP = 0x92;
+static constexpr uint8_t KEY_SHIFT_DOWN = 0x93;
+static constexpr uint8_t KEY_SHIFT_HOME = 0x94;
+static constexpr uint8_t KEY_SHIFT_END = 0x95;
+
+static constexpr int MAX_UNDO_ENTRIES = 96;
+static constexpr int MAX_UNDO_LINES_PER_ENTRY = 512;
+static constexpr uint64_t TYPE_COALESCE_TICKS = 800;
 
 enum Language
 {
@@ -113,6 +121,18 @@ struct OutlineRow
     int line;
 };
 
+// Undo/redo entry: the edit replaced lines [start_line, start_line+new_count)
+// with the old_count saved lines; undo swaps them back.
+struct UndoEntry
+{
+    int start_line;
+    int old_count;
+    int new_count;
+    int cursor_line;
+    int cursor_col;
+    TextLine *lines;
+};
+
 struct LatitudeRects
 {
     Rect project_rows[MAX_PROJECT_ROWS];
@@ -125,6 +145,7 @@ struct LatitudeRects
     Rect editor_rect;
     Rect sidebar_rect;
     Rect editor_panel;
+    Rect help_close;
 };
 
 namespace {
@@ -150,6 +171,19 @@ struct AppState
     int first_col;
     int visible_lines;
     int visible_cols;
+
+    int anchor_line;
+    int anchor_col;
+    bool selecting;
+    bool show_help;
+
+    UndoEntry undo_stack[MAX_UNDO_ENTRIES];
+    int undo_count;
+    UndoEntry redo_stack[MAX_UNDO_ENTRIES];
+    int redo_count;
+    uint64_t last_edit_ticks;
+    bool last_edit_was_typing;
+    int last_edit_line;
 
     FocusPane focus;
     HoverTarget hovered;
@@ -820,6 +854,17 @@ static int leading_indent(const TextLine &line)
     return count;
 }
 
+static UndoEntry *record_edit_begin(AppState *state, int start_line, int end_line, bool is_typing);
+static void record_edit_end(AppState *state, UndoEntry *e, int new_count);
+static void collapse_selection(AppState *state);
+static bool selection_active(const AppState *state);
+static void delete_selection(AppState *state);
+static void paste_clipboard(AppState *state);
+static bool selection_to_clipboard(AppState *state, bool cut);
+static void select_all(AppState *state);
+static void perform_undo(AppState *state);
+static void perform_redo(AppState *state);
+
 static void insert_text_char(AppState *state, char c)
 {
     TextLine *line = current_line(state);
@@ -829,29 +874,35 @@ static void insert_text_char(AppState *state, char c)
     if (is_closing_char(c) && state->cursor_col < line->len && line->text[state->cursor_col] == c) {
         state->cursor_col++;
         state->desired_col = state->cursor_col;
+        collapse_selection(state);
         ensure_cursor_visible(state);
         state->needs_redraw = true;
         return;
     }
 
+    UndoEntry *edit = record_edit_begin(state, state->cursor_line, state->cursor_line, true);
     char close = matching_close(c);
     if (close != 0) {
         char pair[2] = {c, close};
         if (line_insert_chars(line, state->cursor_col, pair, 2)) {
             state->cursor_col++;
             state->desired_col = state->cursor_col;
+            collapse_selection(state);
             mark_modified(state);
             ensure_cursor_visible(state);
         }
+        record_edit_end(state, edit, 1);
         return;
     }
 
     if (line_insert_chars(line, state->cursor_col, &c, 1)) {
         state->cursor_col++;
         state->desired_col = state->cursor_col;
+        collapse_selection(state);
         mark_modified(state);
         ensure_cursor_visible(state);
     }
+    record_edit_end(state, edit, 1);
 }
 
 static void insert_spaces(AppState *state, int count)
@@ -871,6 +922,8 @@ static void insert_newline(AppState *state)
     bool closer_after = state->cursor_col < line.len && matching_open(line.text[state->cursor_col]) != 0;
     int new_indent = indent + (opener_before ? DEFAULT_TAB_SPACES : 0);
 
+    UndoEntry *edit = record_edit_begin(state, state->cursor_line, state->cursor_line, false);
+
     char after[MAX_LINE_LEN];
     int after_len = line.len - state->cursor_col;
     if (after_len < 0)
@@ -881,8 +934,10 @@ static void insert_newline(AppState *state)
     line.text[line.len] = '\0';
 
     if (closer_after && opener_before && buffer->line_count + 2 <= MAX_LINES) {
-        if (!insert_line(state, state->cursor_line + 1))
+        if (!insert_line(state, state->cursor_line + 1)) {
+            record_edit_end(state, edit, 1);
             return;
+        }
         TextLine &middle = buffer->lines[state->cursor_line + 1];
         int middle_indent = min_int(new_indent, MAX_LINE_LEN - 1);
         for (int i = 0; i < middle_indent; i++)
@@ -890,8 +945,10 @@ static void insert_newline(AppState *state)
         middle.text[middle_indent] = '\0';
         middle.len = (uint16_t)middle_indent;
 
-        if (!insert_line(state, state->cursor_line + 2))
+        if (!insert_line(state, state->cursor_line + 2)) {
+            record_edit_end(state, edit, 2);
             return;
+        }
         TextLine &closing = buffer->lines[state->cursor_line + 2];
         int close_indent = min_int(indent, MAX_LINE_LEN - 1);
         for (int i = 0; i < close_indent; i++)
@@ -903,9 +960,12 @@ static void insert_newline(AppState *state)
 
         state->cursor_line++;
         state->cursor_col = middle_indent;
+        record_edit_end(state, edit, 3);
     } else {
-        if (!insert_line(state, state->cursor_line + 1))
+        if (!insert_line(state, state->cursor_line + 1)) {
+            record_edit_end(state, edit, 1);
             return;
+        }
         TextLine &next = buffer->lines[state->cursor_line + 1];
         int use_indent = min_int(new_indent, MAX_LINE_LEN - 1);
         for (int i = 0; i < use_indent; i++)
@@ -916,9 +976,11 @@ static void insert_newline(AppState *state)
         next.text[next.len] = '\0';
         state->cursor_line++;
         state->cursor_col = use_indent;
+        record_edit_end(state, edit, 2);
     }
 
     state->desired_col = state->cursor_col;
+    collapse_selection(state);
     mark_modified(state);
     build_outline(state);
     ensure_cursor_visible(state);
@@ -935,6 +997,7 @@ static void backspace(AppState *state)
         char before = line->text[state->cursor_col - 1];
         char after = state->cursor_col < line->len ? line->text[state->cursor_col] : 0;
         char close = matching_close(before);
+        UndoEntry *edit = record_edit_begin(state, state->cursor_line, state->cursor_line, false);
         if (close != 0 && close == after) {
             line_delete_range(line, state->cursor_col - 1, 2);
             state->cursor_col--;
@@ -942,7 +1005,9 @@ static void backspace(AppState *state)
             line_delete_range(line, state->cursor_col - 1, 1);
             state->cursor_col--;
         }
+        record_edit_end(state, edit, 1);
         state->desired_col = state->cursor_col;
+        collapse_selection(state);
         mark_modified(state);
         build_outline(state);
         ensure_cursor_visible(state);
@@ -953,13 +1018,16 @@ static void backspace(AppState *state)
         TextLine &prev = state->buffer->lines[state->cursor_line - 1];
         if ((int)prev.len + (int)line->len > MAX_LINE_LEN - 1)
             return;
+        UndoEntry *edit = record_edit_begin(state, state->cursor_line - 1, state->cursor_line, false);
         int old_len = prev.len;
         memcpy(prev.text + prev.len, line->text, (size_t)line->len + 1);
         prev.len = (uint16_t)(prev.len + line->len);
         delete_line(state, state->cursor_line);
+        record_edit_end(state, edit, 1);
         state->cursor_line--;
         state->cursor_col = old_len;
         state->desired_col = state->cursor_col;
+        collapse_selection(state);
         mark_modified(state);
         build_outline(state);
         ensure_cursor_visible(state);
@@ -974,7 +1042,10 @@ static void delete_forward(AppState *state)
     if (!line)
         return;
     if (state->cursor_col < line->len) {
+        UndoEntry *edit = record_edit_begin(state, state->cursor_line, state->cursor_line, false);
         line_delete_range(line, state->cursor_col, 1);
+        record_edit_end(state, edit, 1);
+        collapse_selection(state);
         mark_modified(state);
         build_outline(state);
         ensure_cursor_visible(state);
@@ -984,9 +1055,12 @@ static void delete_forward(AppState *state)
         TextLine &next = state->buffer->lines[state->cursor_line + 1];
         if ((int)line->len + (int)next.len > MAX_LINE_LEN - 1)
             return;
+        UndoEntry *edit = record_edit_begin(state, state->cursor_line, state->cursor_line + 1, false);
         memcpy(line->text + line->len, next.text, (size_t)next.len + 1);
         line->len = (uint16_t)(line->len + next.len);
         delete_line(state, state->cursor_line + 1);
+        record_edit_end(state, edit, 1);
+        collapse_selection(state);
         mark_modified(state);
         build_outline(state);
         ensure_cursor_visible(state);
@@ -1024,6 +1098,421 @@ static void move_cursor(AppState *state, int line_delta, int col_delta, bool pre
     }
     ensure_cursor_visible(state);
     state->needs_redraw = true;
+}
+
+static void undo_free_entry(UndoEntry *e)
+{
+    if (e && e->lines) {
+        free(e->lines);
+        e->lines = nullptr;
+    }
+    if (e)
+        memset(e, 0, sizeof(*e));
+}
+
+static void undo_clear_stack(UndoEntry *stack, int *count)
+{
+    if (!stack || !count)
+        return;
+    for (int i = 0; i < *count; i++)
+        undo_free_entry(&stack[i]);
+    *count = 0;
+}
+
+static void undo_evict_oldest(UndoEntry *stack, int *count)
+{
+    if (*count <= 0)
+        return;
+    undo_free_entry(&stack[0]);
+    memmove(&stack[0], &stack[1], sizeof(UndoEntry) * (size_t)(*count - 1));
+    (*count)--;
+}
+
+// Capture lines [start_line, end_line] before an edit. Returns the entry to
+// finish (with new_count + cursor after the edit) or NULL when the edit is
+// coalesced into the previous typing burst or cannot be recorded.
+static UndoEntry *record_edit_begin(AppState *state, int start_line, int end_line, bool is_typing)
+{
+    if (!state || !state->buffer)
+        return nullptr;
+    TextBuffer *b = state->buffer;
+    undo_clear_stack(state->redo_stack, &state->redo_count);
+
+    uint64_t now = get_ticks();
+    if (is_typing && state->last_edit_was_typing && state->undo_count > 0 &&
+        now - state->last_edit_ticks < TYPE_COALESCE_TICKS) {
+        UndoEntry *top = &state->undo_stack[state->undo_count - 1];
+        if (top->old_count == 1 && top->start_line == start_line && start_line == end_line &&
+            state->last_edit_line == start_line) {
+            state->last_edit_ticks = now;
+            return nullptr;
+        }
+    }
+
+    start_line = clamp_int(start_line, 0, b->line_count - 1);
+    end_line = clamp_int(end_line, start_line, b->line_count - 1);
+    int count = end_line - start_line + 1;
+    if (count > MAX_UNDO_LINES_PER_ENTRY) {
+        state->last_edit_was_typing = false;
+        return nullptr;
+    }
+    if (state->undo_count >= MAX_UNDO_ENTRIES)
+        undo_evict_oldest(state->undo_stack, &state->undo_count);
+
+    UndoEntry *e = &state->undo_stack[state->undo_count];
+    memset(e, 0, sizeof(*e));
+    e->lines = static_cast<TextLine *>(malloc(sizeof(TextLine) * (size_t)count));
+    if (!e->lines) {
+        state->last_edit_was_typing = false;
+        return nullptr;
+    }
+    memcpy(e->lines, &b->lines[start_line], sizeof(TextLine) * (size_t)count);
+    e->start_line = start_line;
+    e->old_count = count;
+    e->new_count = count;
+    e->cursor_line = state->cursor_line;
+    e->cursor_col = state->cursor_col;
+    state->undo_count++;
+
+    state->last_edit_ticks = now;
+    state->last_edit_was_typing = is_typing;
+    state->last_edit_line = start_line;
+    return e;
+}
+
+static void record_edit_end(AppState *state, UndoEntry *e, int new_count)
+{
+    if (!state)
+        return;
+    if (e) {
+        e->new_count = new_count;
+    } else if (state->undo_count > 0) {
+        // Coalesced typing burst: keep restoring to the burst's original
+        // pre-edit cursor position.
+        state->last_edit_ticks = get_ticks();
+    }
+}
+
+static bool buffer_replace_lines(TextBuffer *b, int start, int remove_count, const TextLine *src, int src_count)
+{
+    if (!b || start < 0 || start > b->line_count || remove_count < 0 || start + remove_count > b->line_count ||
+        src_count < 0)
+        return false;
+    int new_total = b->line_count - remove_count + src_count;
+    if (new_total > MAX_LINES || new_total < 1)
+        return false;
+    if (src_count == 0 && new_total == 0)
+        return false;
+    memmove(&b->lines[start + src_count], &b->lines[start + remove_count],
+            sizeof(TextLine) * (size_t)(b->line_count - start - remove_count));
+    if (src_count > 0)
+        memcpy(&b->lines[start], src, sizeof(TextLine) * (size_t)src_count);
+    b->line_count = new_total;
+    return true;
+}
+
+static void apply_top_entry(AppState *state, UndoEntry *from_stack, int *from_count, UndoEntry *to_stack,
+                            int *to_count)
+{
+    if (!state || !state->buffer || !from_count || *from_count <= 0)
+        return;
+    TextBuffer *b = state->buffer;
+    UndoEntry *e = &from_stack[*from_count - 1];
+    int start = clamp_int(e->start_line, 0, b->line_count - 1);
+    int remove_count = clamp_int(e->new_count, 0, b->line_count - start);
+
+    if (*to_count >= MAX_UNDO_ENTRIES)
+        undo_evict_oldest(to_stack, to_count);
+    UndoEntry *r = &to_stack[*to_count];
+    memset(r, 0, sizeof(*r));
+    bool recorded = false;
+    if (remove_count > 0 && remove_count <= MAX_UNDO_LINES_PER_ENTRY) {
+        r->lines = static_cast<TextLine *>(malloc(sizeof(TextLine) * (size_t)remove_count));
+        if (r->lines) {
+            memcpy(r->lines, &b->lines[start], sizeof(TextLine) * (size_t)remove_count);
+            r->start_line = start;
+            r->old_count = remove_count;
+            r->new_count = e->old_count;
+            r->cursor_line = state->cursor_line;
+            r->cursor_col = state->cursor_col;
+            recorded = true;
+        }
+    }
+
+    if (!buffer_replace_lines(b, start, remove_count, e->lines, e->old_count)) {
+        if (recorded)
+            undo_free_entry(r);
+        return;
+    }
+    if (recorded)
+        (*to_count)++;
+
+    state->cursor_line = clamp_int(e->cursor_line, 0, b->line_count - 1);
+    state->cursor_col = clamp_int(e->cursor_col, 0, b->lines[state->cursor_line].len);
+    state->anchor_line = state->cursor_line;
+    state->anchor_col = state->cursor_col;
+    state->desired_col = state->cursor_col;
+    undo_free_entry(e);
+    (*from_count)--;
+
+    state->last_edit_was_typing = false;
+    state->buffer->modified = true;
+    build_outline(state);
+    ensure_cursor_visible(state);
+    state->needs_redraw = true;
+}
+
+static void perform_undo(AppState *state)
+{
+    apply_top_entry(state, state->undo_stack, &state->undo_count, state->redo_stack, &state->redo_count);
+}
+
+static void perform_redo(AppState *state)
+{
+    apply_top_entry(state, state->redo_stack, &state->redo_count, state->undo_stack, &state->undo_count);
+}
+
+static bool selection_active(const AppState *state)
+{
+    return state && (state->anchor_line != state->cursor_line || state->anchor_col != state->cursor_col);
+}
+
+static void collapse_selection(AppState *state)
+{
+    if (!state)
+        return;
+    state->anchor_line = state->cursor_line;
+    state->anchor_col = state->cursor_col;
+}
+
+static void selection_ordered(const AppState *state, int *sl, int *sc, int *el, int *ec)
+{
+    bool anchor_first = state->anchor_line < state->cursor_line ||
+                        (state->anchor_line == state->cursor_line && state->anchor_col <= state->cursor_col);
+    if (anchor_first) {
+        *sl = state->anchor_line;
+        *sc = state->anchor_col;
+        *el = state->cursor_line;
+        *ec = state->cursor_col;
+    } else {
+        *sl = state->cursor_line;
+        *sc = state->cursor_col;
+        *el = state->anchor_line;
+        *ec = state->anchor_col;
+    }
+}
+
+static void select_all(AppState *state)
+{
+    if (!state || !state->buffer || state->buffer->line_count < 1)
+        return;
+    state->anchor_line = 0;
+    state->anchor_col = 0;
+    state->cursor_line = state->buffer->line_count - 1;
+    state->cursor_col = state->buffer->lines[state->cursor_line].len;
+    state->desired_col = state->cursor_col;
+    ensure_cursor_visible(state);
+    state->needs_redraw = true;
+}
+
+static void delete_selection(AppState *state)
+{
+    if (!state || !state->buffer || !selection_active(state))
+        return;
+    TextBuffer *b = state->buffer;
+    int sl, sc, el, ec;
+    selection_ordered(state, &sl, &sc, &el, &ec);
+    UndoEntry *e = record_edit_begin(state, sl, el, false);
+
+    if (sl == el) {
+        line_delete_range(&b->lines[sl], sc, ec - sc);
+    } else {
+        TextLine &first = b->lines[sl];
+        TextLine &last = b->lines[el];
+        int merged_len = sc + (last.len - ec);
+        if (merged_len > MAX_LINE_LEN - 1)
+            merged_len = MAX_LINE_LEN - 1;
+        char merged[MAX_LINE_LEN];
+        int keep_head = min_int(sc, merged_len);
+        memcpy(merged, first.text, (size_t)keep_head);
+        int keep_tail = merged_len - keep_head;
+        if (keep_tail > 0)
+            memcpy(merged + keep_head, last.text + ec, (size_t)keep_tail);
+        merged[merged_len] = '\0';
+        memcpy(first.text, merged, (size_t)merged_len + 1);
+        first.len = (uint16_t)merged_len;
+        while (el > sl && b->line_count > 1) {
+            if (!delete_line(state, sl + 1))
+                break;
+            el--;
+        }
+    }
+    record_edit_end(state, e, 1);
+    state->cursor_line = sl;
+    state->cursor_col = sc;
+    state->desired_col = sc;
+    collapse_selection(state);
+    clamp_cursor(state);
+    mark_modified(state);
+    build_outline(state);
+    ensure_cursor_visible(state);
+    state->needs_redraw = true;
+}
+
+static bool selection_to_clipboard(AppState *state, bool cut)
+{
+    if (!state || !state->buffer || !selection_active(state))
+        return false;
+    TextBuffer *b = state->buffer;
+    int sl, sc, el, ec;
+    selection_ordered(state, &sl, &sc, &el, &ec);
+
+    size_t total = 0;
+    if (sl == el) {
+        total = (size_t)(ec - sc);
+    } else {
+        total = (size_t)(b->lines[sl].len - sc) + (size_t)ec;
+        for (int i = sl + 1; i < el; i++)
+            total += (size_t)b->lines[i].len + 1;
+        total += 1;
+    }
+    if (total > MENU_CLIPBOARD_CAP) {
+        set_status(state, "Selection too large for the clipboard");
+        return false;
+    }
+
+    char out[MENU_CLIPBOARD_CAP + 1];
+    size_t pos = 0;
+    if (sl == el) {
+        memcpy(out, b->lines[sl].text + sc, (size_t)(ec - sc));
+        pos = (size_t)(ec - sc);
+    } else {
+        int head = b->lines[sl].len - sc;
+        memcpy(out, b->lines[sl].text + sc, (size_t)head);
+        pos = (size_t)head;
+        for (int i = sl + 1; i < el; i++) {
+            out[pos++] = '\n';
+            memcpy(out + pos, b->lines[i].text, b->lines[i].len);
+            pos += b->lines[i].len;
+        }
+        out[pos++] = '\n';
+        memcpy(out + pos, b->lines[el].text, (size_t)ec);
+        pos += (size_t)ec;
+    }
+    out[pos] = '\0';
+    if (!gui_clipboard_copy(out, pos)) {
+        set_status(state, "Clipboard unavailable");
+        return false;
+    }
+    if (cut) {
+        delete_selection(state);
+        set_status(state, "Cut selection");
+    } else {
+        set_status(state, "Copied selection");
+    }
+    return true;
+}
+
+static void paste_clipboard(AppState *state)
+{
+    if (!state || !state->buffer)
+        return;
+    TextBuffer *b = state->buffer;
+    char text[MENU_CLIPBOARD_CAP + 1];
+    size_t len = 0;
+    if (!gui_clipboard_paste(text, sizeof(text), &len) || len == 0) {
+        set_status(state, "Clipboard is empty");
+        state->needs_redraw = true;
+        return;
+    }
+
+    // Segment table: pointers/lengths of the '\n'-split chunks.
+    const char *seg_start[MENU_CLIPBOARD_CAP + 2];
+    int seg_len[MENU_CLIPBOARD_CAP + 2];
+    int nseg = 0;
+    size_t i = 0;
+    size_t max_segment = 0;
+    while (i <= len && nseg < (int)(sizeof(seg_start) / sizeof(seg_start[0]))) {
+        size_t start = i;
+        while (i < len && text[i] != '\n')
+            i++;
+        seg_start[nseg] = text + start;
+        seg_len[nseg] = (int)(i - start);
+        if ((size_t)seg_len[nseg] > max_segment)
+            max_segment = (size_t)seg_len[nseg];
+        nseg++;
+        if (i >= len)
+            break;
+        i++; // skip '\n'
+    }
+    if (nseg <= 0)
+        return;
+
+    if (selection_active(state))
+        delete_selection(state);
+
+    int line = state->cursor_line;
+    int col = state->cursor_col;
+    TextLine &cur = b->lines[line];
+    int tail_len = cur.len - col;
+    if ((int)max_segment + max_int(col, tail_len) > MAX_LINE_LEN - 1 ||
+        b->line_count + (nseg - 1) > MAX_LINES) {
+        set_status(state, "Clipboard too large to paste");
+        state->needs_redraw = true;
+        return;
+    }
+
+    UndoEntry *e = record_edit_begin(state, line, line, false);
+
+    char tail[MAX_LINE_LEN];
+    memcpy(tail, cur.text + col, (size_t)tail_len);
+    cur.len = (uint16_t)col;
+    cur.text[col] = '\0';
+
+    if (nseg == 1) {
+        line_insert_chars(&cur, col, seg_start[0], seg_len[0]);
+        line_insert_chars(&cur, col + seg_len[0], tail, tail_len);
+        state->cursor_col = col + seg_len[0];
+    } else {
+        line_insert_chars(&cur, col, seg_start[0], seg_len[0]);
+        for (int s = 1; s < nseg; s++) {
+            if (!insert_line(state, line + s))
+                break;
+            TextLine &added = b->lines[line + s];
+            memcpy(added.text, seg_start[s], (size_t)seg_len[s]);
+            int at = seg_len[s];
+            if (s == nseg - 1 && tail_len > 0) {
+                memcpy(added.text + at, tail, (size_t)tail_len);
+                at += tail_len;
+            }
+            added.text[at] = '\0';
+            added.len = (uint16_t)at;
+        }
+        state->cursor_line = line + nseg - 1;
+        state->cursor_col = seg_len[nseg - 1];
+    }
+
+    record_edit_end(state, e, nseg);
+    state->desired_col = state->cursor_col;
+    collapse_selection(state);
+    clamp_cursor(state);
+    mark_modified(state);
+    build_outline(state);
+    ensure_cursor_visible(state);
+    set_status(state, "Pasted clipboard");
+    state->needs_redraw = true;
+}
+
+static void reset_edit_history(AppState *state)
+{
+    if (!state)
+        return;
+    undo_clear_stack(state->undo_stack, &state->undo_count);
+    undo_clear_stack(state->redo_stack, &state->redo_count);
+    state->last_edit_was_typing = false;
+    state->anchor_line = state->cursor_line;
+    state->anchor_col = state->cursor_col;
+    state->selecting = false;
 }
 
 static bool write_all(int fd, const char *data, size_t len)
@@ -1130,6 +1619,7 @@ static void new_file(AppState *state)
     state->desired_col = 0;
     state->first_line = 0;
     state->first_col = 0;
+    reset_edit_history(state);
     build_outline(state);
     set_status(state, "New file");
     state->needs_redraw = true;
@@ -1269,6 +1759,7 @@ static bool load_file(AppState *state, const char *path)
     state->desired_col = 0;
     state->first_line = 0;
     state->first_col = 0;
+    reset_edit_history(state);
     build_outline(state);
 
     char status[160];
@@ -2279,6 +2770,23 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                                   line_index == state->cursor_line ? g_gui_style.text : syntax_muted(),
                                   g_gui_style.app_surface_alt);
             draw_code_line(win, state, line_index, text_x, row_y, state->visible_cols, row_bg);
+            if (selection_active(state)) {
+                int sl, sc, el, ec;
+                selection_ordered(state, &sl, &sc, &el, &ec);
+                if (line_index >= sl && line_index <= el) {
+                    int start_col = (line_index == sl) ? sc : state->first_col;
+                    int end_col = (line_index == el) ? ec : state->buffer->lines[line_index].len;
+                    if (start_col < state->first_col)
+                        start_col = state->first_col;
+                    if (end_col > state->first_col + state->visible_cols)
+                        end_col = state->first_col + state->visible_cols;
+                    if (end_col > start_col) {
+                        uint32_t sel_color = 0x55000000u | (g_gui_style.accent & 0x00FFFFFFu);
+                        gui_fill_rect_blend(win, text_x + (start_col - state->first_col) * cell_w, row_y,
+                                            (end_col - start_col) * cell_w, cell_h, sel_color);
+                    }
+                }
+            }
         }
     }
 
@@ -2322,6 +2830,44 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     gui_draw_text_clipped(win, gui_font_default(), right_status_x,
                           gui_align_text_y(gui_font_default(), status_y, status_h), rw, right_status,
                           g_gui_style.text_dim, g_gui_style.chrome_bg);
+
+    if (state->show_help) {
+        rects->help_close = gui_rect_make(0, 0, 0, 0);
+        int box_w = gui_scaled_metric(430);
+        int box_h = gui_scaled_metric(248);
+        if (box_w > (int)win->width - gui_space_4())
+            box_w = (int)win->width - gui_space_4();
+        if (box_h > (int)win->height - gui_space_4())
+            box_h = (int)win->height - gui_space_4();
+        int box_x = ((int)win->width - box_w) / 2;
+        int box_y = ((int)win->height - box_h) / 2;
+        gui_fill_rect_blend(win, 0, 0, (int)win->width, (int)win->height, 0x80000000u);
+        gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
+                             g_gui_style.chrome_bg_alt);
+        gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Latitude Help", nullptr);
+        static const char *tips[] = {
+            "Ctrl+S save, Ctrl+N new, Ctrl+O open selected file",
+            "Ctrl+Z / Ctrl+Y undo and redo",
+            "Ctrl+X / Ctrl+C / Ctrl+V cut, copy, paste",
+            "Ctrl+A selects the whole buffer",
+            "Shift+arrows or mouse drag selects text",
+            "Ctrl+F find, Ctrl+L edit the file path",
+        };
+        int text_x = box_x + gui_space_2();
+        int text_y = box_y + gui_card_header_h() + gui_space_2();
+        int line_h = gui_line_height();
+        for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
+            gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i],
+                                  g_gui_style.text, g_gui_style.app_surface);
+            text_y += line_h + gui_space_1();
+        }
+        int btn_w = gui_scaled_metric(88);
+        rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
+                                          box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w,
+                                          gui_app_control_h());
+        gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w,
+                               rects->help_close.h, "Close", true, false, false, false);
+    }
 }
 
 static HoverTarget update_hover(AppState *state, LatitudeRects *rects, int x, int y)
@@ -2369,9 +2915,9 @@ static void jump_to_outline(AppState *state, int index)
     state->needs_redraw = true;
 }
 
-static void click_editor(AppState *state, LatitudeRects *rects, int x, int y)
+static void editor_pos_from_point(AppState *state, LatitudeRects *rects, int x, int y, int *out_line, int *out_col)
 {
-    if (!state || !rects || !point_in_rect(rects->editor_rect, x, y))
+    if (!state || !rects || !out_line || !out_col)
         return;
     const GuiFont *mono = gui_font_mono();
     int cell_w = gui_font_mono_cell_width(mono);
@@ -2383,19 +2929,57 @@ static void click_editor(AppState *state, LatitudeRects *rects, int x, int y)
     int gutter_w = gui_scaled_metric(56);
     int text_x = rects->editor_rect.x + gutter_w + gui_space_1();
     int line = state->first_line + (y - rects->editor_rect.y) / cell_h;
-    int col = state->first_col + max_int(0, (x - text_x) / cell_w);
-    if (line >= state->buffer->line_count)
-        line = state->buffer->line_count - 1;
-    if (line < 0)
-        line = 0;
+    int col = state->first_col + (x - text_x) / cell_w;
+    if (col < 0)
+        col = 0;
+    line = clamp_int(line, 0, state->buffer->line_count - 1);
     col = clamp_int(col, 0, state->buffer->lines[line].len);
+    *out_line = line;
+    *out_col = col;
+}
+
+static void click_editor(AppState *state, LatitudeRects *rects, int x, int y)
+{
+    if (!state || !rects || !point_in_rect(rects->editor_rect, x, y))
+        return;
+    int line, col;
+    editor_pos_from_point(state, rects, x, y, &line, &col);
     state->cursor_line = line;
     state->cursor_col = col;
     state->desired_col = col;
+    state->anchor_line = line;
+    state->anchor_col = col;
+    state->selecting = true;
     state->focus = FOCUS_EDITOR;
     clear_field_focus(state);
     ensure_cursor_visible(state);
     state->needs_redraw = true;
+}
+
+static void drag_editor(AppState *state, LatitudeRects *rects, int x, int y)
+{
+    if (!state || !rects || !state->selecting)
+        return;
+    // Autoscroll while dragging past the visible text region.
+    const GuiFont *mono = gui_font_mono();
+    int cell_h = gui_font_line_height(mono);
+    if (cell_h <= 0)
+        cell_h = 16;
+    if (y < rects->editor_rect.y && state->first_line > 0)
+        state->first_line--;
+    else if (y >= rects->editor_rect.y + rects->editor_rect.h &&
+             state->first_line < max_int(0, state->buffer->line_count - state->visible_lines))
+        state->first_line++;
+    int cx = clamp_int(x, rects->editor_rect.x, rects->editor_rect.x + rects->editor_rect.w - 1);
+    int cy = clamp_int(y, rects->editor_rect.y, rects->editor_rect.y + rects->editor_rect.h - 1);
+    int line, col;
+    editor_pos_from_point(state, rects, cx, cy, &line, &col);
+    if (line != state->cursor_line || col != state->cursor_col) {
+        state->cursor_line = line;
+        state->cursor_col = col;
+        state->desired_col = col;
+        state->needs_redraw = true;
+    }
 }
 
 static void commit_path_input_for_open(AppState *state)
@@ -2487,6 +3071,14 @@ static void handle_key(AppState *state, uint8_t c)
     if (!state || !state->buffer || c == 0)
         return;
 
+    if (state->show_help) {
+        if (c == 27 || c == '\n' || c == '\r') {
+            state->show_help = false;
+            state->needs_redraw = true;
+        }
+        return;
+    }
+
     if (state->path_focused) {
         handle_path_key(state, c);
         return;
@@ -2548,6 +3140,33 @@ static void handle_key(AppState *state, uint8_t c)
         return;
     }
 
+    if (state->focus == FOCUS_EDITOR) {
+        if (c == 26) { // Ctrl+Z
+            perform_undo(state);
+            return;
+        }
+        if (c == 25) { // Ctrl+Y
+            perform_redo(state);
+            return;
+        }
+        if (c == 1) { // Ctrl+A
+            select_all(state);
+            return;
+        }
+        if (c == 24) { // Ctrl+X
+            selection_to_clipboard(state, true);
+            return;
+        }
+        if (c == 3) { // Ctrl+C
+            selection_to_clipboard(state, false);
+            return;
+        }
+        if (c == 22) { // Ctrl+V
+            paste_clipboard(state);
+            return;
+        }
+    }
+
     if (state->focus == FOCUS_PROJECT) {
         if (c == KEY_UP_ARROW) {
             move_project_selection(state, -1);
@@ -2569,21 +3188,50 @@ static void handle_key(AppState *state, uint8_t c)
         }
     }
 
-    if (c == KEY_UP_ARROW) {
+    bool extend = (c == KEY_SHIFT_UP || c == KEY_SHIFT_DOWN || c == KEY_SHIFT_LEFT || c == KEY_SHIFT_RIGHT ||
+                   c == KEY_SHIFT_HOME || c == KEY_SHIFT_END);
+    if (extend && !selection_active(state)) {
+        state->anchor_line = state->cursor_line;
+        state->anchor_col = state->cursor_col;
+    }
+
+    if (c == KEY_UP_ARROW || c == KEY_SHIFT_UP) {
         move_cursor(state, -1, 0, true);
-    } else if (c == KEY_DOWN_ARROW) {
+    } else if (c == KEY_DOWN_ARROW || c == KEY_SHIFT_DOWN) {
         move_cursor(state, 1, 0, true);
     } else if (c == KEY_LEFT_ARROW || c == KEY_SHIFT_LEFT) {
+        if (selection_active(state) && !extend) {
+            int sl, sc, el, ec;
+            selection_ordered(state, &sl, &sc, &el, &ec);
+            state->cursor_line = sl;
+            state->cursor_col = sc;
+            state->desired_col = sc;
+            collapse_selection(state);
+            ensure_cursor_visible(state);
+            state->needs_redraw = true;
+            return;
+        }
         move_cursor(state, 0, -1, false);
     } else if (c == KEY_RIGHT_ARROW || c == KEY_SHIFT_RIGHT) {
+        if (selection_active(state) && !extend) {
+            int sl, sc, el, ec;
+            selection_ordered(state, &sl, &sc, &el, &ec);
+            state->cursor_line = el;
+            state->cursor_col = ec;
+            state->desired_col = ec;
+            collapse_selection(state);
+            ensure_cursor_visible(state);
+            state->needs_redraw = true;
+            return;
+        }
         move_cursor(state, 0, 1, false);
-    } else if (c == KEY_HOME) {
+    } else if (c == KEY_HOME || c == KEY_SHIFT_HOME) {
         TextLine *line = current_line(state);
         state->cursor_col = line ? leading_indent(*line) : 0;
         state->desired_col = state->cursor_col;
         ensure_cursor_visible(state);
         state->needs_redraw = true;
-    } else if (c == KEY_END) {
+    } else if (c == KEY_END || c == KEY_SHIFT_END) {
         TextLine *line = current_line(state);
         state->cursor_col = line ? line->len : 0;
         state->desired_col = state->cursor_col;
@@ -2594,15 +3242,170 @@ static void handle_key(AppState *state, uint8_t c)
     } else if (c == KEY_PAGEDOWN) {
         move_cursor(state, max_int(1, state->visible_lines - 1), 0, true);
     } else if (c == KEY_DELETE) {
+        if (selection_active(state)) {
+            delete_selection(state);
+            return;
+        }
         delete_forward(state);
     } else if (c == '\b' || c == 127) {
+        if (selection_active(state)) {
+            delete_selection(state);
+            return;
+        }
         backspace(state);
     } else if (c == '\n' || c == '\r') {
+        if (selection_active(state))
+            delete_selection(state);
         insert_newline(state);
     } else if (c == '\t') {
+        if (selection_active(state))
+            delete_selection(state);
         insert_spaces(state, DEFAULT_TAB_SPACES);
     } else if (c >= 32 && c <= 126) {
+        if (selection_active(state))
+            delete_selection(state);
         insert_text_char(state, (char)c);
+    }
+
+    if (!extend)
+        collapse_selection(state);
+}
+
+// Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+enum LatitudeMenuId
+{
+    LAT_MENU_NEW = 1,
+    LAT_MENU_OPEN,
+    LAT_MENU_SAVE,
+    LAT_MENU_RELOAD,
+    LAT_MENU_UNDO,
+    LAT_MENU_REDO,
+    LAT_MENU_CUT,
+    LAT_MENU_COPY,
+    LAT_MENU_PASTE,
+    LAT_MENU_DELETE,
+    LAT_MENU_SELECT_ALL,
+    LAT_MENU_HELP = 0x80,
+};
+
+static void latitude_publish_menus(AppState *state)
+{
+    MenuModel model;
+    gui_menu_model_reset(&model);
+    bool has_sel = selection_active(state);
+    bool has_text = state->buffer->line_count > 1 || state->buffer->lines[0].len > 0;
+
+    int file = gui_menu_model_add_menu(&model, "File");
+    gui_menu_model_add_item(&model, file, "New", LAT_MENU_NEW, 0, "Ctrl+N");
+    gui_menu_model_add_item(&model, file, "Open...", LAT_MENU_OPEN,
+                            state->project_selected >= 0 ? 0 : MENU_FLAG_DISABLED, "Ctrl+O");
+    gui_menu_model_add_item(&model, file, "Save", LAT_MENU_SAVE, 0, "Ctrl+S");
+    gui_menu_model_add_item(&model, file, "Reload", LAT_MENU_RELOAD,
+                            state->buffer->path[0] ? 0 : MENU_FLAG_DISABLED, nullptr);
+
+    int edit = gui_menu_model_add_menu(&model, "Edit");
+    gui_menu_model_add_item(&model, edit, "Undo", LAT_MENU_UNDO, state->undo_count > 0 ? 0 : MENU_FLAG_DISABLED,
+                            "Ctrl+Z");
+    gui_menu_model_add_item(&model, edit, "Redo", LAT_MENU_REDO, state->redo_count > 0 ? 0 : MENU_FLAG_DISABLED,
+                            "Ctrl+Y");
+    gui_menu_model_add_separator(&model, edit);
+    gui_menu_model_add_item(&model, edit, "Cut", LAT_MENU_CUT, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+X");
+    gui_menu_model_add_item(&model, edit, "Copy", LAT_MENU_COPY, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+C");
+    gui_menu_model_add_item(&model, edit, "Paste", LAT_MENU_PASTE, 0, "Ctrl+V");
+    gui_menu_model_add_item(&model, edit, "Delete", LAT_MENU_DELETE, has_sel ? 0 : MENU_FLAG_DISABLED, nullptr);
+    gui_menu_model_add_separator(&model, edit);
+    gui_menu_model_add_item(&model, edit, "Select All", LAT_MENU_SELECT_ALL, has_text ? 0 : MENU_FLAG_DISABLED,
+                            "Ctrl+A");
+
+    int help = gui_menu_model_add_menu(&model, "Help");
+    gui_menu_model_add_item(&model, help, "Latitude Help", LAT_MENU_HELP, 0, nullptr);
+    gui_menu_model_add_separator(&model, help);
+    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+
+    gui_menu_publish(&model);
+}
+
+static void latitude_request_new(AppState *state)
+{
+    if (state->buffer->modified) {
+        if (state->pending_confirm == 1 && get_ticks() - state->pending_confirm_ticks < 3000) {
+            state->pending_confirm = 0;
+            new_file(state);
+        } else {
+            state->pending_confirm = 1;
+            state->pending_confirm_ticks = get_ticks();
+            set_status(state, "Unsaved changes - trigger New again to discard");
+            state->needs_redraw = true;
+        }
+    } else {
+        state->pending_confirm = 0;
+        new_file(state);
+    }
+}
+
+static void latitude_request_reload(AppState *state)
+{
+    if (state->buffer->modified && state->buffer->path[0]) {
+        if (state->pending_confirm == 2 && get_ticks() - state->pending_confirm_ticks < 3000) {
+            state->pending_confirm = 0;
+            load_file(state, state->buffer->path);
+        } else {
+            state->pending_confirm = 2;
+            state->pending_confirm_ticks = get_ticks();
+            set_status(state, "Unsaved changes - trigger Reload again to discard");
+            state->needs_redraw = true;
+        }
+    } else {
+        state->pending_confirm = 0;
+        if (state->buffer->path[0])
+            load_file(state, state->buffer->path);
+    }
+}
+
+static void latitude_handle_menu_command(AppState *state, uint32_t cmd)
+{
+    if (!state)
+        return;
+    switch (cmd) {
+    case LAT_MENU_NEW:
+        latitude_request_new(state);
+        break;
+    case LAT_MENU_OPEN:
+        if (state->project_selected >= 0)
+            open_project_row(state, state->project_selected);
+        break;
+    case LAT_MENU_SAVE:
+        save_file(state);
+        break;
+    case LAT_MENU_RELOAD:
+        latitude_request_reload(state);
+        break;
+    case LAT_MENU_UNDO:
+        perform_undo(state);
+        break;
+    case LAT_MENU_REDO:
+        perform_redo(state);
+        break;
+    case LAT_MENU_CUT:
+        selection_to_clipboard(state, true);
+        break;
+    case LAT_MENU_COPY:
+        selection_to_clipboard(state, false);
+        break;
+    case LAT_MENU_PASTE:
+        paste_clipboard(state);
+        break;
+    case LAT_MENU_DELETE:
+        delete_selection(state);
+        break;
+    case LAT_MENU_SELECT_ALL:
+        select_all(state);
+        break;
+    case LAT_MENU_HELP:
+        state->show_help = true;
+        break;
+    default:
+        break;
     }
 }
 
@@ -2644,6 +3447,7 @@ extern "C" int main()
 
     Registry *registry = gui_registry();
     state->last_settings_generation = registry ? registry->settings_generation : 0;
+    uint32_t self_pid = (uint32_t)syscall1(SYS_GETPID, 0);
 
     while (true) {
         Event ev = {};
@@ -2670,6 +3474,10 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_MOUSE_MOVE) {
+                if (state->selecting) {
+                    drag_editor(state, rects, ev.mouse.x, ev.mouse.y);
+                    continue;
+                }
                 HoverTarget previous = state->hovered;
                 int previous_project_hovered = state->project_hovered;
                 int previous_outline_hovered = state->outline_hovered;
@@ -2678,6 +3486,13 @@ extern "C" int main()
                                      state->outline_hovered != previous_outline_hovered;
                 if (hover_changed) {
                     state->hovered = hovered;
+                    state->needs_redraw = true;
+                }
+                continue;
+            }
+            if (ev.type == EVT_MOUSE_UP && ev.mouse.button == 1) {
+                if (state->selecting) {
+                    state->selecting = false;
                     state->needs_redraw = true;
                 }
                 continue;
@@ -2715,6 +3530,11 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_MOUSE_DOWN && ev.mouse.button == 1) {
+                if (state->show_help) {
+                    state->show_help = false;
+                    state->needs_redraw = true;
+                    continue;
+                }
                 HoverTarget target = update_hover(state, rects, ev.mouse.x, ev.mouse.y);
                 state->hovered = target;
                 if (target == HOVER_NEW_FILE) {
@@ -2822,6 +3642,12 @@ extern "C" int main()
             state->needs_redraw = true;
         }
 
+        uint32_t menu_cmd = 0;
+        if (gui_menu_take_command(&menu_cmd)) {
+            latitude_handle_menu_command(state, menu_cmd);
+            state->needs_redraw = true;
+        }
+
         if (state->needs_redraw) {
             if (ensure_render_surface(&frame, win.width, win.height)) {
                 draw_latitude(&frame, state, rects);
@@ -2840,6 +3666,9 @@ extern "C" int main()
             else
                 snprintf(title, sizeof(title), "%suntitled - Latitude", state->buffer->modified ? "* " : "");
             gui_set_window_title(title);
+
+            if (registry && registry->focused_owner_pid == self_pid)
+                latitude_publish_menus(state);
         } else {
             sleep_ms(10);
         }
