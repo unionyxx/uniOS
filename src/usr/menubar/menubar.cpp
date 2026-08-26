@@ -176,7 +176,6 @@ static constexpr int LOGO_H = 22;
 static constexpr int MENU_X = 8;
 static constexpr int MENU_GAP = 7;
 static constexpr int MENU_MIN_W = 220;
-static constexpr int MENUBAR_CONTENT_X = 72;
 static constexpr int MENUBAR_TITLE_MAX_W = 220;
 
 static inline int menubar_h()
@@ -215,13 +214,20 @@ static inline int menu_total_h()
 {
     return gui_system_menubar_canvas_h();
 }
-static inline int menubar_content_x()
-{
-    return gui_scaled_metric(MENUBAR_CONTENT_X);
-}
 static inline int menubar_title_max_w()
 {
     return gui_scaled_metric(MENUBAR_TITLE_MAX_W);
+}
+// Uniform breathing room between strip groups (logo -> title -> app menus).
+static inline int menubar_strip_gap()
+{
+    return gui_scaled_metric(12);
+}
+// Right edge of the uniOS logo button; matches g_logo_btn_x + g_logo_btn_w
+// (logo text + horizontal padding) without depending on draw-time state.
+static inline int logo_button_end_x()
+{
+    return logo_x() + gui_measure_text(gui_font_title(), "uniOS") + gui_scaled_metric(10) * 2;
 }
 
 static inline int menubar_scaled_offset(int px)
@@ -296,7 +302,7 @@ static void draw_menubar_text_clipped(Surface *canvas, const GuiFont *font, int3
 
 static Rect menubar_focus_dirty_rect(uint32_t screen_w)
 {
-    int left = menubar_content_x() - menubar_text_shadow_outset_x();
+    int left = logo_button_end_x() - menubar_text_shadow_outset_x();
     int right = (int)screen_w - gui_scaled_metric(220) - gui_scaled_metric(24) + menubar_text_shadow_outset_x();
     if (right < left)
         right = left;
@@ -659,12 +665,12 @@ static ComposedAppMenus &compose_app_menus(Registry *reg)
     dropdown_finish(d);
     g_composed.count++;
 
-    int x = menubar_content_x();
+    int x = logo_button_end_x() + menubar_strip_gap();
     if (focus.valid) {
         int title_w = gui_measure_text(gui_font_title(), focus.title);
         if (title_w > menubar_title_max_w())
             title_w = menubar_title_max_w();
-        x += title_w + gui_scaled_metric(24);
+        x += title_w + menubar_strip_gap();
     }
     const GuiFont *menu_font = gui_font_default();
     int pad = gui_scaled_metric(10);
@@ -814,7 +820,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
     int center_x = g_logo_btn_x + (g_logo_btn_w - text_w) / 2;
     draw_menubar_text_clipped(canvas, app_font, center_x, app_text_y, g_logo_btn_w, "uniOS", text_color, is_light);
 
-    int x = menubar_content_x();
+    int x = logo_button_end_x() + menubar_strip_gap();
     FocusedWindowInfo focus = {};
     if (snapshot_focused_window(reg, &focus)) {
         int title_w = gui_measure_text(app_font, focus.title);
@@ -822,7 +828,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
             title_w = menubar_title_max_w();
         draw_menubar_text_clipped(canvas, app_font, x, app_text_y, menubar_title_max_w(), focus.title, g_gui_style.text,
                                   is_light);
-        x += title_w + gui_scaled_metric(24);
+        x += title_w + menubar_strip_gap();
     }
 
     if (reg && g_model_valid) {
