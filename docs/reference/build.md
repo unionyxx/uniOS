@@ -92,6 +92,10 @@ meson compile -C build/debug format     # clang-format in place
 
 CI runs lint and a format check (`git diff --exit-code` after `format`) as continue-on-error steps; keep the tree format-clean locally.
 
+These targets are whole-tree: `format` rewrites every `src/` and `include/` source in place, and `lint`/`analyze` scan all sources. When working on a change, scope the checks to the files you modified — `clang-format -i <file>` and `clang-tidy -p build/debug <file>.cpp` — and do not commit reformatting or fixes for files you did not touch.
+
+clang-tidy reads the curated `.clang-tidy` at the repository root (bugprone, clang-analyzer, and performance checks tuned for freestanding code, with the noisy or OS-hostile checks disabled). The file is required: without a config clang-tidy errors out with `no checks enabled`.
+
 ## Adding Sources and Apps
 
 Kernel and userspace source lists are computed by `tools/meson_list_sources.py` **at meson setup time**:

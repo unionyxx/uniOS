@@ -1,0 +1,17 @@
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  misc-definitions-in-headers,
+  misc-header-include-cycle,
+  readability-container-size-empty,
+  readability-misleading-indentation,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-reserved-identifier,
+  -performance-enum-size,
+  -performance-no-int-to-ptr
+WarningsAsErrors: ''
+HeaderFilterRegex: ''
+FormatStyle: file
