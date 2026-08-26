@@ -409,13 +409,23 @@ static void blit_cache_to_window(ClockCache *cache, Surface *win)
     }
 }
 
+static inline int clock_face_pad()
+{
+    return gui_app_outer_padding();
+}
+
+static inline int clock_face_text_gap()
+{
+    return gui_space_1();
+}
+
 static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysTime *time)
 {
     if (!win || !time)
         return;
 
     int w = (int)win->width;
-    int pad = gui_scaled_metric(16);
+    int pad = clock_face_pad();
 
     const GuiFont *font = gui_font_title();
     char digital[32];
@@ -424,7 +434,7 @@ static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysT
 
     int dig_w = gui_measure_text(font, digital);
     int dig_x = cx - dig_w / 2;
-    int dig_y = cy + face_r + gui_scaled_metric(10);
+    int dig_y = cy + face_r + clock_face_text_gap();
     gui_draw_text_clipped(win, font, dig_x, dig_y, w - pad * 2, digital, g_gui_style.text, g_gui_style.app_bg);
 
     const GuiFont *sfont = gui_font_default();
@@ -457,38 +467,17 @@ static void clock_publish_menus()
 
 static void clock_draw_help(Surface *surf, Rect *help_close)
 {
-    int win_w = (int)surf->width;
-    int win_h = (int)surf->height;
-    int box_w = gui_scaled_metric(360);
-    int box_h = gui_scaled_metric(196);
-    if (box_w > win_w - gui_space_4())
-        box_w = win_w - gui_space_4();
-    if (box_h > win_h - gui_space_4())
-        box_h = win_h - gui_space_4();
-    int box_x = (win_w - box_w) / 2;
-    int box_y = (win_h - box_h) / 2;
-    gui_fill_rect_blend(surf, 0, 0, win_w, win_h, 0x80000000u);
-    gui_draw_panel_inset(surf, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
-                         g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(surf, box_x + 1, box_y + 1, box_w - 2, "Clock Help", nullptr);
     static const char *tips[] = {
         "The hands sweep continuously, synced to the RTC",
         "The analog face and digital readout show the same time",
         "Resize the window; the face follows the smaller axis",
     };
-    int text_x = box_x + gui_space_2();
-    int text_y = box_y + gui_card_header_h() + gui_space_2();
-    int line_h = gui_line_height();
-    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
-        gui_draw_text_clipped(surf, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i],
-                              g_gui_style.text, g_gui_style.app_surface);
-        text_y += line_h + gui_space_1();
-    }
-    int btn_w = gui_scaled_metric(88);
-    *help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
-                                box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
-    gui_app_draw_button_ex(surf, help_close->x, help_close->y, help_close->w, help_close->h, "Close", true, false,
-                           false, false);
+    int win_w = (int)surf->width;
+    int win_h = (int)surf->height;
+    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
+    gui_draw_dialog(surf, win_w, win_h, 0, &layout, "Clock Help", tips, (int)(sizeof(tips) / sizeof(tips[0])), nullptr,
+                    "Close", false, false, nullptr, false, false);
+    *help_close = layout.confirm;
 }
 
 extern "C" int main()
@@ -788,7 +777,7 @@ extern "C" int main()
 
         w = (int)win.width;
         h = (int)win.height;
-        int pad = gui_scaled_metric(16);
+        int pad = clock_face_pad();
 
         face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(52));
         if (face_r < gui_scaled_metric(60))
@@ -828,7 +817,7 @@ extern "C" int main()
                 fx1 = (int)win.width;
             if (fy1 > (int)win.height)
                 fy1 = (int)win.height;
-            int text_top = cy + face_r + gui_scaled_metric(10);
+            int text_top = cy + face_r + clock_face_text_gap();
             if (text_top < 0)
                 text_top = 0;
             if (text_top > (int)win.height)

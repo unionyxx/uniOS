@@ -103,15 +103,6 @@ static Rect inflate_rect(Rect rect, int pad)
     return gui_rect_make(rect.x - pad, rect.y - pad, rect.w + pad * 2, rect.h + pad * 2);
 }
 
-static Rect merge_rects(Rect a, Rect b)
-{
-    if (gui_rect_is_empty(a))
-        return b;
-    if (gui_rect_is_empty(b))
-        return a;
-    return gui_rect_union(a, b);
-}
-
 static bool point_in_rect(const Rect &rect, int x, int y)
 {
     return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
@@ -485,27 +476,27 @@ static int compute_preferences_content_height(PreferencesState *state, int detai
     int section_h = header_h + gap * 2;
 
     if (state->section == PREF_SECTION_APPEARANCE) {
-        section_h += gui_line_height() + 6 + gui_app_control_h();
+        section_h += gui_line_height() + gui_space_0_5() + gui_app_control_h();
         section_h += gui_space_3();
-        section_h += gui_line_height() + 6;
+        section_h += gui_line_height() + gui_space_0_5();
         bool stacked = detail_w < gui_scaled_metric(420);
         if (stacked)
             section_h += gui_app_control_h() * 2 + gui_space_1();
         else
             section_h += gui_app_control_h();
         section_h += gui_space_3();
-        section_h += gui_scaled_metric(40) * 2 + gui_scaled_metric(12);
+        section_h += gui_app_row_tall_h() * 2 + gui_space_1_5();
         section_h += gui_space_2() + gui_line_height();
     } else if (state->section == PREF_SECTION_DESKTOP) {
-        int row_h = gui_scaled_metric(40);
-        section_h += row_h * 2 + gui_app_slider_h() + gui_scaled_metric(12) * 2;
+        int row_h = gui_app_row_tall_h();
+        section_h += row_h * 2 + gui_app_slider_h() + gui_space_1_5() * 2;
     } else if (state->section == PREF_SECTION_NETWORK) {
-        int row_h = gui_scaled_metric(40);
-        section_h += row_h * 2 + gui_scaled_metric(12);
+        int row_h = gui_app_row_tall_h();
+        section_h += row_h * 2 + gui_space_1_5();
         section_h += gui_space_2() + gui_line_height() * 2;
     } else {
-        section_h += gui_scaled_metric(40);
-        section_h += gui_space_3() + gui_line_height() + 6 + gui_app_control_h();
+        section_h += gui_app_row_tall_h();
+        section_h += gui_space_3() + gui_line_height() + gui_space_0_5() + gui_app_control_h();
         section_h += gui_space_2() + gui_line_height();
     }
     return section_h;
@@ -526,38 +517,17 @@ static void preferences_publish_menus()
 
 static void preferences_draw_help(Surface *win, PreferencesRects *rects)
 {
-    int win_w = (int)win->width;
-    int win_h = (int)win->height;
-    int box_w = gui_scaled_metric(430);
-    int box_h = gui_scaled_metric(238);
-    if (box_w > win_w - gui_space_4())
-        box_w = win_w - gui_space_4();
-    if (box_h > win_h - gui_space_4())
-        box_h = win_h - gui_space_4();
-    int box_x = (win_w - box_w) / 2;
-    int box_y = (win_h - box_h) / 2;
-    gui_fill_rect_blend(win, 0, 0, win_w, win_h, 0x80000000u);
-    gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
-                         g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Settings Help", nullptr);
     static const char *tips[] = {
         "Pick a section on the left to change its settings",   "Theme, volume and toggles apply immediately",
         "Wallpaper Apply needs a readable .uowp path",         "Storage mode controls whether changes persist to /data",
         "Settings marked session-only reset on the next boot",
     };
-    int text_x = box_x + gui_space_2();
-    int text_y = box_y + gui_card_header_h() + gui_space_2();
-    int line_h = gui_line_height();
-    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
-        gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i], g_gui_style.text,
-                              g_gui_style.app_surface);
-        text_y += line_h + gui_space_1();
-    }
-    int btn_w = gui_scaled_metric(88);
-    rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
-                                      box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
-    gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
-                           "Close", true, false, false, false);
+    int win_w = (int)win->width;
+    int win_h = (int)win->height;
+    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
+    gui_draw_dialog(win, win_w, win_h, 0, &layout, "Settings Help", tips, (int)(sizeof(tips) / sizeof(tips[0])),
+                    nullptr, "Close", false, false, nullptr, false, false);
+    rects->help_close = layout.confirm;
 }
 
 static void draw_preferences(Surface *win, PreferencesState *state, PreferencesRects *rects, const Rect *present_rect)
@@ -569,7 +539,7 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
     int view_h = layout.outer_h + layout.outer_y + gui_app_outer_padding();
 
     int nav_w = layout.body_rect.w >= gui_scaled_metric(680) ? gui_scaled_metric(180) : gui_scaled_metric(150);
-    int nav_item_h = gui_scaled_metric(52);
+    int nav_item_h = gui_app_nav_h();
     bool stacked_nav = layout.body_rect.w < gui_scaled_metric(620);
     int nav_content_h = stacked_nav ? nav_item_h : (nav_item_h + gui_space_1()) * PREF_SECTION_COUNT;
     int detail_w = stacked_nav ? layout.body_rect.w : layout.body_rect.w - nav_w - gui_app_section_gap();
@@ -602,13 +572,8 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
     int sticky_detail_y = detail_y + scroll_y;
     int card_header_h = gui_card_header_h();
 
-    if (!stacked_nav) {
-        gui_draw_panel_inset(win, detail_x, detail_y, detail_w, detail_h, g_gui_style.app_surface, g_gui_style.border,
-                             g_gui_style.chrome_bg_alt);
-    } else {
-        gui_draw_panel_inset(win, detail_x, detail_y, detail_w, detail_h, g_gui_style.app_surface, g_gui_style.border,
-                             g_gui_style.chrome_bg_alt);
-    }
+    gui_draw_panel_inset(win, detail_x, detail_y, detail_w, detail_h, g_gui_style.app_surface, g_gui_style.border,
+                         g_gui_style.chrome_bg_alt);
 
     int content_x = detail_x + gui_space_2();
     int content_y = detail_y + card_header_h + gui_space_2();
@@ -616,8 +581,8 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
 
     if (state->section == PREF_SECTION_APPEARANCE) {
         gui_draw_string(win, content_x, content_y, "Theme", g_gui_style.text_dim, g_gui_style.app_surface);
-        rects->theme_segment =
-            gui_rect_make(content_x, content_y + gui_line_height() + 6, gui_scaled_metric(180), gui_app_control_h());
+        rects->theme_segment = gui_rect_make(content_x, content_y + gui_line_height() + gui_space_0_5(),
+                                             gui_scaled_metric(180), gui_app_control_h());
         const char *theme_labels[2] = {"Dark", "Light"};
         int hovered_seg = -1;
         if (state->hovered == HOVER_THEME_DARK)
@@ -630,7 +595,7 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
 
         int wallpaper_y = rects->theme_segment.y + rects->theme_segment.h + gui_space_3();
         gui_draw_string(win, content_x, wallpaper_y, "Wallpaper", g_gui_style.text_dim, g_gui_style.app_surface);
-        int controls_y = wallpaper_y + gui_line_height() + 6;
+        int controls_y = wallpaper_y + gui_line_height() + gui_space_0_5();
         int apply_w = gui_scaled_metric(72);
         int default_w = gui_scaled_metric(92);
         bool stacked_controls = content_w < gui_scaled_metric(420);
@@ -663,13 +628,13 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
                                state->hovered == HOVER_WALLPAPER_DEFAULT, state->pressed == HOVER_WALLPAPER_DEFAULT);
 
         int anim_y = rects->wallpaper_default_btn.y + rects->wallpaper_default_btn.h + gui_space_3();
-        rects->animations_toggle = gui_rect_make(content_x, anim_y, content_w, gui_scaled_metric(40));
+        rects->animations_toggle = gui_rect_make(content_x, anim_y, content_w, gui_app_row_tall_h());
         gui_app_draw_toggle_row(win, rects->animations_toggle.x, rects->animations_toggle.y, rects->animations_toggle.w,
                                 rects->animations_toggle.h, "Motion", "Animate window and system transitions",
                                 state->animations_enabled, false, state->hovered == HOVER_ANIMATIONS_TOGGLE);
 
-        int trans_y = rects->animations_toggle.y + rects->animations_toggle.h + gui_scaled_metric(12);
-        rects->transparency_toggle = gui_rect_make(content_x, trans_y, content_w, gui_scaled_metric(40));
+        int trans_y = rects->animations_toggle.y + rects->animations_toggle.h + gui_space_1_5();
+        rects->transparency_toggle = gui_rect_make(content_x, trans_y, content_w, gui_app_row_tall_h());
         gui_app_draw_toggle_row(win, rects->transparency_toggle.x, rects->transparency_toggle.y,
                                 rects->transparency_toggle.w, rects->transparency_toggle.h, "Transparency",
                                 "Use transparent menu bar and Dock surfaces", state->transparency_level < 255, false,
@@ -678,10 +643,10 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
         gui_draw_string(win, content_x, rects->transparency_toggle.y + rects->transparency_toggle.h + gui_space_2(),
                         state->status, g_gui_style.text_muted, g_gui_style.app_surface);
     } else if (state->section == PREF_SECTION_DESKTOP) {
-        int row_h = gui_scaled_metric(40);
+        int row_h = gui_app_row_tall_h();
         rects->grid_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
-        rects->seconds_toggle = gui_rect_make(content_x, content_y + row_h + gui_scaled_metric(12), content_w, row_h);
-        int slider_y = rects->seconds_toggle.y + rects->seconds_toggle.h + gui_scaled_metric(12);
+        rects->seconds_toggle = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
+        int slider_y = rects->seconds_toggle.y + rects->seconds_toggle.h + gui_space_1_5();
         rects->volume_slider = gui_rect_make(content_x, slider_y, content_w, gui_app_slider_h());
         gui_app_draw_toggle_row(win, rects->grid_toggle.x, rects->grid_toggle.y, rects->grid_toggle.w,
                                 rects->grid_toggle.h, "Show desktop grid", nullptr,
@@ -695,10 +660,9 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
                             rects->volume_slider.h, "Volume", state->volume_level, 100,
                             state->hovered == HOVER_VOLUME_SLIDER || state->volume_dragging);
     } else if (state->section == PREF_SECTION_NETWORK) {
-        int row_h = gui_scaled_metric(40);
+        int row_h = gui_app_row_tall_h();
         rects->ethernet_toggle = gui_rect_make(content_x, content_y, content_w, row_h);
-        rects->ethernet_dhcp_toggle =
-            gui_rect_make(content_x, content_y + row_h + gui_scaled_metric(12), content_w, row_h);
+        rects->ethernet_dhcp_toggle = gui_rect_make(content_x, content_y + row_h + gui_space_1_5(), content_w, row_h);
         gui_app_draw_toggle_row(win, rects->ethernet_toggle.x, rects->ethernet_toggle.y, rects->ethernet_toggle.w,
                                 rects->ethernet_toggle.h, "Ethernet",
                                 "Use the wired Ethernet stack when a supported NIC is present", state->ethernet_enabled,
@@ -713,15 +677,15 @@ static void draw_preferences(Surface *win, PreferencesState *state, PreferencesR
         gui_draw_string(win, content_x, note_y + gui_line_height(), state->status, g_gui_style.text_muted,
                         g_gui_style.app_surface);
     } else {
-        rects->terminal_toggle = gui_rect_make(content_x, content_y, content_w, gui_scaled_metric(40));
+        rects->terminal_toggle = gui_rect_make(content_x, content_y, content_w, gui_app_row_tall_h());
         gui_app_draw_toggle_row(win, rects->terminal_toggle.x, rects->terminal_toggle.y, rects->terminal_toggle.w,
                                 rects->terminal_toggle.h, "Open Terminal at startup", nullptr,
                                 (state->system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) != 0, false,
                                 state->hovered == HOVER_TERMINAL_TOGGLE);
         int storage_y = rects->terminal_toggle.y + rects->terminal_toggle.h + gui_space_3();
         gui_draw_string(win, content_x, storage_y, "Storage Mode", g_gui_style.text_dim, g_gui_style.app_surface);
-        rects->storage_segment =
-            gui_rect_make(content_x, storage_y + gui_line_height() + 6, gui_scaled_metric(260), gui_app_control_h());
+        rects->storage_segment = gui_rect_make(content_x, storage_y + gui_line_height() + gui_space_0_5(),
+                                               gui_scaled_metric(260), gui_app_control_h());
         const char *storage_labels[3] = {"Off", "Read-Only", "Writable"};
         int hovered_seg = -1;
         if (state->hovered == HOVER_STORAGE_OFF)
@@ -869,7 +833,7 @@ extern "C" int main()
         }
         if (redraw_full)
             return;
-        redraw_rect = merge_rects(redraw_rect, rect);
+        redraw_rect = gui_rect_union(redraw_rect, rect);
     };
 
     while (true) {
@@ -913,8 +877,8 @@ extern "C" int main()
                 HoverTarget hovered = update_hover_target(rects, state.section, ev.mouse.x, ev.mouse.y);
                 if (hovered != state.hovered) {
                     state.hovered = hovered;
-                    request_redraw(false, merge_rects(hover_target_rect(rects, state.section, previous_hovered),
-                                                      hover_target_rect(rects, state.section, hovered)));
+                    request_redraw(false, gui_rect_union(hover_target_rect(rects, state.section, previous_hovered),
+                                                         hover_target_rect(rects, state.section, hovered)));
                 }
                 continue;
             }

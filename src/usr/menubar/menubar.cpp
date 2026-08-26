@@ -34,87 +34,6 @@ static void reap_exited_children()
     }
 }
 
-static inline uint8_t menubar_scale_alpha_u8(uint8_t alpha, uint8_t coverage)
-{
-    return (uint8_t)(((uint32_t)alpha * (uint32_t)coverage + 127u) / 255u);
-}
-
-static inline uint32_t menubar_blend_pixel(uint32_t dst, uint32_t src, uint8_t coverage)
-{
-    uint8_t src_alpha = menubar_scale_alpha_u8((uint8_t)(src >> 24), coverage);
-    if (src_alpha == 0)
-        return dst;
-
-    uint8_t dst_alpha = (uint8_t)(dst >> 24);
-    if (dst_alpha == 0)
-        return ((uint32_t)src_alpha << 24) | (src & 0x00FFFFFFu);
-    if (src_alpha == 255)
-        return 0xFF000000u | (src & 0x00FFFFFFu);
-
-    uint32_t inv = 255u - src_alpha;
-    uint32_t out_alpha = (uint32_t)src_alpha + ((uint32_t)dst_alpha * inv + 127u) / 255u;
-    if (out_alpha == 0)
-        return 0;
-
-    uint32_t dr_p = ((dst >> 16) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t dg_p = ((dst >> 8) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t db_p = (dst & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t sr_p = ((src >> 16) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sg_p = ((src >> 8) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sb_p = (src & 0xFFu) * (uint32_t)src_alpha;
-
-    uint32_t out_r_p = sr_p + (dr_p * inv + 127u) / 255u;
-    uint32_t out_g_p = sg_p + (dg_p * inv + 127u) / 255u;
-    uint32_t out_b_p = sb_p + (db_p * inv + 127u) / 255u;
-
-    uint32_t r = (out_r_p + out_alpha / 2u) / out_alpha;
-    uint32_t g = (out_g_p + out_alpha / 2u) / out_alpha;
-    uint32_t b = (out_b_p + out_alpha / 2u) / out_alpha;
-    return (out_alpha << 24) | (r << 16) | (g << 8) | b;
-}
-
-static void alpha_fill_rect(Surface *canvas, int x, int y, int w, int h, uint32_t color)
-{
-    if (!canvas || !canvas->buffer || canvas->pitch == 0 || w <= 0 || h <= 0)
-        return;
-
-    int64_t left = x;
-    int64_t top = y;
-    int64_t right = left + (int64_t)w;
-    int64_t bottom = top + (int64_t)h;
-    if (left < 0)
-        left = 0;
-    if (top < 0)
-        top = 0;
-    if (right > canvas->width)
-        right = canvas->width;
-    if (bottom > canvas->height)
-        bottom = canvas->height;
-    if (right <= left || bottom <= top)
-        return;
-
-    x = (int)left;
-    y = (int)top;
-    w = (int)(right - left);
-    h = (int)(bottom - top);
-
-    uint8_t alpha = (uint8_t)(color >> 24);
-    if (alpha == 0)
-        return;
-    if (alpha == 255) {
-        gui_fill_rect(canvas, x, y, w, h, color);
-        return;
-    }
-
-    uint32_t stride = canvas->pitch / 4u;
-    for (int py = y; py < y + h; py++) {
-        uint32_t *row = &canvas->buffer[(size_t)py * stride];
-        for (int px = x; px < x + w; px++) {
-            row[px] = menubar_blend_pixel(row[px], color, 255);
-        }
-    }
-}
-
 static bool ensure_blur_surface(Registry *registry, uint32_t screen_w)
 {
     auto reset_blur_surface = []() {
@@ -169,12 +88,8 @@ static bool ensure_blur_surface(Registry *registry, uint32_t screen_w)
     return true;
 }
 
-static constexpr int LOGO_X = 10;
-static constexpr int LOGO_Y = 5;
 static constexpr int LOGO_W = 56;
 static constexpr int LOGO_H = 22;
-static constexpr int MENU_X = 8;
-static constexpr int MENU_GAP = 7;
 static constexpr int MENU_MIN_W = 220;
 static constexpr int MENUBAR_TITLE_MAX_W = 220;
 
@@ -192,19 +107,24 @@ static inline int logo_h()
 }
 static inline int logo_x()
 {
-    return gui_scaled_metric(LOGO_X);
+    return gui_space_1();
 }
 static inline int logo_y()
 {
     return (menubar_h() - logo_h()) / 2;
 }
+// Horizontal padding inside menubar buttons (logo, date, app menus).
+static inline int menubar_button_pad()
+{
+    return gui_space_1();
+}
 static inline int menu_x()
 {
-    return gui_scaled_metric(MENU_X);
+    return gui_space_1();
 }
 static inline int menu_gap()
 {
-    return gui_scaled_metric(MENU_GAP);
+    return gui_space_1();
 }
 static inline int menu_y()
 {
@@ -221,13 +141,13 @@ static inline int menubar_title_max_w()
 // Uniform breathing room between strip groups (logo -> title -> app menus).
 static inline int menubar_strip_gap()
 {
-    return gui_scaled_metric(12);
+    return gui_space_1_5();
 }
 // Right edge of the uniOS logo button; matches g_logo_btn_x + g_logo_btn_w
 // (logo text + horizontal padding) without depending on draw-time state.
 static inline int logo_button_end_x()
 {
-    return logo_x() + gui_measure_text(gui_font_title(), "uniOS") + gui_scaled_metric(10) * 2;
+    return logo_x() + gui_measure_text(gui_font_title(), "uniOS") + menubar_button_pad() * 2;
 }
 
 static inline int menubar_scaled_offset(int px)
@@ -768,6 +688,8 @@ void draw_menubar(Surface *canvas, Registry *reg)
     uint32_t tint_color = is_light ? 0x70F7F9FCu : 0x60141820u;
     uint32_t divider_color = is_light ? 0x16000000u : 0x14FFFFFFu;
     uint32_t fallback_color = is_light ? 0xFFF7F9FCu : 0xFF141820u;
+    // Shared hover wash for every menubar button (glass surface).
+    uint32_t hover_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
 
     if (blur_ready) {
         gui_blit_rect(canvas, &g_blur_surface, 0, 0, 0, 0, canvas->width, bar_h);
@@ -775,7 +697,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
         gui_fill_rect(canvas, 0, 0, canvas->width, bar_h, fallback_color);
     }
 
-    alpha_fill_rect(canvas, 0, 0, canvas->width, bar_h, tint_color);
+    gui_fill_rect_blend(canvas, 0, 0, canvas->width, bar_h, tint_color);
     gui_fill_rect(canvas, 0, bar_h - 1, canvas->width, 1, divider_color);
 
     int app_text_y = gui_align_text_y(app_font, 0, bar_h);
@@ -785,7 +707,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
     bool logo_hot = false;
     bool date_hot = false;
     if (reg) {
-        const int padding = gui_scaled_metric(10);
+        const int padding = menubar_button_pad();
         int logo_text_w = gui_measure_text(app_font, "uniOS");
         g_logo_btn_w = logo_text_w + padding * 2;
         g_logo_btn_x = logo_x();
@@ -809,15 +731,12 @@ void draw_menubar(Surface *canvas, Registry *reg)
                                     my < logo_y() + logo_h());
     }
     if (logo_hot) {
-        uint32_t logo_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
-        gui_fill_rounded_rect(canvas, g_logo_btn_x, logo_y(), g_logo_btn_w, logo_h(), gui_radius_sm(), logo_fill);
+        gui_fill_rounded_rect(canvas, g_logo_btn_x, logo_y(), g_logo_btn_w, logo_h(), gui_radius_sm(), hover_fill);
     }
     if (date_hot) {
-        uint32_t date_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
-        gui_fill_rounded_rect(canvas, g_date_btn_x, logo_y(), g_date_btn_w, logo_h(), gui_radius_sm(), date_fill);
+        gui_fill_rounded_rect(canvas, g_date_btn_x, logo_y(), g_date_btn_w, logo_h(), gui_radius_sm(), hover_fill);
     }
-    int text_w = gui_measure_text(app_font, "uniOS");
-    int center_x = g_logo_btn_x + (g_logo_btn_w - text_w) / 2;
+    int center_x = gui_align_text_x_center(app_font, g_logo_btn_x, g_logo_btn_w, "uniOS");
     draw_menubar_text_clipped(canvas, app_font, center_x, app_text_y, g_logo_btn_w, "uniOS", text_color, is_light);
 
     int x = logo_button_end_x() + menubar_strip_gap();
@@ -834,7 +753,6 @@ void draw_menubar(Surface *canvas, Registry *reg)
     if (reg && g_model_valid) {
         ComposedAppMenus &cm = compose_app_menus(reg);
         if (cm.valid && cm.count > 0) {
-            uint32_t hot_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
             int mx = pointer_local_x(reg);
             int my = pointer_local_y(reg);
             for (int j = 0; j < cm.count; j++) {
@@ -843,10 +761,9 @@ void draw_menubar(Surface *canvas, Registry *reg)
                 bool hot =
                     (g_open_app_menu == j) || (mx >= bx && mx < bx + bw && my >= logo_y() && my < logo_y() + logo_h());
                 if (hot)
-                    gui_fill_rounded_rect(canvas, bx, logo_y(), bw, logo_h(), gui_radius_sm(), hot_fill);
-                int name_w = gui_measure_text(menu_font, cm.names[j]);
-                draw_menubar_text_clipped(canvas, menu_font, bx + (bw - name_w) / 2, menu_text_y, bw, cm.names[j],
-                                          text_color, is_light);
+                    gui_fill_rounded_rect(canvas, bx, logo_y(), bw, logo_h(), gui_radius_sm(), hover_fill);
+                draw_menubar_text_clipped(canvas, menu_font, gui_align_text_x_center(menu_font, bx, bw, cm.names[j]),
+                                          menu_text_y, bw, cm.names[j], text_color, is_light);
             }
         }
     }
@@ -863,8 +780,7 @@ void draw_menubar(Surface *canvas, Registry *reg)
         } else {
             snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d", month_name, t.day, t.hour, t.minute);
         }
-        uint32_t text_w = (uint32_t)gui_measure_text(menu_font, time_str);
-        int time_x = g_date_btn_x + (g_date_btn_w - (int)text_w) / 2;
+        int time_x = gui_align_text_x_center(menu_font, g_date_btn_x, g_date_btn_w, time_str);
         draw_menubar_text(canvas, menu_font, time_x, menu_text_y, time_str, g_gui_style.text, is_light);
     }
 

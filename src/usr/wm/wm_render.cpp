@@ -131,53 +131,7 @@ int color_luma(uint32_t color)
 
 uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
 {
-    uint32_t src_alpha = (src >> 24);
-    uint32_t sa_cov = src_alpha * (uint32_t)coverage + 128u;
-    src_alpha = (sa_cov + (sa_cov >> 8)) >> 8;
-    if (!src_alpha)
-        return dst;
-    if (src_alpha == 255)
-        return (src & 0x00FFFFFFu) | 0xFF000000u;
-
-    uint32_t dst_alpha = dst >> 24;
-    uint32_t inv_sa = 255u - src_alpha;
-
-    uint32_t sr = (src >> 16) & 0xFFu, sg = (src >> 8) & 0xFFu, sb = src & 0xFFu;
-    uint32_t dr = (dst >> 16) & 0xFFu, dg = (dst >> 8) & 0xFFu, db = dst & 0xFFu;
-
-    uint32_t da_inv = dst_alpha * inv_sa + 128u;
-    uint32_t out_a = src_alpha + ((da_inv + (da_inv >> 8)) >> 8);
-    if (!out_a)
-        return 0;
-
-    if (dst_alpha == 255) {
-        uint32_t rb = (src & 0x00FF00FFu) * src_alpha + (dst & 0x00FF00FFu) * inv_sa + 0x00800080u;
-        rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
-        uint32_t g_acc = sg * src_alpha + dg * inv_sa + 0x80u;
-        uint32_t g = (g_acc + (g_acc >> 8)) >> 8;
-        return 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
-    }
-
-    uint32_t term_dr = dr * dst_alpha * inv_sa + 128u;
-    term_dr = (term_dr + (term_dr >> 8)) >> 8;
-    uint32_t out_r = (sr * src_alpha + term_dr + out_a / 2) / out_a;
-
-    uint32_t term_dg = dg * dst_alpha * inv_sa + 128u;
-    term_dg = (term_dg + (term_dg >> 8)) >> 8;
-    uint32_t out_g = (sg * src_alpha + term_dg + out_a / 2) / out_a;
-
-    uint32_t term_db = db * dst_alpha * inv_sa + 128u;
-    term_db = (term_db + (term_db >> 8)) >> 8;
-    uint32_t out_b = (sb * src_alpha + term_db + out_a / 2) / out_a;
-
-    if (out_r > 255)
-        out_r = 255;
-    if (out_g > 255)
-        out_g = 255;
-    if (out_b > 255)
-        out_b = 255;
-
-    return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+    return gui_blend_pixel(dst, src, coverage);
 }
 
 #include <emmintrin.h>
@@ -196,17 +150,17 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
     for (int y = 0; y < h; ++y) {
         uint32_t *drow = &dst[static_cast<size_t>(y) * dst_stride];
         const uint32_t *srow = &src[static_cast<size_t>(y) * src_stride];
-        
+
         int x = 0;
         for (; x <= w - 4; x += 4) {
-            __m128i s_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srow[x]));
-            
+            __m128i s_vec = _mm_loadu_si128(reinterpret_cast<const __m128i *>(&srow[x]));
+
             __m128i s_alpha = _mm_and_si128(s_vec, alpha_mask);
             if (_mm_movemask_epi8(_mm_cmpeq_epi32(s_alpha, _mm_setzero_si128())) == 0xFFFF) {
                 continue;
             }
 
-            __m128i d_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&drow[x]));
+            __m128i d_vec = _mm_loadu_si128(reinterpret_cast<const __m128i *>(&drow[x]));
             __m128i d_alpha = _mm_and_si128(d_vec, alpha_mask);
             __m128i trans_mask = _mm_cmpeq_epi32(d_alpha, _mm_setzero_si128());
             __m128i opaque_dst_mask = _mm_cmpeq_epi32(d_alpha, alpha_mask);
@@ -216,8 +170,12 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
                 for (int k = 0; k < 4; ++k) {
                     uint32_t s = srow[x + k];
                     uint32_t sa = s >> 24;
-                    if (!sa) continue;
-                    if (sa == 255) { drow[x + k] = s; continue; }
+                    if (!sa)
+                        continue;
+                    if (sa == 255) {
+                        drow[x + k] = s;
+                        continue;
+                    }
                     uint32_t d = drow[x + k];
                     uint32_t da = d >> 24;
                     if (da == 255) {
@@ -241,7 +199,7 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
 
             __m128i alpha_lo = _mm_shufflelo_epi16(s_lo, _MM_SHUFFLE(3, 3, 3, 3));
             alpha_lo = _mm_shufflehi_epi16(alpha_lo, _MM_SHUFFLE(3, 3, 3, 3));
-            
+
             __m128i alpha_hi = _mm_shufflelo_epi16(s_hi, _MM_SHUFFLE(3, 3, 3, 3));
             alpha_hi = _mm_shufflehi_epi16(alpha_hi, _MM_SHUFFLE(3, 3, 3, 3));
 
@@ -259,17 +217,16 @@ static void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_strid
 
             __m128i sum_lo_shift = _mm_srli_epi16(sum_lo, 8);
             __m128i sum_hi_shift = _mm_srli_epi16(sum_hi, 8);
-            
+
             __m128i final_lo = _mm_srli_epi16(_mm_add_epi16(sum_lo, sum_lo_shift), 8);
             __m128i final_hi = _mm_srli_epi16(_mm_add_epi16(sum_hi, sum_hi_shift), 8);
 
             __m128i blended_vec = _mm_packus_epi16(final_lo, final_hi);
 
             blended_vec = _mm_or_si128(blended_vec, alpha_mask);
-            blended_vec = _mm_or_si128(_mm_and_si128(trans_mask, s_vec),
-                                       _mm_andnot_si128(trans_mask, blended_vec));
+            blended_vec = _mm_or_si128(_mm_and_si128(trans_mask, s_vec), _mm_andnot_si128(trans_mask, blended_vec));
 
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(&drow[x]), blended_vec);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(&drow[x]), blended_vec);
         }
 
         for (; x < w; ++x) {
@@ -476,8 +433,8 @@ void recapture_shell_blur_sources(Registry *registry)
 
     // Re-capture full dock source
     if (g_dock_blur_source.buffer && registry->window_count > 1) {
-        DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y,
-                               registry->windows[1].w, registry->windows[1].h};
+        DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                               registry->windows[1].h};
         if (clip_dirty_rect_to_screen(dock_rect)) {
             compose_desktop_for_blur(&g_dock_blur_source, dock_rect, dock_rect.x, dock_rect.y);
             g_dock_blur_dirty = true;
@@ -545,8 +502,14 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
                 uint32_t v0 = color, v1 = color, v2 = color, v3 = color;
                 int i = 0;
                 for (; i + 7 < span; i += 8) {
-                    span_dst[0] = v0; span_dst[1] = v1; span_dst[2] = v2; span_dst[3] = v3;
-                    span_dst[4] = v0; span_dst[5] = v1; span_dst[6] = v2; span_dst[7] = v3;
+                    span_dst[0] = v0;
+                    span_dst[1] = v1;
+                    span_dst[2] = v2;
+                    span_dst[3] = v3;
+                    span_dst[4] = v0;
+                    span_dst[5] = v1;
+                    span_dst[6] = v2;
+                    span_dst[7] = v3;
                     span_dst += 8;
                 }
                 for (; i < span; ++i)
@@ -575,7 +538,8 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
                 }
             } else {
                 for (int col = 0; col < local_r; ++col) {
-                    corner_mask[col] = gui_rounded_rect_coverage_local(col, row, local_r * 2, local_r * 2, local_r, GUI_ROUNDED_EDGE_TOP);
+                    corner_mask[col] = gui_rounded_rect_coverage_local(col, row, local_r * 2, local_r * 2, local_r,
+                                                                       GUI_ROUNDED_EDGE_TOP);
                 }
             }
             corner_mask_y = row;
@@ -602,8 +566,14 @@ static void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
             uint32_t *p = center_dst;
             int i = 0;
             for (; i + 7 < center_w; i += 8) {
-                p[0] = v0; p[1] = v1; p[2] = v2; p[3] = v3;
-                p[4] = v0; p[5] = v1; p[6] = v2; p[7] = v3;
+                p[0] = v0;
+                p[1] = v1;
+                p[2] = v2;
+                p[3] = v3;
+                p[4] = v0;
+                p[5] = v1;
+                p[6] = v2;
+                p[7] = v3;
                 p += 8;
             }
             for (; i < center_w; ++i)
@@ -632,9 +602,12 @@ void paint_desktop_base(Surface *surface)
     if (!surface || !surface->buffer || surface->pitch == 0)
         return;
 
-    const uint32_t color_top = 0xFF0B1533u;
-    const uint32_t color_mid = 0xFF2C1F54u;
-    const uint32_t color_bottom = 0xFF140A12u;
+    // Theme-aware fallback gradient (no wallpaper): derived from the desktop
+    // background token so dark and light themes stay consistent.
+    const uint32_t base = g_gui_chrome.desktop_bg;
+    const uint32_t color_top = mix_rgb(base, 0xFF000000u, 40);
+    const uint32_t color_mid = base;
+    const uint32_t color_bottom = mix_rgb(base, 0xFF000000u, 110);
     const uint32_t stride = surface->pitch / 4u;
     const uint32_t height = surface->height;
     const uint32_t width = surface->width;
@@ -651,13 +624,25 @@ void paint_desktop_base(Surface *surface)
         int32_t g_fp = static_cast<int32_t>((color_top >> 8) & 0xFFu) << 16;
         int32_t b_fp = static_cast<int32_t>(color_top & 0xFFu) << 16;
 
-        int32_t step_r = y_mid > 0 ? (((static_cast<int32_t>((color_mid >> 16) & 0xFFu) - static_cast<int32_t>((color_top >> 16) & 0xFFu))) << 16) / static_cast<int32_t>(y_mid) : 0;
-        int32_t step_g = y_mid > 0 ? (((static_cast<int32_t>((color_mid >> 8) & 0xFFu) - static_cast<int32_t>((color_top >> 8) & 0xFFu))) << 16) / static_cast<int32_t>(y_mid) : 0;
-        int32_t step_b = y_mid > 0 ? (((static_cast<int32_t>(color_mid & 0xFFu) - static_cast<int32_t>(color_top & 0xFFu))) << 16) / static_cast<int32_t>(y_mid) : 0;
+        int32_t step_r =
+            y_mid > 0
+                ? (((static_cast<int32_t>((color_mid >> 16) & 0xFFu) - static_cast<int32_t>((color_top >> 16) & 0xFFu)))
+                   << 16) /
+                      static_cast<int32_t>(y_mid)
+                : 0;
+        int32_t step_g =
+            y_mid > 0
+                ? (((static_cast<int32_t>((color_mid >> 8) & 0xFFu) - static_cast<int32_t>((color_top >> 8) & 0xFFu)))
+                   << 16) /
+                      static_cast<int32_t>(y_mid)
+                : 0;
+        int32_t step_b =
+            y_mid > 0 ? (((static_cast<int32_t>(color_mid & 0xFFu) - static_cast<int32_t>(color_top & 0xFFu))) << 16) /
+                            static_cast<int32_t>(y_mid)
+                      : 0;
 
         for (uint32_t y = 0; y < y_mid; ++y) {
-            uint32_t row_color = 0xFF000000u |
-                                 ((static_cast<uint32_t>(r_fp >> 16) & 0xFFu) << 16) |
+            uint32_t row_color = 0xFF000000u | ((static_cast<uint32_t>(r_fp >> 16) & 0xFFu) << 16) |
                                  ((static_cast<uint32_t>(g_fp >> 16) & 0xFFu) << 8) |
                                  (static_cast<uint32_t>(b_fp >> 16) & 0xFFu);
             uint32_t *row = &surface->buffer[static_cast<size_t>(y) * stride];
@@ -675,13 +660,23 @@ void paint_desktop_base(Surface *surface)
         int32_t g_fp = static_cast<int32_t>((color_mid >> 8) & 0xFFu) << 16;
         int32_t b_fp = static_cast<int32_t>(color_mid & 0xFFu) << 16;
 
-        int32_t step_r = h2 > 1 ? (((static_cast<int32_t>((color_bottom >> 16) & 0xFFu) - static_cast<int32_t>((color_mid >> 16) & 0xFFu))) << 16) / static_cast<int32_t>(h2 - 1u) : 0;
-        int32_t step_g = h2 > 1 ? (((static_cast<int32_t>((color_bottom >> 8) & 0xFFu) - static_cast<int32_t>((color_mid >> 8) & 0xFFu))) << 16) / static_cast<int32_t>(h2 - 1u) : 0;
-        int32_t step_b = h2 > 1 ? (((static_cast<int32_t>(color_bottom & 0xFFu) - static_cast<int32_t>(color_mid & 0xFFu))) << 16) / static_cast<int32_t>(h2 - 1u) : 0;
+        int32_t step_r = h2 > 1 ? (((static_cast<int32_t>((color_bottom >> 16) & 0xFFu) -
+                                     static_cast<int32_t>((color_mid >> 16) & 0xFFu)))
+                                   << 16) /
+                                      static_cast<int32_t>(h2 - 1u)
+                                : 0;
+        int32_t step_g = h2 > 1 ? (((static_cast<int32_t>((color_bottom >> 8) & 0xFFu) -
+                                     static_cast<int32_t>((color_mid >> 8) & 0xFFu)))
+                                   << 16) /
+                                      static_cast<int32_t>(h2 - 1u)
+                                : 0;
+        int32_t step_b =
+            h2 > 1 ? (((static_cast<int32_t>(color_bottom & 0xFFu) - static_cast<int32_t>(color_mid & 0xFFu))) << 16) /
+                         static_cast<int32_t>(h2 - 1u)
+                   : 0;
 
         for (uint32_t y = y_mid; y < height; ++y) {
-            uint32_t row_color = 0xFF000000u |
-                                 ((static_cast<uint32_t>(r_fp >> 16) & 0xFFu) << 16) |
+            uint32_t row_color = 0xFF000000u | ((static_cast<uint32_t>(r_fp >> 16) & 0xFFu) << 16) |
                                  ((static_cast<uint32_t>(g_fp >> 16) & 0xFFu) << 8) |
                                  (static_cast<uint32_t>(b_fp >> 16) & 0xFFu);
             uint32_t *row = &surface->buffer[static_cast<size_t>(y) * stride];
@@ -843,8 +838,7 @@ static inline bool rect_touch_or_overlap(const DirtyRect &a, const DirtyRect &b)
 {
     if (a.w <= 0 || a.h <= 0 || b.w <= 0 || b.h <= 0)
         return false;
-    return a.x <= b.x + b.w && a.x + a.w >= b.x &&
-           a.y <= b.y + b.h && a.y + a.h >= b.y;
+    return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
 }
 
 void flush_shell_blur_updates(Registry *registry)
@@ -935,8 +929,8 @@ void flush_shell_blur_updates(Registry *registry)
     if (g_dock_blur_dirty && g_dock_blur.buffer && g_dock_blur_source.buffer) {
         if (g_dock_blur_dirty_count > 0) {
             // Recompose only dirty regions
-            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y,
-                                   registry->windows[1].w, registry->windows[1].h};
+            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                                   registry->windows[1].h};
             clip_dirty_rect_to_screen(dock_rect);
             for (int i = 0; i < g_dock_blur_dirty_count; i++) {
                 compose_desktop_for_blur(&g_dock_blur_source, g_dock_blur_dirty_rects[i], dock_rect.x, dock_rect.y);
@@ -944,8 +938,8 @@ void flush_shell_blur_updates(Registry *registry)
             clear_blur_dirty_rects(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count);
         } else {
             // Full recomposition
-            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y,
-                                   registry->windows[1].w, registry->windows[1].h};
+            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                                   registry->windows[1].h};
             clip_dirty_rect_to_screen(dock_rect);
             compose_desktop_for_blur(&g_dock_blur_source, dock_rect, dock_rect.x, dock_rect.y);
         }
@@ -967,15 +961,12 @@ static uint32_t get_window_app_background(const Window &w)
             return 0xFF000000u | (pixel & 0x00FFFFFFu);
         }
     }
-    return g_gui_style.app_bg ? g_gui_style.app_bg : 0xFF15171Au;
+    return g_gui_style.app_bg ? g_gui_style.app_bg : g_gui_style.app_surface;
 }
 
 static bool is_color_dark(uint32_t color)
 {
-    uint8_t r = (color >> 16) & 0xFF;
-    uint8_t g = (color >> 8) & 0xFF;
-    uint8_t b = color & 0xFF;
-    return (r * 299 + g * 587 + b * 114) < 128000;
+    return color_luma(color) < 128;
 }
 
 static uint32_t window_decoration_theme_signature(const Window &w)
@@ -1044,29 +1035,23 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     }
     uint32_t frame_fill_color = mix_rgb(outline_color, body_color, focused ? 236 : 242);
     uint32_t inner_stroke_color = mix_rgb(body_color, 0xFFFFFFFFu, focused ? 18 : 12);
-    
+
     int lx = (dst->buffer != g_backbuffer.buffer) ? 0 : w.x;
     int ly = (dst->buffer != g_backbuffer.buffer) ? 0 : w.y - title_bar_h;
     int sx = lx, sy = ly, sw = w.w, sh = w.h + title_bar_h;
 
-    // Multi-layered soft drop shadow styling that fits exactly inside outer.w/outer.h bounds
+    // Multi-layered soft drop shadow: same alpha stack as the shared panel
+    // shadow (gui_draw_panel_shadow), fit inside the outer bounds.
     if (focused) {
-        // Layer 1: Ambient soft blur shadow
         gui_fill_rounded_rect_clipped(dst, sx + gui_scaled_metric(1), sy + gui_scaled_metric(3), sw, sh,
                                       radius + gui_scaled_metric(2), 0x08000000u, clip);
-        // Layer 2: Mid-range ambient shadow
         gui_fill_rounded_rect_clipped(dst, sx + gui_scaled_metric(1), sy + gui_scaled_metric(2), sw, sh,
                                       radius + gui_scaled_metric(1), 0x0C000000u, clip);
-        // Layer 3: Direct key shadow
-        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(1), sw, sh,
-                                      radius, 0x14000000u, clip);
+        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(1), sw, sh, radius, 0x10000000u, clip);
     } else {
-        // Layer 1: Soft ambient shadow
-        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(2), sw, sh,
-                                      radius + gui_scaled_metric(1), 0x06000000u, clip);
-        // Layer 2: Direct key shadow
-        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(1), sw, sh,
-                                      radius, 0x0A000000u, clip);
+        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(2), sw, sh, radius + gui_scaled_metric(1),
+                                      0x04000000u, clip);
+        gui_fill_rounded_rect_clipped(dst, sx, sy + gui_scaled_metric(1), sw, sh, radius, 0x06000000u, clip);
     }
 
     gui_fill_rounded_rect_clipped(dst, sx, sy, sw, sh, radius, outline_color, clip);
@@ -1096,7 +1081,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
         if (title_radius > title_fill_h)
             title_radius = title_fill_h;
         fill_top_rounded_rect_clipped(dst, title_fill_x, title_fill_y, title_fill_w, title_fill_h, title_radius,
-                                       bar_color);
+                                      bar_color);
     }
 
     const GuiFont *title_font = gui_font_title();
@@ -1130,47 +1115,8 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     }
 }
 
-static void draw_window_decoration_buttons(Surface *dst, const Window &w, bool focused, int hovered_button)
-{
-    if (w.transparent)
-        return;
-
-    ensure_button_icons();
-
-    uint32_t bar_color = get_window_app_background(w);
-    uint32_t button_colors[3] = {g_gui_chrome.button_close, g_gui_chrome.button_minimize, g_gui_chrome.button_maximize};
-    uint32_t button_outline = focused ? 0x65000000u : 0x38000000u;
-    int button_size = wm_button_size();
-
-    DirtyRect b0 = window_button_bounds(w, 0);
-    int offset_x = b0.x, offset_y = b0.y;
-    Surface *icons[3] = {&g_icon_close, &g_icon_minimize, &g_icon_maximize};
-
-    for (int i = 0; i < 3; i++) {
-        int cx = 0, cy = 0;
-        window_button_center(w, i, &cx, &cy);
-        cx -= offset_x;
-        cy -= offset_y;
-        int r = button_size / 2;
-
-        uint32_t button_fill = focused ? button_colors[i] : mix_rgb(button_colors[i], bar_color, 138);
-        if (hovered_button == i) {
-            button_fill = 0xFF000000u | (mix_rgb(button_colors[i], 0xFFFFFFFFu, focused ? 22 : 16) & 0x00FFFFFFu);
-        }
-
-        gui_fill_circle(dst, cx, cy, r, button_fill);
-        gui_draw_circle_stroke(dst, cx, cy, r, 1, button_outline);
-
-        if (icons[i]->buffer) {
-            int ix = cx - static_cast<int>(icons[i]->width) / 2;
-            int iy = cy - static_cast<int>(icons[i]->height) / 2;
-            gui_blit_alpha(dst, icons[i], ix, iy);
-        }
-    }
-}
-
-static void draw_window_decoration_buttons_clipped(Surface *dst, const Window &w, const DirtyRect &clip,
-                                                   bool focused, int hovered_button)
+static void draw_window_decoration_buttons_to(Surface *dst, const Window &w, int origin_x, int origin_y,
+                                              const DirtyRect *clip, bool focused, int hovered_button)
 {
     if (w.transparent)
         return;
@@ -1188,12 +1134,12 @@ static void draw_window_decoration_buttons_clipped(Surface *dst, const Window &w
     for (int i = 0; i < 3; i++) {
         int cx = 0, cy = 0;
         window_button_center(w, i, &cx, &cy);
-
-        // Check if this button intersects the clip rect
-        if (cx - r >= clip.x + clip.w || cx + r <= clip.x ||
-            cy - r >= clip.y + clip.h || cy + r <= clip.y) {
+        if (clip &&
+            (cx - r >= clip->x + clip->w || cx + r <= clip->x || cy - r >= clip->y + clip->h || cy + r <= clip->y)) {
             continue;
         }
+        cx -= origin_x;
+        cy -= origin_y;
 
         uint32_t button_fill = focused ? button_colors[i] : mix_rgb(button_colors[i], bar_color, 138);
         if (hovered_button == i) {
@@ -1209,6 +1155,18 @@ static void draw_window_decoration_buttons_clipped(Surface *dst, const Window &w
             gui_blit_alpha(dst, icons[i], ix, iy);
         }
     }
+}
+
+static void draw_window_decoration_buttons(Surface *dst, const Window &w, bool focused, int hovered_button)
+{
+    DirtyRect b0 = window_button_bounds(w, 0);
+    draw_window_decoration_buttons_to(dst, w, b0.x, b0.y, nullptr, focused, hovered_button);
+}
+
+static void draw_window_decoration_buttons_clipped(Surface *dst, const Window &w, const DirtyRect &clip, bool focused,
+                                                   int hovered_button)
+{
+    draw_window_decoration_buttons_to(dst, w, 0, 0, &clip, focused, hovered_button);
 }
 
 static void ensure_window_decoration_cache(Window &w, bool focused, bool hovered_frame, int hovered_button)
@@ -1300,9 +1258,8 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
     if (!dst || !dst->buffer || w.transparent)
         return;
 
-    bool actively_resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE &&
-                             g_input.drag_index >= 0 && g_input.drag_index < g_window_count &&
-                             g_windows[g_input.drag_index].entry == w.entry;
+    bool actively_resizing = g_input.pointer_down && g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= 0 &&
+                             g_input.drag_index < g_window_count && g_windows[g_input.drag_index].entry == w.entry;
 
     if (!actively_resizing) {
         ensure_window_decoration_cache(w, focused, hovered_frame, hovered_button);
@@ -1343,16 +1300,7 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
 
 static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint8_t coverage)
 {
-    if (!coverage)
-        return dst_px;
-    if (coverage == 255)
-        return src_px;
-    uint32_t inv = 255u - coverage;
-    uint32_t rb = (src_px & 0x00FF00FFu) * coverage + (dst_px & 0x00FF00FFu) * inv + 0x00800080u;
-    rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
-    uint32_t g_acc = ((src_px >> 8) & 0xFFu) * coverage + ((dst_px >> 8) & 0xFFu) * inv + 0x80u;
-    uint32_t g = (g_acc + (g_acc >> 8)) >> 8;
-    return 0xFF000000u | (rb & 0x00FF00FFu) | (g << 8);
+    return gui_blend_straight_opaque_dst_coverage(dst_px, src_px, coverage);
 }
 
 // While the user interactively resizes a window, the WM geometry changes
@@ -1395,8 +1343,8 @@ static void compute_bottom_corner_row(int local_y, int /*inner_w*/, int inner_h,
         }
     } else {
         for (int col = 0; col < inner_r; ++col) {
-            out_mask[col] =
-                gui_rounded_rect_coverage_local(col, inner_r + cy, inner_r * 2, inner_r * 2, inner_r, GUI_ROUNDED_EDGE_BOTTOM);
+            out_mask[col] = gui_rounded_rect_coverage_local(col, inner_r + cy, inner_r * 2, inner_r * 2, inner_r,
+                                                            GUI_ROUNDED_EDGE_BOTTOM);
         }
     }
 }
@@ -1506,8 +1454,10 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             copy_w = content_w_px - src_x;
         if (src_y + copy_h > content_h_px)
             copy_h = content_h_px - src_y;
-        if (copy_w < 0) copy_w = 0;
-        if (copy_h < 0) copy_h = 0;
+        if (copy_w < 0)
+            copy_w = 0;
+        if (copy_h < 0)
+            copy_h = 0;
     }
 
     if (!w.transparent) {
@@ -1527,18 +1477,29 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                     uint32_t *p = &dst_ptr[rx];
                     int i = 0;
                     for (; i + 7 < span; i += 8) {
-                        p[0] = fill; p[1] = fill; p[2] = fill; p[3] = fill;
-                        p[4] = fill; p[5] = fill; p[6] = fill; p[7] = fill;
+                        p[0] = fill;
+                        p[1] = fill;
+                        p[2] = fill;
+                        p[3] = fill;
+                        p[4] = fill;
+                        p[5] = fill;
+                        p[6] = fill;
+                        p[7] = fill;
                         p += 8;
                     }
-                    for (; i < span; ++i) *p++ = fill;
+                    for (; i < span; ++i)
+                        *p++ = fill;
                 } else {
                     int left_end = copy_x < rx ? rx : (copy_x > rect_right ? rect_right : copy_x);
-                    for (int x = rx; x < left_end; ++x) dst_ptr[x] = fill;
+                    for (int x = rx; x < left_end; ++x)
+                        dst_ptr[x] = fill;
                     int right_start = copy_x + copy_w;
-                    if (right_start < rx) right_start = rx;
-                    if (right_start > rect_right) right_start = rect_right;
-                    for (int x = right_start; x < rect_right; ++x) dst_ptr[x] = fill;
+                    if (right_start < rx)
+                        right_start = rx;
+                    if (right_start > rect_right)
+                        right_start = rect_right;
+                    for (int x = right_start; x < rect_right; ++x)
+                        dst_ptr[x] = fill;
                 }
             }
         } else {
@@ -1557,19 +1518,30 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                             uint32_t *p = &dst_ptr[rx];
                             int i = 0;
                             for (; i + 7 < span; i += 8) {
-                                p[0] = fill; p[1] = fill; p[2] = fill; p[3] = fill;
-                                p[4] = fill; p[5] = fill; p[6] = fill; p[7] = fill;
+                                p[0] = fill;
+                                p[1] = fill;
+                                p[2] = fill;
+                                p[3] = fill;
+                                p[4] = fill;
+                                p[5] = fill;
+                                p[6] = fill;
+                                p[7] = fill;
                                 p += 8;
                             }
-                            for (; i < span; ++i) *p++ = fill;
+                            for (; i < span; ++i)
+                                *p++ = fill;
                         }
                     } else {
                         int left_end = copy_x < rx ? rx : (copy_x > rect_right ? rect_right : copy_x);
-                        for (int x = rx; x < left_end; ++x) dst_ptr[x] = fill;
+                        for (int x = rx; x < left_end; ++x)
+                            dst_ptr[x] = fill;
                         int right_start = copy_x + copy_w;
-                        if (right_start < rx) right_start = rx;
-                        if (right_start > rect_right) right_start = rect_right;
-                        for (int x = right_start; x < rect_right; ++x) dst_ptr[x] = fill;
+                        if (right_start < rx)
+                            right_start = rx;
+                        if (right_start > rect_right)
+                            right_start = rect_right;
+                        for (int x = right_start; x < rect_right; ++x)
+                            dst_ptr[x] = fill;
                     }
                     continue;
                 }
@@ -1597,8 +1569,10 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                             dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
                     }
                     int cap_hi = copy_x + copy_w;
-                    if (cap_hi < rx) cap_hi = rx;
-                    if (cap_hi > left_end) cap_hi = left_end;
+                    if (cap_hi < rx)
+                        cap_hi = rx;
+                    if (cap_hi > left_end)
+                        cap_hi = left_end;
                     for (int x = cap_hi; x < left_end; ++x) {
                         int local = x - inner_left;
                         uint8_t coverage = corner_mask[local];
@@ -1617,19 +1591,30 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                         uint32_t *p = &dst_ptr[center_lo];
                         int i = 0;
                         for (; i + 7 < span; i += 8) {
-                            p[0] = fill; p[1] = fill; p[2] = fill; p[3] = fill;
-                            p[4] = fill; p[5] = fill; p[6] = fill; p[7] = fill;
+                            p[0] = fill;
+                            p[1] = fill;
+                            p[2] = fill;
+                            p[3] = fill;
+                            p[4] = fill;
+                            p[5] = fill;
+                            p[6] = fill;
+                            p[7] = fill;
                             p += 8;
                         }
-                        for (; i < span; ++i) *p++ = fill;
+                        for (; i < span; ++i)
+                            *p++ = fill;
                     }
                 } else {
                     int lo = copy_x < center_lo ? center_lo : (copy_x > center_hi ? center_hi : copy_x);
-                    for (int x = center_lo; x < lo; ++x) dst_ptr[x] = fill;
+                    for (int x = center_lo; x < lo; ++x)
+                        dst_ptr[x] = fill;
                     int hi_start = copy_x + copy_w;
-                    if (hi_start < center_lo) hi_start = center_lo;
-                    if (hi_start > center_hi) hi_start = center_hi;
-                    for (int x = hi_start; x < center_hi; ++x) dst_ptr[x] = fill;
+                    if (hi_start < center_lo)
+                        hi_start = center_lo;
+                    if (hi_start > center_hi)
+                        hi_start = center_hi;
+                    for (int x = hi_start; x < center_hi; ++x)
+                        dst_ptr[x] = fill;
                 }
 
                 int right_lo = rx > center_end_x ? rx : center_end_x;
@@ -1653,8 +1638,10 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                             dst_ptr[x] = blend_coverage_rgb(dst_ptr[x], fill, coverage);
                     }
                     int cap_hi = copy_x + copy_w;
-                    if (cap_hi < right_lo) cap_hi = right_lo;
-                    if (cap_hi > rect_right) cap_hi = rect_right;
+                    if (cap_hi < right_lo)
+                        cap_hi = right_lo;
+                    if (cap_hi > rect_right)
+                        cap_hi = rect_right;
                     for (int x = cap_hi; x < rect_right; ++x) {
                         int local = inner_w - 1 - (x - inner_left);
                         uint8_t coverage = corner_mask[local];

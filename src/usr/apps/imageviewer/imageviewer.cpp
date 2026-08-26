@@ -181,12 +181,12 @@ void draw_centered_text(Surface *s, const GuiFont *font, int y, const char *text
     int x = (static_cast<int>(s->width) - text_w) / 2;
     if (x < 0)
         x = 0;
-    gui_draw_text_clipped(s, font, x, y, static_cast<int>(s->width), text, fg, g_gui_style.app_surface);
+    gui_draw_text_clipped(s, font, x, y, static_cast<int>(s->width), text, fg, g_gui_style.app_bg);
 }
 
 void draw_viewer(Surface *s, ViewerState *st)
 {
-    gui_fill_surface(s, g_gui_style.app_surface);
+    gui_fill_surface(s, g_gui_style.app_bg);
 
     if (st->status == VIEWER_EMPTY) {
         int y = (static_cast<int>(s->height) - gui_font_line_height(gui_font_title()) - gui_line_height() * 2) / 2;

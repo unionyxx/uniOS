@@ -68,7 +68,7 @@ static_assert(k_dock_item_count == SHELL_DOCK_ITEM_COUNT, "Dock layout constants
 
 static inline int dock_hover_padding()
 {
-    return gui_scaled_metric(10);
+    return gui_space_1();
 }
 static inline Rect dock_full_rect(uint32_t dock_w, uint32_t dock_h)
 {
@@ -76,7 +76,36 @@ static inline Rect dock_full_rect(uint32_t dock_w, uint32_t dock_h)
 }
 static inline int dock_panel_radius(int panel_w, int panel_h)
 {
-    return gui_corner_radius(panel_w, panel_h, gui_scaled_metric(20));
+    return gui_corner_radius(panel_w, panel_h, gui_radius_2xl());
+}
+
+// Shared hover-pill (tooltip) geometry: used by the draw path and the damage
+// path so they can never diverge.
+struct DockPillLayout
+{
+    int x;
+    int y;
+    int w;
+    int h;
+};
+
+static DockPillLayout dock_hover_pill_layout(const char *label, int icon_x, int icon_size, uint32_t dock_w)
+{
+    DockPillLayout pill = {};
+    int text_w = gui_measure_text(gui_font_default(), label ? label : "") + gui_scaled_metric(2);
+    int pad_x = gui_badge_pad_x();
+    pill.h = gui_badge_h();
+    pill.w = text_w + pad_x * 2;
+    pill.x = icon_x + (icon_size - pill.w) / 2;
+    pill.y = shell_dock_panel_y() - pill.h - gui_scaled_metric(4);
+    int edge_pad = gui_scaled_metric(4);
+    if (pill.x < edge_pad)
+        pill.x = edge_pad;
+    if (pill.x + pill.w > (int)dock_w - edge_pad)
+        pill.x = (int)dock_w - edge_pad - pill.w;
+    if (pill.y < gui_scaled_metric(2))
+        pill.y = gui_scaled_metric(2);
+    return pill;
 }
 
 static inline int dock_item_x(int item_index, uint32_t dock_w)
@@ -220,45 +249,6 @@ static bool ensure_blur_surface(Registry *registry, uint32_t dock_w, uint32_t do
     return true;
 }
 
-static inline uint8_t dock_scale_alpha_u8(uint8_t alpha, uint8_t coverage)
-{
-    return (uint8_t)(((uint32_t)alpha * (uint32_t)coverage + 127u) / 255u);
-}
-
-static inline uint32_t dock_blend_pixel(uint32_t dst, uint32_t src, uint8_t coverage)
-{
-    uint8_t src_alpha = dock_scale_alpha_u8((uint8_t)(src >> 24), coverage);
-    if (src_alpha == 0)
-        return dst;
-
-    uint8_t dst_alpha = (uint8_t)(dst >> 24);
-    if (dst_alpha == 0)
-        return ((uint32_t)src_alpha << 24) | (src & 0x00FFFFFFu);
-    if (src_alpha == 255)
-        return 0xFF000000u | (src & 0x00FFFFFFu);
-
-    uint32_t inv = 255u - src_alpha;
-    uint32_t out_alpha = (uint32_t)src_alpha + ((uint32_t)dst_alpha * inv + 127u) / 255u;
-    if (out_alpha == 0)
-        return 0;
-
-    uint32_t dr_p = ((dst >> 16) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t dg_p = ((dst >> 8) & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t db_p = (dst & 0xFFu) * (uint32_t)dst_alpha;
-    uint32_t sr_p = ((src >> 16) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sg_p = ((src >> 8) & 0xFFu) * (uint32_t)src_alpha;
-    uint32_t sb_p = (src & 0xFFu) * (uint32_t)src_alpha;
-
-    uint32_t out_r_p = sr_p + (dr_p * inv + 127u) / 255u;
-    uint32_t out_g_p = sg_p + (dg_p * inv + 127u) / 255u;
-    uint32_t out_b_p = sb_p + (db_p * inv + 127u) / 255u;
-
-    uint32_t r = (out_r_p + out_alpha / 2u) / out_alpha;
-    uint32_t g = (out_g_p + out_alpha / 2u) / out_alpha;
-    uint32_t b = (out_b_p + out_alpha / 2u) / out_alpha;
-    return (out_alpha << 24) | (r << 16) | (g << 8) | b;
-}
-
 static inline uint8_t dock_unpremultiply_channel(uint32_t value, uint32_t alpha)
 {
     if (alpha == 0)
@@ -332,7 +322,7 @@ static void blit_blur_rounded_rect(Surface *canvas, Surface *blur, int x, int y,
                 continue;
             uint32_t src = blur->buffer[(size_t)py * src_stride + (uint32_t)px];
             uint32_t dst = canvas->buffer[(size_t)py * dst_stride + (uint32_t)px];
-            canvas->buffer[(size_t)py * dst_stride + (uint32_t)px] = dock_blend_pixel(dst, src, coverage);
+            canvas->buffer[(size_t)py * dst_stride + (uint32_t)px] = gui_blend_pixel(dst, src, coverage);
         }
     }
 }
@@ -465,27 +455,14 @@ static Rect dock_item_damage_rect(int item_index, uint32_t dock_w, uint32_t dock
     int bottom = shell_dock_indicator_y(dock_h) + shell_dock_indicator_size() + hover_pad;
 
     const DockItem &item = k_dock_items[item_index];
-    const GuiFont *font = gui_font_default();
-    int text_w = gui_measure_text(font, item.title ? item.title : "") + gui_scaled_metric(2);
-    int pad_x = gui_scaled_metric(9);
-    int pill_h = gui_scaled_metric(18);
-    int pill_w = text_w + pad_x * 2;
-    int pill_x = icon_x + (icon_size - pill_w) / 2;
-    int pill_y = shell_dock_panel_y() - pill_h - gui_scaled_metric(4);
-    int edge_pad = gui_scaled_metric(4);
-    if (pill_x < edge_pad)
-        pill_x = edge_pad;
-    if (pill_x + pill_w > (int)dock_w - edge_pad)
-        pill_x = (int)dock_w - edge_pad - pill_w;
-    if (pill_y < gui_scaled_metric(2))
-        pill_y = gui_scaled_metric(2);
+    DockPillLayout pill = dock_hover_pill_layout(item.title, icon_x, icon_size, dock_w);
 
-    if (pill_x - gui_scaled_metric(2) < left)
-        left = pill_x - gui_scaled_metric(2);
-    if (pill_x + pill_w + gui_scaled_metric(2) > right)
-        right = pill_x + pill_w + gui_scaled_metric(2);
-    if (pill_y - gui_scaled_metric(2) < top)
-        top = pill_y - gui_scaled_metric(2);
+    if (pill.x - gui_scaled_metric(2) < left)
+        left = pill.x - gui_scaled_metric(2);
+    if (pill.x + pill.w + gui_scaled_metric(2) > right)
+        right = pill.x + pill.w + gui_scaled_metric(2);
+    if (pill.y - gui_scaled_metric(2) < top)
+        top = pill.y - gui_scaled_metric(2);
 
     Rect dirty = {left, top, right - left, bottom - top};
     if (!gui_clamp_rect_to_canvas(&dirty, (int)dock_w, (int)dock_h))

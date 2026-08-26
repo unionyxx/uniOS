@@ -2434,15 +2434,15 @@ static void find_next(AppState *state)
     state->needs_redraw = true;
 }
 
-static void draw_button_or_field(Surface *win, Rect rect, const char *label, bool primary, bool active, bool hovered,
-                                 bool pressed)
-{
-    gui_app_draw_button_ex(win, rect.x, rect.y, rect.w, rect.h, label, primary, active, hovered, pressed);
-}
-
 static uint32_t editor_bg()
 {
     return g_gui_style.app_surface;
+}
+
+// Translucent accent wash for the editor text selection.
+static uint32_t editor_selection_color()
+{
+    return 0x55000000u | (g_gui_style.accent & 0x00FFFFFFu);
 }
 
 static bool ensure_render_surface(Surface *surface, uint32_t width, uint32_t height)
@@ -2507,23 +2507,10 @@ static int draw_status_pill(Surface *win, int x, int y, const char *label, bool 
 {
     if (!win || !label)
         return 0;
-    int text_w = gui_measure_text(gui_font_default(), label);
-    int pad_x = gui_space_1();
-    int h = gui_badge_h();
-    int w = text_w + pad_x * 2;
     uint32_t bg = active ? g_gui_style.accent_soft : g_gui_style.chrome_bg;
     uint32_t fg = active ? g_gui_style.text : g_gui_style.text_dim;
-    gui_fill_rounded_rect(win, x, y, w, h, h / 2, bg);
-    gui_draw_text_clipped(win, gui_font_default(), x + pad_x, gui_align_text_y(gui_font_default(), y, h), text_w, label,
-                          fg, bg);
-    return w;
-}
-
-static void draw_toolbar_hint(Surface *win, int x, int y, int w, const char *hint)
-{
-    if (!win || !hint || w <= 0)
-        return;
-    gui_draw_text_clipped(win, gui_font_default(), x, y, w, hint, g_gui_style.text_muted, g_gui_style.chrome_bg);
+    gui_draw_badge(win, x, y, label, bg, fg);
+    return gui_measure_text(gui_font_default(), label) + gui_badge_pad_x() * 2;
 }
 
 static void draw_minimap(Surface *win, const AppState *state, Rect rect, int first_line, int visible_lines)
@@ -2564,6 +2551,18 @@ static void draw_minimap(Surface *win, const AppState *state, Rect rect, int fir
     }
 }
 
+static int latitude_project_area_bottom(const AppState *state, Rect sidebar)
+{
+    int side_header_h = gui_card_header_h();
+    int sy = sidebar.y + side_header_h + gui_space_1() + gui_line_height() + gui_space_1();
+    int needed_project_h = (sy - sidebar.y) + state->project_count * (gui_app_row_h() + gui_app_row_gap());
+    int max_project_area = max_int(gui_scaled_metric(150), (sidebar.h * 58) / 100);
+    int project_area_bottom = sidebar.y + min_int(max_project_area, needed_project_h);
+    if (project_area_bottom > sidebar.y + sidebar.h - gui_scaled_metric(90))
+        project_area_bottom = sidebar.y + sidebar.h - gui_scaled_metric(90);
+    return project_area_bottom;
+}
+
 static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
 {
     if (!win || !state || !state->buffer || !rects)
@@ -2575,10 +2574,10 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     int view_h = latitude_view_height(win);
     gui_fill_rect(win, 0, 0, view_w, view_h, g_gui_style.app_bg);
 
-    const int margin = view_w >= gui_scaled_metric(1100) ? gui_scaled_metric(12) : gui_scaled_metric(8);
-    const int gap = gui_scaled_metric(10);
-    const int topbar_h = gui_scaled_metric(44);
-    const int min_bottom = gui_scaled_metric(8);
+    const int margin = gui_app_outer_padding();
+    const int gap = gui_app_section_gap();
+    const int topbar_h = gui_title_bar_h() + gui_space_1();
+    const int min_bottom = gui_space_1();
 
     Rect topbar = gui_rect_make(margin, margin, max_int(0, view_w - margin * 2), topbar_h);
     gui_draw_panel_inset(win, topbar.x, topbar.y, topbar.w, topbar.h, g_gui_style.app_surface_alt, g_gui_style.border,
@@ -2659,15 +2658,10 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                              rects->sidebar_rect.h, g_gui_style.app_surface, g_gui_style.border,
                              g_gui_style.chrome_bg_alt);
 
-        int side_header_h = gui_scaled_metric(34);
-        gui_fill_rect(win, rects->sidebar_rect.x + 1, rects->sidebar_rect.y + 1, rects->sidebar_rect.w - 2,
-                      side_header_h, g_gui_style.chrome_bg);
-        gui_draw_text_clipped(win, gui_font_title(), rects->sidebar_rect.x + gui_space_2(),
-                              gui_align_text_y(gui_font_title(), rects->sidebar_rect.y, side_header_h),
-                              rects->sidebar_rect.w - gui_space_4(), "Explorer", g_gui_style.text,
-                              g_gui_style.chrome_bg);
-        gui_draw_separator_h(win, rects->sidebar_rect.x + 1, rects->sidebar_rect.y + side_header_h,
-                             rects->sidebar_rect.w - 2, g_gui_style.chrome_edge);
+        int side_header_h = gui_card_header_h();
+        gui_draw_card_header_ext(win, rects->sidebar_rect.x + 1, rects->sidebar_rect.y + 1, rects->sidebar_rect.w - 2,
+                                 gui_corner_radius(rects->sidebar_rect.w - 2, side_header_h, gui_radius_md() - 1),
+                                 "Explorer", nullptr);
 
         int sy = rects->sidebar_rect.y + side_header_h + gui_space_1();
         gui_draw_text_clipped(win, gui_font_default(), rects->sidebar_rect.x + gui_space_2(), sy,
@@ -2675,13 +2669,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                               g_gui_style.app_surface);
         sy += gui_line_height() + gui_space_1();
 
-        int outline_header_h = gui_scaled_metric(30);
-        int max_project_area = max_int(gui_scaled_metric(150), (rects->sidebar_rect.h * 58) / 100);
-        int needed_project_h = (sy - rects->sidebar_rect.y) + state->project_count * (gui_app_row_h() + 2);
-        int project_area_bottom = rects->sidebar_rect.y + min_int(max_project_area, needed_project_h);
-
-        if (project_area_bottom > rects->sidebar_rect.y + rects->sidebar_rect.h - gui_scaled_metric(90))
-            project_area_bottom = rects->sidebar_rect.y + rects->sidebar_rect.h - gui_scaled_metric(90);
+        int outline_header_h = gui_card_header_h();
+        int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
 
         for (int i = state->project_first_row; i < state->project_count && sy + gui_app_row_h() <= project_area_bottom;
              i++) {
@@ -2696,20 +2685,14 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
             gui_app_draw_list_row(win, rects->project_rows[i].x, rects->project_rows[i].y, rects->project_rows[i].w,
                                   rects->project_rows[i].h, badge, state->project_rows[i].name, detail_text,
                                   i == state->project_selected, i == state->project_hovered, muted);
-            sy += gui_app_row_h() + 2;
+            sy += gui_app_row_h() + gui_app_row_gap();
         }
 
         int outline_y = project_area_bottom + gui_space_1();
         gui_draw_separator_h(win, rects->sidebar_rect.x + gui_space_2(), outline_y - gui_space_1(),
                              rects->sidebar_rect.w - gui_space_4(), g_gui_style.chrome_edge);
-        gui_fill_rect(win, rects->sidebar_rect.x + 1, outline_y, rects->sidebar_rect.w - 2, outline_header_h,
-                      g_gui_style.chrome_bg);
-        gui_draw_text_clipped(win, gui_font_title(), rects->sidebar_rect.x + gui_space_2(),
-                              gui_align_text_y(gui_font_title(), outline_y, outline_header_h),
-                              rects->sidebar_rect.w - gui_space_4(), "Outline", g_gui_style.text,
-                              g_gui_style.chrome_bg);
-        gui_draw_separator_h(win, rects->sidebar_rect.x + 1, outline_y + outline_header_h, rects->sidebar_rect.w - 2,
-                             g_gui_style.chrome_edge);
+        gui_draw_card_header_ext(win, rects->sidebar_rect.x + 1, outline_y, rects->sidebar_rect.w - 2, 0, "Outline",
+                                 nullptr);
 
         sy = outline_y + outline_header_h + gui_space_1();
         for (int i = state->outline_first_row;
@@ -2722,7 +2705,7 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                                   rects->outline_rows[i].h, state->outline_rows[i].badge, state->outline_rows[i].label,
                                   detail_line, state->cursor_line == state->outline_rows[i].line,
                                   i == state->outline_hovered, false);
-            sy += gui_app_row_h() + 2;
+            sy += gui_app_row_h() + gui_app_row_gap();
         }
     }
 
@@ -2733,8 +2716,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     int panel_y = rects->editor_panel.y;
     int panel_w = rects->editor_panel.w;
     int panel_h = rects->editor_panel.h;
-    int tab_h = gui_scaled_metric(34);
-    int toolbar_h = gui_scaled_metric(38);
+    int tab_h = gui_app_row_h();
+    int toolbar_h = gui_app_control_h() + gui_scaled_metric(12);
     int status_h = gui_scaled_metric(24);
 
     gui_fill_rect(win, panel_x + 1, panel_y + 1, panel_w - 2, tab_h, g_gui_style.chrome_bg);
@@ -2743,7 +2726,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     int tab_x = panel_x + gui_space_1();
     int tab_w = min_int(gui_scaled_metric(260), max_int(gui_scaled_metric(130), panel_w / 3));
     int tab_radius = gui_radius_sm();
-    gui_fill_rounded_rect(win, tab_x, panel_y + gui_scaled_metric(5), tab_w, tab_h - gui_scaled_metric(5), tab_radius,
+    int tab_inset = gui_space_0_5();
+    gui_fill_rounded_rect(win, tab_x, panel_y + tab_inset, tab_w, tab_h - tab_inset, tab_radius,
                           g_gui_style.app_surface);
     gui_fill_rect(win, tab_x, panel_y + tab_h - tab_radius, tab_w, tab_radius, g_gui_style.app_surface);
 
@@ -2763,12 +2747,13 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     rects->reload_button = gui_rect_make(rects->save_button.x + rects->save_button.w + gui_space_1(), button_y,
                                          gui_scaled_metric(70), gui_app_control_h());
 
-    draw_button_or_field(win, rects->new_button, "New", false, false, state->hovered == HOVER_NEW_FILE,
-                         state->button_pressed == 1);
-    draw_button_or_field(win, rects->save_button, "Save", true, false, state->hovered == HOVER_SAVE,
-                         state->button_pressed == 2);
-    draw_button_or_field(win, rects->reload_button, "Reload", false, false, state->hovered == HOVER_RELOAD,
-                         state->button_pressed == 3);
+    gui_app_draw_button_ex(win, rects->new_button.x, rects->new_button.y, rects->new_button.w, rects->new_button.h,
+                           "New", false, false, state->hovered == HOVER_NEW_FILE, state->button_pressed == 1);
+    gui_app_draw_button_ex(win, rects->save_button.x, rects->save_button.y, rects->save_button.w, rects->save_button.h,
+                           "Save", true, false, state->hovered == HOVER_SAVE, state->button_pressed == 2);
+    gui_app_draw_button_ex(win, rects->reload_button.x, rects->reload_button.y, rects->reload_button.w,
+                           rects->reload_button.h, "Reload", false, false, state->hovered == HOVER_RELOAD,
+                           state->button_pressed == 3);
 
     int search_w = min_int(gui_scaled_metric(210), max_int(gui_scaled_metric(120), panel_w / 5));
     if (state->search_focused) {
@@ -2875,9 +2860,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                     int ov_start = max_int(sel_start, seg_start);
                     int ov_end = min_int(sel_end, seg_end);
                     if (ov_end > ov_start) {
-                        uint32_t sel_color = 0x55000000u | (g_gui_style.accent & 0x00FFFFFFu);
                         gui_fill_rect_blend(win, text_x + (ov_start - seg_start) * cell_w, row_y,
-                                            (ov_end - ov_start) * cell_w, cell_h, sel_color);
+                                            (ov_end - ov_start) * cell_w, cell_h, editor_selection_color());
                     }
                 }
             }
@@ -2951,19 +2935,6 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                           g_gui_style.text_dim, g_gui_style.chrome_bg);
 
     if (state->show_help) {
-        rects->help_close = gui_rect_make(0, 0, 0, 0);
-        int box_w = gui_scaled_metric(430);
-        int box_h = gui_scaled_metric(248);
-        if (box_w > (int)win->width - gui_space_4())
-            box_w = (int)win->width - gui_space_4();
-        if (box_h > (int)win->height - gui_space_4())
-            box_h = (int)win->height - gui_space_4();
-        int box_x = ((int)win->width - box_w) / 2;
-        int box_y = ((int)win->height - box_h) / 2;
-        gui_fill_rect_blend(win, 0, 0, (int)win->width, (int)win->height, 0x80000000u);
-        gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
-                             g_gui_style.chrome_bg_alt);
-        gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Latitude Help", nullptr);
         static const char *tips[] = {
             "Ctrl+S save, Ctrl+N new, Ctrl+O open selected file",
             "Ctrl+Z / Ctrl+Y undo and redo",
@@ -2972,20 +2943,11 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
             "Shift+arrows or mouse drag selects text",
             "Ctrl+F find, Ctrl+L edit the file path",
         };
-        int text_x = box_x + gui_space_2();
-        int text_y = box_y + gui_card_header_h() + gui_space_2();
-        int line_h = gui_line_height();
-        for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
-            gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i],
-                                  g_gui_style.text, g_gui_style.app_surface);
-            text_y += line_h + gui_space_1();
-        }
-        int btn_w = gui_scaled_metric(88);
-        rects->help_close =
-            gui_rect_make(box_x + box_w - gui_space_2() - btn_w, box_y + box_h - gui_space_2() - gui_app_control_h(),
-                          btn_w, gui_app_control_h());
-        gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
-                               "Close", true, false, false, false);
+        GuiDialogLayout layout =
+            gui_dialog_layout((int)win->width, (int)win->height, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
+        gui_draw_dialog(win, (int)win->width, (int)win->height, 0, &layout, "Latitude Help", tips,
+                        (int)(sizeof(tips) / sizeof(tips[0])), nullptr, "Close", false, false, nullptr, false, false);
+        rects->help_close = layout.confirm;
     }
 }
 
@@ -3686,13 +3648,7 @@ extern "C" int main()
                     state->first_line = clamp_int(state->first_line, 0, max_first);
                     state->needs_redraw = true;
                 } else if (point_in_rect(rects->sidebar_rect, ev.mouse.x, ev.mouse.y)) {
-                    int side_header_h = gui_scaled_metric(34);
-                    int sy = rects->sidebar_rect.y + side_header_h + gui_space_1() + gui_line_height() + gui_space_1();
-                    int needed_project_h = (sy - rects->sidebar_rect.y) + state->project_count * (gui_app_row_h() + 2);
-                    int max_project_area = max_int(gui_scaled_metric(150), (rects->sidebar_rect.h * 58) / 100);
-                    int project_area_bottom = rects->sidebar_rect.y + min_int(max_project_area, needed_project_h);
-                    if (project_area_bottom > rects->sidebar_rect.y + rects->sidebar_rect.h - gui_scaled_metric(90))
-                        project_area_bottom = rects->sidebar_rect.y + rects->sidebar_rect.h - gui_scaled_metric(90);
+                    int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
 
                     if (ev.mouse.y < project_area_bottom) {
                         state->project_first_row += ev.mouse.scroll_y < 0 ? 3 : -3;

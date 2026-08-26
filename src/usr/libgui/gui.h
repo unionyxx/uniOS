@@ -97,6 +97,7 @@ typedef struct
     uint32_t success;
     uint32_t warning;
     uint32_t danger;
+    uint32_t overlay_scrim;
 } GuiStylePalette;
 
 typedef struct
@@ -119,6 +120,7 @@ typedef struct
 
 enum
 {
+    GUI_SPACE_0_5 = 4,
     GUI_SPACE_1 = 8,
     GUI_SPACE_1_5 = 12,
     GUI_SPACE_2 = 16,
@@ -133,7 +135,10 @@ enum
     GUI_APP_SECTION_GAP = 14,
     GUI_APP_HEADER_H = 58,
     GUI_APP_ROW_H = 34,
-    GUI_APP_CONTROL_H = 26
+    GUI_APP_CONTROL_H = 26,
+    GUI_DIALOG_MIN_W = 360,
+    GUI_DIALOG_MAX_W = 480,
+    GUI_DIALOG_BUTTON_W = 88
 };
 
 typedef struct
@@ -145,6 +150,17 @@ typedef struct
     int outer_w;
     int outer_h;
 } GuiAppLayout;
+
+// Modal dialog geometry. `panel` is the centered dialog box, `field` the
+// optional text input, and `cancel`/`confirm` the footer buttons (`cancel`
+// only valid when the dialog was laid out with a cancel label).
+typedef struct
+{
+    Rect panel;
+    Rect field;
+    Rect cancel;
+    Rect confirm;
+} GuiDialogLayout;
 
 typedef struct
 {
@@ -294,6 +310,7 @@ void gui_apply_theme(GuiThemeMode mode);
 bool gui_sync_theme_from_registry(void);
 int gui_ui_scale_pct(void);
 int gui_scaled_metric(int base_px);
+int gui_space_0_5(void);
 int gui_space_1(void);
 int gui_space_1_5(void);
 int gui_space_2(void);
@@ -307,10 +324,19 @@ int gui_app_outer_padding(void);
 int gui_app_section_gap(void);
 int gui_app_header_h(void);
 int gui_app_row_h(void);
+// Vertical gap between consecutive list/nav rows.
+int gui_app_row_gap(void);
+// Two-line row (title + detail) for toggles and settings rows.
+int gui_app_row_tall_h(void);
+// Two-line navigation item (title + detail).
+int gui_app_nav_h(void);
 int gui_app_control_h(void);
 int gui_title_bar_h(void);
 int gui_menubar_h(void);
 int gui_system_menubar_canvas_h(void);
+int gui_scrollbar_w(void);
+int gui_scrollbar_min_thumb(void);
+int gui_dialog_button_w(void);
 
 GuiAppLayout gui_app_begin(Surface *s);
 void gui_app_draw_header(Surface *s, const GuiAppLayout *layout, const char *title, const char *subtitle,
@@ -345,6 +371,26 @@ int gui_popup_menu_hit_test(const GuiMenuItem *items, int count, int x, int y, i
 void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index);
 void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
                              const char *const *accel_labels, const bool *checked_flags);
+
+// Canonical drop shadow for floating panels (popups, dialogs, shell
+// overlays): three stacked rounded fills below the panel. Draw it before the
+// panel itself.
+void gui_draw_panel_shadow(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r);
+
+// Modal dialog: scrim + shadow + panel + card header + body lines (or a text
+// field) + footer buttons. gui_dialog_layout computes every rect (panel width
+// is derived from the longest line); gui_draw_dialog renders the whole stack.
+// view_scroll_y supports scrolled app views (pass 0 otherwise).
+GuiDialogLayout gui_dialog_layout(int view_w, int view_h, int view_scroll_y, const char *const *lines, int line_count,
+                                  bool has_field);
+void gui_draw_dialog(Surface *s, int view_w, int view_h, int view_scroll_y, const GuiDialogLayout *layout,
+                     const char *title, const char *const *lines, int line_count, const char *field_value,
+                     const char *confirm_label, bool confirm_hovered, bool confirm_pressed, const char *cancel_label,
+                     bool cancel_hovered, bool cancel_pressed);
+
+// Vertical scrollbar: track + rounded thumb. thumb_offset is the thumb top
+// relative to the track top; pass hovered to brighten the thumb.
+void gui_draw_scrollbar(Surface *s, int x, int y, int w, int h, int thumb_offset, int thumb_length, bool hovered);
 
 void gui_draw_cursor(Surface *s, int32_t x, int32_t y);
 void gui_draw_cursor_kind(Surface *s, int32_t x, int32_t y, GuiCursorKind kind);
@@ -426,6 +472,12 @@ static inline int gui_radius_lg(void)
 static inline int gui_radius_xl(void)
 {
     return gui_scaled_metric(16);
+}
+
+// Large floating shell panels: dock, control center, index, notifications.
+static inline int gui_radius_2xl(void)
+{
+    return gui_scaled_metric(20);
 }
 
 static inline int gui_panel_radius(int w, int h)

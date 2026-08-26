@@ -501,21 +501,20 @@ public:
         uint32_t total_slices = get_total_history_slices();
         uint32_t max_s = max_scroll();
         if (total_slices > m_height && max_s > 0) {
-            int sb_x = (int)m_window.width - term_pad_x() / 2 - 10;
+            int sb_w = gui_scrollbar_w();
+            int sb_x = (int)m_window.width - term_pad_x() / 2 - sb_w - gui_space_0_5();
             int sb_y = term_content_y();
-            int sb_w = 6;
             int sb_h = (int)(m_height * term_cell_h());
 
             gui_fill_rect(&m_window, sb_x - 1, sb_y, sb_w + 2, sb_h, term_bg());
-            gui_fill_rounded_rect(&m_window, sb_x, sb_y, sb_w, sb_h, sb_w / 2, g_gui_style.app_surface_alt);
 
             int thumb_h = (sb_h * (int)m_height) / (int)total_slices;
-            if (thumb_h < 16)
-                thumb_h = 16;
+            if (thumb_h < gui_scrollbar_min_thumb())
+                thumb_h = gui_scrollbar_min_thumb();
 
             int scrollable_dist = sb_h - thumb_h;
-            int thumb_y = sb_y + scrollable_dist - (int)((scrollable_dist * m_scroll_offset) / max_s);
-            gui_fill_rounded_rect(&m_window, sb_x, thumb_y, sb_w, thumb_h, sb_w / 2, g_gui_style.text_dim);
+            int thumb_y = scrollable_dist - (int)((scrollable_dist * m_scroll_offset) / max_s);
+            gui_draw_scrollbar(&m_window, sb_x, sb_y, sb_w, sb_h, thumb_y, thumb_h, false);
 
             if (has_dirty) {
                 if (dirty_x2 < (int32_t)m_window.width) {
@@ -773,39 +772,18 @@ private:
 
     void draw_help_overlay()
     {
-        int win_w = (int)m_window.width;
-        int win_h = (int)m_window.height;
-        int box_w = gui_scaled_metric(430);
-        int box_h = gui_scaled_metric(262);
-        if (box_w > win_w - gui_space_4())
-            box_w = win_w - gui_space_4();
-        if (box_h > win_h - gui_space_4())
-            box_h = win_h - gui_space_4();
-        int box_x = (win_w - box_w) / 2;
-        int box_y = (win_h - box_h) / 2;
-        gui_fill_rect_blend(&m_window, 0, 0, win_w, win_h, 0x80000000u);
-        gui_draw_panel_inset(&m_window, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
-                             g_gui_style.chrome_bg_alt);
-        gui_draw_card_header(&m_window, box_x + 1, box_y + 1, box_w - 2, "Terminal Help", nullptr);
         static const char *tips[] = {
             "Drag with the mouse to select output, then copy it",   "Ctrl+X copies the selection (Ctrl+C sends SIGINT)",
             "Ctrl+V pastes the clipboard into the shell",           "Right-click pastes the clipboard",
             "Page Up / Page Down and the wheel scroll the history", "Edit > Clear Screen wipes the scrollback",
             "View > Zoom In / Zoom Out changes the text size",
         };
-        int text_x = box_x + gui_space_2();
-        int text_y = box_y + gui_card_header_h() + gui_space_2();
-        int line_h = gui_line_height();
-        for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
-            gui_draw_text_clipped(&m_window, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i],
-                                  g_gui_style.text, g_gui_style.app_surface);
-            text_y += line_h + gui_space_1();
-        }
-        int btn_w = gui_scaled_metric(88);
-        m_help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
-                                     box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
-        gui_app_draw_button_ex(&m_window, m_help_close.x, m_help_close.y, m_help_close.w, m_help_close.h, "Close", true,
-                               false, false, false);
+        int win_w = (int)m_window.width;
+        int win_h = (int)m_window.height;
+        GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
+        gui_draw_dialog(&m_window, win_w, win_h, 0, &layout, "Terminal Help", tips,
+                        (int)(sizeof(tips) / sizeof(tips[0])), nullptr, "Close", false, false, nullptr, false, false);
+        m_help_close = layout.confirm;
     }
 
     void draw_chrome()

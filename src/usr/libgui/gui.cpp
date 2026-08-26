@@ -46,13 +46,13 @@ static const Theme k_gui_theme_dark = {0xFF111214, 0xFFF2F2F0, 0xFF6E7784, 0xFF2
 
 static const Theme k_gui_theme_light = {0xFFF4F5F7, 0xFF15181D, 0xFF4B6EAE, 0xFFD6D9E0, 0xFFF6F7F9, 0xFFF6F7F9};
 
-static const GuiStylePalette k_gui_style_dark = {0xFF111214, 0xFF15171A, 0xFF1A1D21, 0xFF1D2025, 0xFF242830, 0xFF2B3037,
-                                                 0xFF333942, 0xFF555E6A, 0xFF484F59, 0xFF626C78, 0xFF2A2F36, 0xFFF2F2F0,
-                                                 0xFFC5C8CC, 0xFF8E949C, 0xFF55B36A, 0xFFE2AF45, 0xFFFF625E};
+static const GuiStylePalette k_gui_style_dark = {
+    0xFF111214, 0xFF15171A, 0xFF1A1D21, 0xFF1D2025, 0xFF242830, 0xFF2B3037, 0xFF333942, 0xFF555E6A, 0xFF484F59,
+    0xFF626C78, 0xFF2A2F36, 0xFFF2F2F0, 0xFFC5C8CC, 0xFF8E949C, 0xFF55B36A, 0xFFE2AF45, 0xFFFF625E, 0x80000000u};
 
 static const GuiStylePalette k_gui_style_light = {
     0xFFF4F5F7, 0xFFFFFFFF, 0xFFF8F9FB, 0xFFF0F2F5, 0xFFE9EDF3, 0xFFD7DCE4, 0xFFD4D9E2, 0xFF4B6EAE, 0xFFB9C4D5,
-    0xFF4B6EAE, 0xFFDDE6F4, 0xFF15181D, 0xFF5D6470, 0xFF808792, 0xFF267A46, 0xFF9A6A00, 0xFFD43D35};
+    0xFF4B6EAE, 0xFFDDE6F4, 0xFF15181D, 0xFF5D6470, 0xFF808792, 0xFF267A46, 0xFF9A6A00, 0xFFD43D35, 0x66000000u};
 
 static const GuiChromePalette k_gui_chrome_dark = {0xFF101113, 0xFF17191D, 0xFF1E2126, 0xFF181A1F, 0xFF23272D,
                                                    0xFFF2F2F0, 0xFF9A9FA7, 0x22000000, 0xFF333942, 0xFFFF5F57,
@@ -584,57 +584,9 @@ void gui_draw_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint3
     gui_fill_rect(s, x + w - 1, y, 1, h, color);
 }
 
-static inline uint8_t scale_alpha_u8(uint8_t alpha, uint8_t coverage)
-{
-    return static_cast<uint8_t>((static_cast<uint32_t>(alpha) * static_cast<uint32_t>(coverage) + 127u) / 255u);
-}
-
 static inline uint32_t blend_pixel(uint32_t dst, uint32_t src, uint8_t coverage)
 {
-    uint32_t src_a = (src >> 24) & 0xFFu;
-    if (coverage < 255)
-        src_a = (src_a * coverage + 127u) / 255u;
-    if (src_a == 0)
-        return dst;
-    if (src_a == 255)
-        return 0xFF000000u | (src & 0x00FFFFFFu);
-
-    uint32_t dst_a = (dst >> 24) & 0xFFu;
-    if (dst_a == 0)
-        return (src_a << 24) | (src & 0x00FFFFFFu);
-
-    if (dst_a == 255) {
-        uint32_t inv_a = 255u - src_a;
-        uint32_t s_rb = src & 0x00FF00FFu;
-        uint32_t s_ag = (src >> 8) & 0x00FF00FFu;
-        uint32_t d_rb = dst & 0x00FF00FFu;
-        uint32_t d_ag = (dst >> 8) & 0x00FF00FFu;
-
-        uint32_t rb = s_rb * src_a + d_rb * inv_a + 0x00800080u;
-        rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
-        rb &= 0x00FF00FFu;
-
-        uint32_t ag = s_ag * src_a + d_ag * inv_a + 0x00800080u;
-        ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
-        ag &= 0x00FF00FFu;
-
-        return 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
-    }
-
-    // Full ARGB blend fallback
-    uint32_t inv_a = 255u - src_a;
-    uint32_t out_a = src_a + (dst_a * inv_a + 127u) / 255u;
-    if (out_a == 0)
-        return 0;
-
-    auto blend_ch = [&](uint32_t s, uint32_t d, uint32_t sa, uint32_t da) {
-        return (s * sa * 255u + d * da * inv_a + (out_a * 127u)) / (out_a * 255u);
-    };
-
-    uint32_t r = blend_ch((src >> 16) & 0xFFu, (dst >> 16) & 0xFFu, src_a, dst_a);
-    uint32_t g = blend_ch((src >> 8) & 0xFFu, (dst >> 8) & 0xFFu, src_a, dst_a);
-    uint32_t b = blend_ch(src & 0xFFu, dst & 0xFFu, src_a, dst_a);
-    return (out_a << 24) | (r << 16) | (g << 8) | b;
+    return gui_blend_pixel(dst, src, coverage);
 }
 
 static inline void paint_pixel_coverage(uint32_t *dst, uint32_t color, uint8_t coverage, uint8_t base_alpha)
@@ -2162,6 +2114,10 @@ int gui_scaled_metric(int base_px)
     return scaled_metric_floor(base_px);
 }
 
+int gui_space_0_5(void)
+{
+    return scaled_metric_floor(GUI_SPACE_0_5);
+}
 int gui_space_1(void)
 {
     return scaled_metric_floor(GUI_SPACE_1);
@@ -2222,6 +2178,33 @@ int gui_app_control_h(void)
 {
     return clamp_metric(gui_font_line_height(gui_font_default()) + gui_scaled_metric(10), scaled_metric_floor(24),
                         scaled_metric_floor(30));
+}
+int gui_app_row_gap(void)
+{
+    return gui_scaled_metric(4);
+}
+int gui_app_row_tall_h(void)
+{
+    return clamp_metric(gui_font_line_height(gui_font_default()) * 2 + gui_scaled_metric(10), scaled_metric_floor(40),
+                        scaled_metric_floor(52));
+}
+int gui_app_nav_h(void)
+{
+    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_font_line_height(gui_font_default()) +
+                            gui_scaled_metric(14),
+                        scaled_metric_floor(44), scaled_metric_floor(56));
+}
+int gui_scrollbar_w(void)
+{
+    return gui_scaled_metric(6);
+}
+int gui_scrollbar_min_thumb(void)
+{
+    return gui_scaled_metric(16);
+}
+int gui_dialog_button_w(void)
+{
+    return scaled_metric_floor(GUI_DIALOG_BUTTON_W);
 }
 int gui_title_bar_h(void)
 {
@@ -2673,7 +2656,8 @@ void gui_app_draw_button_ex(Surface *s, int x, int y, int w, int h, const char *
         gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, ir, highlight);
     }
     int text_y = gui_align_text_y(gui_font_default(), y, h) + (pressed ? 1 : 0);
-    gui_draw_text_clipped(s, gui_font_default(), x + space_1, text_y, w - space_2, label ? label : "",
+    int text_x = gui_align_text_x_center(gui_font_default(), x + space_1, w - space_2, label ? label : "");
+    gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, w - space_2, label ? label : "",
                           primary ? COLOR_WHITE : g_gui_style.text, bg);
 }
 
@@ -2778,9 +2762,7 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
 
     int radius = gui_corner_radius(w, menu_h, gui_radius_xl());
 
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(6), w, menu_h, radius, 0x08000000u);
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(3), w, menu_h, radius, 0x0C000000u);
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(1), w, menu_h, radius, 0x10000000u);
+    gui_draw_panel_shadow(s, x, y, w, menu_h, radius);
 
     gui_draw_panel_inset_ext(s, x, y, w, menu_h, radius, g_gui_style.app_surface, g_gui_style.border,
                              g_gui_style.chrome_bg_alt);
@@ -2834,6 +2816,136 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
 void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index)
 {
     gui_draw_popup_menu_ext(s, x, y, w, items, count, hovered_index, nullptr, nullptr);
+}
+
+void gui_draw_panel_shadow(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    gui_fill_rounded_rect(s, x + 1, y + gui_scaled_metric(6), w - 2, h, r, 0x08000000u);
+    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(3), w, h, r, 0x0C000000u);
+    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(1), w, h, r, 0x10000000u);
+}
+
+static int dialog_panel_radius()
+{
+    return gui_radius_lg();
+}
+
+GuiDialogLayout gui_dialog_layout(int view_w, int view_h, int view_scroll_y, const char *const *lines, int line_count,
+                                  bool has_field)
+{
+    GuiDialogLayout layout = {};
+    if (view_w <= 0 || view_h <= 0)
+        return layout;
+    if (view_scroll_y < 0)
+        view_scroll_y = 0;
+
+    int content_w = 0;
+    for (int i = 0; lines && i < line_count; i++) {
+        int line_w = gui_measure_text(gui_font_default(), lines[i] ? lines[i] : "");
+        if (line_w > content_w)
+            content_w = line_w;
+    }
+    int panel_w = content_w + gui_space_2() * 2;
+    if (panel_w < scaled_metric_floor(GUI_DIALOG_MIN_W))
+        panel_w = scaled_metric_floor(GUI_DIALOG_MIN_W);
+    if (panel_w > scaled_metric_floor(GUI_DIALOG_MAX_W))
+        panel_w = scaled_metric_floor(GUI_DIALOG_MAX_W);
+    if (panel_w > view_w - gui_space_4())
+        panel_w = view_w - gui_space_4();
+    if (panel_w < 0)
+        panel_w = 0;
+
+    int body_h = has_field ? gui_app_control_h()
+                           : (line_count > 0 ? line_count * (gui_line_height() + gui_space_1()) - gui_space_1() : 0);
+    int panel_h = gui_card_header_h() + gui_space_2() + body_h + gui_space_2() + gui_app_control_h() + gui_space_2();
+    if (panel_h > view_h - gui_space_4())
+        panel_h = view_h - gui_space_4();
+    if (panel_h < 0)
+        panel_h = 0;
+
+    int panel_x = (view_w - panel_w) / 2;
+    int panel_y = view_scroll_y + (view_h - panel_h) / 2;
+    if (panel_x < 0)
+        panel_x = 0;
+    if (panel_y < view_scroll_y)
+        panel_y = view_scroll_y;
+    layout.panel = gui_rect_make(panel_x, panel_y, panel_w, panel_h);
+
+    if (has_field) {
+        layout.field = gui_rect_make(panel_x + gui_space_2(), panel_y + gui_card_header_h() + gui_space_2(),
+                                     panel_w - gui_space_4(), gui_app_control_h());
+    }
+
+    int btn_w = gui_dialog_button_w();
+    layout.confirm = gui_rect_make(panel_x + panel_w - gui_space_2() - btn_w,
+                                   panel_y + panel_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
+    layout.cancel =
+        gui_rect_make(layout.confirm.x - gui_space_1() - btn_w, layout.confirm.y, btn_w, gui_app_control_h());
+    return layout;
+}
+
+void gui_draw_dialog(Surface *s, int view_w, int view_h, int view_scroll_y, const GuiDialogLayout *layout,
+                     const char *title, const char *const *lines, int line_count, const char *field_value,
+                     const char *confirm_label, bool confirm_hovered, bool confirm_pressed, const char *cancel_label,
+                     bool cancel_hovered, bool cancel_pressed)
+{
+    if (!s || !layout || layout->panel.w <= 0 || layout->panel.h <= 0)
+        return;
+    if (view_scroll_y < 0)
+        view_scroll_y = 0;
+
+    gui_fill_rect_blend(s, 0, view_scroll_y, view_w, view_h, g_gui_style.overlay_scrim);
+
+    const Rect &panel = layout->panel;
+    int r = gui_corner_radius(panel.w, panel.h, dialog_panel_radius());
+    gui_draw_panel_shadow(s, panel.x, panel.y, panel.w, panel.h, r);
+    gui_draw_panel_inset_ext(s, panel.x, panel.y, panel.w, panel.h, r, g_gui_style.app_surface,
+                             g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
+    gui_draw_card_header_ext(s, panel.x + 1, panel.y + 1, panel.w - 2,
+                             gui_corner_radius(panel.w - 2, panel.h - 2, r - 1), title, nullptr);
+
+    int text_x = panel.x + gui_space_2();
+    int text_w = panel.w - gui_space_4();
+    int text_y = panel.y + gui_card_header_h() + gui_space_2();
+    if (field_value) {
+        if (!gui_rect_is_empty(layout->field))
+            gui_app_draw_text_field(s, layout->field.x, layout->field.y, layout->field.w, layout->field.h, field_value,
+                                    true, false);
+    } else {
+        for (int i = 0; lines && i < line_count; i++) {
+            gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, text_w, lines[i] ? lines[i] : "",
+                                  g_gui_style.text, g_gui_style.app_surface);
+            text_y += gui_line_height() + gui_space_1();
+        }
+    }
+
+    if (cancel_label && *cancel_label) {
+        gui_app_draw_button_ex(s, layout->cancel.x, layout->cancel.y, layout->cancel.w, layout->cancel.h, cancel_label,
+                               false, false, cancel_hovered, cancel_pressed);
+    }
+    gui_app_draw_button_ex(s, layout->confirm.x, layout->confirm.y, layout->confirm.w, layout->confirm.h,
+                           confirm_label && *confirm_label ? confirm_label : "Close", true, false, confirm_hovered,
+                           confirm_pressed);
+}
+
+void gui_draw_scrollbar(Surface *s, int x, int y, int w, int h, int thumb_offset, int thumb_length, bool hovered)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    int r = w / 2;
+    gui_fill_rounded_rect(s, x, y, w, h, r, g_gui_style.app_surface_alt);
+    if (thumb_length <= 0)
+        return;
+    if (thumb_offset < 0)
+        thumb_offset = 0;
+    if (thumb_offset + thumb_length > h)
+        thumb_offset = h - thumb_length;
+    if (thumb_offset < 0)
+        thumb_offset = 0;
+    uint32_t thumb_color = hovered ? g_gui_style.text_muted : g_gui_style.text_dim;
+    gui_fill_rounded_rect(s, x, y + thumb_offset, w, thumb_length, r, thumb_color);
 }
 
 struct CursorAssetDescriptor

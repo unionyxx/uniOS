@@ -25,8 +25,6 @@
 static constexpr int WM_FIRST_USER_WINDOW = 2; // Indices 0=menubar, 1=dock are system windows
 #define MAX_DIRTY_RECTS 128
 #define MAX_VISIBLE_REGIONS 512
-#define CURSOR_WIDTH 16
-#define CURSOR_HEIGHT 16
 #define CURSOR_DAMAGE_PAD 4
 static constexpr int WINDOW_DAMAGE_PAD_BASE = 3;
 
@@ -40,7 +38,6 @@ static constexpr int BTN_SPACING = 20;
 static constexpr int MIN_WINDOW_W = 180;
 static constexpr int MIN_WINDOW_H = 120;
 static constexpr int DESKTOP_MARGIN = 6;
-static constexpr int DOCK_RESERVED_H = 72;
 static constexpr int CURSOR_MAX_SIZE = 64;
 static constexpr const char *WALLPAPER_CONFIG_PATH = "/data/WALLPAPR.CFG";
 static constexpr const char *WALLPAPER_BOOTSTRAP_CONFIG_PATH = "/etc/wallpaper.conf";

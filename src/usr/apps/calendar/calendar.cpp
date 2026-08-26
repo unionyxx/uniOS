@@ -164,39 +164,18 @@ static void calendar_publish_menus()
 
 static void calendar_draw_help(Surface *win, CalendarRects *rects)
 {
-    int win_w = (int)win->width;
-    int win_h = (int)win->height;
-    int box_w = gui_scaled_metric(360);
-    int box_h = gui_scaled_metric(224);
-    if (box_w > win_w - gui_space_4())
-        box_w = win_w - gui_space_4();
-    if (box_h > win_h - gui_space_4())
-        box_h = win_h - gui_space_4();
-    int box_x = (win_w - box_w) / 2;
-    int box_y = (win_h - box_h) / 2;
-    gui_fill_rect_blend(win, 0, 0, win_w, win_h, 0x80000000u);
-    gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
-                         g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Calendar Help", nullptr);
     static const char *tips[] = {
         "Click a day to select it, or use the arrow keys",
         "Page Up / Page Down or the wheel change the month",
         "T jumps to today, the Today button does too",
         "Dimmed days belong to the previous or next month",
     };
-    int text_x = box_x + gui_space_2();
-    int text_y = box_y + gui_card_header_h() + gui_space_2();
-    int line_h = gui_line_height();
-    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
-        gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i], g_gui_style.text,
-                              g_gui_style.app_surface);
-        text_y += line_h + gui_space_1();
-    }
-    int btn_w = gui_scaled_metric(88);
-    rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
-                                      box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
-    gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
-                           "Close", true, false, false, false);
+    int win_w = (int)win->width;
+    int win_h = (int)win->height;
+    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
+    gui_draw_dialog(win, win_w, win_h, 0, &layout, "Calendar Help", tips, (int)(sizeof(tips) / sizeof(tips[0])),
+                    nullptr, "Close", false, false, nullptr, false, false);
+    rects->help_close = layout.confirm;
 }
 
 static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rects, int hover_day_row,
@@ -209,9 +188,9 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
 
     int w = (int)win->width;
     int h = (int)win->height;
-    int pad = gui_scaled_metric(16);
-    int top_pad = gui_scaled_metric(8);
-    int gap = gui_scaled_metric(6);
+    int pad = gui_app_outer_padding();
+    int top_pad = gui_space_1();
+    int gap = gui_space_0_5();
 
     const GuiFont *title_font = gui_font_title();
     const GuiFont *def_font = gui_font_default();
@@ -231,8 +210,10 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
 
     int arrow_size = gui_scaled_metric(8);
     int arrow_y = header_y + line_h / 2;
-    rects->prev_btn = gui_rect_make(pad, header_y, gui_scaled_metric(28), line_h);
-    rects->next_btn = gui_rect_make(w - pad - gui_scaled_metric(28), header_y, gui_scaled_metric(28), line_h);
+    int nav_btn = gui_app_control_h();
+    int nav_y = header_y + (line_h - nav_btn) / 2;
+    rects->prev_btn = gui_rect_make(pad, nav_y, nav_btn, nav_btn);
+    rects->next_btn = gui_rect_make(w - pad - nav_btn, nav_y, nav_btn, nav_btn);
 
     uint32_t arrow_color = hover_arrow == -1 ? g_gui_style.text : g_gui_style.text_dim;
     draw_chevron(win, rects->prev_btn.x + rects->prev_btn.w / 2, arrow_y, arrow_size, true, arrow_color);
@@ -314,7 +295,7 @@ static void draw_calendar(Surface *win, CalendarState *state, CalendarRects *rec
 
                 bg = is_selected ? g_gui_style.accent
                                  : (is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_surface);
-                fg = is_selected ? 0xFFFFFFFFu : (is_today ? g_gui_style.accent : g_gui_style.text);
+                fg = is_selected ? COLOR_WHITE : (is_today ? g_gui_style.accent : g_gui_style.text);
                 border = is_today ? g_gui_style.accent : g_gui_style.border;
 
                 format_day_string(current_month_day, day_str);

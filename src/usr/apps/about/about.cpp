@@ -6,7 +6,6 @@
 #include <uapi/event.h>
 #include <uapi/sysinfo.h>
 
-#include "../../libc/log.h"
 #include "../../libc/unistd.h"
 #include "../../libgui/gui.h"
 
@@ -98,8 +97,7 @@ static void cpu_vendor(char *out)
 
 static void draw_section(Surface *win, int x, int y, int w, int h, const char *title)
 {
-    gui_draw_panel_inset(win, x, y, w, h, g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(win, x + 1, y + 1, w - 2, title, nullptr);
+    gui_draw_card(win, x, y, w, h, title);
 }
 
 struct DetailItem
@@ -110,7 +108,7 @@ struct DetailItem
 
 static inline int about_row_h()
 {
-    int compact_row_h = gui_line_height() + gui_space_1() / 2;
+    int compact_row_h = gui_line_height() + gui_space_0_5();
     if (compact_row_h < gui_scaled_metric(20))
         compact_row_h = gui_scaled_metric(20);
     return compact_row_h;
@@ -122,42 +120,17 @@ static inline int about_summary_h()
     int badge_h = gui_badge_h();
     int line_h = gui_line_height();
     int content_h =
-        ((title_line_h > badge_h) ? title_line_h : badge_h) + gui_space_1() / 2 + line_h + gui_space_1() / 3 + line_h;
+        ((title_line_h > badge_h) ? title_line_h : badge_h) + gui_space_0_5() + line_h + gui_space_0_5() + line_h;
     return gui_card_header_h() + gui_space_2() + content_h + gui_space_1();
-}
-
-static void draw_detail_cell(Surface *win, int x, int y, int w, int h, const DetailItem &item, uint32_t bg)
-{
-    if (!item.label || !item.value || w <= 0 || h <= 0)
-        return;
-    int text_y = y + (h - gui_line_height()) / 2;
-    int gap = gui_space_1();
-    int min_label_w = gui_scaled_metric(96);
-    int min_value_w = gui_scaled_metric(88);
-    int max_value_w = w - min_label_w - gap;
-    if (max_value_w < min_value_w)
-        max_value_w = w / 2;
-    if (max_value_w < 0)
-        max_value_w = 0;
-
-    int val_w = gui_measure_text(gui_font_default(), item.value);
-    if (val_w > max_value_w)
-        val_w = max_value_w;
-
-    int val_x = x + w - val_w;
-    int label_w = val_x - x - gap;
-    if (label_w < 0)
-        label_w = 0;
-
-    gui_draw_text_clipped(win, gui_font_default(), x, text_y, label_w, item.label, g_gui_style.text_dim, bg);
-    if (val_w > 0) {
-        gui_draw_text_clipped(win, gui_font_default(), val_x, text_y, val_w, item.value, g_gui_style.text, bg);
-    }
 }
 
 static void draw_detail_row(Surface *win, int x, int y, int w, int h, const DetailItem &item, uint32_t bg)
 {
-    draw_detail_cell(win, x, y, w, h, item, bg);
+    (void)bg;
+    if (!item.label || !item.value || w <= 0 || h <= 0)
+        return;
+    int text_y = y + (h - gui_line_height()) / 2;
+    gui_draw_metric_row(win, x, text_y, w, item.label, item.value, false);
 }
 
 static inline int panel_content_top(int y)
@@ -270,8 +243,8 @@ static void draw_summary(Surface *win, int x, int y, int w, int h, const char *k
     char summary[128];
     snprintf(summary, sizeof(summary), "Commit %s  |  x86_64",
              kernel_commit && kernel_commit[0] ? kernel_commit : "unknown");
-    int summary_y = content_y + title_line_h + gui_space_1() / 2;
-    int subtitle_y = summary_y + line_h + gui_space_1() / 3;
+    int summary_y = content_y + title_line_h + gui_space_0_5();
+    int subtitle_y = summary_y + line_h + gui_space_0_5();
     gui_draw_text_clipped(win, gui_font_default(), content_x, summary_y, w - gui_space_4(), summary,
                           g_gui_style.text_dim, g_gui_style.app_surface);
     gui_draw_text_clipped(win, gui_font_default(), content_x, subtitle_y, w - gui_space_4(),
@@ -362,9 +335,10 @@ struct AboutPanelRects
     Rect memory;
 };
 
-static void draw_about(Surface *win, const AboutSnapshot *snapshot, AboutPanelRects *panel_rects)
+static void draw_about(Surface *window, uint32_t **back_data, size_t *back_capacity, Surface *win,
+                       const AboutSnapshot *snapshot, AboutPanelRects *panel_rects)
 {
-    if (!win || !snapshot)
+    if (!window || !back_data || !back_capacity || !win || !snapshot)
         return;
     if (panel_rects)
         *panel_rects = {};
@@ -418,7 +392,28 @@ static void draw_about(Surface *win, const AboutSnapshot *snapshot, AboutPanelRe
     int summary_h = about_summary_h();
 
     int content_total = compute_about_content_height(content_w, row_h, summary_h) + layout.body_rect.y + bottom_pad;
-    gui_set_content_size(win, view_w, content_total);
+    // Content size and backing growth must act on the real window surface,
+    // never on the private backbuffer (a resize would swap its buffer pointer
+    // and strand the malloc'd pixels).
+    gui_set_content_size(window, view_w, content_total);
+
+    // The backbuffer spans the whole scrollable content, not just the view.
+    size_t needed = (size_t)(window->pitch / 4) * window->height;
+    if (needed > *back_capacity) {
+        uint32_t *grown = (uint32_t *)malloc(needed * sizeof(uint32_t));
+        if (!grown)
+            return;
+        if (*back_data)
+            memcpy(grown, *back_data, *back_capacity * sizeof(uint32_t));
+        free(*back_data);
+        *back_data = grown;
+        *back_capacity = needed;
+    }
+    *win = *window;
+    win->buffer = *back_data;
+    win->owns_buffer = false;
+    layout = gui_app_begin(win);
+
     const int outer = layout.body_rect.x;
     const int gap = gui_app_section_gap();
 
@@ -494,9 +489,9 @@ extern "C" int main()
     about_publish_menus();
 
     // Double buffer: draw off-screen, then publish whole regions at once so
-    // the compositor never samples a half-drawn frame.
-    uint32_t back_stride = win.pitch / 4;
-    size_t back_capacity = (size_t)back_stride * win.height;
+    // the compositor never samples a half-drawn frame. The buffer is grown by
+    // draw_about as the scrollable content height changes.
+    size_t back_capacity = (size_t)(win.pitch / 4) * win.height;
     uint32_t *back_data = (uint32_t *)malloc(back_capacity * sizeof(uint32_t));
     if (!back_data)
         return 1;
@@ -522,27 +517,7 @@ extern "C" int main()
                 continue;
             }
             if (ev.type == EVT_WINDOW_RESIZE && gui_sync_window_size(&win) > 0) {
-                size_t needed = (size_t)(win.pitch / 4) * win.height;
-                if (needed > back_capacity) {
-                    // Explicit malloc/copy/free instead of realloc: if the old
-                    // region was unmapped out from under us, the copy faults at
-                    // a recognizable site instead of inside libc realloc.
-                    uint32_t *grown = (uint32_t *)malloc(needed * sizeof(uint32_t));
-                    if (!grown) {
-                        free(back_data);
-                        return 1;
-                    }
-                    LOG_INFO("about", "backbuffer grow: old=%p new=%p old_px=%zu new_px=%zu", (void *)back_data,
-                             (void *)grown, back_capacity, needed);
-                    memcpy(grown, back_data, back_capacity * sizeof(uint32_t));
-                    free(back_data);
-                    back_data = grown;
-                    back_capacity = needed;
-                }
-                back_stride = win.pitch / 4;
-                backbuffer = win;
-                backbuffer.buffer = back_data;
-                backbuffer.owns_buffer = false;
+                // draw_about grows the backbuffer to the new content size.
                 needs_redraw = true;
             }
         }
@@ -562,7 +537,7 @@ extern "C" int main()
             bool full = needs_redraw || static_sig != last_static_signature;
 
             AboutPanelRects panels = {};
-            draw_about(&backbuffer, &snapshot, &panels);
+            draw_about(&win, &back_data, &back_capacity, &backbuffer, &snapshot, &panels);
 
             if (full) {
                 memcpy(win.buffer, backbuffer.buffer, back_capacity * sizeof(uint32_t));

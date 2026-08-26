@@ -337,19 +337,11 @@ static bool calc_op_button(CalcOp op, int *row, int *col)
     }
 }
 
-static inline uint32_t darken_color(uint32_t color, uint8_t factor)
-{
-    uint32_t r = ((color >> 16) & 0xFFu) * factor / 255u;
-    uint32_t g = ((color >> 8) & 0xFFu) * factor / 255u;
-    uint32_t b = (color & 0xFFu) * factor / 255u;
-    return (color & 0xFF000000u) | (r << 16) | (g << 8) | b;
-}
-
 static void compute_layout(Surface *win, CalcRects *rects)
 {
-    int pad = gui_scaled_metric(16);
-    int top_pad = gui_scaled_metric(8);
-    int gap = gui_scaled_metric(10);
+    int pad = gui_app_outer_padding();
+    int top_pad = gui_space_1();
+    int gap = gui_space_1();
     int display_h = gui_scaled_metric(72);
     int win_w = (int)win->width;
     int win_h = (int)win->height;
@@ -386,11 +378,8 @@ static void compute_layout(Surface *win, CalcRects *rects)
 
 static void render_display(Surface *win, CalcState *state, const CalcRects *rects)
 {
-    int dr = gui_radius_md();
-    gui_fill_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr,
-                          g_gui_style.app_surface);
-    gui_draw_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, dr,
-                          g_gui_style.border);
+    gui_draw_panel(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, g_gui_style.app_surface,
+                   g_gui_style.border);
 
     const GuiFont *disp_font = gui_font_title();
     int max_w = rects->display.w - gui_space_2() * 2;
@@ -427,41 +416,16 @@ static void render_button(Surface *win, const CalcRects *rects, int row, int col
     const Rect &r = rects->buttons[row][col];
     const ButtonDef &def = k_buttons[row][col];
 
-    int rad = gui_corner_radius(r.w, r.h, gui_radius_md());
-    uint32_t bg = def.primary ? g_gui_style.accent : g_gui_style.chrome_bg;
-    uint32_t fg = def.primary ? 0xFFFFFFFFu : g_gui_style.text;
-    uint32_t border = hovered ? g_gui_style.border_hover : g_gui_style.border;
+    gui_app_draw_button_ex(win, r.x, r.y, r.w, r.h, def.label, def.primary, armed, hovered, pressed);
 
-    if (pressed) {
-        bg = darken_color(def.primary ? g_gui_style.accent : g_gui_style.chrome_bg, def.primary ? 200 : 220);
-        border = g_gui_style.border_focus;
-    } else if (hovered) {
-        if (def.primary) {
-            bg = g_gui_style.accent_soft;
-            fg = 0xFFFFFFFFu;
-        } else {
-            bg = g_gui_style.chrome_bg_alt;
-        }
-    } else if (armed) {
-        // Pending operator stays lit so the user can see which op is armed.
-        bg = def.primary ? g_gui_style.accent_soft : g_gui_style.chrome_bg_alt;
-        border = g_gui_style.border_focus;
-    }
-
-    gui_fill_rounded_rect(win, r.x, r.y, r.w, r.h, rad, bg);
-    gui_draw_rounded_rect(win, r.x, r.y, r.w, r.h, rad, border);
     if (armed && !pressed) {
-        int ir = rad > 0 ? rad - 1 : 0;
+        // Pending operator stays lit: an inner accent ring marks the armed op.
+        int rad = gui_corner_radius(r.w, r.h, gui_radius_md());
         if (r.w > 4 && r.h > 4)
-            gui_draw_rounded_rect(win, r.x + 1, r.y + 1, r.w - 2, r.h - 2, ir, g_gui_style.accent_soft);
+            gui_draw_rounded_rect(win, r.x + 1, r.y + 1, r.w - 2, r.h - 2, rad > 0 ? rad - 1 : 0,
+                                  g_gui_style.accent_soft);
     }
 
-    const GuiFont *font = gui_font_title();
-    int tw = gui_measure_text(font, def.label);
-    int tx = r.x + (r.w - tw) / 2 + (pressed ? 1 : 0);
-    int ty = r.y + (r.h - gui_font_line_height(font)) / 2 + (pressed ? 1 : 0);
-
-    gui_draw_text_clipped(win, font, tx, ty, r.w - gui_space_2(), def.label, fg, bg);
     gui_blit_to_screen_rect(win, r.x, r.y, r.w, r.h);
 }
 
@@ -557,20 +521,6 @@ static void calc_handle_menu_command(CalcState *state, uint32_t cmd, CalcRects *
 
 static void calc_draw_help(Surface *win, CalcRects *rects)
 {
-    int win_w = (int)win->width;
-    int win_h = (int)win->height;
-    int box_w = gui_scaled_metric(360);
-    int box_h = gui_scaled_metric(224);
-    if (box_w > win_w - gui_space_4())
-        box_w = win_w - gui_space_4();
-    if (box_h > win_h - gui_space_4())
-        box_h = win_h - gui_space_4();
-    int box_x = (win_w - box_w) / 2;
-    int box_y = (win_h - box_h) / 2;
-    gui_fill_rect_blend(win, 0, 0, win_w, win_h, 0x80000000u);
-    gui_draw_panel_inset(win, box_x, box_y, box_w, box_h, g_gui_style.app_surface, g_gui_style.border_focus,
-                         g_gui_style.chrome_bg_alt);
-    gui_draw_card_header(win, box_x + 1, box_y + 1, box_w - 2, "Calculator Help", nullptr);
     static const char *tips[] = {
         "Type digits and operators on the keyboard",
         "Enter or = evaluates, Backspace clears the entry",
@@ -578,19 +528,12 @@ static void calc_draw_help(Surface *win, CalcRects *rects)
         "% divides by 100, +/- flips the sign",
         "Edit > Copy Result copies the display (Ctrl+C)",
     };
-    int text_x = box_x + gui_space_2();
-    int text_y = box_y + gui_card_header_h() + gui_space_2();
-    int line_h = gui_line_height();
-    for (size_t i = 0; i < sizeof(tips) / sizeof(tips[0]); i++) {
-        gui_draw_text_clipped(win, gui_font_default(), text_x, text_y, box_w - gui_space_4(), tips[i], g_gui_style.text,
-                              g_gui_style.app_surface);
-        text_y += line_h + gui_space_1();
-    }
-    int btn_w = gui_scaled_metric(88);
-    rects->help_close = gui_rect_make(box_x + box_w - gui_space_2() - btn_w,
-                                      box_y + box_h - gui_space_2() - gui_app_control_h(), btn_w, gui_app_control_h());
-    gui_app_draw_button_ex(win, rects->help_close.x, rects->help_close.y, rects->help_close.w, rects->help_close.h,
-                           "Close", true, false, false, false);
+    int win_w = (int)win->width;
+    int win_h = (int)win->height;
+    GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
+    gui_draw_dialog(win, win_w, win_h, 0, &layout, "Calculator Help", tips, (int)(sizeof(tips) / sizeof(tips[0])),
+                    nullptr, "Close", false, false, nullptr, false, false);
+    rects->help_close = layout.confirm;
 }
 
 extern "C" int main()

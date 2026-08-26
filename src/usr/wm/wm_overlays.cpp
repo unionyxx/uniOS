@@ -69,18 +69,9 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, layout.box, nullptr))
         return;
 
-    int box_r = gui_scaled_metric(20);
+    int box_r = gui_radius_2xl();
 
-    // Soft shadow.
-    int shadow_1 = gui_scaled_metric(10);
-    int shadow_2 = gui_scaled_metric(5);
-    int shadow_3 = gui_scaled_metric(2);
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x + 1, layout.box.y + shadow_1, layout.box.w - 2, layout.box.h,
-                          box_r, 0x08000000u);
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_2, layout.box.w, layout.box.h, box_r,
-                          0x0C000000u);
-    gui_fill_rounded_rect(&g_backbuffer, layout.box.x, layout.box.y + shadow_3, layout.box.w, layout.box.h, box_r,
-                          0x14000000u);
+    gui_draw_panel_shadow(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r);
 
     gui_draw_panel_inset_ext(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
                              g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
@@ -98,11 +89,11 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
                                g_gui_style.text, g_gui_style.app_surface);
 
     int note_y = content_y + gui_space_1_5();
-    int note_h = gui_scaled_metric(52);
+    int note_h = gui_app_row_tall_h();
     if (note_y + note_h < layout.off_button.y - gui_space_1()) {
         gui_fill_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(), g_gui_style.chrome_bg);
         gui_draw_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(), g_gui_style.border);
-        gui_draw_badge(&g_backbuffer, text_x + gui_space_1(), note_y + gui_scaled_metric(8), "CAUTION",
+        gui_draw_badge(&g_backbuffer, text_x + gui_space_1(), note_y + (note_h - gui_badge_h()) / 2, "CAUTION",
                        g_gui_style.warning, g_gui_style.app_surface);
         int note_text_x = text_x + gui_scaled_metric(92);
         gui_draw_wrapped_value(
@@ -130,8 +121,7 @@ void draw_storage_prompt_overlay()
 
 static int wm_index_result_item_h()
 {
-    int h = gui_scaled_metric(52);
-    return h < gui_scaled_metric(40) ? gui_scaled_metric(40) : h;
+    return gui_app_row_tall_h();
 }
 
 static DirtyRect wm_index_search_bounds()
@@ -159,15 +149,9 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_scaled_metric(20);
+    int radius = gui_radius_2xl();
 
-    // Soft shadow.
-    int shadow_1 = gui_scaled_metric(8);
-    int shadow_2 = gui_scaled_metric(4);
-    int shadow_3 = gui_scaled_metric(2);
-    gui_fill_rounded_rect(&g_backbuffer, box.x + 1, box.y + shadow_1, box.w - 2, box.h, radius, 0x08000000u);
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_2, box.w, box.h, radius, 0x0C000000u);
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
+    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
                              g_gui_style.border_focus, g_gui_style.chrome_bg_alt);
@@ -194,7 +178,7 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
     int pad = gui_space_2();
     int row_y = wm_index_results_start_y();
     int row_h = wm_index_result_item_h();
-    int row_gap = gui_scaled_metric(2);
+    int row_gap = gui_app_row_gap();
     int bottom = box.y + box.h - pad;
 
     if (g_index.result_count <= 0) {
@@ -235,42 +219,7 @@ static void draw_control_volume_card()
 {
     DirtyRect r = control_panel_item_rect(CONTROL_ITEM_VOLUME);
     bool hovered = g_control_center.hovered_item == CONTROL_ITEM_VOLUME || g_control_center.volume_dragging;
-    uint32_t bg = hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface;
-    int card_r = gui_radius_md();
-    gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, card_r, bg);
-    gui_draw_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, card_r,
-                          hovered ? g_gui_style.border_hover : g_gui_style.border);
-
-    char value[16];
-    snprintf(value, sizeof(value), "%u%%", (unsigned)g_control_center.volume);
-    int pad = gui_space_1_5();
-    int label_y = r.y + gui_space_1();
-    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), r.x + pad, label_y, r.w / 2, "Volume", g_gui_style.text,
-                          bg);
-    int value_w = gui_measure_text(gui_font_default(), value);
-    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), r.x + r.w - pad - value_w, label_y, value_w, value,
-                          g_gui_style.text_dim, bg);
-
-    int track_h = gui_scaled_metric(16);
-    int track_x = r.x + pad;
-    int track_y = r.y + r.h - pad - track_h;
-    int track_w = r.w - pad * 2;
-    int track_r = gui_corner_radius(track_w, track_h, track_h / 2);
-    gui_fill_rounded_rect(&g_backbuffer, track_x, track_y, track_w, track_h, track_r, g_gui_style.chrome_bg_alt);
-    gui_draw_rounded_rect(&g_backbuffer, track_x, track_y, track_w, track_h, track_r, g_gui_style.border);
-    int fill_w = (int)((uint64_t)track_w * g_control_center.volume / 100u);
-    if (fill_w > 0)
-        gui_fill_rounded_rect(&g_backbuffer, track_x, track_y, fill_w, track_h, track_r, g_gui_style.accent);
-    int knob_d = track_h + gui_scaled_metric(4);
-    int knob_x = track_x + fill_w - knob_d / 2;
-    if (knob_x < track_x)
-        knob_x = track_x;
-    if (knob_x + knob_d > track_x + track_w)
-        knob_x = track_x + track_w - knob_d;
-    gui_fill_rounded_rect(&g_backbuffer, knob_x, track_y - gui_scaled_metric(2), knob_d, knob_d, knob_d / 2,
-                          g_gui_style.app_surface);
-    gui_draw_rounded_rect(&g_backbuffer, knob_x, track_y - gui_scaled_metric(2), knob_d, knob_d, knob_d / 2,
-                          g_gui_style.border_focus);
+    gui_app_draw_slider(&g_backbuffer, r.x, r.y, r.w, r.h, "Volume", g_control_center.volume, 100, hovered);
 }
 
 void draw_control_center_overlay_clipped(const DirtyRect &clip)
@@ -283,15 +232,9 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_scaled_metric(20);
+    int radius = gui_radius_2xl();
 
-    // Soft shadow.
-    int shadow_1 = gui_scaled_metric(8);
-    int shadow_2 = gui_scaled_metric(4);
-    int shadow_3 = gui_scaled_metric(2);
-    gui_fill_rounded_rect(&g_backbuffer, box.x + 1, box.y + shadow_1, box.w - 2, box.h, radius, 0x08000000u);
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_2, box.w, box.h, radius, 0x0C000000u);
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + shadow_3, box.w, box.h, radius, 0x10000000u);
+    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
     // Panel surface.
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
@@ -368,30 +311,25 @@ void draw_toast_overlay_clipped(const DirtyRect &clip)
     if (!active_toast)
         return;
 
-    int radius = gui_scaled_metric(16);
+    int radius = gui_radius_xl();
 
-    int shadow_1 = gui_scaled_metric(8);
-    int shadow_2 = gui_scaled_metric(4);
-    int shadow_3 = gui_scaled_metric(2);
-    gui_fill_rounded_rect(&g_backbuffer, toast_box.x, toast_box.y + shadow_2, toast_box.w, toast_box.h, radius,
-                          0x0C000000u);
-    gui_fill_rounded_rect(&g_backbuffer, toast_box.x, toast_box.y + shadow_3, toast_box.w, toast_box.h, radius,
-                          0x14000000u);
+    gui_draw_panel_shadow(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius);
 
     gui_draw_panel_inset_ext(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius,
                              g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
 
+    int accent_x = toast_box.x + gui_space_1();
     int accent_w = gui_scaled_metric(4);
-    int accent_h = toast_box.h - gui_scaled_metric(24);
-    gui_fill_rounded_rect(&g_backbuffer, toast_box.x + gui_scaled_metric(10), toast_box.y + gui_scaled_metric(12),
-                          accent_w, accent_h, accent_w / 2, g_gui_style.accent);
+    int accent_h = toast_box.h - gui_space_3();
+    gui_fill_rounded_rect(&g_backbuffer, accent_x, toast_box.y + gui_space_1_5(), accent_w, accent_h, accent_w / 2,
+                          g_gui_style.accent);
 
-    int text_x = toast_box.x + gui_scaled_metric(22);
-    int text_y = toast_box.y + gui_scaled_metric(16);
+    int text_x = accent_x + accent_w + gui_space_1_5();
+    int text_y = toast_box.y + gui_space_2();
 
     gui_draw_text_clipped(&g_backbuffer, gui_font_title(), text_x, text_y, toast_box.w - gui_scaled_metric(30),
                           active_toast->title, g_gui_style.text, g_gui_style.app_surface);
-    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, text_y + gui_line_height() + gui_scaled_metric(4),
+    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, text_y + gui_line_height() + gui_space_0_5(),
                           toast_box.w - gui_scaled_metric(30), active_toast->message, g_gui_style.text_dim,
                           g_gui_style.app_surface);
 }
@@ -408,9 +346,9 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_scaled_metric(20);
+    int radius = gui_radius_2xl();
 
-    gui_fill_rounded_rect(&g_backbuffer, box.x, box.y + gui_scaled_metric(2), box.w, box.h, radius, 0x12000000u);
+    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
     gui_draw_panel_inset_ext(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface,
                              g_gui_style.border, g_gui_style.chrome_bg_alt);
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius, "Notifications", "Recent");
@@ -426,8 +364,8 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
 
         int card_x = box.x + gui_space_1_5();
         int card_w = box.w - gui_space_3();
-        int card_h = gui_scaled_metric(52);
-        int card_r = gui_scaled_metric(12);
+        int card_h = gui_app_row_tall_h();
+        int card_r = gui_radius_lg();
 
         // Individual notification card background
         gui_fill_rounded_rect(&g_backbuffer, card_x, item_y, card_w, card_h, card_r, g_gui_style.app_surface_alt);
@@ -438,7 +376,7 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
 
         gui_draw_text_clipped(&g_backbuffer, gui_font_title(), text_x, text_y, card_w - gui_space_3(), notif.title,
                               g_gui_style.text, g_gui_style.app_surface_alt);
-        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, text_y + gui_line_height() + 2,
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, text_y + gui_line_height() + gui_space_0_5(),
                               card_w - gui_space_3(), notif.message, g_gui_style.text_dim, g_gui_style.app_surface_alt);
 
         // Relative timestamp

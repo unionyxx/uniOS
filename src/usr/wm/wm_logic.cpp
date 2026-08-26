@@ -2060,8 +2060,7 @@ static DirtyRect control_center_damage_bounds()
 
 int control_panel_card_h()
 {
-    int h = gui_scaled_metric(54);
-    return h < gui_scaled_metric(44) ? gui_scaled_metric(44) : h;
+    return gui_app_row_tall_h();
 }
 
 DirtyRect control_panel_item_rect(ControlPanelItem item)
@@ -2093,7 +2092,7 @@ DirtyRect control_panel_item_rect(ControlPanelItem item)
 
     y += card_h + gap;
     if (item == CONTROL_ITEM_VOLUME)
-        return {box.x + pad, y, box.w - pad * 2, gui_scaled_metric(62)};
+        return {box.x + pad, y, box.w - pad * 2, gui_app_slider_h()};
 
     int action_h = gui_app_control_h();
     int action_y = box.y + box.h - pad - action_h;
@@ -2122,10 +2121,8 @@ static ControlPanelItem control_panel_item_at(int mouse_x, int mouse_y)
 static DirtyRect control_panel_volume_track_rect()
 {
     DirtyRect card = control_panel_item_rect(CONTROL_ITEM_VOLUME);
-    int pad = gui_space_1_5();
-    int h = gui_scaled_metric(16);
-    int y = card.y + card.h - pad - h;
-    return {card.x + pad, y, card.w - pad * 2, h};
+    Rect track = gui_app_slider_track_rect(card.x, card.y, card.w, card.h);
+    return {track.x, track.y, track.w, track.h};
 }
 
 static bool set_control_center_volume_from_x(int mouse_x)
@@ -2133,14 +2130,8 @@ static bool set_control_center_volume_from_x(int mouse_x)
     DirtyRect track = control_panel_volume_track_rect();
     if (track.w <= 0)
         return false;
-    int rel = mouse_x - track.x;
-    if (rel < 0)
-        rel = 0;
-    if (rel > track.w)
-        rel = track.w;
-    uint32_t next = (uint32_t)((rel * 100 + track.w / 2) / track.w);
-    if (next > 100)
-        next = 100;
+    Rect track_rect = gui_rect_make(track.x, track.y, track.w, track.h);
+    uint32_t next = gui_app_slider_value_from_x(mouse_x, &track_rect, 100);
     if (next == g_control_center.volume)
         return true;
     g_control_center.volume = next;
