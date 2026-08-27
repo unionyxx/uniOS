@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../libc/config_utils.h"
 #include "../libc/log.h"
 #include "../libc/unistd.h"
 
@@ -454,4 +455,106 @@ int app_run(const AppConfig *config, void *user)
     int code = app->exit_code;
     app_destroy(app);
     return code;
+}
+
+// --- Standard Edit menu + keyboard shortcuts ---------------------------------
+
+static bool app_menu_add(MenuModel *model, int menu, const char *label, uint32_t id, bool enabled, const char *accel)
+{
+    return gui_menu_model_add_item(model, menu, label, id, enabled ? 0 : MENU_FLAG_DISABLED, accel);
+}
+
+int app_menus_add_edit(MenuModel *model, uint32_t present, uint32_t enabled)
+{
+    if (!model || present == 0)
+        return -1;
+
+    int menu = gui_menu_model_add_menu(model, "Edit");
+    if (menu < 0)
+        return -1;
+
+    if (present & APP_EDIT_UNDO)
+        app_menu_add(model, menu, "Undo", APP_CMD_UNDO, enabled & APP_EDIT_UNDO, "Ctrl+Z");
+    if (present & APP_EDIT_REDO)
+        app_menu_add(model, menu, "Redo", APP_CMD_REDO, enabled & APP_EDIT_REDO, "Ctrl+Y");
+    if ((present & (APP_EDIT_UNDO | APP_EDIT_REDO)) && (present & (APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_PASTE)))
+        gui_menu_model_add_separator(model, menu);
+
+    if (present & APP_EDIT_CUT)
+        app_menu_add(model, menu, "Cut", APP_CMD_CUT, enabled & APP_EDIT_CUT, "Ctrl+X");
+    if (present & APP_EDIT_COPY)
+        app_menu_add(model, menu, "Copy", APP_CMD_COPY, enabled & APP_EDIT_COPY, "Ctrl+C");
+    if (present & APP_EDIT_PASTE)
+        app_menu_add(model, menu, "Paste", APP_CMD_PASTE, enabled & APP_EDIT_PASTE, "Ctrl+V");
+    if ((present & (APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_PASTE)) &&
+        (present & (APP_EDIT_DELETE | APP_EDIT_SELECT_ALL)))
+        gui_menu_model_add_separator(model, menu);
+
+    if (present & APP_EDIT_DELETE)
+        app_menu_add(model, menu, "Delete", APP_CMD_DELETE, enabled & APP_EDIT_DELETE, nullptr);
+    if (present & APP_EDIT_SELECT_ALL)
+        app_menu_add(model, menu, "Select All", APP_CMD_SELECT_ALL, enabled & APP_EDIT_SELECT_ALL, "Ctrl+A");
+
+    return menu;
+}
+
+int app_menus_add_help(MenuModel *model, uint32_t tips_cmd)
+{
+    if (!model)
+        return -1;
+
+    int menu = gui_menu_model_add_menu(model, "Help");
+    if (menu < 0)
+        return -1;
+
+    if (tips_cmd != 0) {
+        gui_menu_model_add_item(model, menu, "Tips", tips_cmd, 0, nullptr);
+        gui_menu_model_add_separator(model, menu);
+    }
+    gui_menu_model_add_item(model, menu, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    return menu;
+}
+
+uint32_t app_edit_shortcut(const Event *ev)
+{
+    if (!ev || ev->type != EVT_KEY_DOWN)
+        return 0;
+
+    unsigned char c = static_cast<unsigned char>(ev->key.c);
+    // Ctrl+letter arrives as the control character 1..26.
+    if (c < 1 || c > 26)
+        return 0;
+
+    switch (c) {
+        case 26: // Ctrl+Z
+            return APP_CMD_UNDO;
+        case 25: // Ctrl+Y
+            return APP_CMD_REDO;
+        case 24: // Ctrl+X
+            return APP_CMD_CUT;
+        case 3: // Ctrl+C
+            return APP_CMD_COPY;
+        case 22: // Ctrl+V
+            return APP_CMD_PASTE;
+        case 1: // Ctrl+A
+            return APP_CMD_SELECT_ALL;
+        default:
+            return 0;
+    }
+}
+
+// --- Persistent app settings --------------------------------------------------
+
+int app_setting_load_int(const char *key, int fallback)
+{
+    if (!key)
+        return fallback;
+    return cfg_load_int(APP_SETTINGS_CONFIG_PATH, key, fallback);
+}
+
+bool app_setting_save_int(const char *key, int value)
+{
+    if (!key)
+        return false;
+    return cfg_save_int(APP_SETTINGS_CONFIG_PATH, key, value);
 }

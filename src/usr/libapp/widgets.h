@@ -181,6 +181,36 @@ bool widget_help_event(WidgetHelp *h, const Event *ev);
 void widget_help_draw(Surface *s, int view_w, int view_h, int scroll_y, const char *title, const char *const *lines,
                       int line_count);
 
+// --- Scroll view -----------------------------------------------------------------------
+// Pixel-scroll state for a viewport over larger content. The app owns the
+// content rendering: apply scroll_x/scroll_y as a translation (or sub-rect
+// blit) and draw the scrollbar overlay with widget_scroll_view_draw. Wheel
+// scrolls by one row step (default: a quarter of the viewport) per notch; the
+// thumb drags and track clicks page the content. WIDGET_CHANGED is returned
+// whenever the offset moves so the caller can invalidate.
+
+typedef struct WidgetScrollView
+{
+    Rect viewport; // visible region in canvas coordinates
+    int content_w, content_h;
+    int scroll_x, scroll_y;
+    int row_h; // wheel step in px; 0 = viewport.h / 4 per notch
+    bool dragging_v, dragging_h;
+    int drag_grab_v, drag_grab_h; // pointer offset within the grabbed thumb
+    bool hover_v, hover_h;
+} WidgetScrollView;
+
+void widget_scroll_view_reset(WidgetScrollView *sv);
+// Sets viewport and content sizes, keeping the current offset where it still
+// makes sense (clamped). Call on resize / content changes.
+void widget_scroll_view_configure(WidgetScrollView *sv, Rect viewport, int content_w, int content_h);
+int widget_scroll_view_max_x(const WidgetScrollView *sv);
+int widget_scroll_view_max_y(const WidgetScrollView *sv);
+// Scrolls so the content-space rect [y, y+h) is visible (keyboard nav).
+void widget_scroll_view_reveal_y(WidgetScrollView *sv, int y, int h);
+int widget_scroll_view_event(WidgetScrollView *sv, const Event *ev);
+void widget_scroll_view_draw(const WidgetScrollView *sv, Surface *s);
+
 #ifdef __cplusplus
 }
 #endif

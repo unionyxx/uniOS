@@ -578,3 +578,270 @@ void widget_help_draw(Surface *s, int view_w, int view_h, int scroll_y, const ch
     gui_draw_dialog(s, view_w, view_h, scroll_y, &layout, title, lines, line_count, nullptr, "Close", false, false,
                     nullptr, false, false);
 }
+
+// --- Scroll view -----------------------------------------------------------------------
+
+static int scroll_clamp(int value, int max_value)
+{
+    if (value < 0)
+        return 0;
+    if (value > max_value)
+        return max_value;
+    return value;
+}
+
+void widget_scroll_view_reset(WidgetScrollView *sv)
+{
+    if (!sv)
+        return;
+    memset(sv, 0, sizeof(*sv));
+}
+
+void widget_scroll_view_configure(WidgetScrollView *sv, Rect viewport, int content_w, int content_h)
+{
+    if (!sv)
+        return;
+    sv->viewport = viewport;
+    sv->content_w = content_w;
+    sv->content_h = content_h;
+    sv->scroll_x = scroll_clamp(sv->scroll_x, widget_scroll_view_max_x(sv));
+    sv->scroll_y = scroll_clamp(sv->scroll_y, widget_scroll_view_max_y(sv));
+}
+
+int widget_scroll_view_max_x(const WidgetScrollView *sv)
+{
+    if (!sv)
+        return 0;
+    int max_value = sv->content_w - sv->viewport.w;
+    return max_value > 0 ? max_value : 0;
+}
+
+int widget_scroll_view_max_y(const WidgetScrollView *sv)
+{
+    if (!sv)
+        return 0;
+    int max_value = sv->content_h - sv->viewport.h;
+    return max_value > 0 ? max_value : 0;
+}
+
+void widget_scroll_view_reveal_y(WidgetScrollView *sv, int y, int h)
+{
+    if (!sv)
+        return;
+    if (y < sv->scroll_y)
+        sv->scroll_y = y;
+    else if (y + h > sv->scroll_y + sv->viewport.h)
+        sv->scroll_y = scroll_clamp(y + h - sv->viewport.h, widget_scroll_view_max_y(sv));
+}
+
+// Vertical thumb geometry. Returns false when there is nothing to scroll.
+static bool scroll_view_v_thumb(const WidgetScrollView *sv, int *out_track_x, int *out_track_y, int *out_track_h,
+                                int *out_thumb_y, int *out_thumb_h)
+{
+    int max_y = widget_scroll_view_max_y(sv);
+    if (max_y <= 0)
+        return false;
+
+    int sb_w = gui_scrollbar_w();
+    int track_x = sv->viewport.x + sv->viewport.w - sb_w;
+    int track_y = sv->viewport.y;
+    int track_h = sv->viewport.h;
+
+    int thumb_h = (int)((int64_t)track_h * sv->viewport.h / sv->content_h);
+    if (thumb_h < gui_scrollbar_min_thumb())
+        thumb_h = gui_scrollbar_min_thumb();
+    if (thumb_h > track_h)
+        thumb_h = track_h;
+
+    int scrollable = track_h - thumb_h;
+    int thumb_y = scrollable > 0 ? (int)((int64_t)scrollable * sv->scroll_y / max_y) : 0;
+
+    if (out_track_x)
+        *out_track_x = track_x;
+    if (out_track_y)
+        *out_track_y = track_y;
+    if (out_track_h)
+        *out_track_h = track_h;
+    if (out_thumb_y)
+        *out_thumb_y = thumb_y;
+    if (out_thumb_h)
+        *out_thumb_h = thumb_h;
+    return true;
+}
+
+// Horizontal thumb geometry. Returns false when there is nothing to scroll.
+static bool scroll_view_h_thumb(const WidgetScrollView *sv, int *out_track_x, int *out_track_y, int *out_track_w,
+                                int *out_thumb_x, int *out_thumb_w)
+{
+    int max_x = widget_scroll_view_max_x(sv);
+    if (max_x <= 0)
+        return false;
+
+    int sb_w = gui_scrollbar_w();
+    int track_x = sv->viewport.x;
+    int track_y = sv->viewport.y + sv->viewport.h - sb_w;
+    int track_w = sv->viewport.w;
+    if (widget_scroll_view_max_y(sv) > 0)
+        track_w -= sb_w; // leave the bottom-right corner to the vertical bar
+    if (track_w <= 0)
+        return false;
+
+    int thumb_w = (int)((int64_t)track_w * sv->viewport.w / sv->content_w);
+    if (thumb_w < gui_scrollbar_min_thumb())
+        thumb_w = gui_scrollbar_min_thumb();
+    if (thumb_w > track_w)
+        thumb_w = track_w;
+
+    int scrollable = track_w - thumb_w;
+    int thumb_x = scrollable > 0 ? (int)((int64_t)scrollable * sv->scroll_x / max_x) : 0;
+
+    if (out_track_x)
+        *out_track_x = track_x;
+    if (out_track_y)
+        *out_track_y = track_y;
+    if (out_track_w)
+        *out_track_w = track_w;
+    if (out_thumb_x)
+        *out_thumb_x = thumb_x;
+    if (out_thumb_w)
+        *out_thumb_w = thumb_w;
+    return true;
+}
+
+int widget_scroll_view_event(WidgetScrollView *sv, const Event *ev)
+{
+    if (!sv || !ev || gui_rect_is_empty(sv->viewport))
+        return WIDGET_NONE;
+
+    if (event_clears_hover(ev)) {
+        int changed = WIDGET_NONE;
+        if (sv->hover_v || sv->hover_h || sv->dragging_v || sv->dragging_h)
+            changed = WIDGET_CHANGED;
+        sv->hover_v = sv->hover_h = false;
+        sv->dragging_v = sv->dragging_h = false;
+        return changed;
+    }
+
+    if (ev->type == EVT_MOUSE_SCROLL && widget_contains(sv->viewport, ev->mouse.x, ev->mouse.y)) {
+        int step = sv->row_h > 0 ? sv->row_h : (sv->viewport.h / 4 > 0 ? sv->viewport.h / 4 : 1);
+        int before_y = sv->scroll_y;
+        int before_x = sv->scroll_x;
+        // Wheel up (positive scroll_y) reveals earlier content.
+        sv->scroll_y = scroll_clamp(sv->scroll_y - ev->mouse.scroll_y * step, widget_scroll_view_max_y(sv));
+        if (ev->mouse.scroll_x != 0)
+            sv->scroll_x = scroll_clamp(sv->scroll_x + ev->mouse.scroll_x * step, widget_scroll_view_max_x(sv));
+        return (sv->scroll_y != before_y || sv->scroll_x != before_x) ? WIDGET_CHANGED : WIDGET_NONE;
+    }
+
+    int track_x, track_y, track_len, thumb_pos, thumb_len;
+
+    if (event_left_down(ev)) {
+        if (scroll_view_v_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len) && ev->mouse.x >= track_x &&
+            ev->mouse.x < track_x + gui_scrollbar_w()) {
+            int thumb_top = track_y + thumb_pos;
+            if (ev->mouse.y >= thumb_top && ev->mouse.y < thumb_top + thumb_len) {
+                sv->dragging_v = true;
+                sv->drag_grab_v = ev->mouse.y - thumb_top;
+            } else {
+                // Track click: page toward the pointer.
+                int page = sv->viewport.h;
+                sv->scroll_y =
+                    scroll_clamp(sv->scroll_y + (ev->mouse.y < thumb_top ? -page : page), widget_scroll_view_max_y(sv));
+            }
+            return WIDGET_CHANGED;
+        }
+        if (scroll_view_h_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len) && ev->mouse.y >= track_y &&
+            ev->mouse.y < track_y + gui_scrollbar_w()) {
+            int thumb_left = track_x + thumb_pos;
+            if (ev->mouse.x >= thumb_left && ev->mouse.x < thumb_left + thumb_len) {
+                sv->dragging_h = true;
+                sv->drag_grab_h = ev->mouse.x - thumb_left;
+            } else {
+                int page = sv->viewport.w;
+                sv->scroll_x = scroll_clamp(sv->scroll_x + (ev->mouse.x < thumb_left ? -page : page),
+                                            widget_scroll_view_max_x(sv));
+            }
+            return WIDGET_CHANGED;
+        }
+        return WIDGET_NONE;
+    }
+
+    if (ev->type == EVT_MOUSE_MOVE) {
+        int changed = WIDGET_NONE;
+
+        if (sv->dragging_v && scroll_view_v_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len)) {
+            int scrollable = track_len - thumb_len;
+            if (scrollable > 0) {
+                int top = ev->mouse.y - sv->drag_grab_v - track_y;
+                int max_y = widget_scroll_view_max_y(sv);
+                int next = scroll_clamp((int)((int64_t)top * max_y / scrollable), max_y);
+                if (next != sv->scroll_y) {
+                    sv->scroll_y = next;
+                    changed = WIDGET_CHANGED;
+                }
+            }
+        } else if (sv->dragging_h && scroll_view_h_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len)) {
+            int scrollable = track_len - thumb_len;
+            if (scrollable > 0) {
+                int left = ev->mouse.x - sv->drag_grab_h - track_x;
+                int max_x = widget_scroll_view_max_x(sv);
+                int next = scroll_clamp((int)((int64_t)left * max_x / scrollable), max_x);
+                if (next != sv->scroll_x) {
+                    sv->scroll_x = next;
+                    changed = WIDGET_CHANGED;
+                }
+            }
+        }
+
+        bool over_v = false;
+        if (scroll_view_v_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len))
+            over_v = ev->mouse.x >= track_x && ev->mouse.x < track_x + gui_scrollbar_w() && ev->mouse.y >= track_y &&
+                     ev->mouse.y < track_y + track_len;
+        if (over_v != sv->hover_v) {
+            sv->hover_v = over_v;
+            changed = WIDGET_CHANGED;
+        }
+
+        bool over_h = false;
+        if (scroll_view_h_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len))
+            over_h = ev->mouse.y >= track_y && ev->mouse.y < track_y + gui_scrollbar_w() && ev->mouse.x >= track_x &&
+                     ev->mouse.x < track_x + track_len;
+        if (over_h != sv->hover_h) {
+            sv->hover_h = over_h;
+            changed = WIDGET_CHANGED;
+        }
+        return changed;
+    }
+
+    if (event_left_up(ev)) {
+        int changed = WIDGET_NONE;
+        if (sv->dragging_v || sv->dragging_h)
+            changed = WIDGET_CHANGED;
+        sv->dragging_v = sv->dragging_h = false;
+        return changed;
+    }
+
+    return WIDGET_NONE;
+}
+
+void widget_scroll_view_draw(const WidgetScrollView *sv, Surface *s)
+{
+    if (!sv || !s)
+        return;
+
+    int track_x, track_y, track_len, thumb_pos, thumb_len;
+    if (scroll_view_v_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len))
+        gui_draw_scrollbar(s, track_x, track_y, gui_scrollbar_w(), track_len, thumb_pos, thumb_len,
+                           sv->hover_v || sv->dragging_v);
+    if (scroll_view_h_thumb(sv, &track_x, &track_y, &track_len, &thumb_pos, &thumb_len)) {
+        // gui_draw_scrollbar is vertical-only; draw the horizontal bar with
+        // the same track/thumb recipe.
+        int sb_w = gui_scrollbar_w();
+        int r = sb_w / 2;
+        gui_fill_rounded_rect(s, track_x, track_y, track_len, sb_w, r, g_gui_style.app_surface_alt);
+        if (thumb_len > 0) {
+            uint32_t thumb_color = (sv->hover_h || sv->dragging_h) ? g_gui_style.text_muted : g_gui_style.text_dim;
+            gui_fill_rounded_rect(s, track_x + thumb_pos, track_y, thumb_len, sb_w, r, thumb_color);
+        }
+    }
+}

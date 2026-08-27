@@ -105,6 +105,55 @@ void app_set_title(App *app, const char *title);
 void app_publish_menus(App *app);
 void app_set_frame_ticks(App *app, uint64_t frame_ticks);
 
+// --- Standard Edit menu + keyboard shortcuts ---------------------------------
+// Shared command IDs (below MENU_CMD_RESERVED_BASE) so every app's Edit menu
+// and accelerators behave identically. Publish with app_menus_add_edit, then
+// map Ctrl+<key> events with app_edit_shortcut and dispatch the result.
+
+enum
+{
+    APP_CMD_UNDO = 0xE001,
+    APP_CMD_REDO = 0xE002,
+    APP_CMD_CUT = 0xE003,
+    APP_CMD_COPY = 0xE004,
+    APP_CMD_PASTE = 0xE005,
+    APP_CMD_DELETE = 0xE006,
+    APP_CMD_SELECT_ALL = 0xE007,
+};
+
+// Which standard entries an app implements at all (menu shows only these).
+enum
+{
+    APP_EDIT_UNDO = 1 << 0,
+    APP_EDIT_REDO = 1 << 1,
+    APP_EDIT_CUT = 1 << 2,
+    APP_EDIT_COPY = 1 << 3,
+    APP_EDIT_PASTE = 1 << 4,
+    APP_EDIT_DELETE = 1 << 5,
+    APP_EDIT_SELECT_ALL = 1 << 6,
+};
+
+// Adds an "Edit" menu containing the entries set in `present`; entries not in
+// `enabled` render disabled. Accelerator labels are filled in automatically.
+// Returns the menu index, or -1 when the model is full.
+int app_menus_add_edit(MenuModel *model, uint32_t present, uint32_t enabled);
+
+// Adds the standard "Help" menu: an app tips entry (tips_cmd, omitted when 0)
+// followed by the reserved About uniOS entry. Returns the menu index or -1.
+int app_menus_add_help(MenuModel *model, uint32_t tips_cmd);
+
+// Maps an EVT_KEY_DOWN Ctrl+letter to its APP_CMD_* (Ctrl+C -> APP_CMD_COPY,
+// Ctrl+V -> APP_CMD_PASTE, ...). Returns 0 for anything else. Note: terminal
+// must keep Ctrl+C for SIGINT and should not forward it here.
+uint32_t app_edit_shortcut(const Event *ev);
+
+// --- Persistent app settings --------------------------------------------------
+// Per-app view toggles and preferences, stored in /data/APPS.CFG so app
+// writes never race system settings. Keys are plain strings ("terminal_zoom",
+// "files_sidebar", ...); values are integers.
+int app_setting_load_int(const char *key, int fallback);
+bool app_setting_save_int(const char *key, int value);
+
 #ifdef __cplusplus
 }
 #endif
