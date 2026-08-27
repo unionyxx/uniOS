@@ -235,12 +235,6 @@ bool gui_open_request_take(char *out, size_t out_size);
 int gui_request_focus(void);
 int gui_sync_window_size(Surface *s);
 int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h);
-// Two-slot client mailbox (regular app windows). gui_window_mailbox_target
-// returns the slot to draw the next frame into (NULL if the compositor has not
-// freed one yet — drop the frame), and gui_window_mailbox_commit publishes it.
-int gui_window_mailbox_active(void);
-Surface *gui_window_mailbox_target(uint32_t w, uint32_t h);
-int gui_window_mailbox_commit(void);
 int gui_wait_frame(uint64_t *frame_ticks, uint32_t *completed_sequence);
 int gui_poll_frame(uint64_t *frame_ticks, uint32_t *completed_sequence);
 int gui_window_set_min_size(int width, int height);

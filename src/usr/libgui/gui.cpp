@@ -26,21 +26,6 @@ struct RetiredWindowBuffer
     uint32_t generation;
 };
 static RetiredWindowBuffer g_retired_window_buffers[GUI_RETIRED_WINDOW_BUFFER_SLOTS] = {};
-// Two-slot client mailbox (protocol v1). The app draws into the slot the
-// compositor is not presenting, then publishes it with gui_mailbox_commit;
-// this removes the single-buffer race where the WM reads pixels mid-redraw.
-struct GuiMailboxSlot
-{
-    int shm_id;
-    uint32_t *buffer;
-    uint32_t buffer_w;
-    uint32_t buffer_h;
-    uint32_t pitch;
-    size_t bytes;
-};
-static GuiMailboxSlot g_mailbox_slots[2] = {};
-static int g_mailbox_draw_slot = 0;
-static bool g_mailbox_active = false;
 static int g_ui_scale_pct = 0;
 static constexpr int k_system_menu_gap_px = 6;
 static constexpr int k_system_menu_item_h_px = 24;
@@ -363,164 +348,6 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     g_retired_window_buffers[retired_slot].shm_id = old_shm_id;
     g_retired_window_buffers[retired_slot].generation = generation;
     return true;
-}
-
-// --- Two-slot mailbox -----------------------------------------------------
-
-static void gui_mailbox_publish_slot(int idx)
-{
-    if (!g_my_window || idx < 0 || idx > 1)
-        return;
-    const GuiMailboxSlot &slot = g_mailbox_slots[idx];
-    g_my_window->mailbox_shm_id[idx] = slot.shm_id;
-    g_my_window->mailbox_buffer_w[idx] = static_cast<int>(slot.buffer_w);
-    g_my_window->mailbox_buffer_h[idx] = static_cast<int>(slot.buffer_h);
-    asm volatile("sfence" ::: "memory");
-}
-
-// Ensure slot idx has a backing of at least want_w x want_h. (Re)allocates a
-// fresh memfd when the current one is missing or too small, publishing the
-// new shm to the registry entry. Returns false on allocation failure.
-static bool gui_mailbox_ensure_slot(int idx, uint32_t want_w, uint32_t want_h)
-{
-    if (idx < 0 || idx > 1 || want_w == 0 || want_h == 0)
-        return false;
-    GuiMailboxSlot &slot = g_mailbox_slots[idx];
-    if (slot.buffer && slot.buffer_w >= want_w && slot.buffer_h >= want_h)
-        return true;
-
-    uint32_t alloc_w = gui_resize_capacity(slot.buffer_w ? slot.buffer_w : want_w, want_w);
-    uint32_t alloc_h = gui_resize_capacity(slot.buffer_h ? slot.buffer_h : want_h, want_h);
-    uint64_t bytes64 = (uint64_t)alloc_w * (uint64_t)alloc_h * 4u;
-    if (bytes64 == 0 || bytes64 > 0x1000000ULL)
-        return false;
-
-    int memfd = memfd_create("window_mailbox_slot", 0);
-    if (memfd < 0)
-        return false;
-    if (ftruncate(memfd, bytes64) < 0) {
-        close(memfd);
-        return false;
-    }
-    void *mapped = mmap(NULL, (size_t)bytes64, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
-    if (mapped == MAP_FAILED) {
-        close(memfd);
-        return false;
-    }
-    int wm_fd = fd_transfer(0, memfd);
-    if (wm_fd < 0) {
-        munmap(mapped, (size_t)bytes64);
-        close(memfd);
-        return false;
-    }
-    close(memfd);
-
-    int old_shm_id = slot.shm_id;
-    uint32_t *old_buffer = slot.buffer;
-    size_t old_bytes = slot.bytes;
-
-    slot.shm_id = wm_fd | 0x40000000;
-    slot.buffer = reinterpret_cast<uint32_t *>(mapped);
-    slot.buffer_w = alloc_w;
-    slot.buffer_h = alloc_h;
-    slot.pitch = alloc_w * 4u;
-    slot.bytes = (size_t)bytes64;
-    memset(mapped, 0, (size_t)bytes64);
-    gui_mailbox_publish_slot(idx);
-
-    // The previous backing may still be visible to the compositor; retire it
-    // rather than freeing it immediately (same scheme as resize backing).
-    if (gui_shm_id_is_valid(old_shm_id)) {
-        int retired_slot = gui_find_retired_window_buffer_slot();
-        if (retired_slot >= 0) {
-            uint32_t generation = next_window_buffer_generation();
-            g_my_window->buffer_generation = generation;
-            g_retired_window_buffers[retired_slot].shm_id = old_shm_id;
-            g_retired_window_buffers[retired_slot].generation = generation;
-        }
-        if (old_buffer && old_bytes)
-            munmap(old_buffer, old_bytes);
-    }
-    return true;
-}
-
-// Acquire the slot to draw the next frame into. Waits (bounded) for the
-// compositor to free a slot; returns NULL when none becomes available so the
-// caller can drop the frame instead of tearing a presented buffer.
-static Surface *gui_mailbox_acquire_draw_target(uint32_t want_w, uint32_t want_h)
-{
-    if (!g_mailbox_active || !g_my_window)
-        return NULL;
-
-    int target = -1;
-    for (int wait = 0; wait < 128 && target < 0; wait++) {
-        for (int idx = 0; idx < 2; idx++) {
-            if (g_my_window->mailbox_slot_free[idx] != 0) {
-                target = idx;
-                break;
-            }
-        }
-        if (target < 0)
-            syscall1(SYS_YIELD, 0);
-    }
-    if (target < 0)
-        return NULL;
-
-    if (!gui_mailbox_ensure_slot(target, want_w, want_h))
-        return NULL;
-
-    g_my_window->mailbox_slot_free[target] = 0;
-    asm volatile("sfence" ::: "memory");
-    g_mailbox_draw_slot = target;
-
-    GuiMailboxSlot &slot = g_mailbox_slots[target];
-    // Keep the legacy single-buffer fields pointing at the draw target so the
-    // resize/configure machinery and the compositor fallback stay coherent.
-    g_window_shm_id = slot.shm_id;
-    g_window_buffer_w = slot.buffer_w;
-    g_window_buffer_h = slot.buffer_h;
-    g_my_window->shm_id = slot.shm_id;
-    g_my_window->buffer_w = static_cast<int>(slot.buffer_w);
-    g_my_window->buffer_h = static_cast<int>(slot.buffer_h);
-    asm volatile("sfence" ::: "memory");
-
-    static Surface target_surface;
-    target_surface.buffer = slot.buffer;
-    target_surface.width = want_w;
-    target_surface.height = want_h;
-    target_surface.pitch = slot.pitch;
-    target_surface.owns_buffer = false;
-    target_surface.display_handle = 0;
-    return &target_surface;
-}
-
-// Publish the frame just drawn into the draw slot.
-static int gui_mailbox_commit(void)
-{
-    if (!g_mailbox_active || !g_my_window)
-        return -1;
-    asm volatile("sfence" ::: "memory");
-    g_my_window->mailbox_commit_index = static_cast<uint32_t>(g_mailbox_draw_slot);
-    g_my_window->mailbox_commit_seq++;
-    asm volatile("sfence" ::: "memory");
-    return 0;
-}
-
-// --- end mailbox ----------------------------------------------------------
-
-extern "C" int gui_window_mailbox_active(void)
-{
-    return g_mailbox_active ? 1 : 0;
-}
-
-extern "C" Surface *gui_window_mailbox_target(uint32_t w, uint32_t h)
-{
-    return gui_mailbox_acquire_draw_target(w, h);
-}
-
-extern "C" int gui_window_mailbox_commit(void)
-{
-    return gui_mailbox_commit();
 }
 
 static void copy_theme_tables(GuiThemeMode mode)
@@ -1707,14 +1534,6 @@ int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_
         s->height >= static_cast<uint32_t>(g_my_window->h)) {
         g_my_window->buffer_resize_serial = resize_serial;
     }
-    // Manual-mode clients draw directly into the registered surface and commit
-    // through this path without using gui_window_mailbox_target, so publish the
-    // mailbox here too; libapp's mailbox path reaches the same commit via this
-    // function and must not commit twice.
-    if (g_mailbox_active) {
-        g_my_window->mailbox_commit_index = static_cast<uint32_t>(g_mailbox_draw_slot);
-        g_my_window->mailbox_commit_seq++;
-    }
     asm volatile("sfence" ::: "memory");
     return 0;
 }
@@ -1903,40 +1722,6 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
     win_entry->request_restore = false;
     damage_reset(&win_entry->damage);
 
-    // Two-slot mailbox for regular app windows: eliminates the single-buffer
-    // race where the compositor reads pixels while the client redraws. Shell
-    // surfaces (WIN_FLAG_SYSTEM) keep the legacy single-buffer path.
-    bool use_mailbox = (flags & WIN_FLAG_SYSTEM) == 0;
-    if (use_mailbox) {
-        g_mailbox_slots[0].shm_id = shm_id;
-        g_mailbox_slots[0].buffer = reinterpret_cast<uint32_t *>(win_ptr);
-        g_mailbox_slots[0].buffer_w = buffer_w;
-        g_mailbox_slots[0].buffer_h = buffer_h;
-        g_mailbox_slots[0].pitch = buffer_pitch;
-        g_mailbox_slots[0].bytes = buffer_bytes;
-        g_mailbox_slots[1] = {};
-        g_mailbox_slots[1].shm_id = WIN_SHM_INVALID;
-        g_mailbox_draw_slot = 0;
-        g_mailbox_active = true;
-        win_entry->protocol_version = 1u;
-        win_entry->mailbox_commit_index = 0u;
-        win_entry->mailbox_commit_seq = 0u;
-        // Both slots start free: the client draws into its private canvas and
-        // acquires a target slot per frame (it does not draw into the
-        // registration surface directly).
-        win_entry->mailbox_slot_free[0] = 1u;
-        win_entry->mailbox_slot_free[1] = 1u;
-        win_entry->mailbox_shm_id[0] = shm_id;
-        win_entry->mailbox_buffer_w[0] = static_cast<int>(buffer_w);
-        win_entry->mailbox_buffer_h[0] = static_cast<int>(buffer_h);
-        win_entry->mailbox_shm_id[1] = WIN_SHM_INVALID;
-        win_entry->mailbox_buffer_w[1] = 0;
-        win_entry->mailbox_buffer_h[1] = 0;
-    } else {
-        g_mailbox_active = false;
-        win_entry->protocol_version = 0u;
-    }
-
     asm volatile("sfence" ::: "memory");
     win_entry->shm_id = shm_id;
     asm volatile("sfence" ::: "memory");
@@ -2006,17 +1791,6 @@ int gui_sync_window_size(Surface *s)
 
     uint32_t new_w = (g_my_window->w > 0) ? static_cast<uint32_t>(g_my_window->w) : s->width;
     uint32_t new_h = (g_my_window->h > 0) ? static_cast<uint32_t>(g_my_window->h) : s->height;
-
-    if (g_mailbox_active) {
-        // Mailbox slots grow on demand in gui_window_mailbox_target; here we
-        // only track the logical size so the canvas can follow the window.
-        if (s->width == new_w && s->height == new_h)
-            return 0;
-        s->width = new_w;
-        s->height = new_h;
-        return 1;
-    }
-
     bool requested_resize =
         (g_my_window->flags & WIN_FLAG_RESIZABLE) != 0 && (new_w > g_window_buffer_w || new_h > g_window_buffer_h);
     if (requested_resize && !gui_resize_window_backing(s, new_w, new_h)) {
@@ -2050,8 +1824,7 @@ int gui_set_content_size(Surface *s, int content_w, int content_h)
         content_h = view_h;
 
     if (static_cast<uint32_t>(content_w) > g_window_buffer_w || static_cast<uint32_t>(content_h) > g_window_buffer_h) {
-        if (!g_mailbox_active &&
-            !gui_resize_window_backing(s, static_cast<uint32_t>(content_w), static_cast<uint32_t>(content_h)))
+        if (!gui_resize_window_backing(s, static_cast<uint32_t>(content_w), static_cast<uint32_t>(content_h)))
             return -1;
     }
 
