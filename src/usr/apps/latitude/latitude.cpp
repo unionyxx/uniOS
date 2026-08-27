@@ -1922,8 +1922,7 @@ static void load_project(AppState *state, const char *path)
     }
 
     char name[256];
-    while (project_count_of(state) < MAX_PROJECT_ROWS &&
-           syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
+    while (project_count_of(state) < MAX_PROJECT_ROWS && syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
             continue;
         ProjectRow row = {};
@@ -2685,8 +2684,7 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
 
         sy = outline_y + outline_header_h + gui_space_1();
         for (int i = state->outline_first_row;
-             i < outline_count_of(state) && sy + gui_app_row_h() < rects->sidebar_rect.y + rects->sidebar_rect.h;
-             i++) {
+             i < outline_count_of(state) && sy + gui_app_row_h() < rects->sidebar_rect.y + rects->sidebar_rect.h; i++) {
             rects->outline_rows[i] =
                 gui_rect_make(rects->sidebar_rect.x + 1, sy, rects->sidebar_rect.w - 2, gui_app_row_h());
             char detail_line[32];
@@ -3404,13 +3402,13 @@ static void latitude_publish_menus(AppState *state)
     gui_menu_model_add_item(&model, file, "Reload", LAT_MENU_RELOAD, state->buffer->path[0] ? 0 : MENU_FLAG_DISABLED,
                             nullptr);
 
-    int edit = app_menus_add_edit(
-        &model,
-        APP_EDIT_UNDO | APP_EDIT_REDO | APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_PASTE | APP_EDIT_DELETE |
-            APP_EDIT_SELECT_ALL,
-        (state->undo_count > 0 ? APP_EDIT_UNDO : 0) | (state->redo_count > 0 ? APP_EDIT_REDO : 0) |
-            (has_sel ? (APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_DELETE) : 0) | APP_EDIT_PASTE |
-            (has_text ? APP_EDIT_SELECT_ALL : 0));
+    int edit =
+        app_menus_add_edit(&model,
+                           APP_EDIT_UNDO | APP_EDIT_REDO | APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_PASTE |
+                               APP_EDIT_DELETE | APP_EDIT_SELECT_ALL,
+                           (state->undo_count > 0 ? APP_EDIT_UNDO : 0) | (state->redo_count > 0 ? APP_EDIT_REDO : 0) |
+                               (has_sel ? (APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_DELETE) : 0) | APP_EDIT_PASTE |
+                               (has_text ? APP_EDIT_SELECT_ALL : 0));
     (void)edit;
 
     int view = gui_menu_model_add_menu(&model, "View");
