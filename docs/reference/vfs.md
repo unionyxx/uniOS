@@ -29,8 +29,8 @@ A fixed table of 512 entries, one 4 KiB page each, with last-access accounting f
 
 - Cache entries hold vnode references; the dirty flag clears only on successful writeback.
 - Eviction is bounded: unflushable victims are aged rather than livelocked.
-- Closing the last fd of a file purges its entries — repointing them to a still-open vnode of the same file, or flushing and dropping them.
-- `SYS_SYNC` flushes all dirty pages and calls each mounted filesystem's sync op.
+- Closing the last fd of a file purges its entries — repointing them to a still-open vnode of the same file, or flushing and dropping them — and then flushes the backing block device's write cache once, so a saved-and-closed file is durable without a global sync.
+- `SYS_SYNC` runs each mounted filesystem's sync op (with mount roots snapshotted outside the mount lock, since fs syncs issue device I/O), flushes all dirty pages, and then commits every block device's volatile write cache via `block_dev_flush_all()`.
 
 ## Links, Deletes, Renames
 

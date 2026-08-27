@@ -23,11 +23,11 @@ Nothing in the overlay survives reboot. Persistent state belongs on `/data`.
 `src/fs/fat32/fat32.cpp` implements FAT32 with long filenames:
 
 - Boot sector parsing accepts 512 or 4096-byte sectors, power-of-two cluster sizes up to 128 sectors, and validates all geometry in 64-bit arithmetic so crafted values cannot wrap.
-- FSInfo is validated by its three signatures and provides the free-cluster count and next-free-cluster hint; allocation starts at the hint and wraps, frees update it, and FSInfo is written back.
+- FSInfo is validated by its three signatures and provides the free-cluster count and next-free-cluster hint; allocation starts at the hint and wraps, frees update it, and the in-memory state is marked dirty. The FSInfo sector itself is rewritten lazily by the filesystem sync op (`vfs_sync()`), not on every allocation/free.
 - A per-filesystem spinlock serializes every FAT/directory mutation and the read-modify-write walks behind it.
 - All cluster-chain walks (lookup, readdir, read, free) are bounded by the cluster count, so cyclic chains on corrupt media terminate. Out-of-range FAT entries are treated as EOF.
 - LFN: up to 20 slots per name, checksum verified before use, UTF-16 to UTF-8 conversion rejecting surrogates, fallback to the 8.3 short name. Creation generates `~1`..`~999` short-name suffixes when needed.
-- Writes are sector-granular read-modify-write with cluster allocation as needed; truncate supports size 0 only. All file I/O flows through the VFS page cache.
+- Writes bypass read-modify-write for aligned full sectors and coalesce physically contiguous cluster runs into one multi-sector transfer; only head/tail partial sectors take a read-modify-write. Clusters are allocated as needed. Truncate supports size 0 only. All file I/O flows through the VFS page cache.
 
 ## /data Mount Discovery
 

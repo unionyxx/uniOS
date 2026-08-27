@@ -50,3 +50,29 @@ BlockDevice *block_dev_first(void)
     spinlock_release_irqrestore(&dev_lock, flags);
     return first;
 }
+
+int block_dev_flush(BlockDevice *dev)
+{
+    if (!dev || !dev->flush)
+        return 0;
+    if (!dev->cache_dirty)
+        return 0;
+    int res = dev->flush(dev);
+    if (res == 0)
+        dev->cache_dirty = false;
+    return res;
+}
+
+void block_dev_flush_all(void)
+{
+    // Snapshot the head under the lock, then flush with the lock dropped:
+    // a device flush is real I/O and must not run with IRQs masked. The list
+    // is append-only, so walking from a snapshotted head is safe even if a
+    // new device registers mid-iteration (it simply misses this pass).
+    uint64_t flags = spinlock_acquire_irqsave(&dev_lock);
+    BlockDevice *head = dev_list;
+    spinlock_release_irqrestore(&dev_lock, flags);
+
+    for (BlockDevice *dev = head; dev; dev = dev->next)
+        block_dev_flush(dev);
+}

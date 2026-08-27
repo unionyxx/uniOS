@@ -486,6 +486,8 @@ static bool ahci_recover_port(AhciPortState *state)
 // Flush the device's volatile write cache. Without this every "successful"
 // write could still be lost on power cut. Same locking rationale as
 // ahci_port_io: keep interrupts enabled across the (potentially slow) flush.
+// Invoked lazily through the block-device flush op (sync/shutdown/last
+// close) instead of after every single write request.
 static bool ahci_flush_cache(AhciPortState *state)
 {
     if (!state || !state->present)
@@ -495,6 +497,12 @@ static bool ahci_flush_cache(AhciPortState *state)
     bool ok = ahci_exec(state, 0xEA /* FLUSH CACHE EXT */, 0, 0, false, 0);
     spinlock_release(&state->lock);
     return ok;
+}
+
+static int ahci_flush(BlockDevice *dev)
+{
+    AhciPortState *state = static_cast<AhciPortState *>(dev ? dev->private_data : nullptr);
+    return ahci_flush_cache(state) ? 0 : -1;
 }
 
 static int64_t ahci_port_io(AhciPortState *state, uint64_t lba, uint32_t count, void *buffer, bool write)
@@ -554,8 +562,10 @@ static int64_t ahci_write_blocks(BlockDevice *dev, uint64_t lba, uint32_t count,
         return -1;
     AhciPortState *state = static_cast<AhciPortState *>(dev ? dev->private_data : nullptr);
     int64_t res = ahci_port_io(state, lba, count, const_cast<void *>(buffer), true);
-    if (res > 0)
-        ahci_flush_cache(state);
+    // Data is accepted into the drive's volatile cache; the flush op commits
+    // it to media on sync/shutdown rather than after every request.
+    if (res > 0 && dev)
+        dev->cache_dirty = true;
     return res;
 }
 
@@ -675,6 +685,8 @@ static bool register_disk(AhciPortState *state)
     state->block_dev.total_blocks = state->sector_count;
     state->block_dev.read_blocks = ahci_read_blocks;
     state->block_dev.write_blocks = ahci_write_blocks;
+    state->block_dev.flush = ahci_flush;
+    state->block_dev.cache_dirty = false;
     state->block_dev.private_data = state;
     block_dev_register(&state->block_dev);
     g_disk_count++;

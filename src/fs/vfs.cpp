@@ -1,4 +1,6 @@
 #include <kernel/debug.h>
+#include <kernel/fs/block_dev.h>
+#include <kernel/fs/fat32.h>
 #include <kernel/fs/storage_guard.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/mm/heap.h>
@@ -15,13 +17,14 @@ using kstring::string_view;
 
 constexpr size_t MAX_CACHE_PAGES = 512;
 
-struct PageCacheEntry {
+struct PageCacheEntry
+{
     VNode *vnode;      // Associated VNode (keeps it pinned if dirty/valid, unless closed)
     VNodeOps *ops;     // Checked against fat32_file_ops/unifs_file_ops
     uint64_t inode_id; // Starting cluster for FAT32, 0 for UniFS
     void *fs;          // FAT32 filesystem pointer
     char path[256];    // UniFS path
-    
+
     uint64_t page_index; // Offset / 4096
     uint8_t data[4096];
     bool dirty;
@@ -33,20 +36,27 @@ static PageCacheEntry g_page_cache[MAX_CACHE_PAGES];
 static uint64_t g_page_cache_tick = 0;
 static Spinlock g_pc_lock = SPINLOCK_INIT;
 
-static bool vfs_is_same_file(const VNode *a, const VNode *b) {
-    if (a == b) return true;
-    if (!a || !b) return false;
-    if (a->ops != b->ops) return false;
+static bool vfs_is_same_file(const VNode *a, const VNode *b)
+{
+    if (a == b)
+        return true;
+    if (!a || !b)
+        return false;
+    if (a->ops != b->ops)
+        return false;
     if (a->ops == &fat32_file_ops) {
-        if (a->inode_id != b->inode_id) return false;
-        if (!a->fs_data || !b->fs_data) return false;
-        void* fs_a = *static_cast<void**>(a->fs_data);
-        void* fs_b = *static_cast<void**>(b->fs_data);
+        if (a->inode_id != b->inode_id)
+            return false;
+        if (!a->fs_data || !b->fs_data)
+            return false;
+        void *fs_a = *static_cast<void **>(a->fs_data);
+        void *fs_b = *static_cast<void **>(b->fs_data);
         return fs_a == fs_b;
     }
     if (a->ops == &unifs_file_ops) {
-        if (!a->fs_data || !b->fs_data) return false;
-        return kstring::strcmp(static_cast<const char*>(a->fs_data), static_cast<const char*>(b->fs_data)) == 0;
+        if (!a->fs_data || !b->fs_data)
+            return false;
+        return kstring::strcmp(static_cast<const char *>(a->fs_data), static_cast<const char *>(b->fs_data)) == 0;
     }
     return false;
 }
@@ -54,7 +64,8 @@ static bool vfs_is_same_file(const VNode *a, const VNode *b) {
 // Scans every fd table for another open vnode naming the same file. The
 // process list and the fd tables are only stable under the scheduler lock:
 // an unlocked walk raced process teardown and followed freed memory.
-static VNode *vfs_find_open_vnode_for(const VNode *like_node) {
+static VNode *vfs_find_open_vnode_for(const VNode *like_node)
+{
     const uint64_t sched_flags = scheduler_big_lock_irqsave();
     Process *start = scheduler_get_process_list();
     VNode *result = nullptr;
@@ -79,7 +90,8 @@ static VNode *vfs_find_open_vnode_for(const VNode *like_node) {
     return result;
 }
 
-static bool pc_match(const PageCacheEntry &entry, const VNode *node) {
+static bool pc_match(const PageCacheEntry &entry, const VNode *node)
+{
     if (!entry.valid || !node)
         return false;
     if (entry.ops != node->ops)
@@ -89,18 +101,19 @@ static bool pc_match(const PageCacheEntry &entry, const VNode *node) {
             return false;
         if (!node->fs_data)
             return false;
-        void* fs = *static_cast<void**>(node->fs_data);
+        void *fs = *static_cast<void **>(node->fs_data);
         return entry.fs == fs;
     }
     if (node->ops == &unifs_file_ops) {
         if (!node->fs_data)
             return false;
-        return kstring::strcmp(entry.path, static_cast<const char*>(node->fs_data)) == 0;
+        return kstring::strcmp(entry.path, static_cast<const char *>(node->fs_data)) == 0;
     }
     return false;
 }
 
-static PageCacheEntry *pc_find_locked(const VNode *node, uint64_t page_index) {
+static PageCacheEntry *pc_find_locked(const VNode *node, uint64_t page_index)
+{
     for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
         if (g_page_cache[i].valid && g_page_cache[i].page_index == page_index && pc_match(g_page_cache[i], node)) {
             return &g_page_cache[i];
@@ -114,7 +127,8 @@ static PageCacheEntry *pc_find_locked(const VNode *node, uint64_t page_index) {
 // even though g_pc_lock is released while I/O is in flight. `dirty` clears
 // only on success: a failed write keeps the data cached for a later retry
 // instead of dropping it on the floor.
-static bool pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags) {
+static bool pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags)
+{
     if (!entry->valid || !entry->dirty)
         return true;
 
@@ -152,8 +166,9 @@ static bool pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags) {
 // is dropped (a close can recurse back into the page cache). Bounded: an
 // unflushable dirty victim (I/O error, OOM) is aged and skipped instead of
 // re-selecting it forever.
-static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_index, uint64_t &flags,
-                                                    VNode **dropped, size_t dropped_cap, size_t &dropped_count) {
+static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_index, uint64_t &flags, VNode **dropped,
+                                                    size_t dropped_cap, size_t &dropped_count)
+{
     for (uint32_t attempts = 0; attempts < MAX_CACHE_PAGES; attempts++) {
         PageCacheEntry *best_victim = nullptr;
         for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
@@ -195,12 +210,12 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
         best_victim->ops = node->ops;
         best_victim->inode_id = node->inode_id;
         if (node->ops == &fat32_file_ops) {
-            best_victim->fs = node->fs_data ? *static_cast<void**>(node->fs_data) : nullptr;
+            best_victim->fs = node->fs_data ? *static_cast<void **>(node->fs_data) : nullptr;
             best_victim->path[0] = '\0';
         } else if (node->ops == &unifs_file_ops) {
             best_victim->fs = nullptr;
             if (node->fs_data) {
-                kstring::strncpy(best_victim->path, static_cast<const char*>(node->fs_data), 255);
+                kstring::strncpy(best_victim->path, static_cast<const char *>(node->fs_data), 255);
                 best_victim->path[255] = '\0';
             } else {
                 best_victim->path[0] = '\0';
@@ -219,7 +234,8 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
     return nullptr;
 }
 
-static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
+static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index)
+{
     uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
     PageCacheEntry *entry = pc_find_locked(node, page_index);
     if (entry) {
@@ -281,7 +297,8 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index) {
     return entry;
 }
 
-void pc_purge_vnode(VNode *node) {
+void pc_purge_vnode(VNode *node)
+{
     if (!node || (node->ops != &fat32_file_ops && node->ops != &unifs_file_ops))
         return;
 
@@ -614,13 +631,28 @@ void vfs_resolve_relative_path(const char *cwd, const char *path, char *out)
 
 void vfs_sync()
 {
+    // Snapshot and pin the mount roots, then run the filesystem syncs with
+    // the mount lock dropped: fs syncs issue real device I/O and must not run
+    // with interrupts masked.
+    constexpr int MAX_SYNC_ROOTS = 16;
+    VNode *roots[MAX_SYNC_ROOTS];
+    int root_count = 0;
+
     uint64_t flags = spinlock_acquire_irqsave(&g_mount_lock);
-    for (const Mount *m = g_mount_list; m; m = m->next) {
-        if (m->root && m->root->ops->sync) {
-            m->root->ops->sync(m->root);
+    for (const Mount *m = g_mount_list; m && root_count < MAX_SYNC_ROOTS; m = m->next) {
+        if (m->root) {
+            __sync_fetch_and_add(&m->root->ref_count, 1);
+            roots[root_count++] = m->root;
         }
     }
     spinlock_release_irqrestore(&g_mount_lock, flags);
+
+    for (int i = 0; i < root_count; i++) {
+        if (roots[i]->ops && roots[i]->ops->sync) {
+            roots[i]->ops->sync(roots[i]);
+        }
+        vfs_close_vnode(roots[i]);
+    }
 
     uint64_t pc_flags = spinlock_acquire_irqsave(&g_pc_lock);
     for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
@@ -629,6 +661,10 @@ void vfs_sync()
         }
     }
     spinlock_release_irqrestore(&g_pc_lock, pc_flags);
+
+    // Commit volatile write caches now that all filesystem data and metadata
+    // have been handed to the devices.
+    block_dev_flush_all();
 }
 
 void vfs_close_vnode(VNode *node)
@@ -660,8 +696,18 @@ void vfs_close_vnode(VNode *node)
     // Last fd for this file closed while cache entries still reference it:
     // flush dirty pages to disk and drop those entries so the node can be
     // released. If another fd is still open, keep the cache warm for it.
-    if ((node->ops == &fat32_file_ops || node->ops == &unifs_file_ops) && !vfs_find_open_vnode_for(node))
+    if ((node->ops == &fat32_file_ops || node->ops == &unifs_file_ops) && !vfs_find_open_vnode_for(node)) {
+        // Capture the backing device before the purge: dropping the cache
+        // references can free the vnode itself.
+        BlockDevice *dev = (node->ops == &fat32_file_ops) ? fat32_vnode_device(node) : nullptr;
         pc_purge_vnode(node);
+        // The purge handed the file's data to the device's volatile write
+        // cache; commit it so a saved-and-closed file survives power loss
+        // without waiting for a global sync. One coalesced flush per closed
+        // file replaces the old per-write flushes.
+        if (dev)
+            block_dev_flush(dev);
+    }
 }
 
 Mount *vfs_get_mounts()
@@ -1039,8 +1085,7 @@ int vfs_readdir(int fd, char *name_out)
     spinlock_release_irqrestore(&p->fd_lock, fl);
 
     int res = -1;
-    if (vn->ops->readdir &&
-        ((desc.flags & FD_FLAG_STORAGE_GUARDED) == 0 || storage_reads_allowed())) {
+    if (vn->ops->readdir && ((desc.flags & FD_FLAG_STORAGE_GUARDED) == 0 || storage_reads_allowed())) {
         res = vn->ops->readdir(vn, desc.dir_pos, name_out);
         if (res == 0) {
             desc.dir_pos++;

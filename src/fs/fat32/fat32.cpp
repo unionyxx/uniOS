@@ -217,9 +217,16 @@ static void fat32_load_fsinfo(FAT32Filesystem *fs)
     free(sector_buf);
 }
 
-static void fat32_update_fsinfo(FAT32Filesystem *fs)
+// Writes the in-memory free-space state back to the FSInfo sector. Called
+// lazily from the filesystem sync path; cluster allocation/free only marks
+// the state dirty instead of paying a sector read-modify-write (and device
+// cache flush) on every single cluster.
+static void fat32_flush_fsinfo(FAT32Filesystem *fs)
 {
-    if (!fs || fs->fsinfo_sector == 0 || fs->fsinfo_sector >= fs->reserved_sectors)
+    if (!fs || !fs->fsinfo_dirty)
+        return;
+    fs->fsinfo_dirty = false;
+    if (fs->fsinfo_sector == 0 || fs->fsinfo_sector >= fs->reserved_sectors)
         return;
 
     uint8_t *sector_buf = static_cast<uint8_t *>(malloc(fs->bytes_per_sector));
@@ -229,7 +236,8 @@ static void fat32_update_fsinfo(FAT32Filesystem *fs)
     if (fs->dev->read_blocks(fs->dev, fs->fsinfo_sector, 1, sector_buf) >= 0 && fat32_fsinfo_valid(sector_buf)) {
         write_le32(sector_buf + 488, fs->free_cluster_count);
         write_le32(sector_buf + 492, fs->next_free_cluster);
-        fs->dev->write_blocks(fs->dev, fs->fsinfo_sector, 1, sector_buf);
+        if (fs->dev->write_blocks(fs->dev, fs->fsinfo_sector, 1, sector_buf) < 0)
+            fs->fsinfo_dirty = true; // keep the state for the next sync attempt
     }
 
     free(sector_buf);
@@ -286,7 +294,7 @@ static uint32_t fat32_allocate_cluster(FAT32Filesystem *fs, uint32_t last_cluste
                 fs->next_free_cluster = 2;
             if (fs->free_cluster_count != FAT32_FSINFO_UNKNOWN && fs->free_cluster_count > 0)
                 fs->free_cluster_count--;
-            fat32_update_fsinfo(fs);
+            fs->fsinfo_dirty = true;
             return cluster;
         }
     }
@@ -312,7 +320,8 @@ static void fat32_free_chain(FAT32Filesystem *fs, uint32_t cluster)
         fs->next_free_cluster = first_freed;
     if (fs->free_cluster_count != FAT32_FSINFO_UNKNOWN)
         fs->free_cluster_count += freed_count;
-    fat32_update_fsinfo(fs);
+    if (freed_count != 0)
+        fs->fsinfo_dirty = true;
 }
 
 static bool dir_chain_load(FAT32Filesystem *fs, uint32_t dir_cluster, DirChain *out)
@@ -952,6 +961,23 @@ static void fat32_vfs_close(VNode *node)
     node->fs_data = nullptr;
 }
 
+// Persists lazily-tracked metadata (FSInfo free-space state). Device cache
+// commits are handled by the block layer during vfs_sync.
+static int fat32_vfs_sync(VNode *node)
+{
+    if (!node)
+        return -1;
+    auto *node_data = static_cast<FAT32Node *>(node->fs_data);
+    if (!node_data || !node_data->fs)
+        return -1;
+    FAT32Filesystem *fs = node_data->fs;
+
+    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    fat32_flush_fsinfo(fs);
+    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    return 0;
+}
+
 static int64_t fat32_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t offset, FileDescriptor *fd)
 {
     (void)fd;
@@ -1015,9 +1041,12 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
     if (!node_data)
         return -1;
     FAT32Filesystem *fs = node_data->fs;
+    if (!fs || size == 0)
+        return 0;
 
     const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
-    uint32_t cluster_size = fs->bytes_per_sector * fs->sectors_per_cluster;
+    const uint32_t sector_size = fs->bytes_per_sector;
+    const uint32_t cluster_size = sector_size * fs->sectors_per_cluster;
     uint32_t cluster = (uint32_t)node->inode_id;
 
     if (cluster == 0) {
@@ -1030,44 +1059,108 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         dir_update_short_entry(fs, node_data, set_entry_cluster, &cluster);
     }
 
+    // Walk the chain to the cluster containing `offset`, allocating as needed.
+    // Bounded by the cluster count so a cyclic chain on corrupt media cannot
+    // spin forever.
     uint32_t cluster_index = offset / cluster_size;
+    bool walk_failed = false;
     for (uint32_t i = 0; i < cluster_index; i++) {
         uint32_t next = fat_next_cluster(fs, cluster);
         if (next >= FAT_CLUSTER_EOF) {
             next = fat32_allocate_cluster(fs, cluster);
             if (next >= FAT_CLUSTER_EOF) {
-                spinlock_release_irqrestore(&fs->lock, fs_flags);
-                return -1;
+                walk_failed = true;
+                break;
             }
         }
         cluster = next;
+        if (i > fs->cluster_count) {
+            walk_failed = true;
+            break;
+        }
     }
-
-    uint8_t *sector_buf = static_cast<uint8_t *>(malloc(fs->bytes_per_sector));
-    if (!sector_buf) {
+    if (walk_failed) {
         spinlock_release_irqrestore(&fs->lock, fs_flags);
         return -1;
     }
+
     const uint8_t *src = static_cast<const uint8_t *>(buf);
     uint64_t bytes_written = 0;
+    uint8_t *sector_buf = nullptr; // lazily allocated for partial-sector RMW
 
     while (bytes_written < size) {
-        uint32_t cluster_offset = (uint32_t)((offset + bytes_written) % cluster_size);
-        uint32_t sector_in_cluster = cluster_offset / fs->bytes_per_sector;
-        uint32_t sector_offset = cluster_offset % fs->bytes_per_sector;
-        uint32_t chunk = fs->bytes_per_sector - sector_offset;
-        if (chunk > size - bytes_written)
-            chunk = (uint32_t)(size - bytes_written);
+        const uint64_t prev_written = bytes_written;
+        const uint64_t pos = offset + bytes_written;
+        const uint64_t remaining = size - bytes_written;
+        const uint32_t offset_in_cluster = (uint32_t)(pos % cluster_size);
+        const uint32_t sector_in_cluster = offset_in_cluster / sector_size;
+        const uint32_t sector_offset = offset_in_cluster % sector_size;
 
-        uint64_t lba = cluster_to_lba(fs, cluster) + sector_in_cluster;
-        if (fs->dev->read_blocks(fs->dev, lba, 1, sector_buf) < 0)
-            break;
-        kstring::memcpy(sector_buf + sector_offset, src + bytes_written, chunk);
-        if (fs->dev->write_blocks(fs->dev, lba, 1, sector_buf) < 0)
-            break;
+        if (sector_offset != 0 || remaining < sector_size) {
+            // Partial sector: the only case that still needs a read-modify-write.
+            if (!sector_buf) {
+                sector_buf = static_cast<uint8_t *>(malloc(sector_size));
+                if (!sector_buf)
+                    break;
+            }
+            uint32_t chunk = sector_size - sector_offset;
+            if (static_cast<uint64_t>(chunk) > remaining)
+                chunk = (uint32_t)remaining;
+            const uint64_t lba = cluster_to_lba(fs, cluster) + sector_in_cluster;
+            if (fs->dev->read_blocks(fs->dev, lba, 1, sector_buf) < 0)
+                break;
+            kstring::memcpy(sector_buf + sector_offset, src + bytes_written, chunk);
+            if (fs->dev->write_blocks(fs->dev, lba, 1, sector_buf) < 0)
+                break;
+            bytes_written += chunk;
+        } else {
+            // Sector-aligned whole sectors: skip the pre-read and coalesce a
+            // physically contiguous run of clusters into a single transfer.
+            const uint64_t run_lba = cluster_to_lba(fs, cluster) + sector_in_cluster;
+            uint32_t run_sectors = 0;
+            uint64_t run_bytes = 0;
+            uint32_t run_cluster = cluster;
+            uint32_t next_sector = sector_in_cluster;
 
-        bytes_written += chunk;
-        if (bytes_written < size && (cluster_offset + chunk) == cluster_size) {
+            while (run_bytes + sector_size <= remaining) {
+                const uint32_t avail = fs->sectors_per_cluster - next_sector;
+                const uint64_t full_sectors_left = (remaining - run_bytes) / sector_size;
+                uint32_t take = avail;
+                if (static_cast<uint64_t>(take) > full_sectors_left)
+                    take = (uint32_t)full_sectors_left;
+                if (take == 0)
+                    break;
+                run_sectors += take;
+                run_bytes += static_cast<uint64_t>(take) * sector_size;
+                next_sector += take;
+                if (next_sector < fs->sectors_per_cluster)
+                    break; // run ends mid-cluster; leftover is a partial tail
+                if (run_bytes + sector_size > remaining)
+                    break; // data ends on (or inside) the cluster boundary
+                uint32_t next = fat_next_cluster(fs, run_cluster);
+                if (next >= FAT_CLUSTER_EOF) {
+                    next = fat32_allocate_cluster(fs, run_cluster);
+                    if (next >= FAT_CLUSTER_EOF)
+                        break;
+                }
+                // Cluster numbers map linearly to LBAs, so only consecutive
+                // cluster numbers form one contiguous DMA range.
+                if (next != run_cluster + 1)
+                    break;
+                run_cluster = next;
+                next_sector = 0;
+            }
+
+            if (run_sectors == 0)
+                break;
+            if (fs->dev->write_blocks(fs->dev, run_lba, run_sectors, src + bytes_written) < 0)
+                break;
+            bytes_written += run_bytes;
+            cluster = run_cluster;
+        }
+
+        // Crossed a cluster boundary: continue from the next chain cluster.
+        if (bytes_written < size && (offset + bytes_written) % cluster_size == 0) {
             uint32_t next = fat_next_cluster(fs, cluster);
             if (next >= FAT_CLUSTER_EOF) {
                 next = fat32_allocate_cluster(fs, cluster);
@@ -1076,11 +1169,14 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
             }
             cluster = next;
         }
+
+        if (bytes_written == prev_written)
+            break; // safety: never spin without forward progress
     }
 
     free(sector_buf);
 
-    if (offset + bytes_written > node->size) {
+    if (bytes_written > 0 && offset + bytes_written > node->size) {
         node->size = offset + bytes_written;
         uint32_t new_size = (uint32_t)node->size;
         if (!dir_update_short_entry(fs, node_data, set_entry_size, &new_size))
@@ -1101,16 +1197,16 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
 } // namespace
 
 VNodeOps fat32_file_ops = {.read = fat32_vfs_read,
-                                  .write = fat32_vfs_write,
-                                  .readdir = nullptr,
-                                  .lookup = nullptr,
-                                  .create = nullptr,
-                                  .mkdir = nullptr,
-                                  .unlink = nullptr,
-                                  .rename = nullptr,
-                                  .truncate = fat32_vfs_truncate,
-                                  .sync = nullptr,
-                                  .close = fat32_vfs_close};
+                           .write = fat32_vfs_write,
+                           .readdir = nullptr,
+                           .lookup = nullptr,
+                           .create = nullptr,
+                           .mkdir = nullptr,
+                           .unlink = nullptr,
+                           .rename = nullptr,
+                           .truncate = fat32_vfs_truncate,
+                           .sync = fat32_vfs_sync,
+                           .close = fat32_vfs_close};
 
 namespace {
 
@@ -1123,7 +1219,7 @@ static VNodeOps fat32_dir_ops = {.read = nullptr,
                                  .unlink = fat32_vfs_unlink,
                                  .rename = fat32_vfs_rename,
                                  .truncate = nullptr,
-                                 .sync = nullptr,
+                                 .sync = fat32_vfs_sync,
                                  .close = fat32_vfs_close};
 
 static VNode *make_vnode_from_record(FAT32Filesystem *fs, uint32_t dir_cluster, const DirRecord &record)
@@ -1654,4 +1750,14 @@ VNode *fat32_get_root(FAT32Filesystem *fs)
     node_data->entry_start_index = 0;
     node_data->entry_count = 0;
     return vfs_create_vnode(fs->root_dir_cluster, 0, true, &fat32_dir_ops, node_data);
+}
+
+BlockDevice *fat32_vnode_device(VNode *node)
+{
+    if (!node || node->ops != &fat32_file_ops)
+        return nullptr;
+    auto *node_data = static_cast<FAT32Node *>(node->fs_data);
+    if (!node_data || !node_data->fs)
+        return nullptr;
+    return node_data->fs->dev;
 }

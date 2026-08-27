@@ -338,9 +338,23 @@ static int64_t usb_msc_write_blocks(BlockDevice *block_dev, uint64_t lba, uint32
         }
         done += chunk;
     }
-    usb_msc_sync_cache(dev);
+    // Data lands in the device's cache; SYNCHRONIZE CACHE is deferred to the
+    // flush op so a burst of writes costs one cache commit, not one per call.
+    if (done != 0 && block_dev)
+        block_dev->cache_dirty = true;
     mutex_unlock(&dev->lock);
     return done;
+}
+
+static int usb_msc_flush(BlockDevice *block_dev)
+{
+    auto *dev = static_cast<UsbMscDevice *>(block_dev ? block_dev->private_data : nullptr);
+    if (!dev || !dev->ready)
+        return -1;
+    mutex_lock(&dev->lock);
+    bool ok = usb_msc_sync_cache(dev);
+    mutex_unlock(&dev->lock);
+    return ok ? 0 : -1;
 }
 
 static UsbMscDevice *alloc_msc_device()
@@ -429,6 +443,8 @@ void usb_msc_device_connected(UsbDeviceInfo *usb)
     dev->block_dev.parent = nullptr;
     dev->block_dev.read_blocks = usb_msc_read_blocks;
     dev->block_dev.write_blocks = usb_msc_write_blocks;
+    dev->block_dev.flush = usb_msc_flush;
+    dev->block_dev.cache_dirty = false;
     dev->block_dev.private_data = dev;
     dev->ready = true;
 

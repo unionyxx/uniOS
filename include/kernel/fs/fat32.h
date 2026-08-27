@@ -17,6 +17,10 @@ struct FAT32Filesystem
     uint32_t cluster_count;
     uint32_t next_free_cluster;
     uint32_t free_cluster_count;
+    // Set when in-memory free-space state diverges from the on-disk FSInfo
+    // sector; the sector is rewritten lazily on sync instead of on every
+    // cluster allocation/free.
+    bool fsinfo_dirty;
     // Serializes every FAT/directory mutation (and the read-modify-write
     // walks behind them). Zero-initialized mounts are valid: {0} ==
     // SPINLOCK_INIT.
@@ -32,3 +36,6 @@ void fat32_format_short_name(const char *name, uint32_t suffix, uint8_t out[11])
 bool fat32_init(BlockDevice *dev, FAT32Filesystem *fs_out);
 
 VNode *fat32_get_root(FAT32Filesystem *fs);
+
+// Returns the block device backing a FAT32 file vnode, or nullptr.
+BlockDevice *fat32_vnode_device(VNode *node);
