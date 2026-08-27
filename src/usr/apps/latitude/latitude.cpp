@@ -10,12 +10,15 @@
 #include "../../libapp/app.h"
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
+#include "../../libc/vec.h"
 #include "../../libgui/gui.h"
 
 static constexpr int MAX_LINES = 2048;
 static constexpr int MAX_LINE_LEN = 512;
-static constexpr int MAX_PROJECT_ROWS = 160;
-static constexpr int MAX_OUTLINE_ROWS = 96;
+// Safety bounds so a huge directory or outline cannot exhaust memory;
+// ordinary projects are far smaller.
+static constexpr int MAX_PROJECT_ROWS = 100000;
+static constexpr int MAX_OUTLINE_ROWS = 100000;
 static constexpr int MAX_STATUS_LEN = 160;
 static constexpr int DEFAULT_TAB_SPACES = 4;
 static constexpr uint64_t MAX_OPEN_TEXT_BYTES = 512ull * 1024ull;
@@ -137,8 +140,8 @@ struct UndoEntry
 
 struct LatitudeRects
 {
-    Rect project_rows[MAX_PROJECT_ROWS];
-    Rect outline_rows[MAX_OUTLINE_ROWS];
+    Vec<Rect> project_rows;
+    Vec<Rect> outline_rows;
     Rect new_button;
     Rect save_button;
     Rect reload_button;
@@ -154,15 +157,13 @@ namespace {
 struct AppState
 {
     TextBuffer *buffer;
-    ProjectRow project_rows[MAX_PROJECT_ROWS];
-    int project_count;
+    Vec<ProjectRow> project_rows;
     int project_selected;
     int project_hovered;
     int project_first_row;
     char project_path[512];
 
-    OutlineRow outline_rows[MAX_OUTLINE_ROWS];
-    int outline_count;
+    Vec<OutlineRow> outline_rows;
     int outline_hovered;
     int outline_first_row;
 
@@ -216,6 +217,16 @@ struct AppState
     bool needs_redraw;
 };
 } // namespace
+
+static int project_count_of(const AppState *state)
+{
+    return state ? (int)state->project_rows.size() : 0;
+}
+
+static int outline_count_of(const AppState *state)
+{
+    return state ? (int)state->outline_rows.size() : 0;
+}
 
 static int clamp_int(int value, int lo, int hi)
 {
@@ -1865,8 +1876,9 @@ static void sort_project_rows(AppState *state)
 {
     if (!state)
         return;
-    int first_sortable = state->project_count > 0 && state->project_rows[0].parent ? 1 : 0;
-    for (int i = first_sortable + 1; i < state->project_count; i++) {
+    int count = project_count_of(state);
+    int first_sortable = count > 0 && state->project_rows[0].parent ? 1 : 0;
+    for (int i = first_sortable + 1; i < count; i++) {
         ProjectRow row = state->project_rows[i];
         int j = i - 1;
         while (j >= first_sortable && compare_project_rows(state->project_rows[j], row) > 0) {
@@ -1887,18 +1899,19 @@ static void load_project(AppState *state, const char *path)
         target = "/";
 
     copy_cstr(state->project_path, sizeof(state->project_path), target);
-    state->project_count = 0;
+    state->project_rows.clear();
     state->project_selected = -1;
     state->project_hovered = -1;
     state->project_first_row = 0;
 
-    if (strcmp(state->project_path, "/") != 0 && state->project_count < MAX_PROJECT_ROWS) {
-        ProjectRow &row = state->project_rows[state->project_count++];
+    if (strcmp(state->project_path, "/") != 0 && project_count_of(state) < MAX_PROJECT_ROWS) {
+        ProjectRow row = {};
         copy_cstr(row.name, sizeof(row.name), "..");
         parent_path(state->project_path, row.path, sizeof(row.path));
         row.kind = FILE_KIND_UNKNOWN;
         row.is_dir = true;
         row.parent = true;
+        state->project_rows.push(row);
     }
 
     int fd = open(state->project_path, O_RDONLY);
@@ -1909,11 +1922,11 @@ static void load_project(AppState *state, const char *path)
     }
 
     char name[256];
-    while (state->project_count < MAX_PROJECT_ROWS && syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
+    while (project_count_of(state) < MAX_PROJECT_ROWS &&
+           syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
             continue;
-        ProjectRow &row = state->project_rows[state->project_count];
-        memset(&row, 0, sizeof(row));
+        ProjectRow row = {};
         copy_cstr(row.name, sizeof(row.name), name);
         join_path(state->project_path, name, row.path, sizeof(row.path));
         VNodeStat row_stat = {};
@@ -1921,12 +1934,13 @@ static void load_project(AppState *state, const char *path)
         row.is_dir = has_stat && row_stat.is_dir;
         row.kind = classify_file(row.path, row.is_dir, has_stat ? row_stat.size : 0);
         row.parent = false;
-        state->project_count++;
+        if (!state->project_rows.push(row))
+            break;
     }
     close(fd);
     sort_project_rows(state);
     if (state->buffer && state->buffer->path[0]) {
-        for (int i = 0; i < state->project_count; i++) {
+        for (int i = 0; i < project_count_of(state); i++) {
             if (strcmp(state->project_rows[i].path, state->buffer->path) == 0) {
                 state->project_selected = i;
                 break;
@@ -1938,7 +1952,7 @@ static void load_project(AppState *state, const char *path)
 
 static void open_project_row(AppState *state, int index)
 {
-    if (!state || index < 0 || index >= state->project_count)
+    if (!state || index < 0 || index >= project_count_of(state))
         return;
     ProjectRow &row = state->project_rows[index];
     state->project_selected = index;
@@ -2301,13 +2315,13 @@ static void copy_symbol(char *out, size_t out_size, const char *start, int max_l
 
 static void push_outline(AppState *state, const char *badge, const char *label, int line)
 {
-    if (!state || state->outline_count >= MAX_OUTLINE_ROWS || !label || !label[0])
+    if (!state || outline_count_of(state) >= MAX_OUTLINE_ROWS || !label || !label[0])
         return;
-    OutlineRow &row = state->outline_rows[state->outline_count++];
-    memset(&row, 0, sizeof(row));
+    OutlineRow row = {};
     copy_cstr(row.badge, sizeof(row.badge), badge ? badge : "SYM");
     copy_cstr(row.label, sizeof(row.label), label);
     row.line = line;
+    state->outline_rows.push(row);
 }
 
 static bool is_control_statement(const char *word)
@@ -2320,11 +2334,11 @@ static void build_outline(AppState *state)
 {
     if (!state || !state->buffer)
         return;
-    state->outline_count = 0;
+    state->outline_rows.clear();
     state->outline_hovered = -1;
     state->outline_first_row = 0;
     Language language = state->buffer->language;
-    for (int i = 0; i < state->buffer->line_count && state->outline_count < MAX_OUTLINE_ROWS; i++) {
+    for (int i = 0; i < state->buffer->line_count && outline_count_of(state) < MAX_OUTLINE_ROWS; i++) {
         const char *text = state->buffer->lines[i].text;
         while (*text == ' ' || *text == '\t')
             text++;
@@ -2514,7 +2528,7 @@ static int latitude_project_area_bottom(const AppState *state, Rect sidebar)
 {
     int side_header_h = gui_card_header_h();
     int sy = sidebar.y + side_header_h + gui_space_1() + gui_line_height() + gui_space_1();
-    int needed_project_h = (sy - sidebar.y) + state->project_count * (gui_app_row_h() + gui_app_row_gap());
+    int needed_project_h = (sy - sidebar.y) + project_count_of(state) * (gui_app_row_h() + gui_app_row_gap());
     int max_project_area = max_int(gui_scaled_metric(150), (sidebar.h * 58) / 100);
     int project_area_bottom = sidebar.y + min_int(max_project_area, needed_project_h);
     if (project_area_bottom > sidebar.y + sidebar.h - gui_scaled_metric(90))
@@ -2527,7 +2541,23 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     if (!win || !state || !state->buffer || !rects)
         return;
 
-    memset(rects, 0, sizeof(*rects));
+    // Reset the cached layout. The row-rect vectors are resized to match the
+    // data so hover/hit code can index them safely; resizing after a clear
+    // value-initializes every entry (same effect as the old memset).
+    rects->project_rows.clear();
+    rects->project_rows.resize(project_count_of(state));
+    rects->outline_rows.clear();
+    rects->outline_rows.resize(outline_count_of(state));
+    Rect empty_rect = {};
+    rects->new_button = empty_rect;
+    rects->save_button = empty_rect;
+    rects->reload_button = empty_rect;
+    rects->path_field = empty_rect;
+    rects->search_field = empty_rect;
+    rects->editor_rect = empty_rect;
+    rects->sidebar_rect = empty_rect;
+    rects->editor_panel = empty_rect;
+    rects->help_close = empty_rect;
 
     int view_w = latitude_view_width(win);
     int view_h = latitude_view_height(win);
@@ -2631,8 +2661,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
         int outline_header_h = gui_card_header_h();
         int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
 
-        for (int i = state->project_first_row; i < state->project_count && sy + gui_app_row_h() <= project_area_bottom;
-             i++) {
+        for (int i = state->project_first_row;
+             i < project_count_of(state) && sy + gui_app_row_h() <= project_area_bottom; i++) {
             rects->project_rows[i] =
                 gui_rect_make(rects->sidebar_rect.x + 1, sy, rects->sidebar_rect.w - 2, gui_app_row_h());
             FileKind kind = state->project_rows[i].kind;
@@ -2655,7 +2685,8 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
 
         sy = outline_y + outline_header_h + gui_space_1();
         for (int i = state->outline_first_row;
-             i < state->outline_count && sy + gui_app_row_h() < rects->sidebar_rect.y + rects->sidebar_rect.h; i++) {
+             i < outline_count_of(state) && sy + gui_app_row_h() < rects->sidebar_rect.y + rects->sidebar_rect.h;
+             i++) {
             rects->outline_rows[i] =
                 gui_rect_make(rects->sidebar_rect.x + 1, sy, rects->sidebar_rect.w - 2, gui_app_row_h());
             char detail_line[32];
@@ -2916,13 +2947,13 @@ static HoverTarget update_hover(AppState *state, LatitudeRects *rects, int x, in
         return HOVER_NONE;
     state->project_hovered = -1;
     state->outline_hovered = -1;
-    for (int i = 0; i < state->project_count; i++) {
+    for (int i = 0; i < project_count_of(state); i++) {
         if (!gui_rect_is_empty(rects->project_rows[i]) && point_in_rect(rects->project_rows[i], x, y)) {
             state->project_hovered = i;
             return HOVER_PROJECT_ROW;
         }
     }
-    for (int i = 0; i < state->outline_count; i++) {
+    for (int i = 0; i < outline_count_of(state); i++) {
         if (!gui_rect_is_empty(rects->outline_rows[i]) && point_in_rect(rects->outline_rows[i], x, y)) {
             state->outline_hovered = i;
             return HOVER_OUTLINE_ROW;
@@ -2945,7 +2976,7 @@ static HoverTarget update_hover(AppState *state, LatitudeRects *rects, int x, in
 
 static void jump_to_outline(AppState *state, int index)
 {
-    if (!state || index < 0 || index >= state->outline_count)
+    if (!state || index < 0 || index >= outline_count_of(state))
         return;
     state->cursor_line = clamp_int(state->outline_rows[index].line, 0, state->buffer->line_count - 1);
     state->cursor_col = 0;
@@ -3108,14 +3139,14 @@ static void handle_path_key(AppState *state, uint8_t c)
 
 static void move_project_selection(AppState *state, int delta)
 {
-    if (!state || state->project_count <= 0)
+    if (!state || project_count_of(state) <= 0)
         return;
 
     int selected = state->project_selected;
     if (selected < 0)
         selected = 0;
     else
-        selected = clamp_int(selected + delta, 0, state->project_count - 1);
+        selected = clamp_int(selected + delta, 0, project_count_of(state) - 1);
 
     state->project_selected = selected;
     state->project_hovered = -1;
@@ -3128,9 +3159,11 @@ static void move_project_selection(AppState *state, int delta)
         state->project_first_row = state->project_selected;
     if (state->project_selected >= state->project_first_row + visible_rows)
         state->project_first_row = state->project_selected - visible_rows + 1;
-    state->project_first_row = clamp_int(state->project_first_row, 0, max_int(0, state->project_count - 1));
+    state->project_first_row = clamp_int(state->project_first_row, 0, max_int(0, project_count_of(state) - 1));
     state->needs_redraw = true;
 }
+
+static void latitude_handle_menu_command(AppState *state, uint32_t cmd);
 
 static void handle_key(AppState *state, uint8_t c)
 {
@@ -3207,28 +3240,33 @@ static void handle_key(AppState *state, uint8_t c)
     }
 
     if (state->focus == FOCUS_EDITOR) {
-        if (c == 26) { // Ctrl+Z
-            perform_undo(state);
-            return;
+        // Route the standard edit shortcuts through the shared command
+        // handler so menu and keyboard paths stay in one place.
+        uint32_t cmd = 0;
+        switch (c) {
+            case 26:
+                cmd = APP_CMD_UNDO;
+                break; // Ctrl+Z
+            case 25:
+                cmd = APP_CMD_REDO;
+                break; // Ctrl+Y
+            case 1:
+                cmd = APP_CMD_SELECT_ALL;
+                break; // Ctrl+A
+            case 24:
+                cmd = APP_CMD_CUT;
+                break; // Ctrl+X
+            case 3:
+                cmd = APP_CMD_COPY;
+                break; // Ctrl+C
+            case 22:
+                cmd = APP_CMD_PASTE;
+                break; // Ctrl+V
+            default:
+                break;
         }
-        if (c == 25) { // Ctrl+Y
-            perform_redo(state);
-            return;
-        }
-        if (c == 1) { // Ctrl+A
-            select_all(state);
-            return;
-        }
-        if (c == 24) { // Ctrl+X
-            selection_to_clipboard(state, true);
-            return;
-        }
-        if (c == 3) { // Ctrl+C
-            selection_to_clipboard(state, false);
-            return;
-        }
-        if (c == 22) { // Ctrl+V
-            paste_clipboard(state);
+        if (cmd != 0) {
+            latitude_handle_menu_command(state, cmd);
             return;
         }
     }
@@ -3338,19 +3376,13 @@ static void handle_key(AppState *state, uint8_t c)
 }
 
 // Menubar command IDs (dispatched through WindowEntry.menu_command_id).
+// Standard edit actions use the shared APP_CMD_* IDs from libapp.
 enum LatitudeMenuId
 {
     LAT_MENU_NEW = 1,
     LAT_MENU_OPEN,
     LAT_MENU_SAVE,
     LAT_MENU_RELOAD,
-    LAT_MENU_UNDO,
-    LAT_MENU_REDO,
-    LAT_MENU_CUT,
-    LAT_MENU_COPY,
-    LAT_MENU_PASTE,
-    LAT_MENU_DELETE,
-    LAT_MENU_SELECT_ALL,
     LAT_MENU_WRAP,
     LAT_MENU_GUTTER,
     LAT_MENU_HIGHLIGHT,
@@ -3372,19 +3404,14 @@ static void latitude_publish_menus(AppState *state)
     gui_menu_model_add_item(&model, file, "Reload", LAT_MENU_RELOAD, state->buffer->path[0] ? 0 : MENU_FLAG_DISABLED,
                             nullptr);
 
-    int edit = gui_menu_model_add_menu(&model, "Edit");
-    gui_menu_model_add_item(&model, edit, "Undo", LAT_MENU_UNDO, state->undo_count > 0 ? 0 : MENU_FLAG_DISABLED,
-                            "Ctrl+Z");
-    gui_menu_model_add_item(&model, edit, "Redo", LAT_MENU_REDO, state->redo_count > 0 ? 0 : MENU_FLAG_DISABLED,
-                            "Ctrl+Y");
-    gui_menu_model_add_separator(&model, edit);
-    gui_menu_model_add_item(&model, edit, "Cut", LAT_MENU_CUT, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+X");
-    gui_menu_model_add_item(&model, edit, "Copy", LAT_MENU_COPY, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+C");
-    gui_menu_model_add_item(&model, edit, "Paste", LAT_MENU_PASTE, 0, "Ctrl+V");
-    gui_menu_model_add_item(&model, edit, "Delete", LAT_MENU_DELETE, has_sel ? 0 : MENU_FLAG_DISABLED, nullptr);
-    gui_menu_model_add_separator(&model, edit);
-    gui_menu_model_add_item(&model, edit, "Select All", LAT_MENU_SELECT_ALL, has_text ? 0 : MENU_FLAG_DISABLED,
-                            "Ctrl+A");
+    int edit = app_menus_add_edit(
+        &model,
+        APP_EDIT_UNDO | APP_EDIT_REDO | APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_PASTE | APP_EDIT_DELETE |
+            APP_EDIT_SELECT_ALL,
+        (state->undo_count > 0 ? APP_EDIT_UNDO : 0) | (state->redo_count > 0 ? APP_EDIT_REDO : 0) |
+            (has_sel ? (APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_DELETE) : 0) | APP_EDIT_PASTE |
+            (has_text ? APP_EDIT_SELECT_ALL : 0));
+    (void)edit;
 
     int view = gui_menu_model_add_menu(&model, "View");
     gui_menu_model_add_item(&model, view, "Word Wrap", LAT_MENU_WRAP, state->wrap_enabled ? MENU_FLAG_CHECKED : 0,
@@ -3394,10 +3421,7 @@ static void latitude_publish_menus(AppState *state)
     gui_menu_model_add_item(&model, view, "Syntax Highlight", LAT_MENU_HIGHLIGHT,
                             state->highlight_enabled ? MENU_FLAG_CHECKED : 0, nullptr);
 
-    int help = gui_menu_model_add_menu(&model, "Help");
-    gui_menu_model_add_item(&model, help, "Latitude Help", LAT_MENU_HELP, 0, nullptr);
-    gui_menu_model_add_separator(&model, help);
-    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    app_menus_add_help(&model, LAT_MENU_HELP);
 
     gui_menu_publish(&model);
 }
@@ -3457,43 +3481,43 @@ static void latitude_handle_menu_command(AppState *state, uint32_t cmd)
         case LAT_MENU_RELOAD:
             latitude_request_reload(state);
             break;
-        case LAT_MENU_UNDO:
+        case APP_CMD_UNDO:
             perform_undo(state);
             break;
-        case LAT_MENU_REDO:
+        case APP_CMD_REDO:
             perform_redo(state);
             break;
-        case LAT_MENU_CUT:
+        case APP_CMD_CUT:
             selection_to_clipboard(state, true);
             break;
-        case LAT_MENU_COPY:
+        case APP_CMD_COPY:
             selection_to_clipboard(state, false);
             break;
-        case LAT_MENU_PASTE:
+        case APP_CMD_PASTE:
             paste_clipboard(state);
             break;
-        case LAT_MENU_DELETE:
+        case APP_CMD_DELETE:
             delete_selection(state);
             break;
-        case LAT_MENU_SELECT_ALL:
+        case APP_CMD_SELECT_ALL:
             select_all(state);
             break;
         case LAT_MENU_WRAP:
             state->wrap_enabled = !state->wrap_enabled;
             state->first_seg = 0;
-            cfg_save_int(APP_SETTINGS_CONFIG_PATH, "latitude_wrap", state->wrap_enabled ? 1 : 0);
+            app_setting_save_int("latitude_wrap", state->wrap_enabled ? 1 : 0);
             ensure_cursor_visible(state);
             state->needs_redraw = true;
             break;
         case LAT_MENU_GUTTER:
             state->gutter_enabled = !state->gutter_enabled;
-            cfg_save_int(APP_SETTINGS_CONFIG_PATH, "latitude_gutter", state->gutter_enabled ? 1 : 0);
+            app_setting_save_int("latitude_gutter", state->gutter_enabled ? 1 : 0);
             ensure_cursor_visible(state);
             state->needs_redraw = true;
             break;
         case LAT_MENU_HIGHLIGHT:
             state->highlight_enabled = !state->highlight_enabled;
-            cfg_save_int(APP_SETTINGS_CONFIG_PATH, "latitude_highlight", state->highlight_enabled ? 1 : 0);
+            app_setting_save_int("latitude_highlight", state->highlight_enabled ? 1 : 0);
             state->needs_redraw = true;
             break;
         case LAT_MENU_HELP:
@@ -3634,11 +3658,11 @@ static void latitude_event(App *app, const Event *ev)
                 if (ev->mouse.y < project_area_bottom) {
                     state->project_first_row += ev->mouse.scroll_y < 0 ? 3 : -3;
                     state->project_first_row =
-                        clamp_int(state->project_first_row, 0, max_int(0, state->project_count - 1));
+                        clamp_int(state->project_first_row, 0, max_int(0, project_count_of(state) - 1));
                 } else {
                     state->outline_first_row += ev->mouse.scroll_y < 0 ? 3 : -3;
                     state->outline_first_row =
-                        clamp_int(state->outline_first_row, 0, max_int(0, state->outline_count - 1));
+                        clamp_int(state->outline_first_row, 0, max_int(0, outline_count_of(state) - 1));
                 }
                 state->needs_redraw = true;
             }
@@ -3760,9 +3784,9 @@ extern "C" int main()
     state->last_editor_click_line = -1;
     state->focus = FOCUS_EDITOR;
     state->needs_redraw = true;
-    state->gutter_enabled = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "latitude_gutter", 1) != 0;
-    state->highlight_enabled = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "latitude_highlight", 1) != 0;
-    state->wrap_enabled = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "latitude_wrap", 0) != 0;
+    state->gutter_enabled = app_setting_load_int("latitude_gutter", 1) != 0;
+    state->highlight_enabled = app_setting_load_int("latitude_highlight", 1) != 0;
+    state->wrap_enabled = app_setting_load_int("latitude_wrap", 0) != 0;
     state->first_seg = 0;
     reset_buffer(buffer, "/data/untitled.txt");
     sync_path_input(state);
