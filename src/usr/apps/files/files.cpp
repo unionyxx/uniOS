@@ -10,11 +10,14 @@
 #include "../../libapp/widgets.h"
 #include "../../libc/config_utils.h"
 #include "../../libc/syscall.h"
+#include "../../libc/vec.h"
 #include "../../libgui/gui.h"
 #include "../../libmedia/media_image.h"
 
 static constexpr int MAX_VOLUMES = 16;
-static constexpr int MAX_ROWS = 128;
+// Safety bound on a single directory listing so a hostile or corrupt volume
+// cannot exhaust memory; ordinary directories are far smaller.
+static constexpr int MAX_LIST_ROWS = 100000;
 static constexpr int MAX_PLACES = 5;
 static constexpr int FILES_ICON_SIZE_PX = 80;
 
@@ -78,9 +81,6 @@ enum FilesMenuId
     FILES_MENU_NEW_FOLDER = 1,
     FILES_MENU_RENAME,
     FILES_MENU_DELETE,
-    FILES_MENU_CUT,
-    FILES_MENU_COPY,
-    FILES_MENU_PASTE,
     FILES_MENU_REFRESH,
     FILES_MENU_UP,
     FILES_MENU_TOGGLE_SIDEBAR,
@@ -104,8 +104,7 @@ struct AppState
     int volume_count;
     int active_volume;
     int storage_mode;
-    FileRow rows[MAX_ROWS];
-    int row_count;
+    Vec<FileRow> rows;
     int selected_row;
     bool volume_home;
     bool load_failed;
@@ -132,7 +131,7 @@ struct AppState
     char window_title[96];
     bool show_sidebar;
     bool icon_view;
-    ThumbCache thumbs[MAX_ROWS];
+    Vec<ThumbCache> thumbs;
 };
 } // namespace
 
@@ -140,7 +139,7 @@ struct LayoutCache
 {
     Rect place_rects[MAX_PLACES];
     Rect volume_rects[MAX_VOLUMES];
-    Rect row_rects[MAX_ROWS];
+    Vec<Rect> row_rects;
 };
 
 static bool rect_contains(Rect r, int x, int y)
@@ -154,6 +153,11 @@ static void set_status(AppState *state, const char *msg)
         return;
     strncpy(state->status, msg ? msg : "", sizeof(state->status) - 1);
     state->status[sizeof(state->status) - 1] = '\0';
+}
+
+static int row_count_of(const AppState *state)
+{
+    return state ? (int)state->rows.size() : 0;
 }
 
 static const char *storage_mode_label(int mode)
@@ -649,7 +653,7 @@ static int build_menu_entries(const AppState *state, MenuEntryDef *out, int max_
         return count;
     }
 
-    if (state->menu_kind == MENU_ENTRY && state->menu_target_row >= 0 && state->menu_target_row < state->row_count) {
+    if (state->menu_kind == MENU_ENTRY && state->menu_target_row >= 0 && state->menu_target_row < row_count_of(state)) {
         push(state->rows[state->menu_target_row].is_dir ? "Open Folder" : "Open", CMD_OPEN, true, false);
         push(nullptr, CMD_NONE, false, true);
         push("Rename", CMD_RENAME, storage_is_writable(state), false);
@@ -709,11 +713,9 @@ static void clear_thumbs(AppState *state)
 {
     if (!state)
         return;
-    for (int i = 0; i < MAX_ROWS; i++) {
+    for (size_t i = 0; i < state->thumbs.size(); i++)
         media_image_free(&state->thumbs[i].img);
-        state->thumbs[i].path[0] = '\0';
-        state->thumbs[i].tried = false;
-    }
+    state->thumbs.clear();
 }
 
 static void load_directory(AppState *state)
@@ -722,12 +724,12 @@ static void load_directory(AppState *state)
         return;
 
     char selected_path[sizeof(state->current_path)] = {};
-    if (state->selected_row >= 0 && state->selected_row < state->row_count) {
+    if (state->selected_row >= 0 && state->selected_row < row_count_of(state)) {
         strncpy(selected_path, state->rows[state->selected_row].path, sizeof(selected_path) - 1);
         selected_path[sizeof(selected_path) - 1] = '\0';
     }
 
-    state->row_count = 0;
+    state->rows.clear();
     state->selected_row = -1;
     state->load_failed = false;
     clear_thumbs(state);
@@ -747,15 +749,14 @@ static void load_directory(AppState *state)
         return;
     }
 
-    while (state->row_count < MAX_ROWS) {
+    while (row_count_of(state) < MAX_LIST_ROWS) {
         char name[256] = {};
         if (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) != 0)
             break;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
             continue;
 
-        FileRow &row = state->rows[state->row_count++];
-        memset(&row, 0, sizeof(row));
+        FileRow row = {};
         strncpy(row.name, name, sizeof(row.name) - 1);
         join_path(state->current_path, name, row.path, sizeof(row.path));
         VNodeStat st = {};
@@ -764,9 +765,14 @@ static void load_directory(AppState *state)
             row.size = st.size;
         }
         if (selected_path[0] && strcmp(row.path, selected_path) == 0)
-            state->selected_row = state->row_count - 1;
+            state->selected_row = row_count_of(state);
+        if (!state->rows.push(row))
+            break;
     }
     close(fd);
+
+    // Keep one thumbnail slot per row so refresh_thumb can index by row.
+    state->thumbs.resize(state->rows.size());
 }
 
 static bool ensure_place_directory(AppState *state, const char *path)
@@ -837,7 +843,7 @@ static void select_default_location(AppState *state, bool force_data_home)
     if (state->storage_mode == STORAGE_MODE_OFF) {
         state->volume_home = true;
         state->current_path[0] = '\0';
-        state->row_count = 0;
+        state->rows.clear();
         state->selected_row = -1;
         state->load_failed = false;
         return;
@@ -921,7 +927,7 @@ static bool confirm_dialog(AppState *state)
         return true;
     }
 
-    if (state->selected_row < 0 || state->selected_row >= state->row_count) {
+    if (state->selected_row < 0 || state->selected_row >= row_count_of(state)) {
         set_status(state, "No item selected");
         close_dialog(state);
         return false;
@@ -1297,7 +1303,7 @@ static void refresh_thumb(AppState *state, int index)
 
 static void draw_file_icon_cell(Surface *win, AppState *state, const Rect &cell, int index)
 {
-    if (!win || !state || index < 0 || index >= state->row_count)
+    if (!win || !state || index < 0 || index >= row_count_of(state))
         return;
     const FileRow &row = state->rows[index];
     bool selected = index == state->selected_row;
@@ -1402,10 +1408,10 @@ static int compute_files_content_height(AppState *state, int content_w)
         int cols = cell_w > 0 ? (main_w - gui_space_4()) / cell_w : 1;
         if (cols < 1)
             cols = 1;
-        int rows = (state->row_count + cols - 1) / cols;
+        int rows = (row_count_of(state) + cols - 1) / cols;
         main_h += rows * files_icon_cell_h() + gui_space_2();
     } else {
-        main_h += state->row_count * (gui_app_row_h() + gui_app_row_gap());
+        main_h += row_count_of(state) * (gui_app_row_h() + gui_app_row_gap());
     }
 
     return sidebar_h > main_h ? sidebar_h : main_h;
@@ -1413,7 +1419,9 @@ static int compute_files_content_height(AppState *state, int content_w)
 
 static void draw_files(App *app, Surface *win, AppState *state, LayoutCache *cache)
 {
-    memset(cache, 0, sizeof(*cache));
+    memset(cache->place_rects, 0, sizeof(cache->place_rects));
+    memset(cache->volume_rects, 0, sizeof(cache->volume_rects));
+    cache->row_rects.clear();
     GuiAppLayout layout = gui_app_begin(win);
     int view_w = layout.outer_w + layout.outer_x * 2;
     int body_content_h = compute_files_content_height(state, layout.body_rect.w);
@@ -1457,14 +1465,16 @@ static void draw_files(App *app, Surface *win, AppState *state, LayoutCache *cac
         if (cols < 1)
             cols = 1;
         int grid_x = main_x + gui_space_2();
-        for (int i = 0; i < state->row_count; i++) {
+        cache->row_rects.resize(row_count_of(state));
+        for (int i = 0; i < row_count_of(state); i++) {
             int col = i % cols;
             int grid_row = i / cols;
             cache->row_rects[i] = gui_rect_make(grid_x + col * cell_w, list_y + grid_row * cell_h, cell_w, cell_h);
             draw_file_icon_cell(win, state, cache->row_rects[i], i);
         }
     } else {
-        for (int i = 0; i < state->row_count; i++) {
+        cache->row_rects.resize(row_count_of(state));
+        for (int i = 0; i < row_count_of(state); i++) {
             cache->row_rects[i] =
                 gui_rect_make(main_x + gui_space_2(), list_y + i * (gui_app_row_h() + gui_app_row_gap()),
                               main_w - gui_space_4(), gui_app_row_h());
@@ -1569,7 +1579,7 @@ static void navigate_up(AppState *state)
         strcmp(state->current_path, state->volumes[state->active_volume].mount_path) == 0) {
         state->volume_home = true;
         state->current_path[0] = '\0';
-        state->row_count = 0;
+        state->rows.clear();
         state->selected_row = -1;
         state->load_failed = false;
         state->needs_redraw = true;
@@ -1618,7 +1628,7 @@ static void activate_row(AppState *state, int index)
             enter_volume(state, volume_index);
         return;
     }
-    if (index < 0 || index >= state->row_count)
+    if (index < 0 || index >= row_count_of(state))
         return;
     state->selected_row = index;
     if (!state->rows[index].is_dir) {
@@ -1700,7 +1710,7 @@ static void execute_menu_command(AppState *state, MenuCommand command)
         return;
     }
 
-    if (state->menu_target_row < 0 || state->menu_target_row >= state->row_count)
+    if (state->menu_target_row < 0 || state->menu_target_row >= row_count_of(state))
         return;
     state->selected_row = state->menu_target_row;
 
@@ -1733,7 +1743,7 @@ static void execute_menu_command(AppState *state, MenuCommand command)
 
 static bool files_has_selection(const AppState *state)
 {
-    return !state->volume_home && state->selected_row >= 0 && state->selected_row < state->row_count;
+    return !state->volume_home && state->selected_row >= 0 && state->selected_row < row_count_of(state);
 }
 
 static void files_publish_menus(AppState *state)
@@ -1753,12 +1763,10 @@ static void files_publish_menus(AppState *state)
     gui_menu_model_add_item(&model, file, "Delete", FILES_MENU_DELETE, has_sel && writable ? 0 : MENU_FLAG_DISABLED,
                             nullptr);
 
-    int edit = gui_menu_model_add_menu(&model, "Edit");
-    gui_menu_model_add_item(&model, edit, "Cut", FILES_MENU_CUT, has_sel && writable ? 0 : MENU_FLAG_DISABLED,
-                            "Ctrl+X");
-    gui_menu_model_add_item(&model, edit, "Copy", FILES_MENU_COPY, has_sel ? 0 : MENU_FLAG_DISABLED, "Ctrl+C");
-    gui_menu_model_add_item(&model, edit, "Paste", FILES_MENU_PASTE, writable && in_dir ? 0 : MENU_FLAG_DISABLED,
-                            "Ctrl+V");
+    int edit = app_menus_add_edit(&model, APP_EDIT_CUT | APP_EDIT_COPY | APP_EDIT_PASTE,
+                                  (has_sel && writable ? APP_EDIT_CUT : 0) | (has_sel ? APP_EDIT_COPY : 0) |
+                                      (writable && in_dir ? APP_EDIT_PASTE : 0));
+    (void)edit;
 
     int view = gui_menu_model_add_menu(&model, "View");
     gui_menu_model_add_item(&model, view, "Show Sidebar", FILES_MENU_TOGGLE_SIDEBAR,
@@ -1789,10 +1797,7 @@ static void files_publish_menus(AppState *state)
         }
     }
 
-    int help = gui_menu_model_add_menu(&model, "Help");
-    gui_menu_model_add_item(&model, help, "Files Help", FILES_MENU_HELP, 0, nullptr);
-    gui_menu_model_add_separator(&model, help);
-    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    app_menus_add_help(&model, FILES_MENU_HELP);
 
     gui_menu_publish(&model);
 }
@@ -1906,17 +1911,17 @@ static void files_handle_menu_command(AppState *state, uint32_t cmd)
         }
         return;
     }
-    if (cmd == FILES_MENU_CUT) {
+    if (cmd == APP_CMD_CUT) {
         if (has_sel && writable)
             files_cut_or_copy(state, true);
         return;
     }
-    if (cmd == FILES_MENU_COPY) {
+    if (cmd == APP_CMD_COPY) {
         if (has_sel)
             files_cut_or_copy(state, false);
         return;
     }
-    if (cmd == FILES_MENU_PASTE) {
+    if (cmd == APP_CMD_PASTE) {
         files_paste(state);
         return;
     }
@@ -1929,13 +1934,13 @@ static void files_handle_menu_command(AppState *state, uint32_t cmd)
     }
     if (cmd == FILES_MENU_TOGGLE_SIDEBAR) {
         state->show_sidebar = !state->show_sidebar;
-        cfg_save_int(APP_SETTINGS_CONFIG_PATH, "files_sidebar", state->show_sidebar ? 1 : 0);
+        app_setting_save_int("files_sidebar", state->show_sidebar ? 1 : 0);
         state->needs_redraw = true;
         return;
     }
     if (cmd == FILES_MENU_TOGGLE_VIEW) {
         state->icon_view = !state->icon_view;
-        cfg_save_int(APP_SETTINGS_CONFIG_PATH, "files_view_mode", state->icon_view ? 1 : 0);
+        app_setting_save_int("files_view_mode", state->icon_view ? 1 : 0);
         state->needs_redraw = true;
         return;
     }
@@ -2115,7 +2120,7 @@ static void files_event(App *app, const Event *ev)
                 if (handled_left_click)
                     break;
 
-                int row_count = state->volume_home ? visible_volume_count(state) : state->row_count;
+                int row_count = state->volume_home ? visible_volume_count(state) : row_count_of(state);
                 for (int i = 0; i < row_count; i++) {
                     if (!rect_contains(cache->row_rects[i], ev->mouse.x, ev->mouse.y))
                         continue;
@@ -2155,7 +2160,7 @@ static void files_event(App *app, const Event *ev)
                 }
 
                 if (!opened && !state->volume_home) {
-                    for (int i = 0; i < state->row_count && !opened; i++) {
+                    for (int i = 0; i < row_count_of(state) && !opened; i++) {
                         if (!rect_contains(cache->row_rects[i], ev->mouse.x, ev->mouse.y))
                             continue;
                         state->selected_row = i;
@@ -2186,16 +2191,15 @@ static void files_event(App *app, const Event *ev)
                 close_menu(state);
             if (state->dialog_mode == DIALOG_NONE && ev->key.c > 0 && ev->key.c < 32) {
                 bool handled = true;
-                if (ev->key.c == 14)
+                if (ev->key.c == 14) { // Ctrl+N
                     files_handle_menu_command(state, FILES_MENU_NEW_FOLDER);
-                else if (ev->key.c == 24)
-                    files_handle_menu_command(state, FILES_MENU_CUT);
-                else if (ev->key.c == 3)
-                    files_handle_menu_command(state, FILES_MENU_COPY);
-                else if (ev->key.c == 22)
-                    files_handle_menu_command(state, FILES_MENU_PASTE);
-                else
-                    handled = false;
+                } else {
+                    uint32_t shortcut = app_edit_shortcut(ev);
+                    if (shortcut == APP_CMD_CUT || shortcut == APP_CMD_COPY || shortcut == APP_CMD_PASTE)
+                        files_handle_menu_command(state, shortcut);
+                    else
+                        handled = false;
+                }
                 if (handled) {
                     state->needs_redraw = true;
                     break;
@@ -2216,7 +2220,7 @@ static void files_event(App *app, const Event *ev)
                 navigate_up(state);
             } else {
                 uint8_t key = (uint8_t)ev->key.c;
-                int row_count = state->volume_home ? visible_volume_count(state) : state->row_count;
+                int row_count = state->volume_home ? visible_volume_count(state) : row_count_of(state);
                 int *selection = state->volume_home ? &state->selected_volume_row : &state->selected_row;
                 if (key == 0x80) { // Up
                     if (row_count > 0) {
@@ -2265,8 +2269,8 @@ extern "C" int main()
     state->have_mouse = false;
     state->selected_volume_row = -1;
     state->window_title[0] = '\0';
-    state->show_sidebar = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "files_sidebar", 1) != 0;
-    state->icon_view = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "files_view_mode", 0) != 0;
+    state->show_sidebar = app_setting_load_int("files_sidebar", 1) != 0;
+    state->icon_view = app_setting_load_int("files_view_mode", 0) != 0;
     set_status(state, storage_mode_label(state->storage_mode));
     refresh_volumes(state);
     select_default_location(state, true);
