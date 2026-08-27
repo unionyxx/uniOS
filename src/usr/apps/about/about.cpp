@@ -485,8 +485,7 @@ static void about_menus(App *app)
     MenuModel model;
     gui_menu_model_reset(&model);
 
-    int help = gui_menu_model_add_menu(&model, "Help");
-    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    app_menus_add_help(&model, 0);
 
     gui_menu_publish(&model);
 }

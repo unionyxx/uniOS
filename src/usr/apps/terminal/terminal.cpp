@@ -1195,7 +1195,7 @@ static bool term_apply_zoom(int new_zoom)
     if (new_zoom == g_term_zoom)
         return false;
     g_term_zoom = new_zoom;
-    cfg_save_int(APP_SETTINGS_CONFIG_PATH, "terminal_zoom", g_term_zoom);
+    app_setting_save_int("terminal_zoom", g_term_zoom);
     return true;
 }
 
@@ -1220,10 +1220,7 @@ static void term_publish_menus(TerminalEmulator &term, bool clipboard_nonempty)
     gui_menu_model_add_item(&model, view, "Actual Size", TERM_MENU_ZOOM_ACTUAL,
                             g_term_zoom == 0 ? MENU_FLAG_DISABLED : 0, nullptr);
 
-    int help = gui_menu_model_add_menu(&model, "Help");
-    gui_menu_model_add_item(&model, help, "Terminal Help", TERM_MENU_HELP, 0, nullptr);
-    gui_menu_model_add_separator(&model, help);
-    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    app_menus_add_help(&model, TERM_MENU_HELP);
 
     gui_menu_publish(&model);
 }
@@ -1423,7 +1420,7 @@ extern "C" int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    g_term_zoom = cfg_load_int(APP_SETTINGS_CONFIG_PATH, "terminal_zoom", 0);
+    g_term_zoom = app_setting_load_int("terminal_zoom", 0);
     if (g_term_zoom < TERM_ZOOM_MIN)
         g_term_zoom = TERM_ZOOM_MIN;
     if (g_term_zoom > TERM_ZOOM_MAX)

@@ -477,10 +477,7 @@ static void calc_menus(App *app)
     gui_menu_model_add_item(&model, edit, "Clear Entry", CALC_MENU_CLEAR, 0, nullptr);
     gui_menu_model_add_item(&model, edit, "Clear All", CALC_MENU_CLEAR_ALL, 0, "Esc");
 
-    int help = gui_menu_model_add_menu(&model, "Help");
-    gui_menu_model_add_item(&model, help, "Calculator Help", CALC_MENU_HELP, 0, nullptr);
-    gui_menu_model_add_separator(&model, help);
-    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    app_menus_add_help(&model, CALC_MENU_HELP);
 
     gui_menu_publish(&model);
 }

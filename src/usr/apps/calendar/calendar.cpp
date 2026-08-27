@@ -340,10 +340,7 @@ static void calendar_menus(App *app)
     MenuModel model;
     gui_menu_model_reset(&model);
 
-    int help = gui_menu_model_add_menu(&model, "Help");
-    gui_menu_model_add_item(&model, help, "Calendar Help", CAL_MENU_HELP, 0, nullptr);
-    gui_menu_model_add_separator(&model, help);
-    gui_menu_model_add_item(&model, help, "About uniOS", MENU_CMD_ABOUT_UNIOS, 0, nullptr);
+    app_menus_add_help(&model, CAL_MENU_HELP);
 
     gui_menu_publish(&model);
 }
