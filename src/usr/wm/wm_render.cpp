@@ -1,3 +1,5 @@
+#include <wm/resize_stretch.h>
+
 #include "wm_core.h"
 
 static void gui_fill_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
@@ -1303,6 +1305,38 @@ static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint
     return gui_blend_straight_opaque_dst_coverage(dst_px, src_px, coverage);
 }
 
+void wm_resize_snapshot_release(Window &w)
+{
+    gui_destroy_surface(&w.resize_snapshot);
+}
+
+// Copy the window's last committed content into a WM-owned surface. Called
+// when a new resize configure generation is posted, while that content is
+// still the stable frame on screen; the stretch path then renders from the
+// copy instead of the shared buffer the client is actively redrawing.
+void wm_resize_snapshot_capture(Window &w)
+{
+    int cw = w.client_committed_w;
+    int ch = w.client_committed_h;
+    if (cw <= 0 || ch <= 0 || !w.buffer || cw > w.buffer_w || ch > w.buffer_h || cw > 8192 || ch > 8192) {
+        wm_resize_snapshot_release(w);
+        return;
+    }
+    if (!w.resize_snapshot.buffer || w.resize_snapshot.width != static_cast<uint32_t>(cw) ||
+        w.resize_snapshot.height != static_cast<uint32_t>(ch)) {
+        gui_destroy_surface(&w.resize_snapshot);
+        w.resize_snapshot = gui_create_surface(static_cast<uint32_t>(cw), static_cast<uint32_t>(ch));
+        if (!w.resize_snapshot.buffer)
+            return;
+    }
+    const uint32_t src_stride = static_cast<uint32_t>(w.buffer_w);
+    const uint32_t dst_stride = w.resize_snapshot.pitch / 4;
+    for (int y = 0; y < ch; y++) {
+        memcpy(&w.resize_snapshot.buffer[static_cast<size_t>(y) * dst_stride],
+               &w.buffer[static_cast<size_t>(y) * src_stride], static_cast<size_t>(cw) * sizeof(uint32_t));
+    }
+}
+
 // While the user interactively resizes a window, the WM geometry changes
 // immediately but the client buffer still holds the previous size. Anchor the
 // committed content to the corner opposite the dragged edges so it visually
@@ -1405,6 +1439,82 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         corner_mask_y = local_y;
     };
 
+    // While a resize configure is outstanding, the geometry tracks the pointer
+    // but the client has not committed the new size yet. Nearest-neighbor
+    // stretch the committed frame (snapshotted when the configure was posted)
+    // across the entire client area so content follows the dragged edges
+    // exactly instead of lagging behind them with a background band; it
+    // returns to a crisp 1:1 blit as soon as the client commits. Rendering
+    // from the WM-owned snapshot keeps the client's in-flight redraw from
+    // tearing the frame. Opaque, unscrolled windows only — transparent and
+    // scrolled surfaces keep the anchored 1:1 path below.
+    if (!w.transparent && w.scroll_x == 0 && w.scroll_y == 0 && w.resize_configure_pending &&
+        w.resize_snapshot.buffer && w.resize_snapshot.width > 0 && w.resize_snapshot.height > 0 && inner_w > 0 &&
+        inner_h > 0 && inner_w <= 8192 &&
+        (w.resize_snapshot.width != static_cast<uint32_t>(inner_w) ||
+         w.resize_snapshot.height != static_cast<uint32_t>(inner_h))) {
+        static int32_t s_stretch_col_lut[8192];
+        const int cw = static_cast<int>(w.resize_snapshot.width);
+        const int ch = static_cast<int>(w.resize_snapshot.height);
+        const uint32_t src_stride = w.resize_snapshot.pitch / 4;
+        for (int dx = 0; dx < inner_w; dx++)
+            s_stretch_col_lut[dx] = wm::stretch_map_coord(dx, cw, inner_w);
+
+        const int dst_w_int = static_cast<int>(dst->width);
+        int dy0 = inner_top > clip.y ? inner_top : clip.y;
+        int dy1 = (inner_top + inner_h) < (clip.y + clip.h) ? (inner_top + inner_h) : (clip.y + clip.h);
+        int dx0 = inner_left > clip.x ? inner_left : clip.x;
+        int dx1 = (inner_left + inner_w) < (clip.x + clip.w) ? (inner_left + inner_w) : (clip.x + clip.w);
+        if (dy0 < 0)
+            dy0 = 0;
+        if (dx0 < 0)
+            dx0 = 0;
+        if (dy1 > dst_height_int)
+            dy1 = dst_height_int;
+        if (dx1 > dst_w_int)
+            dx1 = dst_w_int;
+
+        for (int dy = dy0; dy < dy1; dy++) {
+            const int sy = wm::stretch_map_coord(dy - inner_top, ch, inner_h);
+            const uint32_t *src_row = &w.resize_snapshot.buffer[static_cast<size_t>(sy) * src_stride];
+            uint32_t *dst_row = &dst->buffer[static_cast<size_t>(dy) * dst_stride];
+
+            if (inner_r <= 0 || dy < rounded_start_y) {
+                for (int dx = dx0; dx < dx1; dx++)
+                    dst_row[dx] = src_row[s_stretch_col_lut[dx - inner_left]];
+                continue;
+            }
+
+            refresh_corner_mask(dy - inner_top);
+            const int left_end = center_start_x < dx1 ? center_start_x : dx1;
+            for (int dx = dx0; dx < left_end; dx++) {
+                int local = dx - inner_left;
+                uint8_t cov = (local >= 0 && local < inner_r) ? corner_mask[local] : 255;
+                uint32_t sp = src_row[s_stretch_col_lut[dx - inner_left]];
+                if (cov == 255)
+                    dst_row[dx] = sp;
+                else if (cov > 0)
+                    dst_row[dx] = blend_coverage_rgb(dst_row[dx], sp, cov);
+            }
+            const int center_lo = dx0 > center_start_x ? dx0 : center_start_x;
+            const int center_hi = dx1 < center_end_x ? dx1 : center_end_x;
+            for (int dx = center_lo; dx < center_hi; dx++)
+                dst_row[dx] = src_row[s_stretch_col_lut[dx - inner_left]];
+            const int right_lo = dx0 > center_end_x ? dx0 : center_end_x;
+            for (int dx = right_lo; dx < dx1; dx++) {
+                int local = inner_w - 1 - (dx - inner_left);
+                uint8_t cov = (local >= 0 && local < inner_r) ? corner_mask[local] : 255;
+                uint32_t sp = src_row[s_stretch_col_lut[dx - inner_left]];
+                if (cov == 255)
+                    dst_row[dx] = sp;
+                else if (cov > 0)
+                    dst_row[dx] = blend_coverage_rgb(dst_row[dx], sp, cov);
+            }
+        }
+        g_frame_stats.resize_stretch_draws++;
+        return;
+    }
+
     int copy_x = 0, copy_y = 0, copy_w = 0, copy_h = 0;
     int src_x = 0, src_y = 0;
     bool has_buffer = (w.buffer_w > 0 && w.buffer_h > 0 && w.buffer != nullptr);
@@ -1424,6 +1534,13 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             content_w_px = w.buffer_w;
         if (content_h_px > w.buffer_h)
             content_h_px = w.buffer_h;
+
+        // Stretch fell through (missing snapshot, scrolled or transparent
+        // surface): the anchored blit below leaves a background band until the
+        // client commits. Count it so benchmarks can assert it never happens
+        // for ordinary interactive resizes.
+        if (w.resize_configure_pending && !w.transparent && (content_w_px != inner_w || content_h_px != inner_h))
+            g_frame_stats.resize_fallback_draws++;
 
         // While the client catches up to an interactive resize, pin the
         // content to the corner opposite the dragged edges.

@@ -134,6 +134,12 @@ struct Window
     // so anchored content does not jump when the pointer is released.
     int resize_anchor_edges_persist = RESIZE_NONE;
 
+    // WM-owned copy of the last committed client content, captured when a new
+    // resize configure generation is posted. The in-flight stretch renders
+    // from this snapshot so a client redraw racing the resize can never tear
+    // the stretched frame.
+    Surface resize_snapshot;
+
     // Consecutive frames the shared WindowEntry could not be sampled stable.
     // Bounded so one busy client cannot force endless full-window re-damage.
     int unstable_sample_count = 0;
@@ -183,6 +189,12 @@ struct WmFrameStats
     uint64_t last_input_to_submit_ticks;
     uint64_t last_vram_copy_ticks;
     uint64_t last_present_pixels;
+    // In-flight resize presentation: window draws whose committed content was
+    // stretched to the live geometry versus draws that fell back to the
+    // anchored 1:1 blit (fill band) while a configure was outstanding. A
+    // correct interactive resize shows stretch draws and zero fallback draws.
+    uint64_t resize_stretch_draws;
+    uint64_t resize_fallback_draws;
 };
 
 struct WmBenchState
@@ -200,6 +212,8 @@ struct WmBenchState
     uint64_t start_present_total;
     uint64_t start_max_frame_ticks;
     uint64_t start_dirty_area_accum;
+    uint64_t start_resize_stretch_draws;
+    uint64_t start_resize_fallback_draws;
 };
 
 struct RuntimeGuiSettings
@@ -771,6 +785,8 @@ void mark_window_chrome_damage(const Window &w);
 void invalidate_window_decoration_cache(Window &w);
 void mark_window_transition_damage(const Window &old_w, const Window &new_w);
 bool post_window_resize_configure(Window &w);
+void wm_resize_snapshot_capture(Window &w);
+void wm_resize_snapshot_release(Window &w);
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
                                    GuiCursorKind new_kind);
 bool wm_cursor_backend_allowed();
