@@ -563,6 +563,13 @@ public:
         return reflow_grid();
     }
 
+    // The runtime may swap the window backing while growing a resize, so the
+    // cached surface must be re-read from the shared window before reflow.
+    void refresh_window(const Surface &window)
+    {
+        m_window = window;
+    }
+
     // Re-derive the grid from the current window size after the font (and
     // therefore the cell size) changed. The window keeps its pixel size; the
     // column/row count follows the new cell dimensions.
@@ -1288,6 +1295,7 @@ static void term_event(App *app, const Event *ev)
 
     switch (ev->type) {
         case EVT_WINDOW_RESIZE:
+            term.refresh_window(*app_window(app));
             if (term.sync_resize())
                 run->needs_render = true;
             break;
