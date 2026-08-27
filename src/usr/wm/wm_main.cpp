@@ -1845,9 +1845,23 @@ extern "C" int main(int argc, char **argv)
 
                 if (!gui_shm_id_is_valid(e.shm_id) || e.w <= 0 || e.h <= 0 || !e.owner_pid || !e.title[0])
                     continue;
-                if (adoption_exhausted(e.shm_id, e.owner_pid))
-                    continue;
                 if (find_window_by_entry(&e) >= 0 || find_window_by_shm(e.shm_id) >= 0)
+                    continue;
+                // An entry whose owner died before or during adoption (crash,
+                // kill) never completes: retrying it burns syscalls, and its
+                // recycled (shm_id, pid) pair poisons the adoption key of a
+                // relaunched app that reuses the same fd and pid. Reset the
+                // slot so gui_reserve_window_slot can hand it out again.
+                if (!process_is_alive(e.owner_pid)) {
+                    adoption_clear(e.shm_id, e.owner_pid);
+                    damage_reset(&e.damage);
+                    e.ready = false;
+                    asm volatile("sfence" ::: "memory");
+                    e.shm_id = WIN_SHM_INVALID;
+                    asm volatile("sfence" ::: "memory");
+                    continue;
+                }
+                if (adoption_exhausted(e.shm_id, e.owner_pid))
                     continue;
                 if (add_win_internal(e.shm_id, e.x, e.y, e.w, e.h, e.title, &e.damage, &e,
                                      (e.flags & WIN_FLAG_TRANSPARENT))) {

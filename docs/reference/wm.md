@@ -22,7 +22,7 @@ Slots 0 and 1 are reserved for the menubar and dock; user windows take slots 2-3
 3. Transfers the memfd to the WM with `SYS_FD_TRANSFER` (pid 0 resolves to the WM pid).
 4. Publishes `shm_id = wm_fd | 0x40000000` (memfd tag), owner pid, geometry, generation counters, then sets `ready` behind store fences.
 
-**Adoption (WM side).** Each frame the WM scans ready entries and adopts valid ones: it validates the buffer size against `SYS_FSIZE` (a memfd mapped past EOF would fault the compositor), clamps dimensions, and maps. Adoption failures leave tombstones (keyed by `shm_id + owner_pid`, 5000-tick expiry) to stop retry storms.
+**Adoption (WM side).** Each frame the WM scans ready entries and adopts valid ones: it validates the buffer size against `SYS_FSIZE` (a memfd mapped past EOF would fault the compositor), clamps dimensions, and maps. Adoption failures leave tombstones (keyed by `shm_id + owner_pid`, 5000-tick expiry) to stop retry storms. An unadopted entry whose owner is already dead (crash, kill) is reset in place — `ready` cleared, slot returned to `WIN_SHM_INVALID`, damage zeroed, tombstone dropped — so it stops burning syscalls and cannot poison the adoption key of a relaunched app that reuses the same fd and pid.
 
 **Validation hardening.** Window entries are sampled twice across load fences and accepted only when bitwise stable (bounded retries). Buffer dimensions are clamped to 8192. Dimension growth is re-validated against `SYS_FSIZE`/`SYS_SHM_INFO` and forced back on violations; SysV blocks must be owned by the entry's owner pid. Titles are copied with forced NUL termination. Liveness is checked with `kill(pid, 0)` every 30 frames; dead owners' windows are closed without killing recycled pids.
 
@@ -31,7 +31,7 @@ Slots 0 and 1 are reserved for the menubar and dock; user windows take slots 2-3
 For resizable windows:
 
 1. WM writes `resize_serial` into the entry and posts an `EVT_WINDOW_RESIZE` event with the new size and serial.
-2. Client grows its backing (new memfd + transfer; capacity grows with slack) and redraws.
+2. Client grows its backing (new memfd + transfer; capacity grows with slack) and redraws. Growth swaps the shared window surface's buffer pointer, so clients must re-read it before drawing — a cached `Surface` copy keeps pointing at the unmapped old backing and faults on the next fill.
 3. Client publishes `buffer_resize_serial`; the WM retries the configure until serials match.
 4. Retired buffers are released when the WM's acknowledge generation reaches theirs.
 
