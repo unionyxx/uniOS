@@ -319,9 +319,12 @@ static inline uint64_t clock_read_tsc()
 
 static double wrap_dial_seconds(double v)
 {
-    while (v < 0.0)
+    if (v >= 0.0 && v < 43200.0)
+        return v;
+    v -= 43200.0 * (double)(int64_t)(v / 43200.0);
+    if (v < 0.0)
         v += 43200.0;
-    while (v >= 43200.0)
+    else if (v >= 43200.0)
         v -= 43200.0;
     return v;
 }
@@ -329,9 +332,12 @@ static double wrap_dial_seconds(double v)
 static double dial_step(double from, double to)
 {
     double d = to - from;
+    if (d >= -21600.0 && d <= 21600.0)
+        return d;
+    d -= 43200.0 * (double)(int64_t)(d / 43200.0);
     if (d < -21600.0)
         d += 43200.0;
-    if (d > 21600.0)
+    else if (d > 21600.0)
         d -= 43200.0;
     return d;
 }
@@ -492,9 +498,16 @@ struct ClockApp
 // Advance the RTC phase servo and return the smooth dial position in seconds.
 static double clock_servo_tick(App *app, ClockApp *st, double dt)
 {
-    bool rtc_ok = get_time(&st->current_os_time) == 0 && !clock_rtc_fallback(&st->current_os_time);
+    if (dt > 0.1)
+        dt = 0.1;
+
+    // Bracket the RTC read with one monotonic counter and take the midpoint as
+    // the observation instant. Both samples must come from the same source:
+    // mixing TSC counts with scheduler ticks underflows the uint64 midpoint and
+    // corrupts every downstream phase computation (anchor, boundary bracket).
     uint64_t now_counter = st->use_tsc ? clock_read_tsc() : get_ticks();
-    uint64_t after_counter = st->use_tsc ? get_ticks() : now_counter;
+    bool rtc_ok = get_time(&st->current_os_time) == 0 && !clock_rtc_fallback(&st->current_os_time);
+    uint64_t after_counter = st->use_tsc ? clock_read_tsc() : now_counter;
     uint64_t obs_counter = now_counter + (after_counter - now_counter) / 2;
 
     if (rtc_ok) {
