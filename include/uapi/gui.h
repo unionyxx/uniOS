@@ -96,7 +96,9 @@ typedef struct WindowEntry
     //   resize_serial is written by the WM when it requests a new client size.
     //   buffer_resize_serial is written by the client when it has redrawn and
     //   committed a buffer for that resize_serial.  This keeps visible frame
-    //   geometry separate from the asynchronously committed client backing.
+    //   geometry separate from the asynchronously committed client backing:
+    //   the compositor flips the window bounds to the configured geometry of
+    //   the acknowledged serial, never ahead of it.
     volatile uint32_t resize_serial;
     volatile uint32_t buffer_resize_serial;
     volatile uint32_t buffer_generation;

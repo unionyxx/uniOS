@@ -261,21 +261,39 @@ static uint32_t next_configure_serial(Window &w)
     return serial;
 }
 
+static void apply_window_bounds_now(Window &w, int x, int y, int width, int height, bool publish);
+
+// Publish the current target as a resize configure. Only called with no
+// configure outstanding: resizes are serialized per window, so the client is
+// never redrawing toward one size while being asked for another. The visible
+// bounds stay at the last committed frame until the client acks, then flip
+// to the pending geometry in one step.
 bool post_window_resize_configure(Window &w)
 {
     if (!w.entry || !(w.entry->flags & WIN_FLAG_RESIZABLE) || !w.owner_pid || w.target_w <= 0 || w.target_h <= 0)
         return false;
+    if (w.resize_configure_pending)
+        return false;
 
-    if (w.resize_configure_pending && w.pending_configure_serial != 0) {
-        // Retries retransmit the outstanding configure instead of creating a new generation.
-        w.entry_resize_serial = w.pending_configure_serial;
-    } else {
-        w.pending_configure_serial = next_configure_serial(w);
-        w.entry_resize_serial = w.pending_configure_serial;
-    }
+    // The buffer holds the last committed frame right now (no resize in
+    // flight): copy it before the client starts redrawing, so composition can
+    // keep presenting a stable frame for the whole redraw window.
+    wm_resize_snapshot_capture(w);
+
+    w.pending_configure_serial = next_configure_serial(w);
+    w.entry_resize_serial = w.pending_configure_serial;
     w.resize_configure_pending = true;
     w.last_configure_ticks = get_ticks();
+    w.pending_x = w.target_x;
+    w.pending_y = w.target_y;
+    w.pending_w = w.target_w;
+    w.pending_h = w.target_h;
 
+    w.entry->x = w.target_x;
+    w.entry->y = w.target_y;
+    w.entry->w = w.target_w;
+    w.entry->h = w.target_h;
+    w.entry->position_serial++;
     w.entry->resize_serial = w.pending_configure_serial;
     asm volatile("sfence" ::: "memory");
 
@@ -286,6 +304,43 @@ bool post_window_resize_configure(Window &w)
     resize_ev.resize.serial = w.pending_configure_serial;
     syscall2(SYS_POST_EVENT, w.owner_pid, (uint64_t)&resize_ev);
     return true;
+}
+
+// The client finished redrawing the outstanding configure: flip the visible
+// bounds to the pending geometry — backing and bounds land in one frame —
+// then keep the pipeline full if the target already moved on.
+void apply_window_resize_flip(Window &w)
+{
+    if (!w.resize_configure_pending || w.pending_configure_serial == 0)
+        return;
+    g_frame_stats.resize_flips++;
+    apply_window_bounds_now(w, w.pending_x, w.pending_y, w.pending_w, w.pending_h, false);
+    w.resize_configure_pending = false;
+    w.last_configure_ticks = 0;
+    w.last_commit_ticks = get_ticks();
+    // The buffer now holds the freshly committed frame: refresh the snapshot
+    // so the next configure generation starts from it.
+    wm_resize_snapshot_capture(w);
+    if (w.target_x != w.x || w.target_y != w.y || w.target_w != w.w || w.target_h != w.h)
+        post_window_resize_configure(w);
+}
+
+// Retransmit the outstanding configure unchanged (same serial, same
+// geometry) after a client went quiet; no new generation, no snapshot.
+void resend_window_resize_configure(Window &w)
+{
+    if (!w.entry || !w.owner_pid || !w.resize_configure_pending || w.pending_configure_serial == 0)
+        return;
+    w.last_configure_ticks = get_ticks();
+    w.entry->resize_serial = w.pending_configure_serial;
+    asm volatile("sfence" ::: "memory");
+
+    Event resize_ev = {};
+    resize_ev.type = EVT_WINDOW_RESIZE;
+    resize_ev.resize.width = w.pending_w;
+    resize_ev.resize.height = w.pending_h;
+    resize_ev.resize.serial = w.pending_configure_serial;
+    syscall2(SYS_POST_EVENT, w.owner_pid, (uint64_t)&resize_ev);
 }
 
 static int wm_snap_threshold()
@@ -1104,30 +1159,58 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
 
     bool size_changed = (w.w != width) || (w.h != height);
     bool moved = (w.x != x) || (w.y != y);
-
-    bool defer_interactive_resize = !g_applying_pending_bounds && size_changed && g_input.pointer_down &&
-                                    g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= WM_FIRST_USER_WINDOW &&
-                                    g_input.drag_index < g_window_count &&
-                                    g_windows[g_input.drag_index].entry == w.entry;
-    if (defer_interactive_resize) {
+    if (!size_changed && !moved) {
         w.entry->active = true;
         close_context_menu();
         asm volatile("sfence" ::: "memory");
         return;
     }
 
+    if (size_changed) {
+        // Synchronous resize: the configure carries the new geometry and the
+        // visible bounds flip to it only when the client acks. While a
+        // configure is outstanding only the target moves; apply_pending
+        // publishes the newest target right after the ack lands, so the
+        // client is never asked for two sizes at once.
+        if (!w.resize_configure_pending && !post_window_resize_configure(w))
+            apply_window_bounds_now(w, x, y, width, height, true);
+        w.entry->active = true;
+        close_context_menu();
+        asm volatile("sfence" ::: "memory");
+        return;
+    }
+
+    apply_window_bounds_now(w, x, y, width, height, true);
+
+    w.entry->active = true;
+    close_context_menu();
+    asm volatile("sfence" ::: "memory");
+}
+
+// Apply geometry to a window. publish=true additionally writes the registry
+// entry (and issues a resize configure on a size change) — i.e. it claims the
+// new size toward the client; plain moves use it directly. publish=false only
+// moves the compositor-side geometry; the synchronous resize flip uses it to
+// land the bounds of an acknowledged configure without touching the entry
+// (which keeps carrying the drag target the client is redrawing toward).
+static void apply_window_bounds_now(Window &w, int x, int y, int width, int height, bool publish)
+{
+    bool size_changed = (w.w != width) || (w.h != height);
+    bool moved = (w.x != x) || (w.y != y);
     if (moved || size_changed) {
         Window old = w;
         w.x = x;
         w.y = y;
         w.w = width;
         w.h = height;
-        w.entry->x = x;
-        w.entry->y = y;
-        w.entry->w = width;
-        w.entry->h = height;
-        w.entry->position_serial++;
-        asm volatile("sfence" ::: "memory");
+        if (publish) {
+            w.entry->x = x;
+            w.entry->y = y;
+            w.entry->w = width;
+            w.entry->h = height;
+            w.entry->position_serial++;
+            asm volatile("sfence" ::: "memory");
+        }
 
         // Update last_rendered immediately so damage calculation uses current state
         // (not stale values from last submitted frame, which may be many frames ago during resize)
@@ -1141,11 +1224,8 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         capture_shell_backdrop_for_rect(old_covered, gui_registry());
         capture_shell_backdrop_for_rect(new_covered, gui_registry());
 
-        if (size_changed) {
-            if (clamp_window_scroll(w))
-                publish_window_scroll(w);
-            post_window_resize_configure(w);
-        }
+        if (size_changed && clamp_window_scroll(w))
+            publish_window_scroll(w);
 
         bool moved_fast = false;
         if (moved && !size_changed && !w.transparent && g_input.pointer_down && g_input.drag_edges == RESIZE_NONE &&
@@ -1185,10 +1265,6 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         }
         invalidate_window_visibility_cache();
     }
-
-    w.entry->active = true;
-    close_context_menu();
-    asm volatile("sfence" ::: "memory");
 }
 
 void apply_pending_window_bounds()
@@ -1198,6 +1274,18 @@ void apply_pending_window_bounds()
         Window &w = g_windows[i];
         if (w.target_x == w.x && w.target_y == w.y && w.target_w == w.w && w.target_h == w.h)
             continue;
+
+        if (w.target_w != w.w || w.target_h != w.h) {
+            // Synchronous resize: publish the newest target only when the
+            // previous configure has been acked. Between acks the window
+            // holds its last committed frame — content is never scaled,
+            // stale, or partially drawn, and the window follows the pointer
+            // at the client's render rate like a toolkit live resize.
+            if (!w.resize_configure_pending)
+                post_window_resize_configure(w);
+            continue;
+        }
+
         set_window_bounds(w, w.target_x, w.target_y, w.target_w, w.target_h);
     }
     g_applying_pending_bounds = false;
@@ -1272,7 +1360,6 @@ void restore_window(int index, bool raise)
     int rh = w.entry->restore_h > 0 ? w.entry->restore_h : w.h;
     w.entry->state = WIN_NORMAL;
     w.active = true;
-    w.resize_anchor_edges_persist = RESIZE_NONE;
     set_window_bounds(w, w.entry->restore_x, w.entry->restore_y, rw, rh);
     close_context_menu();
     invalidate_window_visibility_cache();
@@ -1293,7 +1380,6 @@ void maximize_window(int index)
     }
     w.entry->state = WIN_MAXIMIZED;
     w.active = true;
-    w.resize_anchor_edges_persist = RESIZE_NONE;
     set_window_bounds(w, wm_desktop_margin(), wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin(),
                       (int)g_screen.width - wm_desktop_margin() * 2,
                       (int)g_screen.height - wm_dock_reserved_h() -
@@ -1394,6 +1480,7 @@ void close_window(int index, bool kill_owner)
     }
     gui_destroy_surface(&doomed.decoration_cache);
     gui_destroy_surface(&doomed.button_cache);
+    wm_resize_snapshot_release(doomed);
     if (doomed.entry) {
         memset(doomed.entry, 0, sizeof(*doomed.entry));
         doomed.entry->shm_id = WIN_SHM_INVALID;
@@ -2893,8 +2980,6 @@ bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     win.target_h = h;
     win.buffer_w = bw;
     win.buffer_h = bh;
-    win.client_committed_w = w;
-    win.client_committed_h = h;
     win.last_rendered_x = x;
     win.last_rendered_y = y;
     win.last_rendered_w = w;

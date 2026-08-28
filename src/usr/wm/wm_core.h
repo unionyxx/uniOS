@@ -125,20 +125,20 @@ struct Window
     uint64_t last_configure_ticks;
     bool resize_configure_pending;
     bool first_damage_received;
-    // Size the client last committed content for (updated on adoption and on
-    // every resize ack). Lets the compositor blit only valid buffer content
-    // and anchor it to the fixed corner during interactive resizes.
-    int client_committed_w = 0;
-    int client_committed_h = 0;
-    // Drag-resize edges kept alive until the outstanding configure is acked,
-    // so anchored content does not jump when the pointer is released.
-    int resize_anchor_edges_persist = RESIZE_NONE;
 
-    // WM-owned copy of the last committed client content, captured when a new
-    // resize configure generation is posted. The in-flight stretch renders
-    // from this snapshot so a client redraw racing the resize can never tear
-    // the stretched frame.
+    // Synchronous resize state: while a configure is outstanding the visible
+    // bounds stay at the last committed frame and the entry carries the
+    // target. When the client acks, the bounds flip to the pending geometry
+    // in one step — never ahead of what the client actually drew.
+    int pending_x = 0, pending_y = 0, pending_w = 0, pending_h = 0;
+
+    // WM-owned copy of the last committed frame, captured when a resize
+    // configure is posted (the buffer is stable then) and refreshed on the
+    // ack. While the client redraws for the outstanding configure the
+    // compositor renders from this copy — never from the shared buffer it is
+    // actively overwriting.
     Surface resize_snapshot;
+    int resize_snapshot_y0 = 0;
 
     // Consecutive frames the shared WindowEntry could not be sampled stable.
     // Bounded so one busy client cannot force endless full-window re-damage.
@@ -189,12 +189,11 @@ struct WmFrameStats
     uint64_t last_input_to_submit_ticks;
     uint64_t last_vram_copy_ticks;
     uint64_t last_present_pixels;
-    // In-flight resize presentation: window draws whose committed content was
-    // stretched to the live geometry versus draws that fell back to the
-    // anchored 1:1 blit (fill band) while a configure was outstanding. A
-    // correct interactive resize shows stretch draws and zero fallback draws.
-    uint64_t resize_stretch_draws;
-    uint64_t resize_fallback_draws;
+    // Synchronous resize accounting: geometry flips applied when the client
+    // acknowledged a configure, and acks whose serial fell out of the
+    // configure history (client too far behind) and were dropped.
+    uint64_t resize_flips;
+    uint64_t resize_stale_acks;
 };
 
 struct WmBenchState
@@ -212,8 +211,8 @@ struct WmBenchState
     uint64_t start_present_total;
     uint64_t start_max_frame_ticks;
     uint64_t start_dirty_area_accum;
-    uint64_t start_resize_stretch_draws;
-    uint64_t start_resize_fallback_draws;
+    uint64_t start_resize_flips;
+    uint64_t start_resize_stale_acks;
 };
 
 struct RuntimeGuiSettings
@@ -785,6 +784,8 @@ void mark_window_chrome_damage(const Window &w);
 void invalidate_window_decoration_cache(Window &w);
 void mark_window_transition_damage(const Window &old_w, const Window &new_w);
 bool post_window_resize_configure(Window &w);
+void resend_window_resize_configure(Window &w);
+void apply_window_resize_flip(Window &w);
 void wm_resize_snapshot_capture(Window &w);
 void wm_resize_snapshot_release(Window &w);
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,

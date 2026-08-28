@@ -1,4 +1,3 @@
-#include <wm/resize_stretch.h>
 
 #include "wm_core.h"
 
@@ -1308,22 +1307,37 @@ static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint
 void wm_resize_snapshot_release(Window &w)
 {
     gui_destroy_surface(&w.resize_snapshot);
+    w.resize_snapshot_y0 = 0;
 }
 
-// Copy the window's last committed content into a WM-owned surface. Called
-// when a new resize configure generation is posted, while that content is
-// still the stable frame on screen; the stretch path then renders from the
-// copy instead of the shared buffer the client is actively redrawing.
+// Copy the window's backing into a WM-owned surface while the backing is
+// stable (configure post / ack). During the following redraw window the
+// compositor presents from this copy instead of the shared buffer the client
+// is overwriting. Very tall content backings are captured as a band around
+// the visible slice; a scroll outside the band falls back to the live buffer
+// for that frame.
 void wm_resize_snapshot_capture(Window &w)
 {
-    int cw = w.client_committed_w;
-    int ch = w.client_committed_h;
-    if (cw <= 0 || ch <= 0 || !w.buffer || cw > w.buffer_w || ch > w.buffer_h || cw > 8192 || ch > 8192) {
+    if (!w.buffer || w.buffer_w <= 0 || w.buffer_h <= 0 || w.buffer_w > 8192) {
         wm_resize_snapshot_release(w);
         return;
     }
-    if (!w.resize_snapshot.buffer || w.resize_snapshot.width != static_cast<uint32_t>(cw) ||
-        w.resize_snapshot.height != static_cast<uint32_t>(ch)) {
+    int cw = w.buffer_w;
+    int ch = w.buffer_h;
+    int y0 = 0;
+    if (ch > 4096) {
+        int band_h = w.h + 256;
+        if (band_h > ch)
+            band_h = ch;
+        y0 = w.scroll_y - 128;
+        if (y0 < 0)
+            y0 = 0;
+        if (y0 + band_h > ch)
+            y0 = ch - band_h;
+        ch = band_h;
+    }
+    if (!w.resize_snapshot.buffer || static_cast<int>(w.resize_snapshot.width) != cw ||
+        static_cast<int>(w.resize_snapshot.height) != ch) {
         gui_destroy_surface(&w.resize_snapshot);
         w.resize_snapshot = gui_create_surface(static_cast<uint32_t>(cw), static_cast<uint32_t>(ch));
         if (!w.resize_snapshot.buffer)
@@ -1333,26 +1347,9 @@ void wm_resize_snapshot_capture(Window &w)
     const uint32_t dst_stride = w.resize_snapshot.pitch / 4;
     for (int y = 0; y < ch; y++) {
         memcpy(&w.resize_snapshot.buffer[static_cast<size_t>(y) * dst_stride],
-               &w.buffer[static_cast<size_t>(y) * src_stride], static_cast<size_t>(cw) * sizeof(uint32_t));
+               &w.buffer[static_cast<size_t>(y + y0) * src_stride], static_cast<size_t>(cw) * sizeof(uint32_t));
     }
-}
-
-// While the user interactively resizes a window, the WM geometry changes
-// immediately but the client buffer still holds the previous size. Anchor the
-// committed content to the corner opposite the dragged edges so it visually
-// stays pinned at the fixed corner (as in native toolkits) instead of sliding
-// with the moving grip. The edges stay active until the outstanding configure
-// is acknowledged so releasing the pointer does not snap the content.
-static int active_resize_anchor_edges(const Window &w)
-{
-    if (w.transparent)
-        return RESIZE_NONE;
-    if (g_input.pointer_down && g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= WM_FIRST_USER_WINDOW &&
-        g_input.drag_index < g_window_count && g_windows[g_input.drag_index].entry == w.entry)
-        return g_input.drag_edges;
-    if (w.resize_configure_pending && w.resize_anchor_edges_persist != RESIZE_NONE)
-        return w.resize_anchor_edges_persist;
-    return RESIZE_NONE;
+    w.resize_snapshot_y0 = y0;
 }
 
 static void compute_bottom_corner_row(int local_y, int /*inner_w*/, int inner_h, int inner_r, uint8_t *out_mask)
@@ -1439,82 +1436,6 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         corner_mask_y = local_y;
     };
 
-    // While a resize configure is outstanding, the geometry tracks the pointer
-    // but the client has not committed the new size yet. Nearest-neighbor
-    // stretch the committed frame (snapshotted when the configure was posted)
-    // across the entire client area so content follows the dragged edges
-    // exactly instead of lagging behind them with a background band; it
-    // returns to a crisp 1:1 blit as soon as the client commits. Rendering
-    // from the WM-owned snapshot keeps the client's in-flight redraw from
-    // tearing the frame. Opaque, unscrolled windows only — transparent and
-    // scrolled surfaces keep the anchored 1:1 path below.
-    if (!w.transparent && w.scroll_x == 0 && w.scroll_y == 0 && w.resize_configure_pending &&
-        w.resize_snapshot.buffer && w.resize_snapshot.width > 0 && w.resize_snapshot.height > 0 && inner_w > 0 &&
-        inner_h > 0 && inner_w <= 8192 &&
-        (w.resize_snapshot.width != static_cast<uint32_t>(inner_w) ||
-         w.resize_snapshot.height != static_cast<uint32_t>(inner_h))) {
-        static int32_t s_stretch_col_lut[8192];
-        const int cw = static_cast<int>(w.resize_snapshot.width);
-        const int ch = static_cast<int>(w.resize_snapshot.height);
-        const uint32_t src_stride = w.resize_snapshot.pitch / 4;
-        for (int dx = 0; dx < inner_w; dx++)
-            s_stretch_col_lut[dx] = wm::stretch_map_coord(dx, cw, inner_w);
-
-        const int dst_w_int = static_cast<int>(dst->width);
-        int dy0 = inner_top > clip.y ? inner_top : clip.y;
-        int dy1 = (inner_top + inner_h) < (clip.y + clip.h) ? (inner_top + inner_h) : (clip.y + clip.h);
-        int dx0 = inner_left > clip.x ? inner_left : clip.x;
-        int dx1 = (inner_left + inner_w) < (clip.x + clip.w) ? (inner_left + inner_w) : (clip.x + clip.w);
-        if (dy0 < 0)
-            dy0 = 0;
-        if (dx0 < 0)
-            dx0 = 0;
-        if (dy1 > dst_height_int)
-            dy1 = dst_height_int;
-        if (dx1 > dst_w_int)
-            dx1 = dst_w_int;
-
-        for (int dy = dy0; dy < dy1; dy++) {
-            const int sy = wm::stretch_map_coord(dy - inner_top, ch, inner_h);
-            const uint32_t *src_row = &w.resize_snapshot.buffer[static_cast<size_t>(sy) * src_stride];
-            uint32_t *dst_row = &dst->buffer[static_cast<size_t>(dy) * dst_stride];
-
-            if (inner_r <= 0 || dy < rounded_start_y) {
-                for (int dx = dx0; dx < dx1; dx++)
-                    dst_row[dx] = src_row[s_stretch_col_lut[dx - inner_left]];
-                continue;
-            }
-
-            refresh_corner_mask(dy - inner_top);
-            const int left_end = center_start_x < dx1 ? center_start_x : dx1;
-            for (int dx = dx0; dx < left_end; dx++) {
-                int local = dx - inner_left;
-                uint8_t cov = (local >= 0 && local < inner_r) ? corner_mask[local] : 255;
-                uint32_t sp = src_row[s_stretch_col_lut[dx - inner_left]];
-                if (cov == 255)
-                    dst_row[dx] = sp;
-                else if (cov > 0)
-                    dst_row[dx] = blend_coverage_rgb(dst_row[dx], sp, cov);
-            }
-            const int center_lo = dx0 > center_start_x ? dx0 : center_start_x;
-            const int center_hi = dx1 < center_end_x ? dx1 : center_end_x;
-            for (int dx = center_lo; dx < center_hi; dx++)
-                dst_row[dx] = src_row[s_stretch_col_lut[dx - inner_left]];
-            const int right_lo = dx0 > center_end_x ? dx0 : center_end_x;
-            for (int dx = right_lo; dx < dx1; dx++) {
-                int local = inner_w - 1 - (dx - inner_left);
-                uint8_t cov = (local >= 0 && local < inner_r) ? corner_mask[local] : 255;
-                uint32_t sp = src_row[s_stretch_col_lut[dx - inner_left]];
-                if (cov == 255)
-                    dst_row[dx] = sp;
-                else if (cov > 0)
-                    dst_row[dx] = blend_coverage_rgb(dst_row[dx], sp, cov);
-            }
-        }
-        g_frame_stats.resize_stretch_draws++;
-        return;
-    }
-
     int copy_x = 0, copy_y = 0, copy_w = 0, copy_h = 0;
     int src_x = 0, src_y = 0;
     bool has_buffer = (w.buffer_w > 0 && w.buffer_h > 0 && w.buffer != nullptr);
@@ -1526,29 +1447,15 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         int client_left = w.transparent ? w.x : inner_left;
         int client_top = w.transparent ? w.y : inner_top;
 
-        // Valid content size: what the client last committed, bounded by the
-        // mapped buffer. Blitting past it would show stale slack pixels.
-        int content_w_px = w.client_committed_w > 0 ? w.client_committed_w : w.buffer_w;
-        int content_h_px = w.client_committed_h > 0 ? w.client_committed_h : w.buffer_h;
-        if (content_w_px > w.buffer_w)
-            content_w_px = w.buffer_w;
-        if (content_h_px > w.buffer_h)
-            content_h_px = w.buffer_h;
-
-        // Stretch fell through (missing snapshot, scrolled or transparent
-        // surface): the anchored blit below leaves a background band until the
-        // client commits. Count it so benchmarks can assert it never happens
-        // for ordinary interactive resizes.
-        if (w.resize_configure_pending && !w.transparent && (content_w_px != inner_w || content_h_px != inner_h))
-            g_frame_stats.resize_fallback_draws++;
-
-        // While the client catches up to an interactive resize, pin the
-        // content to the corner opposite the dragged edges.
-        int anchor_edges = active_resize_anchor_edges(w);
-        if (anchor_edges & RESIZE_LEFT)
-            client_left += inner_w - content_w_px;
-        if (anchor_edges & RESIZE_TOP)
-            client_top += inner_h - content_h_px;
+        // The backing always holds a complete frame that covers the window:
+        // clients publish a resized buffer only once it is fully drawn, and
+        // the compositor flips the bounds only to the acknowledged size. The
+        // valid source region is therefore the mapped buffer itself — no
+        // committed-size tracking, no anchoring, no scaling. Scrolled
+        // (content-sized) windows read their visible slice via the scroll
+        // offset; everything else copies 1:1.
+        const int content_w_px = w.buffer_w;
+        const int content_h_px = w.buffer_h;
 
         src_x = copy_x - client_left + w.scroll_x;
         src_y = copy_y - client_top + w.scroll_y;
@@ -1773,6 +1680,24 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     if (!has_buffer || copy_w <= 0 || copy_h <= 0)
         return;
 
+    // While a resize configure is outstanding the client is overwriting the
+    // shared backing; present from the WM-owned snapshot of the last
+    // committed frame instead so a partially rendered frame is never shown.
+    // Outside a resize the backing is stable (geometry flips only land on
+    // the ack), so it is read directly.
+    const uint32_t *blit_buffer = w.buffer;
+    int blit_w = w.buffer_w;
+    int blit_h = w.buffer_h;
+    int blit_y0 = 0;
+    if (w.resize_configure_pending && w.resize_snapshot.buffer &&
+        static_cast<int>(w.resize_snapshot.width) >= src_x + copy_w && src_y >= w.resize_snapshot_y0 &&
+        src_y + copy_h <= w.resize_snapshot_y0 + static_cast<int>(w.resize_snapshot.height)) {
+        blit_buffer = w.resize_snapshot.buffer;
+        blit_w = static_cast<int>(w.resize_snapshot.pitch / 4);
+        blit_h = static_cast<int>(w.resize_snapshot.height);
+        blit_y0 = w.resize_snapshot_y0;
+    }
+
     if (w.transparent) {
         blit_alpha_blend_rect(&dst->buffer[static_cast<size_t>(copy_y) * dst_stride + copy_x], dst_stride,
                               &w.buffer[static_cast<size_t>(src_y) * w.buffer_w + src_x], w.buffer_w, copy_w, copy_h);
@@ -1780,25 +1705,25 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     }
 
     if (inner_r <= 0) {
-        Surface src_surface = {w.buffer,
-                               static_cast<uint32_t>(w.buffer_w),
-                               static_cast<uint32_t>(w.buffer_h),
-                               static_cast<uint32_t>(w.buffer_w) * 4,
+        Surface src_surface = {const_cast<uint32_t *>(blit_buffer),
+                               static_cast<uint32_t>(blit_w),
+                               static_cast<uint32_t>(blit_h),
+                               static_cast<uint32_t>(blit_w) * 4,
                                false,
                                0};
-        copy_surface_rect(dst, copy_x, copy_y, &src_surface, src_x, src_y, copy_w, copy_h);
+        copy_surface_rect(dst, copy_x, copy_y, &src_surface, src_x, src_y - blit_y0, copy_w, copy_h);
         return;
     }
 
     const int copy_right = copy_x + copy_w;
     for (int py = 0; py < copy_h; ++py) {
         const int dst_y = copy_y + py;
-        const int src_row_base = src_y + py;
-        if (dst_y < 0 || dst_y >= dst_height_int || src_row_base < 0 || src_row_base >= w.buffer_h)
+        const int src_row_base = src_y + py - blit_y0;
+        if (dst_y < 0 || dst_y >= dst_height_int || src_row_base < 0 || src_row_base >= blit_h)
             continue;
 
         uint32_t *dst_ptr = &dst->buffer[static_cast<size_t>(dst_y) * dst_stride];
-        const uint32_t *src_ptr = &w.buffer[static_cast<size_t>(src_row_base) * w.buffer_w];
+        const uint32_t *src_ptr = &blit_buffer[static_cast<size_t>(src_row_base) * blit_w];
 
         if (dst_y < rounded_start_y) {
             memcpy(&dst_ptr[copy_x], &src_ptr[src_x], static_cast<size_t>(copy_w) * sizeof(uint32_t));
@@ -1811,7 +1736,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         for (int x = copy_x; x < left_end; ++x) {
             int local = x - inner_left;
             int src_col = src_x + (x - copy_x);
-            if (static_cast<unsigned>(src_col) >= static_cast<unsigned>(w.buffer_w))
+            if (static_cast<unsigned>(src_col) >= static_cast<unsigned>(blit_w))
                 continue;
 
             uint8_t coverage = corner_mask[local];
@@ -1831,8 +1756,8 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                 center_w -= -src_col_start;
                 src_col_start = 0;
             }
-            if (src_col_start + center_w > w.buffer_w)
-                center_w = w.buffer_w - src_col_start;
+            if (src_col_start + center_w > blit_w)
+                center_w = blit_w - src_col_start;
             if (center_w > 0) {
                 memcpy(&dst_ptr[center_lo], &src_ptr[src_col_start], static_cast<size_t>(center_w) * sizeof(uint32_t));
             }
@@ -1842,7 +1767,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         for (int x = right_lo; x < copy_right; ++x) {
             int local = inner_w - 1 - (x - inner_left);
             int src_col = src_x + (x - copy_x);
-            if (static_cast<unsigned>(src_col) >= static_cast<unsigned>(w.buffer_w))
+            if (static_cast<unsigned>(src_col) >= static_cast<unsigned>(blit_w))
                 continue;
 
             uint8_t coverage = corner_mask[local];

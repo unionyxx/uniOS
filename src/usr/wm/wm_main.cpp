@@ -215,17 +215,17 @@ static void wm_bench_finish(Registry *registry)
     uint64_t compose_ticks = g_frame_stats.total_compose_ticks - g_bench.start_compose_total;
     uint64_t present_ticks = g_frame_stats.total_present_ticks - g_bench.start_present_total;
     uint64_t dirty_area = g_frame_stats.dirty_area_accum - g_bench.start_dirty_area_accum;
-    uint64_t stretch_draws = g_frame_stats.resize_stretch_draws - g_bench.start_resize_stretch_draws;
-    uint64_t fallback_draws = g_frame_stats.resize_fallback_draws - g_bench.start_resize_fallback_draws;
+    uint64_t flips = g_frame_stats.resize_flips - g_bench.start_resize_flips;
+    uint64_t stale_acks = g_frame_stats.resize_stale_acks - g_bench.start_resize_stale_acks;
     LOG_INFO("wm",
              "bench %s done: %llu frames, compose avg %llu us, present avg %llu us, frame max %llu us, "
-             "dirty avg %llu kpx, resize stretch %llu fallback %llu",
+             "dirty avg %llu kpx, resize flips %llu stale %llu",
              g_bench.resize_mode ? "resize" : "drag", static_cast<unsigned long long>(frames),
              static_cast<unsigned long long>(frames ? wm_tsc_to_us(compose_ticks) / frames : 0),
              static_cast<unsigned long long>(frames ? wm_tsc_to_us(present_ticks) / frames : 0),
              static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.max_frame_ticks)),
              static_cast<unsigned long long>(frames ? dirty_area / frames / 1000u : 0),
-             static_cast<unsigned long long>(stretch_draws), static_cast<unsigned long long>(fallback_draws));
+             static_cast<unsigned long long>(flips), static_cast<unsigned long long>(stale_acks));
     registry->system_flags &= ~(SYSTEM_FLAG_WM_BENCH_DRAG | SYSTEM_FLAG_WM_BENCH_RESIZE);
     smp_wmb();
     g_bench = {};
@@ -265,8 +265,8 @@ void wm_bench_tick(Registry *registry)
         g_bench.start_present_total = g_frame_stats.total_present_ticks;
         g_bench.start_max_frame_ticks = g_frame_stats.max_frame_ticks;
         g_bench.start_dirty_area_accum = g_frame_stats.dirty_area_accum;
-        g_bench.start_resize_stretch_draws = g_frame_stats.resize_stretch_draws;
-        g_bench.start_resize_fallback_draws = g_frame_stats.resize_fallback_draws;
+        g_bench.start_resize_flips = g_frame_stats.resize_flips;
+        g_bench.start_resize_stale_acks = g_frame_stats.resize_stale_acks;
         LOG_INFO("wm", "bench: starting %s benchmark (%llu frames)", resize_flag ? "resize" : "drag",
                  static_cast<unsigned long long>(g_bench.frames_target));
         return;
@@ -296,9 +296,9 @@ void wm_bench_tick(Registry *registry)
         int min_h = w.min_h > 0 ? w.min_h : 160;
         int new_w = min_w + ((max_w > min_w ? max_w - min_w : 0) * phase) / 127;
         int new_h = min_h + ((max_h > min_h ? max_h - min_h : 0) * phase) / 127;
-        // Route through the real resize pipeline (configure post, client ack,
-        // snapshot stretch) so the benchmark measures exactly what an
-        // interactive edge drag exercises, and damages through the same path.
+        // Route through the real resize pipeline (configure post, client
+        // redraw, buffer flip, geometry flip on ack) so the benchmark
+        // measures exactly what an interactive edge drag exercises.
         (void)old;
         set_window_bounds(w, g_bench.origin_x, g_bench.origin_y, new_w, new_h);
         return;
@@ -887,15 +887,6 @@ static void mark_titlebar_dirty(const Window &w)
         enqueue_damage_rect(outer.x, outer.y, outer.w, title_h);
 }
 
-// The interactive resize gesture keeps the in-flight stretch snapshot alive
-// until the pointer is released; once the gesture is over the snapshot is
-// reclaimed at the next ack.
-static bool window_resize_gesture_active(const Window &w)
-{
-    return g_input.pointer_down && g_input.drag_edges != RESIZE_NONE && g_input.drag_index >= WM_FIRST_USER_WINDOW &&
-           g_input.drag_index < g_window_count && g_windows[g_input.drag_index].entry == w.entry;
-}
-
 static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &entry)
 {
     if (!w.entry)
@@ -908,42 +899,32 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
         w.entry_resize_serial = entry.resize_serial;
         w.buffer_resize_serial = entry.buffer_resize_serial;
 
-        if (buffer_resize_serial_changed && entry.w > 0 && entry.h > 0) {
-            // The client just committed content for the geometry it saw. That
-            // geometry can lag the registry value the WM advanced to in the
-            // meantime, so never claim more content than the mapped backing
-            // (or the entry the client answered) actually holds.
-            int cw = entry.w;
-            int ch = entry.h;
-            if (w.buffer_w > 0 && cw > w.buffer_w)
-                cw = w.buffer_w;
-            if (w.buffer_h > 0 && ch > w.buffer_h)
-                ch = w.buffer_h;
-            w.client_committed_w = cw;
-            w.client_committed_h = ch;
-        }
+        // Only the ack changes something visible (a posted configure alone
+        // does not): the client finished redrawing the outstanding configure,
+        // so the bounds flip to its pending geometry — the buffer remap above
+        // already switched the displayed backing, so geometry and content
+        // land in one frame.
+        if (buffer_resize_serial_changed) {
+            if (w.resize_configure_pending && w.buffer_resize_serial == w.pending_configure_serial) {
+                apply_window_resize_flip(w);
+            } else if (w.resize_configure_pending) {
+                // Ack for a superseded configure; keep waiting for the
+                // outstanding serial.
+                g_frame_stats.resize_stale_acks++;
+            }
 
-        if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
-            w.buffer_resize_serial == w.pending_configure_serial) {
-            w.resize_configure_pending = false;
-            w.resize_anchor_edges_persist = RESIZE_NONE;
-            w.last_configure_ticks = 0;
-            w.last_commit_ticks = get_ticks();
-            if (!window_resize_gesture_active(w))
-                wm_resize_snapshot_release(w);
-        }
+            if (clamp_window_scroll(w) && w.entry) {
+                w.entry->scroll_x = w.scroll_x;
+                w.entry->scroll_y = w.scroll_y;
+                smp_wmb();
+            }
 
-        if (clamp_window_scroll(w) && w.entry) {
-            w.entry->scroll_x = w.scroll_x;
-            w.entry->scroll_y = w.scroll_y;
-            smp_wmb();
+            w.needs_full_redraw = true;
+            invalidate_window_decoration_cache(w);
+            DirtyRect client = window_visible_client_bounds(w);
+            enqueue_damage_rect(client.x, client.y, client.w, client.h);
+            invalidate_window_visibility_cache();
         }
-
-        w.needs_full_redraw = true;
-        invalidate_window_decoration_cache(w);
-        DirtyRect client = window_visible_client_bounds(w);
-        enqueue_damage_rect(client.x, client.y, client.w, client.h);
-        invalidate_window_visibility_cache();
     }
 
     const int new_content_w = entry.content_w;
@@ -1452,7 +1433,6 @@ extern "C" int main(int argc, char **argv)
                         hit_idx = focus_window(i, true);
                         g_input.drag_index = hit_idx;
                         g_input.drag_edges = redges;
-                        g_windows[hit_idx].resize_anchor_edges_persist = redges;
                         g_input.hover_frame_index = -1;
                         g_input.hover_resize_edges = RESIZE_NONE;
                         g_input.hover_button = -1;
@@ -2084,13 +2064,6 @@ extern "C" int main(int argc, char **argv)
                         w.y = ny;
                         w.w = nw;
                         w.h = nh;
-                        // Shell surfaces bypass the resize/configure protocol:
-                        // their registry geometry is exactly what the client
-                        // committed (the menubar grows its window to expose the
-                        // system dropdown), so the committed content size tracks
-                        // it instead of staying pinned at the boot-time size.
-                        w.client_committed_w = nw < w.buffer_w ? nw : w.buffer_w;
-                        w.client_committed_h = nh < w.buffer_h ? nh : w.buffer_h;
                         w.needs_full_redraw = (old.w != nw) || (old.h != nh);
                         if (clamp_window_scroll(w) && w.entry) {
                             w.entry->scroll_x = w.scroll_x;
@@ -2100,8 +2073,13 @@ extern "C" int main(int argc, char **argv)
                         mark_window_transition_damage(old, w);
                         invalidate_window_visibility_cache();
                     }
-                } else if (w.entry && (entry_snapshot.x != w.x || entry_snapshot.y != w.y || entry_snapshot.w != w.w ||
-                                       entry_snapshot.h != w.h)) {
+                } else if (!w.resize_configure_pending && w.entry &&
+                           (entry_snapshot.x != w.x || entry_snapshot.y != w.y || entry_snapshot.w != w.w ||
+                            entry_snapshot.h != w.h)) {
+                    // While a resize configure is outstanding the entry
+                    // deliberately carries the target the client redraws
+                    // toward; writing the visible bounds back would clobber
+                    // it. Outside a resize the WM is the geometry authority.
                     w.entry->x = w.x;
                     w.entry->y = w.y;
                     w.entry->w = w.w;
@@ -2114,29 +2092,15 @@ extern "C" int main(int argc, char **argv)
                 w.buffer_generation_seen = entry_snapshot.buffer_generation;
                 w.buffer_generation_acked = entry_snapshot.buffer_ack_generation;
 
-                if (w.resize_configure_pending && w.pending_configure_serial != 0 &&
-                    w.buffer_resize_serial == w.pending_configure_serial) {
-                    w.resize_configure_pending = false;
-                    w.resize_anchor_edges_persist = RESIZE_NONE;
-                    if (entry_snapshot.w > 0 && entry_snapshot.h > 0) {
-                        int cw = entry_snapshot.w;
-                        int ch = entry_snapshot.h;
-                        if (w.buffer_w > 0 && cw > w.buffer_w)
-                            cw = w.buffer_w;
-                        if (w.buffer_h > 0 && ch > w.buffer_h)
-                            ch = w.buffer_h;
-                        w.client_committed_w = cw;
-                        w.client_committed_h = ch;
-                    }
-                    w.last_configure_ticks = 0;
-                    w.last_commit_ticks = get_ticks();
-                    if (!window_resize_gesture_active(w))
-                        wm_resize_snapshot_release(w);
-                } else if (w.resize_configure_pending && w.owner_pid) {
+                // A matching ack already cleared resize_configure_pending in
+                // sync_window_runtime_metadata above (same scan, same entry
+                // snapshot); what remains here is retransmitting a configure
+                // the client has not answered yet.
+                if (w.resize_configure_pending && w.owner_pid) {
                     uint64_t now = get_ticks();
                     uint64_t retry_interval = WM_RESIZE_CONFIGURE_RETRY_TICKS << 4;
                     if (w.last_configure_ticks == 0 || now - w.last_configure_ticks >= retry_interval) {
-                        post_window_resize_configure(w);
+                        resend_window_resize_configure(w);
                     }
                 }
             }

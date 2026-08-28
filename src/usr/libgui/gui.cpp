@@ -19,6 +19,10 @@ WindowEntry *g_my_window = NULL;
 static int g_window_shm_id = WIN_SHM_INVALID;
 static uint32_t g_window_buffer_w = 0;
 static uint32_t g_window_buffer_h = 0;
+// Configure serial the client last synced its surface to. The commit acks
+// exactly this serial instead of reading the live entry at commit time,
+// which a fast drag may have advanced past the frame the client drew.
+static uint32_t g_synced_resize_serial = 0;
 static constexpr int GUI_RETIRED_WINDOW_BUFFER_SLOTS = 4;
 struct RetiredWindowBuffer
 {
@@ -174,24 +178,6 @@ static void gui_publish_window_count_for_slot(int slot)
     }
 }
 
-static uint32_t gui_resize_capacity(uint32_t current, uint32_t target)
-{
-    if (target <= current)
-        return current;
-
-    uint32_t slack = current / 4u;
-    if (slack < 64u)
-        slack = 64u;
-
-    uint64_t grown = (uint64_t)current + (uint64_t)slack;
-    if (grown < target)
-        grown = target;
-    grown = (grown + 63u) & ~63u;
-    if (grown > 0xFFFFFFFFu)
-        return target;
-    return static_cast<uint32_t>(grown);
-}
-
 static void gui_init_retired_window_buffers()
 {
     for (int i = 0; i < GUI_RETIRED_WINDOW_BUFFER_SLOTS; i++) {
@@ -241,6 +227,24 @@ static int gui_find_retired_window_buffer_slot()
             return i;
     }
     return -1;
+}
+
+static uint32_t gui_resize_capacity(uint32_t current, uint32_t target)
+{
+    if (target <= current)
+        return current;
+
+    uint32_t slack = current / 4u;
+    if (slack < 64u)
+        slack = 64u;
+
+    uint64_t grown = (uint64_t)current + (uint64_t)slack;
+    if (grown < target)
+        grown = target;
+    grown = (grown + 63u) & ~63u;
+    if (grown > 0xFFFFFFFFu)
+        return target;
+    return static_cast<uint32_t>(grown);
 }
 
 static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t target_h)
@@ -1528,11 +1532,15 @@ int gui_commit_window_damage(Surface *s, int32_t x, int32_t y, int32_t w, int32_
     // borders, titlebars, and moved/resized regions.
     asm volatile("sfence" ::: "memory");
     damage_push(&g_my_window->damage, x, y, w, h);
-    uint32_t resize_serial = g_my_window->resize_serial;
-    if (resize_serial != 0 && g_my_window->buffer_resize_serial != resize_serial && g_my_window->w > 0 &&
-        g_my_window->h > 0 && s->width >= static_cast<uint32_t>(g_my_window->w) &&
-        s->height >= static_cast<uint32_t>(g_my_window->h)) {
-        g_my_window->buffer_resize_serial = resize_serial;
+
+    // Ack the configure this frame actually answered: the serial recorded
+    // when the surface was synced, never the live entry (a fast drag may
+    // have advanced it past the frame just drawn). The compositor looks the
+    // serial up in its configure history and flips the window bounds to that
+    // geometry — never ahead of what was drawn.
+    if (g_synced_resize_serial != 0 && g_my_window->buffer_resize_serial != g_synced_resize_serial) {
+        g_my_window->buffer_resize_serial = g_synced_resize_serial;
+        g_synced_resize_serial = 0;
     }
     asm volatile("sfence" ::: "memory");
     return 0;
@@ -1789,26 +1797,47 @@ int gui_sync_window_size(Surface *s)
 
     gui_release_retired_window_buffer();
 
-    uint32_t new_w = (g_my_window->w > 0) ? static_cast<uint32_t>(g_my_window->w) : s->width;
-    uint32_t new_h = (g_my_window->h > 0) ? static_cast<uint32_t>(g_my_window->h) : s->height;
-    bool requested_resize =
-        (g_my_window->flags & WIN_FLAG_RESIZABLE) != 0 && (new_w > g_window_buffer_w || new_h > g_window_buffer_h);
-    if (requested_resize && !gui_resize_window_backing(s, new_w, new_h)) {
-        new_w = g_window_buffer_w;
-        new_h = g_window_buffer_h;
+    // Sample geometry + configure serial as one consistent triple: the WM
+    // bumps position_serial after writing the geometry, so an unchanged
+    // guard pair proves no write landed inside the read window (loads are
+    // not reordered on x86; a compiler barrier is enough). A torn sample
+    // would pair one configure's serial with another's size.
+    uint32_t req_w, req_h, sync_serial;
+    uint32_t position_guard;
+    do {
+        position_guard = g_my_window->position_serial;
+        req_w = (g_my_window->w > 0) ? static_cast<uint32_t>(g_my_window->w) : s->width;
+        req_h = (g_my_window->h > 0) ? static_cast<uint32_t>(g_my_window->h) : s->height;
+        sync_serial = g_my_window->resize_serial;
+        asm volatile("" ::: "memory");
+    } while (g_my_window->position_serial != position_guard);
+    bool resized = false;
+
+    if ((g_my_window->flags & WIN_FLAG_RESIZABLE) != 0 && (req_w != s->width || req_h != s->height)) {
+        // Grow the backing in place when needed (capacity grows with slack,
+        // so a drag reallocates only occasionally); shrinking reuses it. If
+        // the backing cannot fit the target, keep the current size; the
+        // compositor retries the configure.
+        if (!gui_resize_window_backing(s, req_w, req_h))
+            return 0;
+        s->width = req_w;
+        s->height = req_h;
+        resized = true;
     }
 
-    uint32_t max_w = s->pitch / 4;
-    if (new_w > max_w)
-        new_w = max_w;
-    if (g_window_buffer_h > 0 && new_h > g_window_buffer_h)
-        new_h = g_window_buffer_h;
+    if (sync_serial != 0 && g_my_window->buffer_resize_serial != sync_serial) {
+        if (resized) {
+            // The commit following the redraw acks this serial.
+            g_synced_resize_serial = sync_serial;
+        } else {
+            // The surface already covers the requested geometry: the current
+            // frame already is the answer.
+            g_my_window->buffer_resize_serial = sync_serial;
+            asm volatile("sfence" ::: "memory");
+        }
+    }
 
-    if (s->width == new_w && s->height == new_h)
-        return 0;
-    s->width = new_w;
-    s->height = new_h;
-    return 1;
+    return resized ? 1 : 0;
 }
 
 int gui_set_content_size(Surface *s, int content_w, int content_h)
