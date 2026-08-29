@@ -6,20 +6,6 @@
 #include <drivers/class/hid/usb_hid.h>
 #include <drivers/video/framebuffer.h>
 
-static bool input_debug = false;
-static int32_t screen_width = 1024;
-static int32_t screen_height = 768;
-static int8_t scroll_accumulator = 0;
-
-void input_init()
-{
-    ps2_keyboard_init();
-    ps2_mouse_init();
-    usb_init();
-    usb_hid_init();
-    usb_hid_set_screen_size(screen_width, screen_height);
-}
-
 void input_poll()
 {
     static bool in_poll = false;
@@ -27,16 +13,11 @@ void input_poll()
         return;
     in_poll = true;
 
-    // Keep the event pump IRQ-safe. Full USB polling can sleep and enumerate
-    // devices, so it must not run from timer/IRQ-driven input paths.
+    // Full USB polling can sleep and enumerate devices, so it must not run
+    // from timer/IRQ-driven input paths.
     usb_hid_update();
 
     in_poll = false;
-}
-
-bool input_keyboard_available()
-{
-    return usb_hid_keyboard_available() || true; // PS/2 keyboard always "available"
 }
 
 bool input_keyboard_has_char()
@@ -57,11 +38,6 @@ char input_keyboard_get_char()
     if (usb_hid_keyboard_has_char())
         return usb_hid_keyboard_get_char();
     return ps2_keyboard_get_char();
-}
-
-bool input_mouse_available()
-{
-    return usb_hid_mouse_available() || true; // PS/2 mouse always "available"
 }
 
 void input_mouse_get_state(InputMouseState *state)
@@ -95,12 +71,5 @@ void input_mouse_get_state(InputMouseState *state)
 
 void input_set_screen_size(int32_t width, int32_t height)
 {
-    screen_width = width;
-    screen_height = height;
     usb_hid_set_screen_size(width, height);
-}
-
-void input_set_debug(bool enabled)
-{
-    input_debug = enabled;
 }
