@@ -6,6 +6,11 @@
 static uint32_t g_last_seq = 0;
 static uint32_t g_frame_seq = 1;
 
+// Non-blocking present-wait timer; backs off so a wedged display does not
+// log-flood.
+static uint64_t g_wait_start_ticks = 0;
+static uint64_t g_wait_warn_interval = 250;
+
 void wm_present_init_sequences(uint32_t first_submitted)
 {
     g_last_seq = first_submitted;
@@ -303,4 +308,101 @@ uint32_t present_frame(const Surface *source, const DirtyRect *rects, int rect_c
                                  .frame_sequence = frame_sequence,
                                  .flags = DISPLAY_PRESENT_VBLANK};
     return display_present(&req);
+}
+
+bool wm_present_end_frame(Registry *registry, bool manip, bool inter, uint32_t limit, uint64_t frame_tsc_start)
+{
+    uint32_t pending = wm::pending_presents(g_last_seq, g_display_queue.completed_sequence);
+    if (pending) {
+        refresh_display_queue_from_status();
+        pending = wm::pending_presents(g_last_seq, g_display_queue.completed_sequence);
+    }
+
+    wm::PresentPolicyDecision action =
+        wm::choose_present_policy({pending, limit, (g_display_caps.flags & DISPLAY_FLAG_STRICT_SYNC_ONLY) != 0, inter,
+                                   g_display_copy_path, manip});
+
+    if (g_dirty_frame_ready && action == wm::PresentPolicyDecision::Submit) {
+        asm volatile("sfence" ::: "memory");
+        uint64_t present_tsc_start = wm_tsc_now();
+        DisplayBufferHandle frame_cursor_handle = 0;
+        int frame_cursor_x = 0;
+        int frame_cursor_y = 0;
+        wm_cursor_frame_plane(&frame_cursor_handle, &frame_cursor_x, &frame_cursor_y);
+        uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
+                                     g_frame_seq, frame_cursor_handle, frame_cursor_x, frame_cursor_y);
+        uint64_t present_tsc_end = wm_tsc_now();
+        if (sub) {
+            g_frame_stats.last_present_ticks = present_tsc_end - present_tsc_start;
+            g_frame_stats.total_present_ticks += g_frame_stats.last_present_ticks;
+            g_frame_stats.last_frame_ticks = present_tsc_end - frame_tsc_start;
+            if (g_frame_stats.last_frame_ticks > g_frame_stats.max_frame_ticks)
+                g_frame_stats.max_frame_ticks = g_frame_stats.last_frame_ticks;
+            if (g_frame_stats.last_input_ticks != 0)
+                g_frame_stats.last_input_to_submit_ticks = present_tsc_end - g_frame_stats.last_input_ticks;
+            if (g_presentbuffer_slot_count) {
+                g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = sub;
+            }
+            mark_other_presentbuffer_slots_stale(g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
+                                                 g_presentbuffer_active_slot);
+            for (int i = 0; i < g_window_count; i++) {
+                g_windows[i].last_rendered_x = g_windows[i].x;
+                g_windows[i].last_rendered_y = g_windows[i].y;
+                g_windows[i].last_rendered_w = g_windows[i].w;
+                g_windows[i].last_rendered_h = g_windows[i].h;
+            }
+            g_frame_stats.frames_submitted++;
+#ifdef DEBUG
+            if ((g_frame_stats.frames_submitted % 120u) == 0) {
+                LOG_INFO("wm",
+                         "stats: sub=%llu skip=%llu comp=%lluus pres=%lluus frame=%lluus max=%lluus "
+                         "dmg=%llukpx in>sub=%lluus",
+                         static_cast<unsigned long long>(g_frame_stats.frames_submitted),
+                         static_cast<unsigned long long>(g_frame_stats.frames_skipped),
+                         static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_compose_ticks)),
+                         static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_present_ticks)),
+                         static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_frame_ticks)),
+                         static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.max_frame_ticks)),
+                         static_cast<unsigned long long>(g_frame_stats.last_dirty_area / 1000u),
+                         static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_input_to_submit_ticks)));
+            }
+#endif
+            wm_present_note_submitted(sub);
+            g_dirty_count = 0;
+            g_dirty_frame_ready = false;
+            g_wait_start_ticks = 0; // Reset wait timer
+            g_wait_warn_interval = 250;
+        }
+    } else if (!g_dirty_frame_ready || action == wm::PresentPolicyDecision::Skip) {
+        if (action == wm::PresentPolicyDecision::Skip)
+            g_frame_stats.frames_skipped++;
+        // Flush deferred settings persist during idle to avoid blocking I/O during compositing.
+        flush_pending_settings_persist(registry);
+        if (g_dirty_count == 0 && g_last_seq <= g_display_queue.completed_sequence) {
+            // Fully idle: a 1 ms loop woke the compositor ~1000x/second
+            // for no work (power/thermal cost on real laptops). The only
+            // genuinely periodic duties are 1 Hz (clock) and toast expiry.
+            sleep_ms(16);
+        } else {
+            yield();
+        }
+    } else {
+        // Swapchain present-wait: park on the display event queue instead
+        // of polling, so completion wakes us within a tick instead of
+        // after an arbitrary 1 ms poll interval.
+        if (g_wait_start_ticks == 0) {
+            g_wait_start_ticks = get_ticks();
+        }
+        if (get_ticks() - g_wait_start_ticks > g_wait_warn_interval) {
+            LOG_ERROR("wm", "Display driver has not completed the pending frame");
+            g_wait_start_ticks = get_ticks();
+            if (g_wait_warn_interval < 4000)
+                g_wait_warn_interval *= 2;
+        }
+        DisplayEvent wait_event = {};
+        if (display_wait_event_timeout_ms(&wait_event, 4) == 0)
+            apply_display_event(wait_event);
+        return true; // Wait without releasing ownership of an in-flight present buffer.
+    }
+    return false;
 }

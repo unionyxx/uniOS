@@ -13,3 +13,4 @@
 #include "wm_render.h"
 #include "wm_settings.h"
 #include "wm_overlays.h"
+#include "wm_main.h"
