@@ -61,4 +61,3 @@ void post_focus_change_events(uint32_t prev_pid, uint32_t next_pid)
     post_plain_event_to_pid(prev_pid, EVT_UNFOCUS);
     post_plain_event_to_pid(next_pid, EVT_FOCUS);
 }
-

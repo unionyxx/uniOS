@@ -1,9 +1,10 @@
 #include "wm_present.h"
+
+#include "wm_damage.h"
+#include "wm_input.h"
+#include "wm_metrics.h"
 #include "wm_settings.h"
 #include "wm_window.h"
-#include "wm_input.h"
-#include "wm_damage.h"
-#include "wm_metrics.h"
 
 Surface g_screen;
 Surface g_backbuffer;

@@ -1,7 +1,7 @@
-#include "wm_input.h"
-#include "wm_present.h"
 #include "wm_damage.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
 
 namespace {
 

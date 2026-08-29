@@ -1,13 +1,13 @@
 #include "../libgui/gui_pixops.h"
-#include "wm_main.h"
-#include "wm_present.h"
-#include "wm_window.h"
-#include "wm_input.h"
 #include "wm_damage.h"
+#include "wm_input.h"
+#include "wm_main.h"
+#include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
 #include "wm_render.h"
 #include "wm_settings.h"
-#include "wm_overlays.h"
-#include "wm_metrics.h"
+#include "wm_window.h"
 
 Registry *wm_bootstrap()
 {

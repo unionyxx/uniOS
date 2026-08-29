@@ -30,7 +30,7 @@ uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage)
 #include <emmintrin.h>
 
 void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_stride, const uint32_t *__restrict__ src,
-                                  uint32_t src_stride, int w, int h)
+                           uint32_t src_stride, int w, int h)
 {
     if (w <= 0 || h <= 0)
         return;
@@ -239,4 +239,3 @@ bool ensure_surface_capacity(Surface *surface, uint32_t width, uint32_t height)
     }
     return false;
 }
-

@@ -1,9 +1,9 @@
-#include "wm_input.h"
-#include "wm_window.h"
 #include "wm_damage.h"
-#include "wm_present.h"
-#include "wm_overlays.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_window.h"
 
 WmInputState g_input;
 
@@ -257,4 +257,3 @@ void update_cursor_kind()
         g_input.cursor_kind = n_k;
     }
 }
-

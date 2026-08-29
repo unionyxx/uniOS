@@ -1,9 +1,9 @@
-#include "wm_overlays.h"
-#include "wm_window.h"
 #include "wm_damage.h"
+#include "wm_metrics.h"
+#include "wm_overlays.h"
 #include "wm_present.h"
 #include "wm_settings.h"
-#include "wm_metrics.h"
+#include "wm_window.h"
 
 StoragePromptState g_storage_prompt = {};
 
@@ -179,7 +179,6 @@ static uint32_t storage_prompt_scrim_color()
     return ((uint32_t)alpha << 24) | (material & 0x00FFFFFFu);
 }
 
-
 void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 {
     if (!g_storage_prompt.visible || !g_backbuffer.buffer)
@@ -264,4 +263,3 @@ void draw_storage_prompt_overlay()
     DirtyRect full = {0, 0, (int)g_backbuffer.width, (int)g_backbuffer.height};
     draw_storage_prompt_overlay_clipped(full);
 }
-

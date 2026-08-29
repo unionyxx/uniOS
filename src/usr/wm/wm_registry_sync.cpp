@@ -1,11 +1,11 @@
-#include "wm_main.h"
-#include "wm_settings.h"
-#include "wm_render.h"
-#include "wm_overlays.h"
 #include "wm_damage.h"
-#include "wm_present.h"
-#include "wm_window.h"
+#include "wm_main.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_render.h"
+#include "wm_settings.h"
+#include "wm_window.h"
 
 // Generation trackers: consume registry-side requests exactly once per
 // generation bump so a restarting client cannot replay a stale request.
@@ -49,8 +49,7 @@ void wm_sync_registry(Registry *registry)
             }
         }
         if (transparency_changed) {
-            capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width),
-                                             static_cast<int>(g_screen.height)},
+            capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)},
                                             registry);
             recapture_shell_blur_sources(registry);
             enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));

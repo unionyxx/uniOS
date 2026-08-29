@@ -1,7 +1,7 @@
-#include "wm_overlays.h"
 #include "wm_damage.h"
-#include "wm_present.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
 
 NotificationCenterState g_notifications = {};
 
@@ -161,4 +161,3 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
             index = MAX_NOTIFICATIONS - 1;
     }
 }
-

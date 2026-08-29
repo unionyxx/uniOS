@@ -1,9 +1,9 @@
-#include "wm_overlays.h"
-#include "wm_window.h"
-#include "wm_input.h"
 #include "wm_damage.h"
-#include "wm_present.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_window.h"
 
 ContextMenuState g_context_menu = {};
 
@@ -231,4 +231,3 @@ void draw_context_menu_overlay_clipped(const DirtyRect &clip, const Registry *re
         gui_draw_popup_menu(&g_backbuffer, g_context_menu.x, g_context_menu.y, g_context_menu.w, items, count,
                             g_context_menu.hovered_index);
 }
-

@@ -1,7 +1,7 @@
-#include "wm_window.h"
-#include "wm_input.h"
 #include "wm_damage.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
+#include "wm_window.h"
 
 void publish_window_scroll(const Window &w)
 {
@@ -79,4 +79,3 @@ bool scroll_window_content(Window &w, int delta_x, int delta_y)
     enqueue_damage_rect(client.x, client.y, client.w, client.h);
     return true;
 }
-

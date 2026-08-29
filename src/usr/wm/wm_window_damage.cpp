@@ -1,7 +1,7 @@
-#include "wm_window.h"
-#include "wm_input.h"
 #include "wm_damage.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
+#include "wm_window.h"
 
 static void mark_window_titlebar_damage(const Window &w)
 {
@@ -133,4 +133,3 @@ void mark_window_transition_damage(const Window &old_w, const Window &new_w)
         enqueue_damage_rect(overlap.x + overlap.w, overlap.y, o.x + o.w - (overlap.x + overlap.w),
                             overlap.y + o.h - overlap.y);
 }
-

@@ -1,7 +1,7 @@
-#include "wm_render.h"
-#include "wm_present.h"
-#include "wm_settings.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
+#include "wm_render.h"
+#include "wm_settings.h"
 
 static int g_cached_top_r = -1;
 static uint8_t g_top_corner_mask_lut[64][64] = {};
@@ -327,4 +327,3 @@ void reload_wallpaper(Registry *registry, bool prefer_requested)
     }
     publish_wallpaper_state(registry, status, active_path);
 }
-

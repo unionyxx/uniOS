@@ -1,10 +1,10 @@
-#include "wm_window.h"
-#include "wm_render.h"
-#include "wm_overlays.h"
-#include "wm_input.h"
-#include "wm_present.h"
 #include "wm_damage.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_render.h"
+#include "wm_window.h"
 
 Window g_windows[MAX_WINDOWS];
 int g_window_count = 0;
@@ -510,4 +510,3 @@ bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
     invalidate_window_visibility_cache();
     return true;
 }
-

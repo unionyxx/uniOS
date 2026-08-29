@@ -1,9 +1,9 @@
-#include "wm_render.h"
 #include "wm_input.h"
+#include "wm_metrics.h"
 #include "wm_present.h"
+#include "wm_render.h"
 #include "wm_settings.h"
 #include "wm_window.h"
-#include "wm_metrics.h"
 
 static void gui_fill_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
                                           const DirtyRect &clip)
@@ -429,4 +429,3 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
         draw_window_decoration_buttons_clipped(dst, w, clip, focused, hovered_button);
     }
 }
-

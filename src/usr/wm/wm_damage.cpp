@@ -1,7 +1,8 @@
 #include "wm_damage.h"
+
 #include "wm_input.h"
-#include "wm_present.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
 
 DirtyRect g_dirty_rects[MAX_DIRTY_RECTS];
 int g_dirty_count = 0;
@@ -219,4 +220,3 @@ void enqueue_damage_rect_expanded(const DirtyRect &rect, int pad)
     DirtyRect expanded = rect_expand(rect, pad);
     enqueue_damage_rect(expanded.x, expanded.y, expanded.w, expanded.h);
 }
-

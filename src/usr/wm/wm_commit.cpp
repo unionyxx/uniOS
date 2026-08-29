@@ -1,8 +1,8 @@
-#include "wm_window.h"
-#include "wm_render.h"
 #include "wm_damage.h"
-#include "wm_present.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
+#include "wm_render.h"
+#include "wm_window.h"
 
 static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
 {
@@ -217,8 +217,7 @@ void wm_commit_windows(Registry *registry)
                         int fd = entry_snapshot.shm_id & ~0x40000000;
                         uint64_t file_size = syscall1(SYS_FSIZE, (uint64_t)fd);
                         if (file_size != (uint64_t)-1 && req_size <= file_size) {
-                            void *mapped_ptr =
-                                mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                            void *mapped_ptr = mmap(NULL, (size_t)req_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
                             if (mapped_ptr != MAP_FAILED) {
                                 mapped = reinterpret_cast<uint64_t>(mapped_ptr);
                                 map_ok = true;

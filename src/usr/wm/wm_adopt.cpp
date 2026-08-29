@@ -1,5 +1,5 @@
-#include "wm_window.h"
 #include "wm_metrics.h"
+#include "wm_window.h"
 
 static bool process_is_alive(uint32_t pid)
 {
@@ -106,8 +106,7 @@ void wm_adopt_windows(Registry *registry)
         }
         if (adoption_exhausted(e.shm_id, e.owner_pid))
             continue;
-        if (add_win_internal(e.shm_id, e.x, e.y, e.w, e.h, e.title, &e.damage, &e,
-                             (e.flags & WIN_FLAG_TRANSPARENT))) {
+        if (add_win_internal(e.shm_id, e.x, e.y, e.w, e.h, e.title, &e.damage, &e, (e.flags & WIN_FLAG_TRANSPARENT))) {
             adoption_clear(e.shm_id, e.owner_pid);
         } else {
             adoption_note_failure(e.shm_id, e.owner_pid);

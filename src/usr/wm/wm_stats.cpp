@@ -1,8 +1,8 @@
-#include "wm_present.h"
-#include "wm_window.h"
-#include "wm_settings.h"
 #include "wm_damage.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
+#include "wm_settings.h"
+#include "wm_window.h"
 
 static uint64_t g_tsc_freq_cached = 0;
 
@@ -252,4 +252,3 @@ void draw_stats_overlay_clipped(const DirtyRect &clip)
     gui_draw_text_clipped(&g_backbuffer, mono, text_x, text_y, max_w, line, g_gui_style.text_dim,
                           g_gui_style.app_surface);
 }
-

@@ -2,6 +2,29 @@
 
 The window manager (`/bin/wm.elf`, `src/usr/wm/`) is a userspace compositor process. The kernel provides present/compose syscalls and event plumbing; the WM owns window metadata, decorations, focus, overlays, the cursor, and every frame submitted to the display.
 
+## Module Layout
+
+Headers are layered: `wm_types.h` (POD structs/constants) -> `wm_rect.h` (rect math) -> subsystem headers (`wm_metrics.h`, `wm_damage.h`, `wm_window.h`, `wm_input.h`, `wm_render.h`, `wm_settings.h`) -> pipeline/feature headers (`wm_present.h`, `wm_overlays.h`, `wm_main.h`). Pure rect/queue/present-policy math shared with the kernel ktest suite lives in `include/wm/interaction_policy.h`.
+
+| Module | Contents |
+| --- | --- |
+| `wm_main.cpp` | `main()`: bootstrap + per-frame pipeline orchestration (no shared state definitions) |
+| `wm_bootstrap.cpp` | Registry allocation, swapchain setup, shell window seeding, first frame, registry publish |
+| `wm_events.cpp` | Event pump and dispatch (pointer/keyboard/scroll, overlay modal handling) |
+| `wm_registry_sync.cpp` | Settings/storage/wallpaper/notification generation consumption |
+| `wm_adopt.cpp` | Window adoption scan, failure tombstones, dead-owner reaping |
+| `wm_commit.cpp` | Entry sampling, buffer remap/validation, metadata sync, damage pop |
+| `wm_frame_build.cpp` | Dirty-set normalization, overlay damage expansion, compose pass, scene alias state |
+| `wm_present.cpp` | Present slots, stale tracking, display events, submit/idle/wait policy, frame sequences, scene/display globals |
+| `wm_cursor.cpp` | Hardware cursor planes, software-cursor damage bookkeeping |
+| `wm_stats.cpp` | TSC timing, frame stats, benchmark driver, stats overlay drawing |
+| `wm_damage.cpp` | Dirty-rect queue (enqueue/normalize/clip/collapse), dirty-set queries |
+| `wm_window_geometry.cpp`, `wm_window_cache.cpp`, `wm_window_stack.cpp`, `wm_window_bounds.cpp`, `wm_window_resize.cpp`, `wm_window_scroll.cpp`, `wm_window_damage.cpp` | Window bounds/visibility predicates, visibility caches, focus/z-order/lifecycle, move/snap, synchronous resize protocol, content scrolling, damage marking |
+| `wm_hit_test.cpp`, `wm_client_events.cpp`, `wm_pointer.cpp` | Hit testing, client event delivery, move/hover/cursor-kind tracking |
+| `wm_pixel.cpp`, `wm_wallpaper.cpp`, `wm_shell_blur.cpp`, `wm_decoration.cpp`, `wm_client_draw.cpp`, `wm_blur.cpp`, `wm_compose.cpp` | Pixel math/SIMD blits, wallpaper + desktop base, menubar/dock blur, decorations, client blit, blur kernels, rect composition |
+| `wm_index.cpp`, `wm_control_center.cpp`, `wm_context_menu.cpp`, `wm_storage_prompt.cpp`, `wm_notifications.cpp`, `wm_actions.cpp` | Overlay features: each owns its state, logic, and clipped drawing |
+| `wm_settings.cpp`, `wm_metrics.cpp` | Runtime settings load/persist, scaled metrics |
+
 ## Shared Registry
 
 The protocol is a shared-memory `Registry` (`include/uapi/gui.h`) — no sockets or message passing:

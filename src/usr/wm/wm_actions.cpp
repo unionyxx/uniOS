@@ -17,7 +17,6 @@ void show_desktop_windows()
             minimize_window(i);
 }
 
-
 void launch_or_focus_app(Registry *registry, const char *title, const char *path)
 {
     const uint32_t win_limit = registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count;
@@ -36,4 +35,3 @@ void launch_or_focus_app(Registry *registry, const char *title, const char *path
         exit(1);
     }
 }
-

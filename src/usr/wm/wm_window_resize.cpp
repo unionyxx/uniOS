@@ -1,7 +1,7 @@
-#include "wm_window.h"
-#include "wm_render.h"
-#include "wm_present.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
+#include "wm_render.h"
+#include "wm_window.h"
 
 static uint32_t next_configure_serial(Window &w)
 {
@@ -137,4 +137,3 @@ void wm_resize_snapshot_capture(Window &w)
     }
     w.resize_snapshot_y0 = y0;
 }
-

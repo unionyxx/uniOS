@@ -1,5 +1,5 @@
-#include "wm_render.h"
 #include "wm_metrics.h"
+#include "wm_render.h"
 
 static Surface g_blur_scratch = {};
 static Surface g_blur_pass_a = {};
@@ -103,8 +103,8 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
             }
 
             for (uint32_t x = 0; x < w; x++) {
-                tmp_row[x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_w) << 16) | (blur_div((uint32_t)sum_g, recip_w) << 8) |
-                             blur_div((uint32_t)sum_b, recip_w);
+                tmp_row[x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_w) << 16) |
+                             (blur_div((uint32_t)sum_g, recip_w) << 8) | blur_div((uint32_t)sum_b, recip_w);
 
                 int remove_index = (int)x - radius_w;
                 int add_index = (int)x + radius_w + 1;
@@ -181,7 +181,6 @@ void blur_surface_box(const Surface *src, Surface *dst, int radius)
             }
         }
     } else {
-
         for (uint32_t y = 0; y < h; y++) {
             memcpy(&dst->buffer[(size_t)y * dst_stride], &g_blur_scratch.buffer[(size_t)y * tmp_stride],
                    (size_t)w * sizeof(uint32_t));
@@ -297,8 +296,8 @@ static void blur_surface_box_fused(const Surface *src, Surface *dst, int radius,
             sum_b += pixel & 0xFFu;
         }
         for (uint32_t x = 0; x < w; x++) {
-            tmp_row[x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_w) << 16) | (blur_div((uint32_t)sum_g, recip_w) << 8) |
-                         blur_div((uint32_t)sum_b, recip_w);
+            tmp_row[x] = 0xFF000000u | (blur_div((uint32_t)sum_r, recip_w) << 16) |
+                         (blur_div((uint32_t)sum_g, recip_w) << 8) | blur_div((uint32_t)sum_b, recip_w);
             int ri = (int)x - radius_w, ai = (int)x + radius_w + 1;
             if (ri < 0)
                 ri = 0;
@@ -488,8 +487,7 @@ void blur_surface_material(const Surface *src, Surface *dst, float sigma, int sa
         if (cw < 32u || ch < 8u)
             return false;
         if (!ensure_surface_capacity(&g_blur_small_src, cw, ch) ||
-            !ensure_surface_capacity(&g_blur_small_dst, cw, ch) ||
-            !ensure_surface_capacity(&g_blur_pass_a, cw, ch) ||
+            !ensure_surface_capacity(&g_blur_small_dst, cw, ch) || !ensure_surface_capacity(&g_blur_pass_a, cw, ch) ||
             !ensure_surface_capacity(&g_blur_pass_b, cw, ch))
             return false;
         downsample_factor = factor;

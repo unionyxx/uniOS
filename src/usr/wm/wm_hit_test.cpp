@@ -1,8 +1,8 @@
 #include "wm_input.h"
-#include "wm_window.h"
+#include "wm_metrics.h"
 #include "wm_overlays.h"
 #include "wm_present.h"
-#include "wm_metrics.h"
+#include "wm_window.h"
 
 int hit_test_resize(const Window &w, int px, int py)
 {
@@ -127,4 +127,3 @@ bool pointer_blocked_by_shell_overlay(int px, int py)
     return g_storage_prompt.visible || g_context_menu.open || g_index.active || g_control_center.open ||
            system_window_hit(px, py) >= 0;
 }
-

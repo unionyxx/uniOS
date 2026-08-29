@@ -1,9 +1,9 @@
-#include "wm_input.h"
-#include "wm_window.h"
 #include "wm_damage.h"
+#include "wm_input.h"
+#include "wm_metrics.h"
 #include "wm_overlays.h"
 #include "wm_present.h"
-#include "wm_metrics.h"
+#include "wm_window.h"
 
 bool point_targets_window_client_for_input(const Window &w, int px, int py)
 {
@@ -105,7 +105,8 @@ void wm_handle_events(Registry *registry, Event &ev)
             // expanded menubar window, or inside its bounds but on
             // transparent pixels beside the panel.
             bool dismiss = g_input.mouse_y >= registry->windows[0].h;
-            if (!dismiss && g_input.mouse_y >= wm_menubar_h() && system_window_hit(g_input.mouse_x, g_input.mouse_y) < 0)
+            if (!dismiss && g_input.mouse_y >= wm_menubar_h() &&
+                system_window_hit(g_input.mouse_x, g_input.mouse_y) < 0)
                 dismiss = true;
             if (dismiss) {
                 registry->mb_menu_dismiss_requested = true;
@@ -206,8 +207,7 @@ void wm_handle_events(Registry *registry, Event &ev)
                     const int click_shm = g_windows[hit_idx].shm_id;
                     const uint32_t click_owner = g_windows[hit_idx].owner_pid;
                     if (click_entry && click_entry == g_input.titlebar_click_entry &&
-                        click_shm == g_input.titlebar_click_shm_id &&
-                        click_owner == g_input.titlebar_click_owner_pid &&
+                        click_shm == g_input.titlebar_click_shm_id && click_owner == g_input.titlebar_click_owner_pid &&
                         click_ticks - g_input.titlebar_click_ticks < 400) {
                         // Titlebar double-click toggles maximize, unless the
                         // first click of the pair already restored the window.
@@ -497,8 +497,7 @@ void wm_handle_events(Registry *registry, Event &ev)
                 focus_window(find_top_visible_user_window(), false);
             }
         } else if (ev.type == EVT_MOUSE_DOWN || ev.type == EVT_MOUSE_UP) {
-            if (ev.type == EVT_MOUSE_UP && g_input.client_grab_entry &&
-                g_input.client_grab_button == ev.mouse.button) {
+            if (ev.type == EVT_MOUSE_UP && g_input.client_grab_entry && g_input.client_grab_button == ev.mouse.button) {
                 int grabbed = find_window_by_entry(g_input.client_grab_entry);
                 if (grabbed >= WM_FIRST_USER_WINDOW && is_window_visible(g_windows[grabbed])) {
                     post_mouse_event_to_window(g_windows[grabbed], EVT_MOUSE_UP, g_input.mouse_x, g_input.mouse_y,

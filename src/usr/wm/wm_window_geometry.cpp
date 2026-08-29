@@ -1,5 +1,5 @@
-#include "wm_window.h"
 #include "wm_metrics.h"
+#include "wm_window.h"
 
 DirtyRect window_client_bounds(const Window &w)
 {
@@ -111,4 +111,3 @@ bool is_user_window(const Window &w)
 {
     return w.entry && (w.entry->flags & WIN_FLAG_SYSTEM) == 0;
 }
-

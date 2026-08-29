@@ -1,11 +1,11 @@
-#include "wm_main.h"
-#include "wm_present.h"
-#include "wm_window.h"
-#include "wm_input.h"
 #include "wm_damage.h"
-#include "wm_render.h"
-#include "wm_overlays.h"
+#include "wm_input.h"
+#include "wm_main.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_render.h"
+#include "wm_window.h"
 
 // Identity alias mode: on synchronous copy-path backends the scene buffer is
 // itself the present buffer, so the scene->present blit disappears. The
@@ -71,9 +71,9 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
         build_pending = wm::pending_presents(wm_present_last_sequence(), g_display_queue.completed_sequence);
     }
 
-    wm::PresentPolicyDecision build_action = wm::choose_present_policy(
-        {build_pending, limit, (g_display_caps.flags & DISPLAY_FLAG_STRICT_SYNC_ONLY) != 0, inter,
-         g_display_copy_path, manip});
+    wm::PresentPolicyDecision build_action =
+        wm::choose_present_policy({build_pending, limit, (g_display_caps.flags & DISPLAY_FLAG_STRICT_SYNC_ONLY) != 0,
+                                   inter, g_display_copy_path, manip});
 
     if (build_action == wm::PresentPolicyDecision::Skip) {
         g_frame_stats.frames_skipped++;

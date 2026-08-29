@@ -1,9 +1,9 @@
-#include "wm_overlays.h"
-#include "wm_window.h"
 #include "wm_damage.h"
-#include "wm_settings.h"
-#include "wm_present.h"
 #include "wm_metrics.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_settings.h"
+#include "wm_window.h"
 
 ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true, true, false, true, 180, false};
 
@@ -387,4 +387,3 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     int notif_y = box.y + box.h + gui_space_2();
     draw_notification_center_clipped(clip, notif_y);
 }
-

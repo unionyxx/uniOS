@@ -23,4 +23,3 @@ void refresh_wm_metrics()
     int shadow_y = gui_scaled_metric(3);
     g_metrics.frame_shadow_offset_y = shadow_y < 1 ? 1 : shadow_y;
 }
-

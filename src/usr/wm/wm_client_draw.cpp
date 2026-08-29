@@ -1,6 +1,6 @@
+#include "wm_metrics.h"
 #include "wm_render.h"
 #include "wm_window.h"
-#include "wm_metrics.h"
 
 static int g_cached_inner_r = -1;
 static uint8_t g_bottom_corner_mask_lut[64][64] = {};
@@ -9,7 +9,6 @@ static inline uint32_t blend_coverage_rgb(uint32_t dst_px, uint32_t src_px, uint
 {
     return gui_blend_straight_opaque_dst_coverage(dst_px, src_px, coverage);
 }
-
 
 static void compute_bottom_corner_row(int local_y, int /*inner_w*/, int inner_h, int inner_r, uint8_t *out_mask)
 {
@@ -437,4 +436,3 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         }
     }
 }
-

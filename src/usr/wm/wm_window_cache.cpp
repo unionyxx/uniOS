@@ -1,7 +1,7 @@
-#include "wm_window.h"
 #include "wm_damage.h"
-#include "wm_present.h"
 #include "wm_metrics.h"
+#include "wm_present.h"
+#include "wm_window.h"
 
 DirtyRect g_window_outer_cache[MAX_WINDOWS];
 DirtyRect g_window_client_cache[MAX_WINDOWS];
@@ -210,4 +210,3 @@ bool rect_intersects_window_chrome(const Window &w, const DirtyRect &r)
 
     return false;
 }
-

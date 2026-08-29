@@ -1,10 +1,10 @@
-#include "wm_overlays.h"
-#include "wm_window.h"
-#include "wm_input.h"
 #include "wm_damage.h"
+#include "wm_input.h"
+#include "wm_metrics.h"
+#include "wm_overlays.h"
 #include "wm_present.h"
 #include "wm_settings.h"
-#include "wm_metrics.h"
+#include "wm_window.h"
 
 IndexState g_index = {};
 
@@ -451,4 +451,3 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
         row_y += row_h + row_gap;
     }
 }
-
