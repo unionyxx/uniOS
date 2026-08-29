@@ -422,19 +422,21 @@ static bool copy_file_stream(const char *src, const char *dst, char *error, size
         return false;
     }
 
-    VNodeStat st = {};
-    if (stat(dst, &st) == 0) {
-        if (st.is_dir) {
-            snprintf(error, error_size, "destination is a directory");
-            unlink(tmp_path);
-            return false;
-        }
-        unlink(dst);
-    }
-
-    if (rename(tmp_path, dst) != 0) {
+    // Put the staged temp file in place. rename() is the authoritative
+    // step; on FAT32 it refuses to overwrite, so a failed rename is retried
+    // after unlinking the destination. unlink() itself refuses directories,
+    // and no stat() gates a mutation here, so there is no check/use race.
+    // The stat below only picks an error message once every mutation failed.
+    int placed = rename(tmp_path, dst);
+    if (placed != 0 && unlink(dst) == 0)
+        placed = rename(tmp_path, dst);
+    if (placed != 0) {
         unlink(tmp_path);
-        snprintf(error, error_size, "rename failed for %s", dst);
+        VNodeStat st = {};
+        if (stat(dst, &st) == 0 && st.is_dir)
+            snprintf(error, error_size, "destination is a directory");
+        else
+            snprintf(error, error_size, "rename failed for %s", dst);
         return false;
     }
     return true;
@@ -467,24 +469,29 @@ static bool copy_directory_tree(const char *src, const char *dst, int depth, cha
         return false;
     }
 
+    // Open src before stat-ing it: a stat() -> open() sequence on the same
+    // path is a TOCTOU race, so the fd is opened first and its type is
+    // verified afterwards (open() succeeds for directories and files alike).
+    int fd = open(src, O_RDONLY);
+    if (fd < 0) {
+        snprintf(error, error_size, "open failed for %s", src);
+        return false;
+    }
     VNodeStat st = {};
     if (stat(src, &st) != 0 || !st.is_dir) {
+        close(fd);
         snprintf(error, error_size, "source is not a directory");
         return false;
     }
     VNodeStat dst_st = {};
     if (stat(dst, &dst_st) == 0) {
+        close(fd);
         snprintf(error, error_size, "destination already exists");
         return false;
     }
     if (mkdir(dst) != 0) {
+        close(fd);
         snprintf(error, error_size, "mkdir failed for %s", dst);
-        return false;
-    }
-
-    int fd = open(src, O_RDONLY);
-    if (fd < 0) {
-        snprintf(error, error_size, "open failed for %s", src);
         return false;
     }
 

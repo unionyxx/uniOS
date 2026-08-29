@@ -1752,48 +1752,36 @@ static bool byte_is_textish(uint8_t c)
     return false;
 }
 
-static bool sniff_file_is_binary(const char *path, bool *out_binary)
-{
-    if (out_binary)
-        *out_binary = false;
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return false;
-
-    uint8_t chunk[TEXT_SNIFF_BYTES];
-    int n = read(fd, chunk, sizeof(chunk));
-    close(fd);
-    if (n < 0)
-        return false;
-
-    for (int i = 0; i < n; i++) {
-        if (chunk[i] == 0 || !byte_is_textish(chunk[i])) {
-            if (out_binary)
-                *out_binary = true;
-            return true;
-        }
-    }
-    return true;
-}
-
 static bool load_file(AppState *state, const char *path)
 {
     if (!state || !state->buffer || !path || !path[0])
         return false;
 
-    VNodeStat st = {};
-    if (stat(path, &st) != 0) {
+    // Open first, then classify: a stat() check followed by open() on the
+    // same path is a classic TOCTOU race, so the fd is the single handle
+    // used for every step that follows.
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
         set_status(state, "Open failed");
         state->needs_redraw = true;
         return false;
     }
-    if (st.is_dir) {
+
+    // open() succeeds for directories too, so the directory check runs after
+    // the open (never before it) and dispatches to load_project.
+    VNodeStat st = {};
+    if (stat(path, &st) == 0 && st.is_dir) {
+        close(fd);
         load_project(state, path);
         return true;
     }
 
-    FileKind kind = classify_file(path, false, st.size);
+    int64_t file_size = fsize(fd);
+    if (file_size < 0)
+        file_size = 0;
+    FileKind kind = classify_file(path, false, (uint64_t)file_size);
     if (!file_kind_opens_as_text(kind)) {
+        close(fd);
         char status[160];
         snprintf(status, sizeof(status), "%s not opened as text", file_kind_label(path, kind));
         set_status(state, status);
@@ -1801,24 +1789,26 @@ static bool load_file(AppState *state, const char *path)
         return false;
     }
 
+    // Sniff the leading bytes through the same fd, then rewind so the full
+    // read resumes from the start. A NUL or non-text byte means binary.
+    uint8_t sniff[TEXT_SNIFF_BYTES];
+    int sniff_n = read(fd, sniff, sizeof(sniff));
+    if (sniff_n < 0)
+        sniff_n = 0;
     bool binary = false;
-    if (!sniff_file_is_binary(path, &binary)) {
-        set_status(state, "Open failed");
-        state->needs_redraw = true;
-        return false;
+    for (int i = 0; i < sniff_n; i++) {
+        if (sniff[i] == 0 || !byte_is_textish(sniff[i])) {
+            binary = true;
+            break;
+        }
     }
     if (binary) {
+        close(fd);
         set_status(state, "Binary file not opened");
         state->needs_redraw = true;
         return false;
     }
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        set_status(state, "Open failed");
-        state->needs_redraw = true;
-        return false;
-    }
+    lseek(fd, 0, SEEK_SET);
 
     reset_buffer(state->buffer, path);
     state->buffer->line_count = 1;
