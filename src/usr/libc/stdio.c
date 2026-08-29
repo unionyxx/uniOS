@@ -103,24 +103,43 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
                 else
                     n = (int64_t)va_arg(ap, int);
 
-                uint64_t un;
-                if (n < 0) {
-                    if ((size_t)written < size - 1)
-                        str[written++] = '-';
-                    un = (uint64_t)-(n + 1) + 1;
-                } else {
-                    un = (uint64_t)n;
-                }
+                bool negative = n < 0;
+                uint64_t un = negative ? (uint64_t)-(n + 1) + 1u : (uint64_t)n;
 
                 char tmp[64];
                 int ti = 0;
                 itoa_internal(un, tmp, &ti, 10, false);
-                while (width > ti && (size_t)written < size - 1) {
-                    str[written++] = pad_char;
-                    width--;
+
+                int content = ti + (negative ? 1 : 0);
+                int pad_count = width > content ? width - content : 0;
+                if (!left_justify) {
+                    if (pad_char == '0') {
+                        if (negative && (size_t)written < size - 1)
+                            str[written++] = '-';
+                        while (pad_count > 0 && (size_t)written < size - 1) {
+                            str[written++] = '0';
+                            pad_count--;
+                        }
+                    } else {
+                        while (pad_count > 0 && (size_t)written < size - 1) {
+                            str[written++] = ' ';
+                            pad_count--;
+                        }
+                        if (negative && (size_t)written < size - 1)
+                            str[written++] = '-';
+                    }
+                } else {
+                    if (negative && (size_t)written < size - 1)
+                        str[written++] = '-';
                 }
                 while (ti > 0 && (size_t)written < size - 1) {
                     str[written++] = tmp[--ti];
+                }
+                if (left_justify) {
+                    while (pad_count > 0 && (size_t)written < size - 1) {
+                        str[written++] = ' ';
+                        pad_count--;
+                    }
                 }
                 f++;
             } else if (*f == 'u' || *f == 'o' || *f == 'x' || *f == 'X') {
@@ -136,12 +155,22 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
                 char tmp[64];
                 int ti = 0;
                 itoa_internal(n, tmp, &ti, base, (*f == 'X'));
-                while (width > ti && (size_t)written < size - 1) {
-                    str[written++] = pad_char;
-                    width--;
+
+                int pad_count = width > ti ? width - ti : 0;
+                if (!left_justify) {
+                    while (pad_count > 0 && (size_t)written < size - 1) {
+                        str[written++] = pad_char;
+                        pad_count--;
+                    }
                 }
                 while (ti > 0 && (size_t)written < size - 1) {
                     str[written++] = tmp[--ti];
+                }
+                if (left_justify) {
+                    while (pad_count > 0 && (size_t)written < size - 1) {
+                        str[written++] = ' ';
+                        pad_count--;
+                    }
                 }
                 f++;
             } else if (*f == 'p') {
@@ -198,10 +227,10 @@ int sprintf(char *str, const char *format, ...)
 
 int printf(const char *format, ...)
 {
-    char buf[4096]; // Increased buffer size
+    char buf[4096];
     va_list ap;
     va_start(ap, format);
-    int ret = vsprintf(buf, format, ap);
+    int ret = vsnprintf(buf, sizeof(buf), format, ap);
     va_end(ap);
     if (ret > 0)
         write(1, buf, (size_t)ret);
