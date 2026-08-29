@@ -124,6 +124,9 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         if (w.resize_configure_pending && w.resize_snapshot.buffer) {
             content_w_px = static_cast<int>(w.resize_snapshot.width);
             content_h_px = w.resize_snapshot_y0 + static_cast<int>(w.resize_snapshot.height);
+        } else if (w.transparent && w.commit_snapshot.buffer) {
+            content_w_px = static_cast<int>(w.commit_snapshot.width);
+            content_h_px = static_cast<int>(w.commit_snapshot.height);
         }
 
         src_x = copy_x - client_left + w.scroll_x;
@@ -353,7 +356,10 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
     // shared backing; present from the WM-owned snapshot of the last
     // committed frame instead so a partially rendered frame is never shown.
     // Outside a resize the backing is stable (geometry flips only land on
-    // the ack), so it is read directly.
+    // the ack), so it is read directly — except for transparent system
+    // windows (menubar, dock) whose canvas a separate process may be
+    // overwriting; the commit_snapshot captured at damage-processing time
+    // is a stable copy for the compose pass.
     const uint32_t *blit_buffer = w.buffer;
     int blit_w = w.buffer_w;
     int blit_h = w.buffer_h;
@@ -365,11 +371,19 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         blit_w = static_cast<int>(w.resize_snapshot.pitch / 4);
         blit_h = static_cast<int>(w.resize_snapshot.height);
         blit_y0 = w.resize_snapshot_y0;
+    } else if (w.transparent && w.commit_snapshot.buffer &&
+               static_cast<int>(w.commit_snapshot.width) >= src_x + copy_w &&
+               src_y + copy_h <= static_cast<int>(w.commit_snapshot.height)) {
+        blit_buffer = w.commit_snapshot.buffer;
+        blit_w = static_cast<int>(w.commit_snapshot.pitch / 4);
+        blit_h = static_cast<int>(w.commit_snapshot.height);
+        blit_y0 = 0;
     }
 
     if (w.transparent) {
         blit_alpha_blend_rect(&dst->buffer[static_cast<size_t>(copy_y) * dst_stride + copy_x], dst_stride,
-                              &w.buffer[static_cast<size_t>(src_y) * w.buffer_w + src_x], w.buffer_w, copy_w, copy_h);
+                              &blit_buffer[static_cast<size_t>(src_y - blit_y0) * blit_w + src_x], blit_w, copy_w,
+                              copy_h);
         return;
     }
 

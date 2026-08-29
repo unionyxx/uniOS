@@ -96,6 +96,8 @@ void resend_window_resize_configure(Window &w);
 void apply_window_resize_flip(Window &w);
 void wm_resize_snapshot_capture(Window &w);
 void wm_resize_snapshot_release(Window &w);
+void wm_commit_snapshot_capture(Window &w);
+void wm_commit_snapshot_release(Window &w);
 
 // Content scrolling.
 bool clamp_window_scroll(Window &w);

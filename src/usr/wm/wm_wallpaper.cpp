@@ -6,7 +6,8 @@
 static int g_cached_top_r = -1;
 static uint8_t g_top_corner_mask_lut[64][64] = {};
 
-void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color)
+void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
+                                   const DirtyRect *clip)
 {
     if (!dst || !dst->buffer || w <= 0 || h <= 0)
         return;
@@ -30,6 +31,19 @@ void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int
     int end_y = y + h > dst_h ? dst_h : y + h;
     int start_x = x < 0 ? 0 : x;
     int end_x = x + w > dst_w ? dst_w : x + w;
+
+    if (clip) {
+        int cx2 = clip->x + clip->w;
+        int cy2 = clip->y + clip->h;
+        if (clip->x > start_x)
+            start_x = clip->x;
+        if (clip->y > start_y)
+            start_y = clip->y;
+        if (cx2 < end_x)
+            end_x = cx2;
+        if (cy2 < end_y)
+            end_y = cy2;
+    }
 
     if (r <= 0) {
         gui_fill_rect(dst, start_x, start_y, end_x - start_x, end_y - start_y, color);

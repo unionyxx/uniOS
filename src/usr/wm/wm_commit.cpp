@@ -256,6 +256,7 @@ void wm_commit_windows(Registry *registry)
                                 syscall1(SYS_SHM_UNMAP, old_shm_id);
                             }
                         }
+                        wm_commit_snapshot_release(w);
                         w.entry->buffer_ack_generation = entry_snapshot.buffer_generation;
                         w.buffer_generation_acked = entry_snapshot.buffer_generation;
                         w.buffer_generation_seen = entry_snapshot.buffer_generation;
@@ -308,6 +309,7 @@ void wm_commit_windows(Registry *registry)
                         Window old = w;
                         w.buffer_w = bw;
                         w.buffer_h = bh;
+                        wm_commit_snapshot_release(w);
                         mark_window_transition_damage(old, w);
                         w.needs_full_redraw = true;
                         invalidate_window_decoration_cache(w);
@@ -383,11 +385,15 @@ void wm_commit_windows(Registry *registry)
             }
         }
         if (w.damage_ptr) {
-            if (damage_take_dropped_updates(w.damage_ptr) != 0)
+            bool had_damage = false;
+            if (damage_take_dropped_updates(w.damage_ptr) != 0) {
                 w.needs_full_redraw = true;
+                had_damage = true;
+            }
 
             Rect d = {};
             while (damage_pop_rect(w.damage_ptr, &d)) {
+                had_damage = true;
                 if (!w.first_damage_received) {
                     w.first_damage_received = true;
                     w.needs_full_redraw = true;
@@ -411,6 +417,13 @@ void wm_commit_windows(Registry *registry)
                 w.first_damage_received = true;
                 w.needs_full_redraw = true;
             }
+
+            // Transparent system windows (menubar, dock) share a canvas
+            // with a separate process.  Snapshot it now — while the buffer
+            // is stable after the damage push — so the compose pass never
+            // reads a half-written canvas (flicker / stripes).
+            if (had_damage && i < WM_FIRST_USER_WINDOW && w.transparent)
+                wm_commit_snapshot_capture(w);
         }
     }
 }

@@ -35,7 +35,8 @@ uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int
 void init_wallpaper();
 void reload_wallpaper(Registry *registry, bool prefer_requested);
 void paint_desktop_base(Surface *surface);
-void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color);
+void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color,
+                                   const DirtyRect *clip = nullptr);
 uint32_t get_window_app_background(const Window &w);
 
 // Shell (menubar/dock) blur.

@@ -351,6 +351,7 @@ void close_window(int index, bool kill_owner)
     gui_destroy_surface(&doomed.decoration_cache);
     gui_destroy_surface(&doomed.button_cache);
     wm_resize_snapshot_release(doomed);
+    wm_commit_snapshot_release(doomed);
     if (doomed.entry) {
         memset(doomed.entry, 0, sizeof(*doomed.entry));
         doomed.entry->shm_id = WIN_SHM_INVALID;

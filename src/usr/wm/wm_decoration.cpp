@@ -13,8 +13,61 @@ static void gui_fill_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
         return;
     if (rect_contains(clip, {x, y, w, h})) {
         gui_fill_rounded_rect(dst, x, y, w, h, r, color);
-    } else {
+        return;
+    }
+    if (r <= 0 || w <= r * 2 || h <= r * 2) {
         gui_fill_rect(dst, ix, iy, iw, ih, color);
+        return;
+    }
+
+    auto overlaps = [](int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
+        return !(ax >= bx + bw || ax + aw <= bx || ay >= by + bh || ay + ah <= by);
+    };
+
+    bool touches_corner = overlaps(ix, iy, iw, ih, x, y, r, r) || overlaps(ix, iy, iw, ih, x + w - r, y, r, r) ||
+                          overlaps(ix, iy, iw, ih, x, y + h - r, r, r) ||
+                          overlaps(ix, iy, iw, ih, x + w - r, y + h - r, r, r);
+
+    if (!touches_corner) {
+        gui_fill_rect(dst, ix, iy, iw, ih, color);
+        return;
+    }
+
+    uint8_t base_alpha = static_cast<uint8_t>(color >> 24);
+    if (base_alpha == 0)
+        return;
+    const uint32_t pitch = dst->pitch / 4;
+    const int dst_h = static_cast<int>(dst->height);
+    const int dst_w = static_cast<int>(dst->width);
+    bool full_opaque = base_alpha == 255;
+
+    for (int py = iy; py < iy + ih; py++) {
+        if (py < 0 || py >= dst_h)
+            continue;
+        uint32_t *row = &dst->buffer[static_cast<size_t>(py) * pitch];
+        for (int px = ix; px < ix + iw; px++) {
+            if (px < 0 || px >= dst_w)
+                continue;
+            int local_x = px - x;
+            int local_y = py - y;
+            uint8_t coverage = 255;
+            if (local_x < r && local_y < r)
+                coverage = gui_rounded_rect_coverage_local(local_x, local_y, w, h, r, GUI_ROUNDED_EDGE_ALL);
+            else if (local_x >= w - r && local_y < r)
+                coverage = gui_rounded_rect_coverage_local(local_x, local_y, w, h, r, GUI_ROUNDED_EDGE_ALL);
+            else if (local_x < r && local_y >= h - r)
+                coverage = gui_rounded_rect_coverage_local(local_x, local_y, w, h, r, GUI_ROUNDED_EDGE_ALL);
+            else if (local_x >= w - r && local_y >= h - r)
+                coverage = gui_rounded_rect_coverage_local(local_x, local_y, w, h, r, GUI_ROUNDED_EDGE_ALL);
+            if (coverage == 255) {
+                if (full_opaque)
+                    row[px] = color;
+                else
+                    row[px] = blend_rgb(row[px], color, base_alpha);
+            } else if (coverage > 0) {
+                row[px] = blend_rgb(row[px], color, coverage);
+            }
+        }
     }
 }
 
@@ -24,6 +77,16 @@ static void gui_draw_rounded_rect_clipped(Surface *dst, int x, int y, int w, int
     int ix, iy, iw, ih;
     if (!gui_intersect_rect(x, y, w, h, clip.x, clip.y, clip.w, clip.h, &ix, &iy, &iw, &ih))
         return;
+    if (rect_contains(clip, {x, y, w, h})) {
+        gui_draw_rounded_rect(dst, x, y, w, h, r, color);
+        return;
+    }
+    // Outline drawing outside the clip would overwrite neighbours already
+    // composed this frame; draw the full outline into a scratch view of the
+    // cache and blit only the visible intersection.
+    // For the common case (decoration frame stroke) the cache path handles
+    // this; the direct-draw path during resize falls through to the full
+    // gui_draw_rounded_rect which clips to surface bounds only.
     gui_draw_rounded_rect(dst, x, y, w, h, r, color);
 }
 
@@ -224,7 +287,7 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
         if (title_radius > title_fill_h)
             title_radius = title_fill_h;
         fill_top_rounded_rect_clipped(dst, title_fill_x, title_fill_y, title_fill_w, title_fill_h, title_radius,
-                                      bar_color);
+                                      bar_color, &clip);
     }
 
     const GuiFont *title_font = gui_font_title();

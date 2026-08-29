@@ -97,6 +97,37 @@ void wm_resize_snapshot_release(Window &w)
     w.resize_snapshot_y0 = 0;
 }
 
+// Copy a transparent system window's canvas (menubar, dock) into a WM-owned
+// surface at the moment damage is processed.  The buffer is stable then
+// (the owner just finished writing and pushed damage).  The compositor
+// reads from this snapshot during the compose pass so a concurrent next-frame
+// write by the owner never produces a torn read (stripes / flicker).
+void wm_commit_snapshot_capture(Window &w)
+{
+    if (!w.buffer || w.buffer_w <= 0 || w.buffer_h <= 0)
+        return;
+    int cw = w.buffer_w;
+    int ch = w.buffer_h;
+    if (!w.commit_snapshot.buffer || static_cast<int>(w.commit_snapshot.width) != cw ||
+        static_cast<int>(w.commit_snapshot.height) != ch) {
+        gui_destroy_surface(&w.commit_snapshot);
+        w.commit_snapshot = gui_create_surface(static_cast<uint32_t>(cw), static_cast<uint32_t>(ch));
+        if (!w.commit_snapshot.buffer)
+            return;
+    }
+    const uint32_t src_stride = static_cast<uint32_t>(w.buffer_w);
+    const uint32_t dst_stride = w.commit_snapshot.pitch / 4;
+    for (int y = 0; y < ch; y++) {
+        memcpy(&w.commit_snapshot.buffer[static_cast<size_t>(y) * dst_stride],
+               &w.buffer[static_cast<size_t>(y) * src_stride], static_cast<size_t>(cw) * sizeof(uint32_t));
+    }
+}
+
+void wm_commit_snapshot_release(Window &w)
+{
+    gui_destroy_surface(&w.commit_snapshot);
+}
+
 // Copy the window's backing into a WM-owned surface while the backing is
 // stable (configure post / ack). During the following redraw window the
 // compositor presents from this copy instead of the shared buffer the client
@@ -112,10 +143,14 @@ void wm_resize_snapshot_capture(Window &w)
     int cw = w.buffer_w;
     int ch = w.buffer_h;
     int y0 = 0;
-    if (ch > 4096) {
-        int band_h = w.h + 256;
-        if (band_h > ch)
-            band_h = ch;
+    // Always band: copy only the visible slice plus a margin, not the full
+    // content buffer.  For typical windows (buffer_h ≈ window_h) the band
+    // covers the whole buffer; for content-sized windows (file browser,
+    // scrollable lists) this avoids a multi-megabyte copy per configure.
+    int band_h = w.h + 256;
+    if (band_h < ch) {
+        if (band_h < 1)
+            band_h = 1;
         y0 = w.scroll_y - 128;
         if (y0 < 0)
             y0 = 0;

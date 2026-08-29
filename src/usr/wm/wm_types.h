@@ -174,6 +174,14 @@ struct Window
     Surface resize_snapshot;
     int resize_snapshot_y0 = 0;
 
+    // WM-owned copy of a transparent system window's canvas (menubar, dock),
+    // captured when damage is processed.  The compositor reads from this
+    // snapshot instead of the live shared canvas so that a concurrent canvas
+    // write by the owner process never produces a torn frame (stripes /
+    // flicker).  Refreshed every time damage is popped; valid until the
+    // buffer is remapped.
+    Surface commit_snapshot;
+
     // Consecutive frames the shared WindowEntry could not be sampled stable.
     // Bounded so one busy client cannot force endless full-window re-damage.
     int unstable_sample_count = 0;
