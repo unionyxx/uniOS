@@ -163,3 +163,98 @@ bool activate_storage_prompt_button(Registry *registry, int mx, int my)
     return false;
 }
 
+static uint32_t storage_prompt_scrim_color()
+{
+    uint32_t base = g_gui_style.app_bg ? g_gui_style.app_bg : g_gui_chrome.desktop_bg;
+    bool light = color_luma(base) >= 128;
+    uint32_t material = mix_rgb(base, g_gui_style.chrome_bg, light ? 14 : 8);
+    uint8_t alpha = light ? 96 : 156;
+    return ((uint32_t)alpha << 24) | (material & 0x00FFFFFFu);
+}
+
+
+void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
+{
+    if (!g_storage_prompt.visible || !g_backbuffer.buffer)
+        return;
+    DirtyRect screen = {0, 0, (int)g_backbuffer.width, (int)g_backbuffer.height};
+    DirtyRect dim = {};
+    if (!rect_intersection(screen, clip, &dim))
+        return;
+
+    uint32_t stride = g_backbuffer.pitch / 4;
+    uint32_t scrim = storage_prompt_scrim_color();
+
+    // Pre-calculate scrim blending constants outside the loop
+    uint32_t scrim_a = scrim >> 24;
+    uint32_t inv_sa = 255u - scrim_a;
+    uint32_t scrim_r = ((scrim >> 16) & 0xFFu) * scrim_a;
+    uint32_t scrim_g = ((scrim >> 8) & 0xFFu) * scrim_a;
+    uint32_t scrim_b = (scrim & 0xFFu) * scrim_a;
+
+    for (int y = dim.y; y < dim.y + dim.h; y++) {
+        uint32_t *row = &g_backbuffer.buffer[(size_t)y * stride + dim.x];
+        for (int x = 0; x < dim.w; x++) {
+            uint32_t dst = row[x];
+            uint32_t dr = (dst >> 16) & 0xFFu, dg = (dst >> 8) & 0xFFu, db = dst & 0xFFu;
+            uint32_t out_r = (scrim_r + dr * inv_sa) >> 8;
+            uint32_t out_g = (scrim_g + dg * inv_sa) >> 8;
+            uint32_t out_b = (scrim_b + db * inv_sa) >> 8;
+            row[x] = 0xFF000000u | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+
+    StoragePromptLayout layout = storage_prompt_layout();
+    if (!rect_intersection(clip, layout.box, nullptr))
+        return;
+
+    int box_r = gui_radius_xl();
+
+    gui_draw_panel_shadow(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r);
+
+    gui_draw_chrome_frame(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
+                          g_gui_style.app_surface, true);
+    gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r - 1,
+                             "Storage Mode", "Choose how uniOS should expose AHCI and ATA storage");
+
+    int text_x = layout.box.x + gui_space_2();
+    int content_y = layout.box.y + gui_card_header_h() + gui_space_2();
+    int text_w = layout.box.w - gui_space_4();
+
+    content_y +=
+        gui_draw_wrapped_value(&g_backbuffer, text_x, content_y, text_w,
+                               "Off hides persistent storage from apps. Read-Only allows browsing without disk writes. "
+                               "Writable enables normal file changes and seeds standard user folders in /data.",
+                               g_gui_style.text, g_gui_style.app_surface);
+
+    int note_y = content_y + gui_space_1_5();
+    int note_h = gui_app_row_tall_h();
+    if (note_y + note_h < layout.off_button.y - gui_space_1()) {
+        gui_fill_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(), g_gui_style.chrome_bg);
+        gui_draw_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(), g_gui_style.border);
+        gui_draw_badge(&g_backbuffer, text_x + gui_space_1(), note_y + (note_h - gui_badge_h()) / 2, "CAUTION",
+                       g_gui_style.warning, g_gui_style.app_surface);
+        int note_text_x = text_x + gui_scaled_metric(92);
+        gui_draw_wrapped_value(
+            &g_backbuffer, note_text_x, note_y + gui_scaled_metric(8), text_w - (note_text_x - text_x) - gui_space_1(),
+            "Choose Writable only if you are intentionally testing on hardware you are prepared to modify.",
+            g_gui_style.text_dim, g_gui_style.chrome_bg);
+    }
+
+    int footer_y = layout.off_button.y - gui_space_1();
+    gui_draw_separator_h(&g_backbuffer, layout.box.x + 1, footer_y, layout.box.w - 2, g_gui_style.chrome_edge);
+
+    gui_app_draw_button(&g_backbuffer, layout.off_button.x, layout.off_button.y, layout.off_button.w,
+                        layout.off_button.h, "Off", false, false, g_storage_prompt.hovered_button == 0);
+    gui_app_draw_button(&g_backbuffer, layout.readonly_button.x, layout.readonly_button.y, layout.readonly_button.w,
+                        layout.readonly_button.h, "Read-Only", false, false, g_storage_prompt.hovered_button == 1);
+    gui_app_draw_button(&g_backbuffer, layout.writable_button.x, layout.writable_button.y, layout.writable_button.w,
+                        layout.writable_button.h, "Writable", true, false, g_storage_prompt.hovered_button == 2);
+}
+
+void draw_storage_prompt_overlay()
+{
+    DirtyRect full = {0, 0, (int)g_backbuffer.width, (int)g_backbuffer.height};
+    draw_storage_prompt_overlay_clipped(full);
+}
+

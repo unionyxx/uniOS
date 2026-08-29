@@ -323,3 +323,63 @@ bool handle_control_center_scroll(Registry *registry, int mouse_x, int mouse_y, 
     return true;
 }
 
+static void draw_control_toggle(ControlPanelItem item, const char *label, const char *detail, bool on)
+{
+    DirtyRect r = control_panel_item_rect(item);
+    gui_app_draw_toggle_row(&g_backbuffer, r.x, r.y, r.w, r.h, label, detail, on, false,
+                            g_control_center.hovered_item == item);
+}
+
+static void draw_control_volume_card()
+{
+    DirtyRect r = control_panel_item_rect(CONTROL_ITEM_VOLUME);
+    bool hovered = g_control_center.hovered_item == CONTROL_ITEM_VOLUME || g_control_center.volume_dragging;
+    gui_app_draw_slider(&g_backbuffer, r.x, r.y, r.w, r.h, "Volume", g_control_center.volume, 100, hovered);
+}
+
+void draw_control_center_overlay_clipped(const DirtyRect &clip)
+{
+    if (!g_control_center.open || !g_backbuffer.buffer)
+        return;
+
+    DirtyRect box = control_center_bounds();
+    DirtyRect damage = rect_expand(box, gui_scaled_metric(14));
+    if (!rect_intersection(clip, damage, nullptr))
+        return;
+
+    int radius = gui_radius_xl();
+
+    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
+
+    // Panel surface.
+    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+
+    // Card header.
+    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius - 1, "Control Panel", "uniOS");
+
+    draw_control_toggle(CONTROL_ITEM_NETWORK, "Network", g_control_center.network_enabled ? "Ethernet" : "Disconnected",
+                        g_control_center.network_enabled);
+    draw_control_toggle(CONTROL_ITEM_DARK_MODE, "Dark", g_control_center.dark_mode ? "On" : "Off",
+                        g_control_center.dark_mode);
+    draw_control_toggle(CONTROL_ITEM_DESKTOP_GRID, "Grid", g_control_center.desktop_grid ? "Shown" : "Hidden",
+                        g_control_center.desktop_grid);
+    draw_control_toggle(CONTROL_ITEM_CLOCK_SECONDS, "Seconds", g_control_center.clock_seconds ? "Show" : "Hide",
+                        g_control_center.clock_seconds);
+    draw_control_toggle(CONTROL_ITEM_ANIMATIONS, "Motion", g_control_center.animations_enabled ? "On" : "Off",
+                        g_control_center.animations_enabled);
+    draw_control_toggle(CONTROL_ITEM_TRANSPARENCY, "Transparency",
+                        g_control_center.transparency_level < 255 ? "On" : "Off",
+                        g_control_center.transparency_level < 255);
+    draw_control_volume_card();
+
+    DirtyRect storage = control_panel_item_rect(CONTROL_ITEM_STORAGE);
+    DirtyRect settings = control_panel_item_rect(CONTROL_ITEM_SETTINGS);
+    gui_app_draw_button(&g_backbuffer, storage.x, storage.y, storage.w, storage.h, "Storage", false, false,
+                        g_control_center.hovered_item == CONTROL_ITEM_STORAGE);
+    gui_app_draw_button(&g_backbuffer, settings.x, settings.y, settings.w, settings.h, "Settings", true, false,
+                        g_control_center.hovered_item == CONTROL_ITEM_SETTINGS);
+
+    int notif_y = box.y + box.h + gui_space_2();
+    draw_notification_center_clipped(clip, notif_y);
+}
+

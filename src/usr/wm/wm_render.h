@@ -7,6 +7,8 @@ uint32_t mix_rgb(uint32_t a, uint32_t b, uint8_t t);
 uint32_t mix_rgb_keep_alpha(uint32_t base, uint32_t tint, uint8_t t);
 int color_luma(uint32_t color);
 uint32_t blend_rgb(uint32_t dst, uint32_t src, uint8_t coverage);
+void blit_alpha_blend_rect(uint32_t *__restrict__ dst, uint32_t dst_stride, const uint32_t *__restrict__ src,
+                           uint32_t src_stride, int w, int h);
 void copy_surface_rect(Surface *dst, int dst_x, int dst_y, const Surface *src, int src_x, int src_y, int w, int h);
 bool ensure_surface_capacity(Surface *surface, uint32_t width, uint32_t height);
 
@@ -33,6 +35,8 @@ uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int
 void init_wallpaper();
 void reload_wallpaper(Registry *registry, bool prefer_requested);
 void paint_desktop_base(Surface *surface);
+void fill_top_rounded_rect_clipped(Surface *dst, int x, int y, int w, int h, int r, uint32_t color);
+uint32_t get_window_app_background(const Window &w);
 
 // Shell (menubar/dock) blur.
 bool init_shell_blur_buffers(Registry *registry, uint32_t dock_w, uint32_t dock_h);

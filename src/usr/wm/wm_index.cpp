@@ -361,3 +361,91 @@ void update_index_hover(int mouse_x, int mouse_y)
     enqueue_damage_rect(damage.x, damage.y, damage.w, damage.h);
 }
 
+static int wm_index_result_item_h()
+{
+    return gui_app_row_tall_h();
+}
+
+static DirtyRect wm_index_search_bounds()
+{
+    DirtyRect box = index_overlay_bounds();
+    int pad = gui_space_2();
+    int h = gui_scaled_metric(44);
+    return {box.x + pad, box.y + pad, box.w - pad * 2, h};
+}
+
+static int wm_index_results_start_y()
+{
+    DirtyRect search = wm_index_search_bounds();
+    return search.y + search.h + gui_space_1();
+}
+
+void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
+{
+    (void)registry;
+    if (!g_index.active || !g_backbuffer.buffer)
+        return;
+
+    DirtyRect box = index_overlay_bounds();
+    DirtyRect damage = rect_expand(box, gui_scaled_metric(14));
+    if (!rect_intersection(clip, damage, nullptr))
+        return;
+
+    int radius = gui_radius_xl();
+
+    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
+
+    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+
+    DirtyRect search = wm_index_search_bounds();
+    const char *query = g_index.query_len > 0 ? g_index.query : "";
+    gui_app_draw_text_field(&g_backbuffer, search.x, search.y, search.w, search.h, query, g_index.query_len > 0, false);
+    if (g_index.query_len == 0) {
+        int placeholder_y = gui_align_text_y(gui_font_default(), search.y, search.h);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), search.x + gui_space_1(), placeholder_y,
+                              search.w - gui_space_2(), "Search apps, commands, settings", g_gui_style.text_muted,
+                              g_gui_style.app_surface);
+    }
+
+    int hint_w = gui_measure_text(gui_font_default(), "Enter");
+    int hint_x = search.x + search.w - hint_w - gui_space_1();
+    if (hint_x > search.x + search.w / 2) {
+        int hint_y = gui_align_text_y(gui_font_default(), search.y, search.h);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), hint_x, hint_y,
+                              search.x + search.w - hint_x - gui_space_1(), "Enter", g_gui_style.text_muted,
+                              g_gui_style.app_surface);
+    }
+
+    int pad = gui_space_2();
+    int row_y = wm_index_results_start_y();
+    int row_h = wm_index_result_item_h();
+    int row_gap = gui_app_row_gap();
+    int bottom = box.y + box.h - pad;
+
+    if (g_index.result_count <= 0) {
+        int empty_y = row_y + gui_space_2();
+        gui_draw_text_clipped(&g_backbuffer, gui_font_title(), box.x + pad, empty_y, box.w - pad * 2, "No matches",
+                              g_gui_style.text_dim, g_gui_style.app_surface);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), box.x + pad,
+                              empty_y + gui_line_height() + gui_scaled_metric(4), box.w - pad * 2,
+                              "Try an app name, setting, or command.", g_gui_style.text_muted, g_gui_style.app_surface);
+        return;
+    }
+
+    for (int i = 0; i < g_index.result_count; i++) {
+        if (row_y + row_h > bottom)
+            break;
+        bool selected = i == g_index.selected_index;
+        bool hovered = i == g_index.hovered_index;
+        const IndexResult &result = g_index.results[i];
+        const char *badge = result.is_app ? "APP" : "CMD";
+        const char *detail = result.detail[0] ? result.detail : result.path;
+        gui_app_draw_list_row(&g_backbuffer, box.x + pad, row_y, box.w - pad * 2, row_h, badge, result.title, detail,
+                              selected, hovered, false);
+        row_y += row_h + row_gap;
+    }
+}
+
+// Layout functions are defined in wm_logic.cpp and declared in wm_core.h:
+// control_panel_card_h(), control_panel_item_rect()
+

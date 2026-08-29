@@ -87,3 +87,51 @@ void resend_window_resize_configure(Window &w)
     syscall2(SYS_POST_EVENT, w.owner_pid, (uint64_t)&resize_ev);
 }
 
+void wm_resize_snapshot_release(Window &w)
+{
+    gui_destroy_surface(&w.resize_snapshot);
+    w.resize_snapshot_y0 = 0;
+}
+
+// Copy the window's backing into a WM-owned surface while the backing is
+// stable (configure post / ack). During the following redraw window the
+// compositor presents from this copy instead of the shared buffer the client
+// is overwriting. Very tall content backings are captured as a band around
+// the visible slice; a scroll outside the band falls back to the live buffer
+// for that frame.
+void wm_resize_snapshot_capture(Window &w)
+{
+    if (!w.buffer || w.buffer_w <= 0 || w.buffer_h <= 0 || w.buffer_w > 8192) {
+        wm_resize_snapshot_release(w);
+        return;
+    }
+    int cw = w.buffer_w;
+    int ch = w.buffer_h;
+    int y0 = 0;
+    if (ch > 4096) {
+        int band_h = w.h + 256;
+        if (band_h > ch)
+            band_h = ch;
+        y0 = w.scroll_y - 128;
+        if (y0 < 0)
+            y0 = 0;
+        if (y0 + band_h > ch)
+            y0 = ch - band_h;
+        ch = band_h;
+    }
+    if (!w.resize_snapshot.buffer || static_cast<int>(w.resize_snapshot.width) != cw ||
+        static_cast<int>(w.resize_snapshot.height) != ch) {
+        gui_destroy_surface(&w.resize_snapshot);
+        w.resize_snapshot = gui_create_surface(static_cast<uint32_t>(cw), static_cast<uint32_t>(ch));
+        if (!w.resize_snapshot.buffer)
+            return;
+    }
+    const uint32_t src_stride = static_cast<uint32_t>(w.buffer_w);
+    const uint32_t dst_stride = w.resize_snapshot.pitch / 4;
+    for (int y = 0; y < ch; y++) {
+        memcpy(&w.resize_snapshot.buffer[static_cast<size_t>(y) * dst_stride],
+               &w.buffer[static_cast<size_t>(y + y0) * src_stride], static_cast<size_t>(cw) * sizeof(uint32_t));
+    }
+    w.resize_snapshot_y0 = y0;
+}
+

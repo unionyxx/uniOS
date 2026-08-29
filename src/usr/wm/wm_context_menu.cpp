@@ -200,3 +200,28 @@ DirtyRect context_menu_bounds()
             g_context_menu.h + shadow_pad_y};
 }
 
+void draw_context_menu_overlay(const Registry *registry)
+{
+    if (!g_context_menu.open)
+        return;
+    GuiMenuItem items[8];
+    int count = build_context_menu_items(registry, items, 8);
+    if (count > 0)
+        gui_draw_popup_menu(&g_backbuffer, g_context_menu.x, g_context_menu.y, g_context_menu.w, items, count,
+                            g_context_menu.hovered_index);
+}
+
+void draw_context_menu_overlay_clipped(const DirtyRect &clip, const Registry *registry)
+{
+    if (!g_context_menu.open)
+        return;
+    DirtyRect bounds = context_menu_bounds();
+    if (!rect_intersection(clip, bounds, nullptr))
+        return;
+    GuiMenuItem items[8];
+    int count = build_context_menu_items(registry, items, 8);
+    if (count > 0)
+        gui_draw_popup_menu(&g_backbuffer, g_context_menu.x, g_context_menu.y, g_context_menu.w, items, count,
+                            g_context_menu.hovered_index);
+}
+
