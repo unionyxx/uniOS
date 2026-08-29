@@ -1,6 +1,6 @@
 # Input
 
-Input comes from PS/2 controllers and USB HID devices, is merged in the kernel input layer (`src/kernel/core/input.cpp`), and reaches userspace through per-process event queues — there are no input device files.
+Input comes from PS/2 controllers and USB HID devices, is merged in the kernel input layer (`src/drivers/class/hid/input.cpp`), and reaches userspace through per-process event queues — there are no input device files.
 
 ## PS/2 Keyboard
 
@@ -15,7 +15,7 @@ Input comes from PS/2 controllers and USB HID devices, is merged in the kernel i
 `src/drivers/class/hid/ps2_mouse.cpp` enables the auxiliary device, then runs the IntelliMouse magic sequence (sample rates 200, 100, 80) and reads the device ID:
 
 - ID 3 or 4: 4-byte packets with scroll wheel; otherwise 3-byte packets.
-- Packet validation (bit 3), sign extension, Y inversion, scroll accumulation, cursor clamping to the framebuffer; position starts at screen center. IRQ12 (vector 44).
+- Packet validation (bit 3), sign extension, Y inversion, scroll accumulation, pointer acceleration (small moves stay 1:1, faster moves amplified ~1.5×), cursor clamping to the framebuffer; position starts at screen center. IRQ12 (vector 44).
 
 ## Merging
 
