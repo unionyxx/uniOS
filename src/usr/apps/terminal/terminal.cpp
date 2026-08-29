@@ -23,28 +23,47 @@ struct Cell
     uint32_t bg;
 };
 
+// The terminal input/output field is pinned to the dark theme regardless of
+// the active UI theme, so output stays legible and consistent. These mirror
+// k_gui_style_dark in libgui/gui.cpp; keep them in sync if that palette moves.
+static constexpr uint32_t TERM_DARK_FRAME_BG = 0xFF111214u;      // app_bg
+static constexpr uint32_t TERM_DARK_BG = 0xFF15171Au;            // app_surface
+static constexpr uint32_t TERM_DARK_FG = 0xFFF2F2F0u;            // text
+static constexpr uint32_t TERM_DARK_CURSOR = 0xFF626C78u;        // accent
+static constexpr uint32_t TERM_DARK_BORDER = 0xFF333942u;        // border
+static constexpr uint32_t TERM_DARK_CHROME_BG_ALT = 0xFF242830u; // chrome_bg_alt
+static constexpr uint32_t TERM_DARK_TEXT_DIM = 0xFFC5C8CCu;      // text_dim
+
 static inline uint32_t term_bg()
 {
-    return g_gui_style.app_surface;
+    return TERM_DARK_BG;
 }
 static inline uint32_t term_frame_bg()
 {
-    return g_gui_style.app_bg;
+    return TERM_DARK_FRAME_BG;
 }
 static inline uint32_t term_fg()
 {
-    return g_gui_style.text;
+    return TERM_DARK_FG;
 }
 static inline uint32_t term_cursor()
 {
-    return g_gui_style.accent;
+    return TERM_DARK_CURSOR;
+}
+static inline uint32_t term_border()
+{
+    return TERM_DARK_BORDER;
+}
+static inline uint32_t term_chrome_bg_alt()
+{
+    return TERM_DARK_CHROME_BG_ALT;
 }
 // Selection highlight: accent blended ~45% over the cell background so the
 // tint stays legible in both themes and over ANSI-colored output.
 static inline uint32_t term_sel_bg()
 {
-    uint32_t a = g_gui_style.accent;
-    uint32_t b = g_gui_style.app_surface;
+    uint32_t a = TERM_DARK_CURSOR;
+    uint32_t b = TERM_DARK_BG;
     uint32_t r = (((a >> 16) & 0xFFu) * 115u + ((b >> 16) & 0xFFu) * 141u) >> 8;
     uint32_t g = (((a >> 8) & 0xFFu) * 115u + ((b >> 8) & 0xFFu) * 141u) >> 8;
     uint32_t bl = ((a & 0xFFu) * 115u + (b & 0xFFu) * 141u) >> 8;
@@ -180,7 +199,7 @@ static uint32_t term_ansi_color(int code)
         case 37:
             return 0xFFE5E5EA;
         case 90:
-            return g_gui_style.text_dim;
+            return TERM_DARK_TEXT_DIM;
         case 91:
             return 0xFFFF6961;
         case 92:
@@ -796,8 +815,7 @@ private:
     {
         gui_fill_surface(&m_window, term_frame_bg());
         gui_draw_panel_inset(&m_window, term_pad_x() / 2, term_pad_y() / 2, (int)m_window.width - term_pad_x(),
-                             (int)m_window.height - term_pad_y(), term_bg(), g_gui_style.border,
-                             g_gui_style.chrome_bg_alt);
+                             (int)m_window.height - term_pad_y(), term_bg(), term_border(), term_chrome_bg_alt());
     }
 
     char *history_line(uint32_t index)
