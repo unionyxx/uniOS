@@ -47,25 +47,31 @@ GuiStylePalette g_gui_style = {};
 GuiChromePalette g_gui_chrome = {};
 }
 
-static const Theme k_gui_theme_dark = {0xFF111214, 0xFFF2F2F0, 0xFF6E7784, 0xFF2F343A, 0xFF1A1C20, 0xFF15171A};
+// One unified control accent (#0A84FF, the macOS dark-mode system blue) is used
+// in both themes so focus rings, carets, toggles, sliders, primary buttons and
+// selections read the same everywhere. The dark palette is AMOLED-leaning true
+// black with a cool-neutral elevation ramp; the light palette is a clean cool
+// off-white. Semantic colors track macOS system colors. Field order matches the
+// struct declarations in gui.h — keep them aligned when editing.
+static const Theme k_gui_theme_dark = {0xFF000000, 0xFFEDEFF2, 0xFF0A84FF, 0xFF1C2026, 0xFF16181C, 0xFF0A0B0D};
 
-static const Theme k_gui_theme_light = {0xFFF4F5F7, 0xFF15181D, 0xFF4B6EAE, 0xFFD6D9E0, 0xFFF6F7F9, 0xFFF6F7F9};
+static const Theme k_gui_theme_light = {0xFFF4F6F8, 0xFF15171C, 0xFF0A84FF, 0xFFD4D9E1, 0xFFE8EBEF, 0xFFECEFF3};
 
 static const GuiStylePalette k_gui_style_dark = {
-    0xFF111214, 0xFF15171A, 0xFF1A1D21, 0xFF1D2025, 0xFF242830, 0xFF2B3037, 0xFF333942, 0xFF555E6A, 0xFF484F59,
-    0xFF626C78, 0xFF2A2F36, 0xFFF2F2F0, 0xFFC5C8CC, 0xFF8E949C, 0xFF55B36A, 0xFFE2AF45, 0xFFFF625E, 0x80000000u};
+    0xFF000000, 0xFF0B0C0E, 0xFF121417, 0xFF0E1013, 0xFF1A1D22, 0xFF23262C, 0xFF1C2026, 0xFF0A84FF, 0xFF2E333C,
+    0xFF0A84FF, 0xFF102338, 0xFFEDEFF2, 0xFFB0B6C2, 0xFF717785, 0xFF30D158, 0xFFFF9F0A, 0xFFFF453A, 0x80000000u};
 
 static const GuiStylePalette k_gui_style_light = {
-    0xFFF4F5F7, 0xFFFFFFFF, 0xFFF8F9FB, 0xFFF0F2F5, 0xFFE9EDF3, 0xFFD7DCE4, 0xFFD4D9E2, 0xFF4B6EAE, 0xFFB9C4D5,
-    0xFF4B6EAE, 0xFFDDE6F4, 0xFF15181D, 0xFF5D6470, 0xFF808792, 0xFF267A46, 0xFF9A6A00, 0xFFD43D35, 0x66000000u};
+    0xFFF4F6F8, 0xFFFFFFFF, 0xFFEDF0F3, 0xFFEAEDF1, 0xFFDEE2E8, 0xFFD4D9E1, 0xFFD4D9E1, 0xFF0A84FF, 0xFFBCC2CC,
+    0xFF0A84FF, 0xFFDBEBFF, 0xFF15171C, 0xFF565E6C, 0xFF868D9A, 0xFF34C759, 0xFFFF9500, 0xFFFF3B30, 0x66000000u};
 
-static const GuiChromePalette k_gui_chrome_dark = {0xFF101113, 0xFF17191D, 0xFF1E2126, 0xFF181A1F, 0xFF23272D,
-                                                   0xFFF2F2F0, 0xFF9A9FA7, 0x22000000, 0xFF333942, 0xFFFF5F57,
-                                                   0xFFF0C04D, 0xFF45C16B, 0xFFEDEDEB, 0xFFF2F2F0};
+static const GuiChromePalette k_gui_chrome_dark = {0xFF000000, 0xFF0D0F12, 0xFF16181C, 0xFF0E0F12, 0xFF1F2329,
+                                                   0xFFEDEFF2, 0xFF717785, 0x28000000, 0xFF1C2026, 0xFFFF5F57,
+                                                   0xFFFFBD2E, 0xFF28C840, 0xFF1C2026, 0xFFEDEFF2};
 
-static const GuiChromePalette k_gui_chrome_light = {0xFFF4F5F7, 0xFFE6E9EF, 0xFFF7F8FA, 0xFFF0F2F5, 0xFFE9EDF3,
-                                                    0xFF15181D, 0xFF6E7580, 0x1A000000, 0xFFC9CED8, 0xFFFF6159,
-                                                    0xFFF1BC4C, 0xFF36BD64, 0xFF6D7584, 0xFF15181D};
+static const GuiChromePalette k_gui_chrome_light = {0xFFECEFF3, 0xFFDFE3EA, 0xFFE8EBEF, 0xFFF0F2F5, 0xFFDEE2E8,
+                                                    0xFF15171C, 0xFF868D9A, 0x14000000, 0xFFD4D9E1, 0xFFFF5F57,
+                                                    0xFFFFBD2E, 0xFF28C840, 0xFFD4D9E1, 0xFF15171C};
 
 static GuiThemeMode g_applied_theme_mode = GUI_THEME_DARK;
 static bool g_theme_tables_init = false;
@@ -302,7 +308,7 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
     if (transparent) {
         memset(new_buffer, 0, static_cast<size_t>(shm_bytes));
     } else {
-        const uint32_t fill = theme_tables_initialized() ? g_gui_style.app_bg : 0xFF15171Au;
+        const uint32_t fill = theme_tables_initialized() ? g_gui_style.app_bg : 0xFF000000u;
         const uint64_t pixels = (uint64_t)alloc_w * (uint64_t)alloc_h;
         for (uint64_t i = 0; i < pixels; i++)
             new_buffer[i] = fill;
@@ -2735,38 +2741,93 @@ int gui_popup_menu_hit_test(const GuiMenuItem *items, int count, int x, int y, i
     return -1;
 }
 
+// Distance from point (px,py) to segment (ax,ay)-(bx,by). Clamping the
+// projection parameter to [0,1] yields round caps at the endpoints for free.
+static inline float gui_point_seg_dist(float px, float py, float ax, float ay, float bx, float by)
+{
+    float dx = bx - ax;
+    float dy = by - ay;
+    float len_sq = dx * dx + dy * dy;
+    float t = 0.0f;
+    if (len_sq > 0.0f) {
+        t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+        if (t < 0.0f)
+            t = 0.0f;
+        else if (t > 1.0f)
+            t = 1.0f;
+    }
+    float ex = px - (ax + t * dx);
+    float ey = py - (ay + t * dy);
+    return libgui_sqrt(ex * ex + ey * ey);
+}
+
 static void draw_popup_checkmark(Surface *s, int x, int y, int size, uint32_t fg)
 {
     if (!s || !s->buffer || s->pitch == 0 || size < 6)
         return;
     uint32_t stride = s->pitch / 4u;
-    auto plot = [&](int px, int py) {
-        if (px < 0 || py < 0 || (uint32_t)px >= s->width || (uint32_t)py >= s->height)
-            return;
-        uint32_t *dst = &s->buffer[(uint32_t)py * stride + (uint32_t)px];
-        *dst = gui_blend_straight_opaque_dst_coverage(*dst, fg, 255);
-    };
-    auto stroke = [&](int x0, int y0, int x1, int y1) {
-        int dx = x1 - x0;
-        int dy = y1 - y0;
-        int steps = dx < 0 ? -dx : dx;
-        int ady = dy < 0 ? -dy : dy;
-        if (ady > steps)
-            steps = ady;
-        if (steps == 0) {
-            plot(x0, y0);
-            return;
+
+    // Normalized tick geometry scaled into the [x, x+size] x [y, y+size] box:
+    // a short descending leg meets a long ascending leg at a low elbow. The
+    // stroke weight tracks the glyph size so it pairs with Inter at any scale.
+    const float ox = static_cast<float>(x);
+    const float oy = static_cast<float>(y);
+    const float fl = static_cast<float>(size);
+    const float ax = ox + fl * 0.12f;
+    const float ay = oy + fl * 0.52f;
+    const float bx = ox + fl * 0.40f;
+    const float by = oy + fl * 0.80f;
+    const float cx = ox + fl * 0.88f;
+    const float cy = oy + fl * 0.20f;
+
+    // Distance-field stroke: coverage ramps across a 1px band, giving smooth
+    // anti-aliased edges like the font and rounded-rect renderers. Taking the
+    // minimum distance to the two segments produces a round join at the elbow
+    // and round caps at both ends.
+    const float half = fl * 0.09f;
+    const float aa = 0.5f;
+    const float pad = half + aa;
+
+    float min_x = ax < bx ? ax : bx;
+    min_x = min_x < cx ? min_x : cx;
+    float max_x = ax > bx ? ax : bx;
+    max_x = max_x > cx ? max_x : cx;
+    float min_y = ay < by ? ay : by;
+    min_y = min_y < cy ? min_y : cy;
+    float max_y = ay > by ? ay : by;
+    max_y = max_y > cy ? max_y : cy;
+
+    int x0 = static_cast<int>(min_x - pad);
+    int y0 = static_cast<int>(min_y - pad);
+    int x1 = static_cast<int>(max_x + pad) + 1;
+    int y1 = static_cast<int>(max_y + pad) + 1;
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 > static_cast<int>(s->width))
+        x1 = static_cast<int>(s->width);
+    if (y1 > static_cast<int>(s->height))
+        y1 = static_cast<int>(s->height);
+    if (x0 >= x1 || y0 >= y1)
+        return;
+
+    for (int py = y0; py < y1; py++) {
+        uint32_t *row = &s->buffer[static_cast<uint32_t>(py) * stride];
+        float pyf = static_cast<float>(py) + 0.5f;
+        for (int px = x0; px < x1; px++) {
+            float pxf = static_cast<float>(px) + 0.5f;
+            float d1 = gui_point_seg_dist(pxf, pyf, ax, ay, bx, by);
+            float d2 = gui_point_seg_dist(pxf, pyf, bx, by, cx, cy);
+            float d = d1 < d2 ? d1 : d2;
+            float cov = half + aa - d;
+            if (cov <= 0.0f)
+                continue;
+            uint8_t coverage = cov >= 1.0f ? 255 : static_cast<uint8_t>(cov * 255.0f);
+            uint32_t *dst = &row[static_cast<uint32_t>(px)];
+            *dst = gui_blend_straight_opaque_dst_coverage(*dst, fg, coverage);
         }
-        for (int i = 0; i <= steps; i++) {
-            int px = x0 + dx * i / steps;
-            int py = y0 + dy * i / steps;
-            plot(px, py);
-            plot(px + 1, py);
-            plot(px, py + 1);
-        }
-    };
-    stroke(x + size / 10, y + size * 55 / 100, x + size * 38 / 100, y + size * 82 / 100);
-    stroke(x + size * 38 / 100, y + size * 82 / 100, x + size * 9 / 10, y + size / 5);
+    }
 }
 
 void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
@@ -2789,7 +2850,7 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
 
     gui_draw_chrome_frame(s, x, y, w, menu_h, radius, g_gui_style.app_surface, true);
 
-    int check_size = item_h / 2;
+    int check_size = gui_font_line_height(gui_font_default()) * 2 / 3;
     int check_gap = gui_scaled_metric(4);
     for (int i = 0; i < count; i++) {
         bool hovered = i == hovered_index && !items[i].separator && items[i].enabled;
@@ -2815,7 +2876,10 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
             int text_y = gui_align_text_y(gui_font_default(), y_cursor, item_h);
             int text_x = x + outer_pad_x + row_pad_x;
             if (checked) {
-                draw_popup_checkmark(s, text_x, y_cursor + (item_h - check_size) / 2, check_size, fg);
+                // ascent*5/8 = Inter cap-height midpoint; sit the tick on the
+                // text optical axis instead of the taller row box.
+                int check_y = text_y + (gui_font_ascent(gui_font_default()) * 5) / 8 - check_size / 2;
+                draw_popup_checkmark(s, text_x, check_y, check_size, fg);
                 text_x += check_size + check_gap;
             }
             int text_right = x + w - outer_pad_x - row_pad_x;
@@ -2876,10 +2940,28 @@ int gui_chrome_detail_inset(void)
     return inset < 1 ? 1 : inset;
 }
 
+// Rec.709 luma < 128, matching color_luma() in the WM so a surface and the WM
+// agree on whether it is dark.
+static inline bool chrome_is_dark(uint32_t color)
+{
+    int r = (int)((color >> 16) & 0xFFu);
+    int g = (int)((color >> 8) & 0xFFu);
+    int b = (int)(color & 0xFFu);
+    return ((r * 54 + g * 183 + b * 19 + 128) >> 8) < 128;
+}
+
 GuiChromeFrameColors gui_chrome_frame_colors(uint32_t body, bool active)
 {
     GuiChromeFrameColors colors;
-    colors.outline = active ? g_gui_style.border_hover : g_gui_style.border;
+    // The outline ring is derived from the surface it wraps, not the global
+    // theme border, so every floating edge stays cohesive with its content: a
+    // dark app (the always-dark terminal, a dark image viewer in light mode)
+    // gets a subtle dark edge instead of a stark light ring, and a light
+    // surface gets a light edge. Themed popups pass the theme surface as body,
+    // so their edge is unchanged. Active widens the contrast slightly.
+    bool dark = chrome_is_dark(body);
+    uint8_t t = active ? (dark ? 44u : 52u) : (dark ? 30u : 38u);
+    colors.outline = chrome_mix_rgb(body, dark ? 0xFFFFFFFFu : 0xFF000000u, t);
     colors.frame_fill = chrome_mix_rgb(colors.outline, body, active ? 236 : 242);
     colors.inner_stroke = chrome_mix_rgb(body, 0xFFFFFFFFu, active ? 18 : 12);
     return colors;

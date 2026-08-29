@@ -26,13 +26,13 @@ struct Cell
 // The terminal input/output field is pinned to the dark theme regardless of
 // the active UI theme, so output stays legible and consistent. These mirror
 // k_gui_style_dark in libgui/gui.cpp; keep them in sync if that palette moves.
-static constexpr uint32_t TERM_DARK_FRAME_BG = 0xFF111214u;      // app_bg
-static constexpr uint32_t TERM_DARK_BG = 0xFF15171Au;            // app_surface
-static constexpr uint32_t TERM_DARK_FG = 0xFFF2F2F0u;            // text
-static constexpr uint32_t TERM_DARK_CURSOR = 0xFF626C78u;        // accent
-static constexpr uint32_t TERM_DARK_BORDER = 0xFF333942u;        // border
-static constexpr uint32_t TERM_DARK_CHROME_BG_ALT = 0xFF242830u; // chrome_bg_alt
-static constexpr uint32_t TERM_DARK_TEXT_DIM = 0xFFC5C8CCu;      // text_dim
+static constexpr uint32_t TERM_DARK_FRAME_BG = 0xFF000000u;      // app_bg
+static constexpr uint32_t TERM_DARK_BG = 0xFF0B0C0Eu;            // app_surface
+static constexpr uint32_t TERM_DARK_FG = 0xFFEDEFF2u;            // text
+static constexpr uint32_t TERM_DARK_CURSOR = 0xFF0A84FFu;        // accent (unified)
+static constexpr uint32_t TERM_DARK_BORDER = 0xFF1C2026u;        // border
+static constexpr uint32_t TERM_DARK_CHROME_BG_ALT = 0xFF1A1D22u; // chrome_bg_alt
+static constexpr uint32_t TERM_DARK_TEXT_DIM = 0xFFB0B6C2u;      // text_dim
 
 static inline uint32_t term_bg()
 {
@@ -301,6 +301,7 @@ public:
             free(m_history_text);
         if (m_history_fg)
             free(m_history_fg);
+        gui_destroy_surface(&m_canvas);
     }
 
     void init(uint32_t width, uint32_t height, const Surface &window)
@@ -314,6 +315,9 @@ public:
         m_ansi_idx = 0;
         memset(m_ansi_buf, 0, sizeof(m_ansi_buf));
         m_window = window;
+        if (m_canvas.buffer)
+            gui_destroy_surface(&m_canvas);
+        m_canvas = gui_create_surface(window.width, window.height);
 
         m_history_len = (uint16_t *)malloc(sizeof(uint16_t) * TERM_HISTORY_LINES);
         m_history_text = (char *)malloc((size_t)TERM_HISTORY_LINES * TERM_HISTORY_LINE_LEN);
@@ -457,9 +461,9 @@ public:
             const Cell &cell = m_grid[y * m_width + x];
             int32_t px = term_content_x() + (int32_t)(x * term_cell_w());
             int32_t py = term_content_y() + (int32_t)(y * term_cell_h());
-            gui_fill_rect(&m_window, px, py, term_cell_w(), term_cell_h(), cell.bg);
+            gui_fill_rect(&m_canvas, px, py, term_cell_w(), term_cell_h(), cell.bg);
             if (cell.ch != ' ') {
-                term_draw_char(&m_window, px, py, cell.ch, cell.fg, cell.bg);
+                term_draw_char(&m_canvas, px, py, cell.ch, cell.fg, cell.bg);
             }
             mark_dirty_cell(x, y);
         };
@@ -470,12 +474,12 @@ public:
                 for (uint32_t x = 0; x < m_width; x++) {
                     const Cell &cell = m_grid[y * m_width + x];
                     if (cell.bg != term_bg()) {
-                        gui_fill_rect(&m_window, term_content_x() + (int32_t)(x * term_cell_w()),
+                        gui_fill_rect(&m_canvas, term_content_x() + (int32_t)(x * term_cell_w()),
                                       term_content_y() + (int32_t)(y * term_cell_h()), term_cell_w(), term_cell_h(),
                                       cell.bg);
                     }
                     if (cell.ch != ' ') {
-                        term_draw_char(&m_window, term_content_x() + (int32_t)(x * term_cell_w()),
+                        term_draw_char(&m_canvas, term_content_x() + (int32_t)(x * term_cell_w()),
                                        term_content_y() + (int32_t)(y * term_cell_h()), cell.ch, cell.fg, cell.bg);
                     }
                     m_presented_grid[y * m_width + x] = cell;
@@ -505,7 +509,7 @@ public:
         }
 
         if (m_cursor_visible && m_blink_on && m_scroll_offset == 0 && m_cursor_x < m_width && m_cursor_y < m_height) {
-            gui_fill_rect(&m_window, term_content_x() + (int32_t)(m_cursor_x * term_cell_w()),
+            gui_fill_rect(&m_canvas, term_content_x() + (int32_t)(m_cursor_x * term_cell_w()),
                           term_content_y() + (int32_t)(m_cursor_y * term_cell_h() + term_cell_h() - TERM_CURSOR_H),
                           term_cell_w(), TERM_CURSOR_H, term_cursor());
             mark_dirty_cell(m_cursor_x, m_cursor_y);
@@ -519,7 +523,7 @@ public:
             int sb_y = term_content_y();
             int sb_h = (int)(m_height * term_cell_h());
 
-            gui_fill_rect(&m_window, sb_x - 1, sb_y, sb_w + 2, sb_h, term_bg());
+            gui_fill_rect(&m_canvas, sb_x - 1, sb_y, sb_w + 2, sb_h, term_bg());
 
             int thumb_h = (sb_h * (int)m_height) / (int)total_slices;
             if (thumb_h < gui_scrollbar_min_thumb())
@@ -527,7 +531,7 @@ public:
 
             int scrollable_dist = sb_h - thumb_h;
             int thumb_y = scrollable_dist - (int)((scrollable_dist * m_scroll_offset) / max_s);
-            gui_draw_scrollbar(&m_window, sb_x, sb_y, sb_w, sb_h, thumb_y, thumb_h, false);
+            gui_draw_scrollbar(&m_canvas, sb_x, sb_y, sb_w, sb_h, thumb_y, thumb_h, false);
 
             if (has_dirty) {
                 if (dirty_x2 < (int32_t)m_window.width) {
@@ -547,6 +551,17 @@ public:
 
         asm volatile("sfence" ::: "memory");
         if (has_dirty) {
+            if (m_canvas.buffer && m_window.buffer) {
+                uint32_t cs = m_canvas.pitch / 4;
+                uint32_t ws = m_window.pitch / 4;
+                int cw = dirty_x2 - dirty_x1;
+                int ch = dirty_y2 - dirty_y1;
+                for (int row = 0; row < ch; row++) {
+                    memcpy(&m_window.buffer[(size_t)(dirty_y1 + row) * ws + dirty_x1],
+                           &m_canvas.buffer[(size_t)(dirty_y1 + row) * cs + dirty_x1], (size_t)cw * sizeof(uint32_t));
+                }
+            }
+            asm volatile("sfence" ::: "memory");
             gui_blit_to_screen_rect(&m_window, dirty_x1, dirty_y1, dirty_x2 - dirty_x1, dirty_y2 - dirty_y1);
         }
         m_presented_cursor_visible = m_cursor_visible;
@@ -587,6 +602,9 @@ public:
     void refresh_window(const Surface &window)
     {
         m_window = window;
+        if (m_canvas.buffer)
+            gui_destroy_surface(&m_canvas);
+        m_canvas = gui_create_surface(window.width, window.height);
     }
 
     // Re-derive the grid from the current window size after the font (and
@@ -806,15 +824,15 @@ private:
         int win_w = (int)m_window.width;
         int win_h = (int)m_window.height;
         GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
-        gui_draw_dialog(&m_window, win_w, win_h, 0, &layout, "Terminal Help", tips,
+        gui_draw_dialog(&m_canvas, win_w, win_h, 0, &layout, "Terminal Help", tips,
                         (int)(sizeof(tips) / sizeof(tips[0])), nullptr, "Close", false, false, nullptr, false, false);
         m_help_close = layout.confirm;
     }
 
     void draw_chrome()
     {
-        gui_fill_surface(&m_window, term_frame_bg());
-        gui_draw_panel_inset(&m_window, term_pad_x() / 2, term_pad_y() / 2, (int)m_window.width - term_pad_x(),
+        gui_fill_surface(&m_canvas, term_frame_bg());
+        gui_draw_panel_inset(&m_canvas, term_pad_x() / 2, term_pad_y() / 2, (int)m_window.width - term_pad_x(),
                              (int)m_window.height - term_pad_y(), term_bg(), term_border(), term_chrome_bg_alt());
     }
 
@@ -1147,6 +1165,7 @@ private:
     uint32_t m_history_cursor_col = 0;
     uint32_t m_history_start = 0;
     Surface m_window;
+    Surface m_canvas;
     bool m_ready;
     bool m_cursor_visible;
     bool m_presented_cursor_visible = false;
