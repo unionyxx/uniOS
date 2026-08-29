@@ -112,8 +112,19 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         // committed-size tracking, no anchoring, no scaling. Scrolled
         // (content-sized) windows read their visible slice via the scroll
         // offset; everything else copies 1:1.
-        const int content_w_px = w.buffer_w;
-        const int content_h_px = w.buffer_h;
+        //
+        // During a resize the compositor reads from the WM-owned snapshot
+        // (selected below), not the live backing the client may have already
+        // reallocated to a smaller size. Clamp against the snapshot
+        // dimensions so the blit covers the full visible bounds; without this
+        // a shrunk live backing over-clamps copy_w/copy_h and the exposed
+        // edges show only the fill color (black rectangles on bottom/right).
+        int content_w_px = w.buffer_w;
+        int content_h_px = w.buffer_h;
+        if (w.resize_configure_pending && w.resize_snapshot.buffer) {
+            content_w_px = static_cast<int>(w.resize_snapshot.width);
+            content_h_px = w.resize_snapshot_y0 + static_cast<int>(w.resize_snapshot.height);
+        }
 
         src_x = copy_x - client_left + w.scroll_x;
         src_y = copy_y - client_top + w.scroll_y;

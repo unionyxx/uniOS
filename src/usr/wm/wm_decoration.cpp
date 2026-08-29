@@ -85,10 +85,21 @@ void invalidate_window_decoration_cache(Window &w)
 
 uint32_t get_window_app_background(const Window &w)
 {
-    if (w.buffer && w.buffer_w > 0 && w.buffer_h > 0) {
-        int sample_y = w.buffer_h > 4 ? 4 : 0;
-        int sample_x = w.buffer_w > 10 ? 10 : 0;
-        uint32_t pixel = w.buffer[(size_t)sample_y * (size_t)w.buffer_w + (size_t)sample_x];
+    // During a resize the live backing may be a freshly mmap'd buffer the
+    // client hasn't written yet (zeroed pixels). Sample from the snapshot
+    // instead — it holds the last committed frame the compositor presents.
+    const uint32_t *src = w.buffer;
+    int src_w = w.buffer_w;
+    int src_h = w.buffer_h;
+    if (w.resize_configure_pending && w.resize_snapshot.buffer) {
+        src = w.resize_snapshot.buffer;
+        src_w = static_cast<int>(w.resize_snapshot.width);
+        src_h = static_cast<int>(w.resize_snapshot.height);
+    }
+    if (src && src_w > 0 && src_h > 0) {
+        int sample_y = src_h > 4 ? 4 : 0;
+        int sample_x = src_w > 10 ? 10 : 0;
+        uint32_t pixel = src[(size_t)sample_y * (size_t)src_w + (size_t)sample_x];
         if ((pixel >> 24) != 0) {
             return 0xFF000000u | (pixel & 0x00FFFFFFu);
         }
