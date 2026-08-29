@@ -12,3 +12,8 @@ void collapse_dirty_rects_to_bounds();
 void invalidate_dirty_frame();
 void normalize_dirty_rects(bool interactive);
 bool clip_dirty_rect_to_screen(DirtyRect &rect);
+
+// Queries over the current frame's dirty set.
+bool dirty_set_is_single_fullscreen_rect();
+bool dirty_set_intersects_rect(const DirtyRect &target);
+bool dirty_set_contains_rect(const DirtyRect &target);

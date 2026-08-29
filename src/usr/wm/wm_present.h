@@ -29,3 +29,20 @@ void wm_stats_overlay_bounds(DirtyRect *out_box, DirtyRect *out_damage);
 void wm_bench_tick(Registry *registry);
 uint64_t wm_tsc_now(void);
 uint64_t wm_tsc_to_us(uint64_t cycles);
+
+// Swapchain / present pipeline.
+void apply_display_event(const DisplayEvent &event);
+uint32_t present_frame(const Surface *source, const DirtyRect *rects, int rect_count, uint32_t frame_sequence,
+                       DisplayBufferHandle cursor_handle, int cursor_x, int cursor_y);
+void sync_presentbuffer_alias_from_active_slot();
+bool select_presentbuffer_slot_for_frame();
+void wm_drain_display_events();
+void refresh_display_queue_from_status();
+void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rect_count, uint32_t fresh_slot);
+void wm_present_init_sequences(uint32_t first_submitted);
+uint32_t wm_present_last_sequence();
+uint32_t wm_present_next_sequence();
+void wm_present_note_submitted(uint32_t sequence);
+// Returns true when the loop should continue without releasing an in-flight
+// present buffer (swapchain present-wait path).
+bool wm_present_end_frame(Registry *registry, bool manip, bool inter, uint32_t limit, uint64_t frame_tsc_start);

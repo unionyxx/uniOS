@@ -392,3 +392,13 @@ struct NotificationCenterState
     int count;
     int head; // Ring buffer head
 };
+
+// Shared-memory ordering fences for lock-free registry/window-entry access.
+static inline void smp_rmb()
+{
+    asm volatile("lfence" ::: "memory");
+}
+static inline void smp_wmb()
+{
+    asm volatile("sfence" ::: "memory");
+}

@@ -19,7 +19,6 @@ uint32_t g_presentbuffer_active_slot = 0;
 DisplayQueueState g_display_queue = {};
 WmFrameStats g_frame_stats = {};
 WmBenchState g_bench = {};
-static uint64_t g_tsc_freq_cached = 0;
 
 // Identity alias mode: on synchronous copy-path backends the scene buffer is
 // itself the present buffer, so the scene->present blit disappears. The
@@ -28,23 +27,6 @@ static uint64_t g_tsc_freq_cached = 0;
 static bool g_scene_is_presentbuffer = false;
 static bool g_scene_cursor_baked = false;
 static DirtyRect g_scene_cursor_rect = {};
-
-uint64_t wm_tsc_now(void)
-{
-    uint32_t lo = 0;
-    uint32_t hi = 0;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<uint64_t>(hi) << 32) | lo;
-}
-
-uint64_t wm_tsc_to_us(uint64_t cycles)
-{
-    if (g_tsc_freq_cached == 0)
-        g_tsc_freq_cached = get_tsc_freq(); // MHz (SYS_GET_TSC_FREQ contract)
-    if (g_tsc_freq_cached == 0)
-        return 0;
-    return cycles / g_tsc_freq_cached;
-}
 
 Window g_windows[MAX_WINDOWS];
 int g_window_count = 0;
@@ -68,59 +50,6 @@ ContextMenuState g_context_menu = {};
 StoragePromptState g_storage_prompt = {};
 WmInputState g_input;
 
-struct CursorPresentBuffer
-{
-    DisplayBufferHandle handle;
-    Surface surface;
-    GuiCursorKind kind;
-    int hot_x;
-    int hot_y;
-    bool valid;
-};
-
-static CursorPresentBuffer g_cursor_present_buffers[GUI_CURSOR_RESIZE_D2 + 1] = {};
-static bool g_cursor_backend_disabled = false;
-static DisplayBufferHandle g_frame_cursor_handle = 0;
-static int g_frame_cursor_x = 0;
-static int g_frame_cursor_y = 0;
-static bool g_prev_frame_sw_cursor = false;
-static DirtyRect g_prev_sw_cursor_rect = {};
-
-struct WindowEntrySnapshot
-{
-    int shm_id;
-    int x, y, w, h;
-    uint32_t position_serial;
-    int buffer_w, buffer_h;
-    int content_w, content_h;
-    int min_w, min_h;
-    int scroll_x, scroll_y;
-    uint32_t flags;
-    uint32_t state;
-    uint32_t owner_pid;
-    uint32_t resize_serial;
-    uint32_t buffer_resize_serial;
-    uint32_t buffer_generation;
-    uint32_t buffer_ack_generation;
-    bool active;
-    bool ready;
-    bool request_close;
-    bool request_focus;
-    bool request_minimize;
-    bool request_maximize;
-    bool request_restore;
-    char title[64];
-};
-
-inline void smp_rmb()
-{
-    asm volatile("lfence" ::: "memory");
-}
-inline void smp_wmb()
-{
-    asm volatile("sfence" ::: "memory");
-}
-
 static bool process_is_alive(uint32_t pid)
 {
     if (pid == 0)
@@ -140,172 +69,6 @@ static void reap_exited_children()
                 i--;                    // Adjust index as close_window compacts the array by shifting elements down
             }
         }
-    }
-}
-
-static void apply_display_event(const DisplayEvent &event)
-{
-    if (event.type == DISPLAY_EVENT_FLIP_COMPLETE && event.sequence > g_display_queue.completed_sequence) {
-        g_display_queue.completed_sequence = event.sequence;
-    }
-    if ((event.type == DISPLAY_EVENT_FLIP_COMPLETE || event.type == DISPLAY_EVENT_VBLANK) &&
-        event.timestamp_ticks > g_display_queue.last_vblank_ticks) {
-        g_display_queue.last_vblank_ticks = event.timestamp_ticks;
-    }
-    if (event.vblank_count > g_display_queue.vblank_count) {
-        g_display_queue.vblank_count = event.vblank_count;
-    }
-}
-
-static uint64_t dirty_area_sum(const DirtyRect *rects, int rect_count)
-{
-    uint64_t area = 0;
-    rect_count = clamp_dirty_rect_count(rect_count);
-    for (int i = 0; i < rect_count; i++) {
-        DirtyRect clipped = rects[i];
-        if (!clip_dirty_rect_to_screen(clipped))
-            continue;
-        area += static_cast<uint64_t>(clipped.w) * static_cast<uint64_t>(clipped.h);
-    }
-    return area;
-}
-
-void wm_stats_note_dirty_set(const DirtyRect *rects, int rect_count)
-{
-    rect_count = clamp_dirty_rect_count(rect_count);
-    uint64_t area = dirty_area_sum(rects, rect_count);
-    g_frame_stats.last_dirty_rects = static_cast<uint32_t>(rect_count);
-    g_frame_stats.last_dirty_area = area;
-    g_frame_stats.dirty_area_accum += area;
-
-    if (static_cast<uint32_t>(rect_count) > g_frame_stats.max_dirty_rects)
-        g_frame_stats.max_dirty_rects = static_cast<uint32_t>(rect_count);
-    if (area > g_frame_stats.max_dirty_area)
-        g_frame_stats.max_dirty_area = area;
-
-    if (rect_count == 1 && area == static_cast<uint64_t>(g_screen.width) * static_cast<uint64_t>(g_screen.height)) {
-        g_frame_stats.full_repaints++;
-    } else {
-        g_frame_stats.clipped_repaints++;
-    }
-}
-
-void wm_stats_note_stale_repair(int rect_count)
-{
-    if (rect_count > 0)
-        g_frame_stats.stale_slot_repairs += static_cast<uint64_t>(rect_count);
-}
-
-static void wm_bench_finish(Registry *registry)
-{
-    if (g_bench.win_index >= 0 && g_bench.win_index < g_window_count) {
-        Window &w = g_windows[g_bench.win_index];
-        if (w.entry) {
-            set_window_bounds(w, g_bench.origin_x, g_bench.origin_y, g_bench.origin_w, g_bench.origin_h);
-        } else {
-            Window old = w;
-            w.x = g_bench.origin_x;
-            w.y = g_bench.origin_y;
-            w.w = g_bench.origin_w;
-            w.h = g_bench.origin_h;
-            mark_window_transition_damage(old, w);
-        }
-    }
-    uint64_t frames = g_frame_stats.frames_submitted - g_bench.start_submitted;
-    uint64_t compose_ticks = g_frame_stats.total_compose_ticks - g_bench.start_compose_total;
-    uint64_t present_ticks = g_frame_stats.total_present_ticks - g_bench.start_present_total;
-    uint64_t dirty_area = g_frame_stats.dirty_area_accum - g_bench.start_dirty_area_accum;
-    uint64_t flips = g_frame_stats.resize_flips - g_bench.start_resize_flips;
-    uint64_t stale_acks = g_frame_stats.resize_stale_acks - g_bench.start_resize_stale_acks;
-    LOG_INFO("wm",
-             "bench %s done: %llu frames, compose avg %llu us, present avg %llu us, frame max %llu us, "
-             "dirty avg %llu kpx, resize flips %llu stale %llu",
-             g_bench.resize_mode ? "resize" : "drag", static_cast<unsigned long long>(frames),
-             static_cast<unsigned long long>(frames ? wm_tsc_to_us(compose_ticks) / frames : 0),
-             static_cast<unsigned long long>(frames ? wm_tsc_to_us(present_ticks) / frames : 0),
-             static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.max_frame_ticks)),
-             static_cast<unsigned long long>(frames ? dirty_area / frames / 1000u : 0),
-             static_cast<unsigned long long>(flips), static_cast<unsigned long long>(stale_acks));
-    registry->system_flags &= ~(SYSTEM_FLAG_WM_BENCH_DRAG | SYSTEM_FLAG_WM_BENCH_RESIZE);
-    smp_wmb();
-    g_bench = {};
-}
-
-void wm_bench_tick(Registry *registry)
-{
-    if (!registry)
-        return;
-    bool drag_flag = (registry->system_flags & SYSTEM_FLAG_WM_BENCH_DRAG) != 0;
-    bool resize_flag = (registry->system_flags & SYSTEM_FLAG_WM_BENCH_RESIZE) != 0;
-
-    if (!g_bench.active) {
-        if (!drag_flag && !resize_flag)
-            return;
-        int idx = -1;
-        for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
-            if (is_window_visible(g_windows[i]) && g_windows[i].buffer) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx < 0)
-            return; // Keep the flag set; the benchmark starts once a window exists.
-        Window &w = g_windows[idx];
-        g_bench = {};
-        g_bench.active = true;
-        g_bench.resize_mode = resize_flag;
-        g_bench.win_index = idx;
-        g_bench.origin_x = w.x;
-        g_bench.origin_y = w.y;
-        g_bench.origin_w = w.w;
-        g_bench.origin_h = w.h;
-        g_bench.frames_target = 1000;
-        g_bench.start_submitted = g_frame_stats.frames_submitted;
-        g_bench.start_compose_total = g_frame_stats.total_compose_ticks;
-        g_bench.start_present_total = g_frame_stats.total_present_ticks;
-        g_bench.start_max_frame_ticks = g_frame_stats.max_frame_ticks;
-        g_bench.start_dirty_area_accum = g_frame_stats.dirty_area_accum;
-        g_bench.start_resize_flips = g_frame_stats.resize_flips;
-        g_bench.start_resize_stale_acks = g_frame_stats.resize_stale_acks;
-        LOG_INFO("wm", "bench: starting %s benchmark (%llu frames)", resize_flag ? "resize" : "drag",
-                 static_cast<unsigned long long>(g_bench.frames_target));
-        return;
-    }
-
-    uint64_t done = g_frame_stats.frames_submitted - g_bench.start_submitted;
-    if (done >= g_bench.frames_target || g_bench.win_index < 0 || g_bench.win_index >= g_window_count) {
-        wm_bench_finish(registry);
-        return;
-    }
-
-    Window &w = g_windows[g_bench.win_index];
-    Window old = w;
-    if (!g_bench.resize_mode) {
-        int step = static_cast<int>(done % 512u);
-        int phase = step < 256 ? step : 512 - step;
-        int span_x = static_cast<int>(g_screen.width) - w.w;
-        int span_y = static_cast<int>(g_screen.height) - w.h;
-        w.x = span_x > 0 ? (phase * span_x) / 255 : w.x;
-        w.y = span_y > 0 ? (phase * span_y) / 255 : w.y;
-    } else {
-        int step = static_cast<int>(done % 256u);
-        int phase = step < 128 ? step : 256 - step;
-        int max_w = static_cast<int>(g_screen.width);
-        int max_h = static_cast<int>(g_screen.height) - wm_menubar_h();
-        int min_w = w.min_w > 0 ? w.min_w : 240;
-        int min_h = w.min_h > 0 ? w.min_h : 160;
-        int new_w = min_w + ((max_w > min_w ? max_w - min_w : 0) * phase) / 127;
-        int new_h = min_h + ((max_h > min_h ? max_h - min_h : 0) * phase) / 127;
-        // Route through the real resize pipeline (configure post, client
-        // redraw, buffer flip, geometry flip on ack) so the benchmark
-        // measures exactly what an interactive edge drag exercises.
-        (void)old;
-        set_window_bounds(w, g_bench.origin_x, g_bench.origin_y, new_w, new_h);
-        return;
-    }
-    if (w.x != old.x || w.y != old.y || w.w != old.w || w.h != old.h) {
-        mark_window_transition_damage(old, w);
-        invalidate_window_visibility_cache();
     }
 }
 
@@ -451,159 +214,6 @@ static void cycle_user_window_focus(Registry *registry)
     }
 }
 
-bool wm_cursor_backend_allowed()
-{
-    // Re-enable cursor backend if display copy path is no longer active
-    if (g_cursor_backend_disabled && !g_display_copy_path &&
-        (g_display_caps.flags & DISPLAY_FLAG_HAS_COMPOSITOR) != 0 &&
-        (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) != 0 && g_presentbuffer_handle != 0) {
-        g_cursor_backend_disabled = false;
-    }
-    return !g_cursor_backend_disabled && !g_display_copy_path &&
-           (g_display_caps.flags & DISPLAY_FLAG_HAS_COMPOSITOR) != 0 &&
-           (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) != 0 && g_presentbuffer_handle != 0;
-}
-
-static CursorPresentBuffer *ensure_cursor_present_buffer(GuiCursorKind kind)
-{
-    int index = static_cast<int>(kind);
-    if (index < 0 || index > static_cast<int>(GUI_CURSOR_RESIZE_D2) || !wm_cursor_backend_allowed())
-        return nullptr;
-
-    CursorPresentBuffer &slot = g_cursor_present_buffers[index];
-    if (slot.valid && slot.handle != 0 && slot.surface.buffer)
-        return &slot;
-
-    int32_t bx = 0, by = 0, bw = 0, bh = 0;
-    gui_get_cursor_bounds(kind, 0, 0, &bx, &by, &bw, &bh);
-    if (bw <= 0 || bh <= 0 || bw > CURSOR_MAX_SIZE || bh > CURSOR_MAX_SIZE)
-        return nullptr;
-
-    DisplayBufferCreate create = {};
-    create.width = static_cast<uint32_t>(bw);
-    create.height = static_cast<uint32_t>(bh);
-    create.pixel_format = DISPLAY_PIXEL_FORMAT_XRGB8888;
-    create.flags = DISPLAY_BUFFER_FLAG_CPU_VISIBLE | DISPLAY_BUFFER_FLAG_LINEAR | DISPLAY_BUFFER_FLAG_RENDER_TARGET;
-
-    if (display_buffer_create(&create) != 0 || create.handle == 0)
-        return nullptr;
-
-    DisplayBufferMap map = {};
-    map.handle = create.handle;
-    if (display_buffer_map(&map) != 0 || map.address == 0 || map.stride < static_cast<uint32_t>(bw)) {
-        display_buffer_destroy(create.handle);
-        return nullptr;
-    }
-
-    memset(&slot, 0, sizeof(slot));
-    slot.handle = create.handle;
-    slot.surface.width = static_cast<uint32_t>(bw);
-    slot.surface.height = static_cast<uint32_t>(bh);
-    slot.surface.pitch = map.stride * 4u;
-    slot.surface.buffer = reinterpret_cast<uint32_t *>(map.address);
-    slot.kind = kind;
-    gui_get_cursor_hotspot(kind, &slot.hot_x, &slot.hot_y);
-    gui_fill_rect(&slot.surface, 0, 0, bw, bh, 0x00000000u);
-    gui_draw_cursor_kind(&slot.surface, slot.hot_x, slot.hot_y, kind);
-    smp_wmb();
-    slot.valid = true;
-    return &slot;
-}
-
-static void retire_completed_present_buffers()
-{
-    for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++) {
-        if (g_presentbuffer_slots[i].in_flight_sequence &&
-            g_presentbuffer_slots[i].in_flight_sequence <= g_display_queue.completed_sequence) {
-            g_presentbuffer_slots[i].in_flight_sequence = 0;
-        }
-    }
-}
-
-static void sync_presentbuffer_alias_from_active_slot()
-{
-    if (g_presentbuffer_slot_count == 0 || g_presentbuffer_active_slot >= g_presentbuffer_slot_count) {
-        g_presentbuffer = {};
-        g_presentbuffer_handle = 0;
-        return;
-    }
-    g_presentbuffer = g_presentbuffer_slots[g_presentbuffer_active_slot].surface;
-    g_presentbuffer_handle = g_presentbuffer_slots[g_presentbuffer_active_slot].handle;
-}
-
-static bool dirty_set_is_single_fullscreen_rect()
-{
-    if (clamp_dirty_rect_count(g_dirty_count) != 1)
-        return false;
-    const DirtyRect &rect = g_dirty_rects[0];
-    return rect.x == 0 && rect.y == 0 && rect.w == static_cast<int>(g_screen.width) &&
-           rect.h == static_cast<int>(g_screen.height);
-}
-
-static bool dirty_set_intersects_rect(const DirtyRect &target)
-{
-    int count = clamp_dirty_rect_count(g_dirty_count);
-    for (int i = 0; i < count; i++) {
-        if (rect_intersection(g_dirty_rects[i], target, nullptr))
-            return true;
-    }
-    return false;
-}
-
-static bool dirty_set_contains_rect(const DirtyRect &target)
-{
-    int count = clamp_dirty_rect_count(g_dirty_count);
-    for (int i = 0; i < count; i++) {
-        if (rect_contains(g_dirty_rects[i], target))
-            return true;
-    }
-    return false;
-}
-
-static bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_rect_out, bool track_damage)
-{
-    if (!cursor_rect_out)
-        return false;
-
-    DirtyRect cursor_rect = {};
-    gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y, &cursor_rect.x, &cursor_rect.y,
-                          &cursor_rect.w, &cursor_rect.h);
-    if (!clip_dirty_rect_to_screen(cursor_rect))
-        return false;
-
-    // Only the software cursor bakes pixels into the frame; the hardware
-    // plane draws it out of band, so cursor damage there would just inflate
-    // the dirty set (and trip the resize dirty-collapse heuristic).
-    if (track_damage && !dirty_set_contains_rect(cursor_rect)) {
-        enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
-        normalize_dirty_rects(interactive);
-        // Re-get bounds after potential normalization
-        gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y, &cursor_rect.x, &cursor_rect.y,
-                              &cursor_rect.w, &cursor_rect.h);
-        if (!clip_dirty_rect_to_screen(cursor_rect))
-            return false;
-    }
-
-    *cursor_rect_out = cursor_rect;
-    return true;
-}
-
-void collapse_dirty_rects_to_bounds()
-{
-    int count = clamp_dirty_rect_count(g_dirty_count);
-    if (count <= 0) {
-        invalidate_dirty_frame();
-        return;
-    }
-    DirtyRect bounds = g_dirty_rects[0];
-    for (int i = 1; i < count; i++) {
-        bounds = rect_union(bounds, g_dirty_rects[i]);
-    }
-    g_dirty_rects[0] = bounds;
-    g_dirty_count = 1;
-    invalidate_dirty_frame();
-}
-
 // Insert a damage rect at the head of the queue so it composes before any
 // window-move pixel shifts in the same frame (identity-alias cursor erase).
 static void prepend_damage_rect(const DirtyRect &rect)
@@ -622,249 +232,7 @@ static void prepend_damage_rect(const DirtyRect &rect)
     g_dirty_count = count + 1;
 }
 
-static void clear_presentbuffer_slot_stale(PresentBufferSlot &slot)
-{
-    slot.stale_count = 0;
-}
-
-static void mark_presentbuffer_slot_stale(PresentBufferSlot &slot, const DirtyRect &dirty)
-{
-    DirtyRect clipped = dirty;
-    if (!clip_dirty_rect_to_screen(clipped))
-        return;
-
-    wm::DirtyRect rects[MAX_DIRTY_RECTS];
-    int count = clamp_dirty_rect_count(slot.stale_count);
-    for (int i = 0; i < count; i++) {
-        rects[i] = to_policy_rect(slot.stale_rects[i]);
-    }
-
-    wm::enqueue_damage_rect(rects, &count, MAX_DIRTY_RECTS, static_cast<int>(g_screen.width),
-                            static_cast<int>(g_screen.height), to_policy_rect(clipped));
-
-    slot.stale_count = clamp_dirty_rect_count(count);
-    for (int i = 0; i < slot.stale_count; i++) {
-        slot.stale_rects[i] = from_policy_rect(rects[i]);
-    }
-}
-
-void mark_presentbuffer_slots_stale(const DirtyRect &dirty)
-{
-    for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++) {
-        mark_presentbuffer_slot_stale(g_presentbuffer_slots[i], dirty);
-    }
-}
-
-static void mark_other_presentbuffer_slots_stale(const DirtyRect *rects, int rect_count, uint32_t fresh_slot)
-{
-    if (!rects || rect_count <= 0)
-        return;
-    rect_count = clamp_dirty_rect_count(rect_count);
-    if (rect_count == 0)
-        return;
-
-    wm::DirtyRect new_rects[MAX_DIRTY_RECTS];
-    int new_count = 0;
-    for (int r = 0; r < rect_count; r++) {
-        DirtyRect clipped = rects[r];
-        if (!clip_dirty_rect_to_screen(clipped))
-            continue;
-        new_rects[new_count++] = to_policy_rect(clipped);
-    }
-    if (new_count == 0)
-        return;
-
-    for (uint32_t i = 0; i < g_presentbuffer_slot_count; i++) {
-        if (i == fresh_slot)
-            continue;
-        PresentBufferSlot &slot = g_presentbuffer_slots[i];
-
-        wm::DirtyRect merged[MAX_DIRTY_RECTS];
-        int merged_count = clamp_dirty_rect_count(slot.stale_count);
-        for (int j = 0; j < merged_count; j++) {
-            merged[j] = to_policy_rect(slot.stale_rects[j]);
-        }
-
-        for (int r = 0; r < new_count; r++) {
-            wm::enqueue_damage_rect(merged, &merged_count, MAX_DIRTY_RECTS, static_cast<int>(g_screen.width),
-                                    static_cast<int>(g_screen.height), new_rects[r]);
-        }
-
-        slot.stale_count = clamp_dirty_rect_count(merged_count);
-        for (int j = 0; j < slot.stale_count; j++) {
-            slot.stale_rects[j] = from_policy_rect(merged[j]);
-        }
-    }
-}
-
-static bool sync_presentbuffer_slot_from_active(uint32_t slot_index, bool overwrite_full_frame)
-{
-    if (slot_index >= g_presentbuffer_slot_count)
-        return false;
-
-    PresentBufferSlot &dst = g_presentbuffer_slots[slot_index];
-    if (!dst.surface.buffer)
-        return false;
-
-    if (overwrite_full_frame) {
-        clear_presentbuffer_slot_stale(dst);
-        return true;
-    }
-
-    int stale_count = clamp_dirty_rect_count(dst.stale_count);
-
-    // Dynamic Pruning: Discard stale repair rects that will be completely overwritten by the new frame's dirty regions.
-    // Bypass during active window manipulation to prevent aggressive pruning from dropping essential shadow/border
-    // repair rects.
-    bool manip = g_input.pointer_down && g_input.drag_index >= 2;
-    if (!manip) {
-        for (int i = 0; i < stale_count; i++) {
-            for (int j = 0; j < g_dirty_count; j++) {
-                if (rect_contains(g_dirty_rects[j], dst.stale_rects[i])) {
-                    dst.stale_rects[i] = dst.stale_rects[stale_count - 1];
-                    stale_count--;
-                    dst.stale_count = stale_count;
-                    i--;
-                    break;
-                }
-            }
-        }
-    }
-
-    wm_stats_note_stale_repair(stale_count);
-
-    DirtyRect cursor_rect = {};
-    gui_get_cursor_bounds(g_input.cursor_kind, g_input.mouse_x, g_input.mouse_y, &cursor_rect.x, &cursor_rect.y,
-                          &cursor_rect.w, &cursor_rect.h);
-    bool cursor_on_screen = clip_dirty_rect_to_screen(cursor_rect);
-    bool cursor_erased = false;
-
-    DirtyRect clipped_stale[MAX_DIRTY_RECTS] = {};
-    int clipped_stale_count = 0;
-    DirtyRect bounds = {};
-    uint64_t stale_area = 0;
-    for (int i = 0; i < stale_count; i++) {
-        DirtyRect stale = dst.stale_rects[i];
-        if (!clip_dirty_rect_to_screen(stale))
-            continue;
-        clipped_stale[clipped_stale_count++] = stale;
-        bounds = clipped_stale_count == 1 ? stale : rect_union(bounds, stale);
-        stale_area += static_cast<uint64_t>(stale.w) * static_cast<uint64_t>(stale.h);
-    }
-
-    uint64_t bounds_area = static_cast<uint64_t>(bounds.w) * static_cast<uint64_t>(bounds.h);
-    bool batch_repair = clipped_stale_count > 4 && stale_area != 0 && bounds_area * 2u <= stale_area * 3u;
-    if (batch_repair) {
-        gui_blit_rect(&dst.surface, &g_backbuffer, bounds.x, bounds.y, bounds.x, bounds.y, bounds.w, bounds.h);
-        cursor_erased = cursor_on_screen && rect_intersection(bounds, cursor_rect, nullptr);
-    } else {
-        for (int i = 0; i < clipped_stale_count; i++) {
-            DirtyRect stale = clipped_stale[i];
-            gui_blit_rect(&dst.surface, &g_backbuffer, stale.x, stale.y, stale.x, stale.y, stale.w, stale.h);
-            if (cursor_on_screen && rect_intersection(stale, cursor_rect, nullptr))
-                cursor_erased = true;
-        }
-    }
-
-    if (cursor_erased)
-        enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
-    clear_presentbuffer_slot_stale(dst);
-    return true;
-}
-
-static bool select_presentbuffer_slot_for_frame()
-{
-    retire_completed_present_buffers();
-    if (g_presentbuffer_slot_count == 0)
-        return false;
-
-    bool overwrite_full_frame = dirty_set_is_single_fullscreen_rect();
-    for (uint32_t offset = 0; offset < g_presentbuffer_slot_count; offset++) {
-        uint32_t index = (g_presentbuffer_active_slot + offset) % g_presentbuffer_slot_count;
-        if (g_presentbuffer_slots[index].in_flight_sequence != 0)
-            continue;
-        if (!sync_presentbuffer_slot_from_active(index, overwrite_full_frame))
-            continue;
-
-        g_presentbuffer_active_slot = index;
-        sync_presentbuffer_alias_from_active_slot();
-        return true;
-    }
-
-    sync_presentbuffer_alias_from_active_slot();
-    return false;
-}
-
-static void drain_display_events()
-{
-    DisplayEvent event = {};
-    while (display_poll_event(&event) == 0) {
-        apply_display_event(event);
-    }
-    retire_completed_present_buffers();
-}
-
-static void refresh_display_queue_from_status()
-{
-    DisplayStatus status = {};
-    if (display_get_status(&status) == 0) {
-        if (status.completed_sequence > g_display_queue.completed_sequence)
-            g_display_queue.completed_sequence = status.completed_sequence;
-        if (status.last_vblank_ticks > g_display_queue.last_vblank_ticks)
-            g_display_queue.last_vblank_ticks = status.last_vblank_ticks;
-        if (status.vblank_count > g_display_queue.vblank_count)
-            g_display_queue.vblank_count = status.vblank_count;
-        retire_completed_present_buffers();
-    }
-}
-
-static uint32_t present_frame(const Surface *source, const DirtyRect *rects, int rect_count, uint32_t frame_sequence,
-                              DisplayBufferHandle cursor_handle, int cursor_x, int cursor_y)
-{
-    rect_count = clamp_dirty_rect_count(rect_count);
-    if (!source || !source->buffer || rect_count <= 0)
-        return 0;
-
-    Rect present_rects[MAX_DIRTY_RECTS];
-    int present_count = 0;
-    for (int i = 0; i < rect_count; i++) {
-        DirtyRect clipped = rects[i];
-        if (clip_dirty_rect_to_screen(clipped)) {
-            present_rects[present_count++] = gui_rect_make(clipped.x, clipped.y, clipped.w, clipped.h);
-        }
-    }
-    if (present_count == 0)
-        return 0;
-
-    if (g_presentbuffer_handle != 0) {
-        DisplayComposeLayer layer = {.buffer_handle = g_presentbuffer_handle,
-                                     .src_rect = gui_rect_make(0, 0, source->width, source->height),
-                                     .dst_rect = gui_rect_make(0, 0, source->width, source->height),
-                                     .flags = DISPLAY_COMPOSE_LAYER_OPAQUE,
-                                     .alpha = 255u};
-
-        DisplayComposeRequest req = {.layers = &layer,
-                                     .layer_count = 1,
-                                     .damage_rects = present_rects,
-                                     .damage_rect_count = static_cast<uint32_t>(present_count),
-                                     .frame_sequence = frame_sequence,
-                                     .flags = DISPLAY_PRESENT_VBLANK,
-                                     .cursor_buffer_handle = cursor_handle,
-                                     .cursor_x = cursor_x,
-                                     .cursor_y = cursor_y};
-        return display_compose_submit(&req);
-    }
-
-    DisplayPresentRequest req = {.buffer = source->buffer,
-                                 .stride = source->pitch / 4,
-                                 .rects = present_rects,
-                                 .rect_count = static_cast<uint32_t>(present_count),
-                                 .frame_sequence = frame_sequence,
-                                 .flags = DISPLAY_PRESENT_VBLANK};
-    return display_present(&req);
-}
-
-static bool point_targets_window_client_for_input(const Window &w, int px, int py)
+bool point_targets_window_client_for_input(const Window &w, int px, int py)
 {
     return w.transparent ? point_hits_window_visible_pixel(w, px, py) : point_in_client(w, px, py);
 }
@@ -1234,14 +602,14 @@ extern "C" int main(int argc, char **argv)
     }
 
     DirtyRect init_pres = {0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)};
-    uint32_t last_seq = present_frame(&g_presentbuffer, &init_pres, 1, 1, 0, 0, 0);
+    uint32_t first_seq = present_frame(&g_presentbuffer, &init_pres, 1, 1, 0, 0, 0);
 
-    if (last_seq && g_presentbuffer_slot_count) {
-        g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = last_seq;
+    if (first_seq && g_presentbuffer_slot_count) {
+        g_presentbuffer_slots[g_presentbuffer_active_slot].in_flight_sequence = first_seq;
     }
 
     mark_other_presentbuffer_slots_stale(&init_pres, 1, g_presentbuffer_active_slot);
-    uint32_t frame_seq = (last_seq ? last_seq : 1) + 1;
+    wm_present_init_sequences(first_seq);
 
     // Ensure deferred shell blur is built on the next compositor frame even
     // when no input or application damage arrives after boot.
@@ -1768,7 +1136,7 @@ extern "C" int main(int argc, char **argv)
             g_input.have_pending_move = false;
         }
         apply_pending_window_bounds();
-        drain_display_events();
+        wm_drain_display_events();
         smp_rmb();
 
         if (registry->settings_generation != last_settings_gen) {
@@ -2196,10 +1564,12 @@ extern "C" int main(int argc, char **argv)
                 collapse_dirty_rects_to_bounds();
             }
 
-            uint32_t build_pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
+            uint32_t build_pending =
+                wm::pending_presents(wm_present_last_sequence(), g_display_queue.completed_sequence);
             if (build_pending) {
                 refresh_display_queue_from_status();
-                build_pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
+                build_pending =
+                    wm::pending_presents(wm_present_last_sequence(), g_display_queue.completed_sequence);
             }
 
             wm::PresentPolicyDecision build_action = wm::choose_present_policy(
@@ -2212,9 +1582,7 @@ extern "C" int main(int argc, char **argv)
                 continue;
             }
 
-            g_frame_cursor_handle = 0;
-            g_frame_cursor_x = 0;
-            g_frame_cursor_y = 0;
+            wm_cursor_begin_frame();
 
             if (g_scene_is_presentbuffer || select_presentbuffer_slot_for_frame()) {
                 uint64_t now = get_ticks();
@@ -2292,40 +1660,13 @@ extern "C" int main(int argc, char **argv)
                 g_dirty_count = optimized_count;
 
                 bool hw_cursor_allowed = wm_cursor_backend_allowed();
-                // Switching from a software cursor to the hardware plane: the
-                // last baked cursor pixels must be erased once.
-                if (hw_cursor_allowed && g_prev_frame_sw_cursor) {
-                    enqueue_damage_rect(g_prev_sw_cursor_rect.x, g_prev_sw_cursor_rect.y, g_prev_sw_cursor_rect.w,
-                                        g_prev_sw_cursor_rect.h);
-                    normalize_dirty_rects(inter);
-                }
+                wm_cursor_erase_previous_software(hw_cursor_allowed, inter);
 
                 DirtyRect cursor_rect = {};
                 bool draw_cursor = prepare_cursor_overlay_damage(inter, &cursor_rect, !hw_cursor_allowed);
-                bool draw_software_cursor = draw_cursor;
-                if (draw_cursor && hw_cursor_allowed) {
-                    CursorPresentBuffer *cursor_buffer = ensure_cursor_present_buffer(g_input.cursor_kind);
-                    if (cursor_buffer && cursor_buffer->handle != 0) {
-                        g_frame_cursor_handle = cursor_buffer->handle;
-                        // Hardware cursor expects HOTSPOT position (mouse position), not bounds top-left
-                        g_frame_cursor_x = g_input.mouse_x;
-                        g_frame_cursor_y = g_input.mouse_y;
-                        draw_software_cursor = false;
-                        g_cursor_backend_disabled = false; // Re-enable if it works
-                    } else {
-                        g_cursor_backend_disabled = true;
-                        g_frame_cursor_handle = 0; // Clear stale handle
-                        // Falling back to the software cursor this frame: the
-                        // cursor rect was not damaged, so add it now.
-                        enqueue_damage_rect(cursor_rect.x, cursor_rect.y, cursor_rect.w, cursor_rect.h);
-                        normalize_dirty_rects(inter);
-                        draw_software_cursor = true;
-                    }
-                } else if (!hw_cursor_allowed) {
-                    // Force software cursor when backend is disabled or no cursor to draw
-                    g_frame_cursor_handle = 0; // Clear stale handle
-                    draw_software_cursor = draw_cursor;
-                }
+                bool draw_software_cursor = false;
+                if (draw_cursor)
+                    draw_software_cursor = wm_cursor_select_plane(hw_cursor_allowed, cursor_rect, inter);
 
                 // Identity alias: the software cursor is baked into the scene.
                 // Erase last frame's baked cursor (recompose from layers) before
@@ -2388,18 +1729,17 @@ extern "C" int main(int argc, char **argv)
                 } else if (draw_cursor) {
                     g_frame_stats.cursor_backend_frames++;
                 }
-                g_prev_frame_sw_cursor = draw_cursor && draw_software_cursor;
-                g_prev_sw_cursor_rect = cursor_rect;
+                wm_cursor_finish_frame(draw_cursor, draw_software_cursor, cursor_rect);
                 wm_stats_note_dirty_set(g_dirty_rects, g_dirty_count);
                 g_frame_stats.frames_built++;
                 g_dirty_frame_ready = true;
             }
         }
 
-        uint32_t pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
+        uint32_t pending = wm::pending_presents(wm_present_last_sequence(), g_display_queue.completed_sequence);
         if (pending) {
             refresh_display_queue_from_status();
-            pending = wm::pending_presents(last_seq, g_display_queue.completed_sequence);
+            pending = wm::pending_presents(wm_present_last_sequence(), g_display_queue.completed_sequence);
         }
 
         wm::PresentPolicyDecision action =
@@ -2409,8 +1749,13 @@ extern "C" int main(int argc, char **argv)
         if (g_dirty_frame_ready && action == wm::PresentPolicyDecision::Submit) {
             asm volatile("sfence" ::: "memory");
             uint64_t present_tsc_start = wm_tsc_now();
+            DisplayBufferHandle frame_cursor_handle = 0;
+            int frame_cursor_x = 0;
+            int frame_cursor_y = 0;
+            wm_cursor_frame_plane(&frame_cursor_handle, &frame_cursor_x, &frame_cursor_y);
             uint32_t sub = present_frame(&g_presentbuffer, g_dirty_rects, clamp_dirty_rect_count(g_dirty_count),
-                                         frame_seq, g_frame_cursor_handle, g_frame_cursor_x, g_frame_cursor_y);
+                                         wm_present_next_sequence(), frame_cursor_handle, frame_cursor_x,
+                                         frame_cursor_y);
             uint64_t present_tsc_end = wm_tsc_now();
             if (sub) {
                 g_frame_stats.last_present_ticks = present_tsc_end - present_tsc_start;
@@ -2447,8 +1792,7 @@ extern "C" int main(int argc, char **argv)
                              static_cast<unsigned long long>(wm_tsc_to_us(g_frame_stats.last_input_to_submit_ticks)));
                 }
 #endif
-                last_seq = sub;
-                frame_seq = sub + 1;
+                wm_present_note_submitted(sub);
                 g_dirty_count = 0;
                 g_dirty_frame_ready = false;
                 g_wait_start_ticks = 0; // Reset wait timer
@@ -2459,7 +1803,7 @@ extern "C" int main(int argc, char **argv)
                 g_frame_stats.frames_skipped++;
             // Flush deferred settings persist during idle to avoid blocking I/O during compositing.
             flush_pending_settings_persist(registry);
-            if (g_dirty_count == 0 && last_seq <= g_display_queue.completed_sequence) {
+            if (g_dirty_count == 0 && wm_present_last_sequence() <= g_display_queue.completed_sequence) {
                 // Fully idle: a 1 ms loop woke the compositor ~1000x/second
                 // for no work (power/thermal cost on real laptops). The only
                 // genuinely periodic duties are 1 Hz (clock) and toast expiry.

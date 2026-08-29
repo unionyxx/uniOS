@@ -13,6 +13,40 @@ extern DirtyRect g_window_visible_regions[MAX_WINDOWS][MAX_VISIBLE_REGIONS];
 extern int g_window_visible_region_count[MAX_WINDOWS];
 extern bool g_window_visible_region_overflow[MAX_WINDOWS];
 
+// WM-side snapshot of a shared WindowEntry, sampled across load fences so a
+// concurrently updating client can never tear the values the WM acts on.
+struct WindowEntrySnapshot
+{
+    int shm_id;
+    int x, y, w, h;
+    uint32_t position_serial;
+    int buffer_w, buffer_h;
+    int content_w, content_h;
+    int min_w, min_h;
+    int scroll_x, scroll_y;
+    uint32_t flags;
+    uint32_t state;
+    uint32_t owner_pid;
+    uint32_t resize_serial;
+    uint32_t buffer_resize_serial;
+    uint32_t buffer_generation;
+    uint32_t buffer_ack_generation;
+    bool active;
+    bool ready;
+    bool request_close;
+    bool request_focus;
+    bool request_minimize;
+    bool request_maximize;
+    bool request_restore;
+    char title[64];
+};
+
+// Adoption and commit pipeline.
+void wm_adopt_windows(Registry *registry);
+void wm_reap_dead_owners();
+void wm_commit_windows(Registry *registry);
+void wm_apply_focus_requests();
+
 // Window cache and visibility.
 void invalidate_window_visibility_cache();
 void refresh_window_cache();

@@ -26,3 +26,15 @@ void update_cursor_kind();
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
                                    GuiCursorKind new_kind);
 bool wm_cursor_backend_allowed();
+
+// True when a pointer at (px,py) should be treated as targeting the window's
+// client area for input (transparent windows hit-test visible pixels).
+bool point_targets_window_client_for_input(const Window &w, int px, int py);
+
+// Hardware/software cursor plane selection for the frame being built.
+bool prepare_cursor_overlay_damage(bool interactive, DirtyRect *cursor_rect_out, bool track_damage);
+void wm_cursor_begin_frame();
+void wm_cursor_erase_previous_software(bool hw_cursor_allowed, bool interactive);
+bool wm_cursor_select_plane(bool hw_cursor_allowed, const DirtyRect &cursor_rect, bool interactive);
+void wm_cursor_finish_frame(bool draw_cursor, bool software, const DirtyRect &cursor_rect);
+void wm_cursor_frame_plane(DisplayBufferHandle *handle, int *x, int *y);
