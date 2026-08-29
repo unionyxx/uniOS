@@ -28,8 +28,11 @@ The wallpaper config is a single path on the first line, not key/value.
 | `animations_enabled` | `0`, `1` | `1` | WM |
 | `transparency_level` | `0..255` | `180` | WM |
 | `volume_level` | `0..100` | `75` | WM |
+| `input_pointer_speed` | `16..1024` (Q8, 256 = 1.0x) | `256` | Kernel input layer, WM restores at boot |
+| `input_repeat_delay` | `50..2000` (ms) | `500` | Kernel input layer (USB HID repeat) |
+| `input_repeat_rate` | `10..500` (ms) | `33` | Kernel input layer (USB HID repeat) |
 
-Writes are performed by the WM (idle-frame persistence) and by the Preferences app. Settings also propagate live through the registry's `settings_generation` counter; storage mode changes go through `storage_request_generation` because `SYS_STORAGE_SET_MODE` is WM-only.
+Writes are performed by the WM (idle-frame persistence, read-modify-writing the input keys to preserve them since they have no registry mirror) and by the Preferences app (atomic write-temp-then-rename). Settings also propagate live through the registry's `settings_generation` counter; storage mode changes go through `storage_request_generation` because `SYS_STORAGE_SET_MODE` is WM-only. Input-device enable state is session-only (USB slot ids are transient) and is not persisted.
 
 ## APPS.CFG Keys
 

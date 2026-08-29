@@ -24,7 +24,7 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 - **socket**: POSIX-shaped wrappers over the network syscalls plus byte-order helpers.
 - **wav**: userspace RIFF/WAV parser used by the shell `play` command.
 - **log**: leveled `[sec.mmm] scope [mark] message` logging to stdout.
-- **config_utils**: `key=value` config readers/writers used for `SYSTEM.CFG` and wallpaper settings.
+- **config_utils**: `key=value` config readers/writers used for `SYSTEM.CFG` and wallpaper settings, including `cfg_write_text_file_atomic` (write-temp-then-rename; FAT32 rename refuses to overwrite, so the destination is unlinked first).
 - **math**: freestanding `sqrt/sin/cos/tan/fabs/fmod` (plus `f` variants) — bit-seeded Newton sqrt (machine epsilon across the full double range) and range-reduced Taylor trig, so apps never hand-roll math.
 - **cxx.cpp**: global `new`/`delete` over malloc, a `__cxa_pure_virtual` fault handler, and the static-object runtime glue (`__cxa_guard_acquire/release/abort`, `__cxa_atexit`/`__cxa_finalize`/`__dso_handle` — single-threaded fast-path guards; static destructors are not run at exit because process teardown reclaims everything).
 - **vec.h / str.h**: header-only C++ containers for apps. `Vec<T>` is a growable array for trivially-copyable elements (realloc + memmove growth; `push`/`pop`/`insert`/`remove`/`resize`/`reserve`, checked `at()`, move-only ownership) that bounds-checks indexed access in debug builds and returns false on allocation failure instead of aborting. `String` is a growable NUL-terminated buffer (`assign`/`append`/`equals`, always-valid `c_str()`). They replace fixed-size row/entry arrays so lists are no longer silently truncated.

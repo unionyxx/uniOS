@@ -44,3 +44,22 @@ Clients use these to clear hover state, stop drags, and redraw sticky overlays; 
 **Text.** `SYS_READ` on stdin polls the keyboard (and serial) directly, sleeping briefly between polls.
 
 Producers wake blocked consumers through the scheduler's input wait queues.
+
+## Device Management
+
+`SYS_INPUT_ENUM_DEVICES` (`src/drivers/class/hid/input.cpp`) returns a snapshot of input sources in `InputDeviceInfo` (`uapi/input.h`):
+
+| Kind | id | vendor/product |
+| --- | --- | --- |
+| `INPUT_DEVICE_PS2_MOUSE` | `0xFE` | 0/0 |
+| `INPUT_DEVICE_PS2_KEYBOARD` | `0xFF` | 0/0 |
+| `INPUT_DEVICE_USB_MOUSE` | xHCI slot | from the USB device descriptor |
+| `INPUT_DEVICE_USB_KEYBOARD` | xHCI slot | from the USB device descriptor |
+
+USB combo devices yield one entry per stream (mouse + keyboard). Names are synthesized (`"PS/2 Mouse"`, `"USB Mouse"`, ...) since USB string descriptors are not fetched; the Settings app shows `vendor:product` as a secondary line. The call always lists the two PS/2 devices and one entry per connected USB HID stream.
+
+- `SYS_INPUT_SET_POINTER_SPEED` (Q8 multiplier, 256 = 1.0x, clamped 16-1024) scales raw mouse deltas **before** position accumulation in `ps2_mouse.cpp` (`accelerate_delta` site) and `usb_hid.cpp` (`process_mouse_report`). It is orthogonal to the PS/2 acceleration curve.
+- `SYS_INPUT_SET_REPEAT_RATE` (delay_ms, rate_ms) drives the USB HID software key-repeat path in `usb_hid.cpp` (`handle_key_repeat`); PS/2 keyboard repeat is hardware-typematic and not tuned here.
+- `SYS_INPUT_SET_DEVICE_ENABLED` freezes a source **at the driver** (`ps2_mouse_handler`/`ps2_keyboard_handler` drop packets; `usb_hid` interrupt callbacks return early) so its accumulated state is preserved rather than zeroed — disabling the only active mouse does not snap the cursor to the origin.
+
+Settings are volatile in the kernel; `SYSTEM.CFG` is the source of truth across boots. The WM restores pointer speed and repeat rate once at boot (`wm_apply_input_settings` in `wm_settings.cpp`); the Settings app re-applies live when the user drags a slider or toggles a device. USB device enables are session-only (slot ids are transient across replug), so they are not persisted.

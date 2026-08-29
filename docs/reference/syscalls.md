@@ -86,8 +86,14 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 | 245 | `SYS_GUI_REGISTER_WM` | Caller becomes the window manager |
 | 246 | `SYS_GUI_SET_FOCUS` | WM-only: set the focused pid |
 | 247-262 | `SYS_DISPLAY_*` | KMS-style display API (see below) |
+| 289 | `SYS_INPUT_ENUM_DEVICES` | Fill `InputDeviceInfo[]` (`uapi/input.h`); returns total count |
+| 290 | `SYS_INPUT_SET_POINTER_SPEED` | Q8 multiplier (256 = 1.0x, clamped 16-1024) applied to mouse deltas |
+| 291 | `SYS_INPUT_SET_REPEAT_RATE` | USB HID key-repeat delay_ms and rate_ms |
+| 292 | `SYS_INPUT_SET_DEVICE_ENABLED` | Enable/disable an input source by stable id (PS/2 sentinel or USB slot) |
 
 Display syscalls: `GET_CAPS` 247, `PRESENT` 248, `WAIT` 249, `GET_STATUS` 250, `QUERY_CONNECTORS` 252, `GET_MODES` 253, `SET_MODE` 254, `BUFFER_CREATE` 255, `BUFFER_MAP` 256, `BUFFER_DESTROY` 257, `COMPOSE_SUBMIT` 258, `EVENT_WAIT` 259, `ATOMIC_COMMIT` 260, `BUFFER_SET_WM_ACCESS` 261, `SURFACE_IMPORT` 262. Present requests carry up to 128 damage rects; compose requests up to 32 layers and 32 damage rects. See [Display](display.md).
+
+Input syscalls: `ENUM_DEVICES` 289 fills an array of `InputDeviceInfo` (PS/2 mouse/keyboard plus one entry per USB HID mouse/keyboard stream) and returns the total count (entries beyond the caller's buffer are truncated). `SET_POINTER_SPEED` scales raw mouse deltas before accumulation (orthogonal to the PS/2 acceleration curve); `SET_REPEAT_RATE` tunes the USB HID software repeat; `SET_DEVICE_ENABLED` freezes a source at the driver (its state is preserved, not zeroed). See [Input](input.md).
 
 ## Shared Memory
 
