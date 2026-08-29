@@ -9,3 +9,4 @@ bool persist_runtime_settings(const Registry *registry);
 void persist_wm_settings();
 void flush_pending_settings_persist(const Registry *registry);
 void load_wm_settings();
+void wm_apply_input_settings(const RuntimeGuiSettings &s);

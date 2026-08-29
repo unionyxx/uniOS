@@ -51,6 +51,7 @@ Registry *wm_bootstrap()
 
     syscall1(SYS_GUI_REGISTER_WM, 0);
     RuntimeGuiSettings runtime_settings = load_runtime_settings();
+    wm_apply_input_settings(runtime_settings);
     g_system_flags = runtime_settings.system_flags;
     bool run_pixops_selftest = (g_system_flags & SYSTEM_FLAG_WM_PIXEL_SELFTEST) != 0;
 #ifdef DEBUG

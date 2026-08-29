@@ -266,6 +266,11 @@ struct RuntimeGuiSettings
     bool animations_enabled;
     uint32_t transparency_level;
     uint32_t volume_level;
+    // Input device settings (restored to the kernel at boot; the Settings app
+    // tunes them live via SYS_INPUT_SET_*).
+    uint32_t input_pointer_speed; // Q8 multiplier, 256 == 1.0x
+    uint32_t input_repeat_delay;  // ms
+    uint32_t input_repeat_rate;   // ms
 };
 
 struct ContextMenuState

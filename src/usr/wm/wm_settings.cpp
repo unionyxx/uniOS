@@ -38,7 +38,7 @@ static uint32_t cfg_uint_clamped(const char *value, uint32_t fallback, uint32_t 
 
 RuntimeGuiSettings load_runtime_settings()
 {
-    RuntimeGuiSettings s = {GUI_THEME_DARK, SYSTEM_FLAG_SHOW_DESKTOP_GRID, true, true, true, 180, 75};
+    RuntimeGuiSettings s = {GUI_THEME_DARK, SYSTEM_FLAG_SHOW_DESKTOP_GRID, true, true, true, 180, 75, 256, 500, 33};
     char cfg[512], val[64];
     const char *cands[] = {SYSTEM_CONFIG_PATH, SYSTEM_BOOTSTRAP_CONFIG_PATH};
     if (cfg_read_text_from_candidates(cands, 2, cfg, sizeof(cfg))) {
@@ -76,8 +76,23 @@ RuntimeGuiSettings load_runtime_settings()
             s.transparency_level = cfg_uint_clamped(val, s.transparency_level, 0, 255);
         if (cfg_line_value(cfg, "volume_level", val, sizeof(val)))
             s.volume_level = cfg_uint_clamped(val, s.volume_level, 0, 100);
+        if (cfg_line_value(cfg, "input_pointer_speed", val, sizeof(val)))
+            s.input_pointer_speed = cfg_uint_clamped(val, s.input_pointer_speed, 16, 1024);
+        if (cfg_line_value(cfg, "input_repeat_delay", val, sizeof(val)))
+            s.input_repeat_delay = cfg_uint_clamped(val, s.input_repeat_delay, 50, 2000);
+        if (cfg_line_value(cfg, "input_repeat_rate", val, sizeof(val)))
+            s.input_repeat_rate = cfg_uint_clamped(val, s.input_repeat_rate, 10, 500);
     }
     return s;
+}
+
+// Restore the persisted input-device scalars to the kernel. Called once at WM
+// boot so pointer speed and key-repeat survive reboots; the Settings app
+// re-applies live when the user drags the sliders.
+void wm_apply_input_settings(const RuntimeGuiSettings &s)
+{
+    input_set_pointer_speed(s.input_pointer_speed);
+    input_set_repeat_rate(s.input_repeat_delay, s.input_repeat_rate);
 }
 
 bool persist_runtime_settings(const Registry *registry)
@@ -87,6 +102,22 @@ bool persist_runtime_settings(const Registry *registry)
 
     uint32_t flags = registry->system_flags;
     GuiThemeMode mode = registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+
+    // Input-device scalars live in the kernel (no Registry mirror), so preserve
+    // whatever the Settings app last persisted instead of zeroing them when the
+    // WM rewrites SYSTEM.CFG.
+    uint32_t pointer_speed = 256, repeat_delay = 500, repeat_rate = 33;
+    char existing[512], val[64];
+    const char *cands[] = {SYSTEM_CONFIG_PATH, SYSTEM_BOOTSTRAP_CONFIG_PATH};
+    if (cfg_read_text_from_candidates(cands, 2, existing, sizeof(existing))) {
+        if (cfg_line_value(existing, "input_pointer_speed", val, sizeof(val)))
+            pointer_speed = cfg_uint_clamped(val, pointer_speed, 16, 1024);
+        if (cfg_line_value(existing, "input_repeat_delay", val, sizeof(val)))
+            repeat_delay = cfg_uint_clamped(val, repeat_delay, 50, 2000);
+        if (cfg_line_value(existing, "input_repeat_rate", val, sizeof(val)))
+            repeat_rate = cfg_uint_clamped(val, repeat_rate, 10, 500);
+    }
+
     char contents[384];
     int n = snprintf(contents, sizeof(contents),
                      "theme=%s\n"
@@ -97,15 +128,19 @@ bool persist_runtime_settings(const Registry *registry)
                      "ethernet_use_dhcp=%d\n"
                      "animations_enabled=%d\n"
                      "transparency_level=%u\n"
-                     "volume_level=%u\n",
+                     "volume_level=%u\n"
+                     "input_pointer_speed=%u\n"
+                     "input_repeat_delay=%u\n"
+                     "input_repeat_rate=%u\n",
                      mode == GUI_THEME_LIGHT ? "light" : "dark", flag_text(flags, SYSTEM_FLAG_SHOW_DESKTOP_GRID),
                      flag_text(flags, SYSTEM_FLAG_CLOCK_SHOW_SECONDS),
                      flag_text(flags, SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT), registry->ethernet_enabled ? 1 : 0,
                      registry->ethernet_use_dhcp ? 1 : 0, registry->animations_enabled ? 1 : 0,
-                     registry->transparency_level, registry->volume_level <= 100 ? registry->volume_level : 100);
+                     registry->transparency_level, registry->volume_level <= 100 ? registry->volume_level : 100,
+                     pointer_speed, repeat_delay, repeat_rate);
     if (n <= 0 || (size_t)n >= sizeof(contents))
         return false;
-    return cfg_write_text_file(SYSTEM_CONFIG_PATH, contents);
+    return cfg_write_text_file_atomic(SYSTEM_CONFIG_PATH, contents);
 }
 
 void persist_wm_settings()
