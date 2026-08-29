@@ -99,7 +99,7 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
 
         if (toast_expired) {
             int toast_w = gui_scaled_metric(320);
-            int toast_h = gui_scaled_metric(76);
+            int toast_h = notification_pill_h();
             int margin = gui_space_2();
             DirtyRect toast_box = {static_cast<int>(g_backbuffer.width) - toast_w - margin, wm_menubar_h() + margin,
                                    toast_w, toast_h};
@@ -112,7 +112,8 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
         bool has_cc_damage = false;
         if (g_control_center.open) {
             DirtyRect cc_box = control_center_bounds();
-            DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_2(), cc_box.w, gui_scaled_metric(240)};
+            DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_2(), cc_box.w,
+                                   notification_center_panel_h()};
             cc_damage = rect_expand(rect_union(cc_box, notif_box), gui_scaled_metric(14));
             has_cc_damage = true;
         }
@@ -121,7 +122,7 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
         bool has_toast_damage = false;
         if (g_notifications.count > 0) {
             int toast_w = gui_scaled_metric(320);
-            int toast_h = gui_scaled_metric(76);
+            int toast_h = notification_pill_h();
             int margin = gui_space_2();
             DirtyRect toast_box = {static_cast<int>(g_backbuffer.width) - toast_w - margin, wm_menubar_h() + margin,
                                    toast_w, toast_h};

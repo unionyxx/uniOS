@@ -47,7 +47,7 @@ static DirtyRect control_center_damage_bounds()
     DirtyRect cc = control_center_bounds();
     DirtyRect damage = rect_expand(cc, gui_scaled_metric(14));
     if (g_notifications.count > 0) {
-        int notif_h = gui_scaled_metric(240);
+        int notif_h = notification_center_panel_h();
         int notif_y = cc.y + cc.h + gui_space_2();
         DirtyRect notif_damage = rect_expand({cc.x, notif_y, cc.w, notif_h}, gui_scaled_metric(14));
         damage = rect_union(damage, notif_damage);

@@ -63,3 +63,9 @@ void draw_storage_prompt_overlay();
 void wm_push_notification(const char *title, const char *message);
 void draw_toast_overlay_clipped(const DirtyRect &clip);
 void draw_notification_center_clipped(const DirtyRect &clip, int start_y);
+// Shared height of a notification pill: the live toast and notification-center
+// cards use the same metric so the two contexts always match.
+int notification_pill_h(void);
+// Height of the notification-center panel, sized to exactly contain up to three
+// toast-sized cards (plus header and padding); grows with the live count.
+int notification_center_panel_h(void);
