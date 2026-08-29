@@ -213,7 +213,4 @@ void read_input_visible(char *buf, int max_len);
 bool constant_time_equals(const char *a, const char *b, size_t len);
 
 // Editor
-void redraw_line_at(int row, int new_cursor_pos);
-void clear_line();
-void display_line();
 void add_to_history(const char *cmd);

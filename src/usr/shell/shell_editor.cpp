@@ -2,60 +2,74 @@
 
 void add_to_history(const char *cmd)
 {
-    if (!g_current_shell || cmd[0] == '\0')
+    if (!g_current_shell || !cmd || cmd[0] == '\0')
         return;
-    if (g_current_shell->history_count > 0 &&
-        strcmp(g_current_shell->history[(g_current_shell->history_count - 1) % HISTORY_SIZE], cmd) == 0)
-        return;
+    if (g_current_shell->history_count > 0) {
+        const char *last = g_current_shell->history[(g_current_shell->history_count - 1) % HISTORY_SIZE];
+        if (strcmp(last, cmd) == 0)
+            return;
+    }
 
     char *dest = g_current_shell->history[g_current_shell->history_count % HISTORY_SIZE];
-    strncpy(dest, cmd, 255);
+    strncpy(dest, cmd, sizeof(g_current_shell->history[0]) - 1);
+    dest[sizeof(g_current_shell->history[0]) - 1] = '\0';
     g_current_shell->history_count++;
-}
-
-void redraw_line_at(int row, int new_cursor_pos)
-{
-    (void)row;
-    // Simplistic redraw for userspace: clear line and reprint prompt + buffer
-    printf("\r\x1b[K"); // CR then Clear to end of line
-    print_prompt();
-    printf("%s", cmd_buffer);
-
-    // Move cursor back to new_cursor_pos
-    int prompt_len = get_prompt_len();
-    printf("\r\x1b[%dC", prompt_len + new_cursor_pos);
-
-    cursor_pos = new_cursor_pos;
-}
-
-void clear_line()
-{
-    printf("\r\x1b[K");
-}
-
-void display_line()
-{
-    printf("%s", cmd_buffer);
 }
 
 void read_input_hidden(char *buf, int max_len)
 {
-    // Basic implementation: we don't have termios yet to disable echo
-    // For now, it's not hidden.
-    int n = read(0, buf, (size_t)max_len - 1);
-    if (n > 0) {
-        buf[n] = '\0';
-        if (buf[n - 1] == '\n')
-            buf[n - 1] = '\0';
+    if (!buf || max_len <= 0)
+        return;
+    int len = 0;
+    for (;;) {
+        char raw;
+        int n = read(0, &raw, 1);
+        if (n == 0)
+            break;
+        if (n < 0)
+            continue;
+        unsigned char c = (unsigned char)raw;
+        if (c == '\n' || c == '\r')
+            break;
+        if ((c == '\b' || c == 127) && len > 0) {
+            len--;
+            printf("\b \b");
+            continue;
+        }
+        if (c >= 32 && c <= 126 && len < max_len - 1) {
+            buf[len++] = (char)c;
+            putchar('*');
+        }
     }
+    buf[len] = '\0';
+    putchar('\n');
 }
 
 void read_input_visible(char *buf, int max_len)
 {
-    int n = read(0, buf, (size_t)max_len - 1);
-    if (n > 0) {
-        buf[n] = '\0';
-        if (buf[n - 1] == '\n')
-            buf[n - 1] = '\0';
+    if (!buf || max_len <= 0)
+        return;
+    int len = 0;
+    for (;;) {
+        char raw;
+        int n = read(0, &raw, 1);
+        if (n == 0)
+            break;
+        if (n < 0)
+            continue;
+        unsigned char c = (unsigned char)raw;
+        if (c == '\n' || c == '\r')
+            break;
+        if ((c == '\b' || c == 127) && len > 0) {
+            len--;
+            printf("\b \b");
+            continue;
+        }
+        if (c >= 32 && c <= 126 && len < max_len - 1) {
+            buf[len++] = (char)c;
+            putchar((char)c);
+        }
     }
+    buf[len] = '\0';
+    putchar('\n');
 }
