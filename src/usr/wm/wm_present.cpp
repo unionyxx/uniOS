@@ -16,6 +16,7 @@ Surface g_menubar_blur_source;
 Surface g_dock_blur_source;
 DisplayCaps g_display_caps;
 bool g_display_copy_path = false;
+bool g_shell_blur_available = false;
 
 DisplayBufferHandle g_presentbuffer_handle = 0;
 PresentBufferSlot g_presentbuffer_slots[MAX_PRESENT_BUFFER_SLOTS] = {};

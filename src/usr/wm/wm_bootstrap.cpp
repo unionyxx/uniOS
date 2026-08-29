@@ -15,9 +15,16 @@ Registry *wm_bootstrap()
     if (!g_screen.buffer)
         return nullptr;
 
-    if (display_get_caps(&g_display_caps) == 0) {
-        g_display_copy_path = (g_display_caps.flags & DISPLAY_FLAG_USES_COPY_PATH) != 0 &&
-                              (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) == 0;
+    {
+        if (display_get_caps(&g_display_caps) == 0) {
+            g_display_copy_path = (g_display_caps.flags & DISPLAY_FLAG_USES_COPY_PATH) != 0 &&
+                                  (g_display_caps.flags & DISPLAY_FLAG_HAS_PAGE_FLIP) == 0;
+        }
+        // Shell blur runs on page-flip backends and on copy-path backends that
+        // still expose a compositor (e.g. the UEFI GOP framebuffer). It is only
+        // suppressed on a truly compositor-less copy path, where there is nothing
+        // to amortize the translucent shell surfaces against.
+        g_shell_blur_available = !g_display_copy_path || (g_display_caps.flags & DISPLAY_FLAG_HAS_COMPOSITOR) != 0;
     }
 
     int reg_shm = static_cast<int>(syscall1(SYS_SHM_GET, (sizeof(Registry) + 0xFFFu) & ~0xFFFu));
@@ -241,12 +248,11 @@ Registry *wm_bootstrap()
     syscall1(SYS_SET_QUIET, 1);
     smp_wmb();
 
-    // The firmware framebuffer backend copies pixels to the display and has
-    // no compositor to amortize translucent shell surfaces. Blur there costs
-    // hundreds of milliseconds and adds a visible hitch on every full-screen
-    // startup/resize. Keep that backend solid; compositor/page-flip backends
-    // retain the normal lazy blur path.
-    if (g_display_copy_path || !init_shell_blur_buffers(registry, dock_w, dock_h)) {
+    // Shell blur is suppressed only on a truly compositor-less copy path (no
+    // page flip and no compositor to amortize translucent shell surfaces).
+    // Backends with a compositor or page flip — including the UEFI GOP
+    // framebuffer used on real hardware — run the normal lazy blur path.
+    if (!g_shell_blur_available || !init_shell_blur_buffers(registry, dock_w, dock_h)) {
         registry->mb_blur_generation = 0;
         registry->dk_blur_generation = 0;
     }

@@ -750,6 +750,7 @@ KTEST(display_complete_present_emits_flip_complete_event)
     drain_display_events_for_test();
 
     DisplayHead *head = display_primary_head();
+    DisplayHead saved = *head;
     head->status = {};
     head->submitted_sequence = 7u;
     display_complete_present(head, 7u, DISPLAY_PRESENT_RESULT_OK, 4096u);
@@ -759,6 +760,7 @@ KTEST(display_complete_present_emits_flip_complete_event)
     KTEST_EXPECT_EQ(event.type, DISPLAY_EVENT_FLIP_COMPLETE);
     KTEST_EXPECT_EQ(event.sequence, 7u);
     KTEST_EXPECT_EQ(head->status.completed_sequence, 7u);
+    *head = saved;
 }
 
 KTEST(display_submit_and_complete_sequences_are_tracked_independently)
@@ -904,6 +906,7 @@ KTEST(display_complete_present_promotes_pending_buffer_to_front)
     drain_display_events_for_test();
 
     DisplayHead *head = display_primary_head();
+    DisplayHead saved = *head;
     head->status = {};
     head->buffer_count = 2u;
     head->front_buffer_index = 0u;
@@ -918,6 +921,7 @@ KTEST(display_complete_present_promotes_pending_buffer_to_front)
     KTEST_EXPECT(!head->pending_flip);
     KTEST_EXPECT_EQ(head->pending_flip_sequence, 0u);
     KTEST_EXPECT_EQ(head->buffer_in_flight_sequence[1], 0u);
+    *head = saved;
 }
 
 KTEST(display_fallback_wait_emits_vblank_event)
@@ -925,6 +929,7 @@ KTEST(display_fallback_wait_emits_vblank_event)
     drain_display_events_for_test();
 
     DisplayHead *head = display_primary_head();
+    DisplayHead saved = *head;
     head->caps.refresh_hz = 60u;
     head->caps.flags = 0u;
     head->status.completed_sequence = 11u;
@@ -938,6 +943,7 @@ KTEST(display_fallback_wait_emits_vblank_event)
     KTEST_EXPECT(display_event_wait(&event, false));
     KTEST_EXPECT_EQ(event.type, DISPLAY_EVENT_VBLANK);
     KTEST_EXPECT_EQ(event.sequence, 11u);
+    *head = saved;
 }
 
 KTEST(display_clip_rect_handles_negative_origin_without_overflow)

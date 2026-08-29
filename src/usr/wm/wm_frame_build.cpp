@@ -205,7 +205,7 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
         if (has_compose_union) {
             capture_shell_backdrop_for_rect(compose_union, const_cast<Registry *>(registry));
         }
-        if (!g_display_copy_path)
+        if (g_shell_blur_available)
             flush_shell_blur_updates(registry);
 
         if (draw_cursor && draw_software_cursor) {

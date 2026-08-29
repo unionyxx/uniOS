@@ -12,6 +12,7 @@ extern Surface g_menubar_blur_source;
 extern Surface g_dock_blur_source;
 extern DisplayCaps g_display_caps;
 extern bool g_display_copy_path;
+extern bool g_shell_blur_available;
 
 extern DisplayBufferHandle g_presentbuffer_handle;
 extern PresentBufferSlot g_presentbuffer_slots[MAX_PRESENT_BUFFER_SLOTS];

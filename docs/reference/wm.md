@@ -78,7 +78,7 @@ On every focus transition the WM posts `EVT_FOCUS`/`EVT_UNFOCUS` to the affected
 ## Wallpaper, Blur, Overlays
 
 - Wallpaper: the `.uowp` path comes from `/data/WALLPAPR.CFG` (fallback `/etc/wallpaper.conf` or the registry request); the theme variant is loaded, scaled cover-style to the screen, and published in the registry. Default: `/usr/share/wallpapers/default.uowp`.
-- Blur: the WM owns menubar/dock blur surfaces (two-pass box blur or material blur), regenerated on backdrop changes; disabled on copy-path backends.
+- Blur: the WM owns menubar/dock blur surfaces (two-pass box blur or material blur), regenerated on backdrop changes. It runs on page-flip backends and on copy-path backends that still advertise a compositor (`DISPLAY_FLAG_HAS_COMPOSITOR`, e.g. the UEFI GOP framebuffer used on real hardware); it is only suppressed on a truly compositor-less copy path, where there is nothing to amortize the translucent shell surfaces against.
 - Overlays: the Index launcher (app catalog + system actions, fuzzy scoring), control center, right-click menus, storage mode prompt, and toast notifications (4 s, 32-slot ring).
 
 ## Debug Telemetry and Benchmarking
