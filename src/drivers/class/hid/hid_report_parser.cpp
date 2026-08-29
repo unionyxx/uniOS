@@ -90,7 +90,7 @@ static void hid_reset_local_state(HidLocalState *local)
     if (local.usage_count == 0)
         return false;
     for (uint8_t i = 1; i < local.usage_count; i++) {
-        if (local.usages[i] != static_cast<uint16_t>(local.usages[0] + i))
+        if (static_cast<uint32_t>(local.usages[i]) != static_cast<uint32_t>(local.usages[0]) + static_cast<uint32_t>(i))
             return false;
     }
     return true;
