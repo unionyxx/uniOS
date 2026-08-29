@@ -11,6 +11,16 @@ project(
 )
 
 py = import('python').find_installation('python3')
+# The wallpaper packager requires cairosvg, which the default 'python3' may
+# lack (e.g. msys2's python3 on Windows has no cairosvg/pip). Probe 'python'
+# and prefer it when it can import cairosvg, so the SVG art is rasterized
+# instead of silently falling back to a gradient. CI's python3 already has it.
+if run_command(py, '-c', 'import cairosvg', check : false).returncode() != 0
+  py_alt = import('python').find_installation('python', required : false)
+  if py_alt.found() and run_command(py_alt, '-c', 'import cairosvg', check : false).returncode() == 0
+    py = py_alt
+  endif
+endif
 fs = import('fs')
 cpp = meson.get_compiler('cpp')
 ld_lld = find_program('ld.lld', required : true)

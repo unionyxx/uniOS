@@ -10,6 +10,8 @@ uniOS builds with Meson using the LLVM toolchain as a cross build. Configuring w
 - `qemu-system-x86_64` and OVMF UEFI firmware (for running)
 - `python3` with `Pillow` and `CairoSVG` (asset generation tools)
 
+  The wallpaper packager rasterizes `assets/wallpapers/*.svg` via CairoSVG and **requires** it (no silent fallback). If the default `python3` lacks CairoSVG (common on Windows where `python3` resolves to msys2's interpreter), `meson setup` probes `python` and prefers a CairoSVG-capable interpreter for the asset targets, so the SVG art is baked into the `.uowp` instead of a placeholder gradient.
+
 CI additionally installs `clang-format`, `clang-tidy`, and `cppcheck` for the developer checks.
 
 ## Configure and Build

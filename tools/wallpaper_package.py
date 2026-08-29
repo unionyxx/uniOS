@@ -15,8 +15,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     import cairosvg
-except Exception:
-    cairosvg = None
+except ImportError:
+    raise SystemExit(
+        "wallpaper_package: the 'cairosvg' module is required to rasterize wallpaper SVGs, "
+        "but was not found in the Python interpreter meson used to run this script. "
+        "Install cairosvg (and Pillow) into that interpreter and reconfigure the build."
+    )
 
 
 UOWP_MAGIC = 0x50574F55  # "UOWP", little-endian
@@ -49,24 +53,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def render_svg(svg_path: Path, width: int, height: int, variant: int) -> Image.Image:
-    if cairosvg is None:
-        # Fallback to a gradient if CairoSVG is missing. Each row is a constant
-        # color, so build it from one repeated pixel instead of a per-pixel loop.
-        rows = bytearray()
-        for y in range(height):
-            t = y / max(1, height - 1)
-            if variant == UOWP_VARIANT_LIGHT:
-                # Light theme: warm gradient
-                r = int(200 + 55 * t)
-                g = int(180 + 40 * t)
-                b = int(160 + 30 * t)
-            else:
-                # Dark theme: cool dark gradient
-                r = int(20 + 30 * t)
-                g = int(25 + 40 * t)
-                b = int(40 + 60 * t)
-            rows.extend(bytes((r, g, b, 255)) * width)
-        return Image.frombytes("RGBA", (width, height), bytes(rows))
     # Pass the SVG as bytes: cairosvg's url= handling is fragile with
     # non-URI paths (especially Windows drive letters).
     svg_bytes = svg_path.read_bytes()
