@@ -1,4 +1,12 @@
-#include "wm_core.h"
+#include "wm_damage.h"
+#include "wm_input.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
+
+DirtyRect g_dirty_rects[MAX_DIRTY_RECTS];
+int g_dirty_count = 0;
+bool g_window_visibility_cache_dirty = true;
+bool g_dirty_frame_ready = false;
 
 void collapse_dirty_rects_to_bounds()
 {

@@ -1,4 +1,11 @@
-#include "wm_core.h"
+#include "wm_main.h"
+#include "wm_present.h"
+#include "wm_window.h"
+#include "wm_input.h"
+#include "wm_damage.h"
+#include "wm_render.h"
+#include "wm_overlays.h"
+#include "wm_metrics.h"
 
 // Identity alias mode: on synchronous copy-path backends the scene buffer is
 // itself the present buffer, so the scene->present blit disappears. The

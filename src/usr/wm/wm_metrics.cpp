@@ -1,4 +1,4 @@
-#include "wm_core.h"
+#include "wm_metrics.h"
 
 WmMetrics g_metrics = {};
 

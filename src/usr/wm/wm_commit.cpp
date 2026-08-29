@@ -1,4 +1,8 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_render.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
 
 static WindowEntrySnapshot read_window_entry_snapshot(const WindowEntry &e)
 {

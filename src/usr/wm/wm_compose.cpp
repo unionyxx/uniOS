@@ -1,4 +1,9 @@
-#include "wm_core.h"
+#include "wm_render.h"
+#include "wm_damage.h"
+#include "wm_window.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
 
 void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_frame_index, int hover_button,
                             const Registry *registry)

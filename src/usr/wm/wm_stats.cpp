@@ -1,4 +1,8 @@
-#include "wm_core.h"
+#include "wm_present.h"
+#include "wm_window.h"
+#include "wm_settings.h"
+#include "wm_damage.h"
+#include "wm_metrics.h"
 
 static uint64_t g_tsc_freq_cached = 0;
 

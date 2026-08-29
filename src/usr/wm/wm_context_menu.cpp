@@ -1,4 +1,11 @@
-#include "wm_core.h"
+#include "wm_overlays.h"
+#include "wm_window.h"
+#include "wm_input.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
+
+ContextMenuState g_context_menu = {};
 
 static int resolve_context_menu_target_index()
 {

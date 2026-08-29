@@ -1,4 +1,9 @@
-#include "wm_core.h"
+#include "wm_overlays.h"
+#include "wm_window.h"
+#include "wm_damage.h"
+#include "wm_settings.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
 
 ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true, true, false, true, 180, false};
 

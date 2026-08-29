@@ -1,4 +1,10 @@
-#include "wm_core.h"
+#include "wm_overlays.h"
+#include "wm_window.h"
+#include "wm_input.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_settings.h"
+#include "wm_metrics.h"
 
 IndexState g_index = {};
 
@@ -445,7 +451,4 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
         row_y += row_h + row_gap;
     }
 }
-
-// Layout functions are defined in wm_logic.cpp and declared in wm_core.h:
-// control_panel_card_h(), control_panel_item_rect()
 

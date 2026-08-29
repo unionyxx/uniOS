@@ -1,4 +1,6 @@
-#include "wm_core.h"
+#include "wm_render.h"
+#include "wm_window.h"
+#include "wm_metrics.h"
 
 static int g_cached_inner_r = -1;
 static uint8_t g_bottom_corner_mask_lut[64][64] = {};

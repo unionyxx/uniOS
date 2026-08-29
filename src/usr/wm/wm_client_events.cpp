@@ -1,4 +1,5 @@
-#include "wm_core.h"
+#include "wm_input.h"
+#include "wm_window.h"
 
 void post_mouse_event_to_window(const Window &w, EventType type, int px, int py, uint8_t button, int8_t scroll_y)
 {

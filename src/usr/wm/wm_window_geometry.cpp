@@ -1,4 +1,5 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_metrics.h"
 
 DirtyRect window_client_bounds(const Window &w)
 {

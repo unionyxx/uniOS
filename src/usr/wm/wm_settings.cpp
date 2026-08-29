@@ -1,4 +1,9 @@
-#include "wm_core.h"
+#include "wm_settings.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
+
+uint32_t g_system_flags = SYSTEM_FLAG_SHOW_DESKTOP_GRID;
 
 static bool g_persist_settings_pending = false;
 

@@ -1,4 +1,11 @@
-#include "wm_core.h"
+#include "wm_overlays.h"
+#include "wm_window.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_settings.h"
+#include "wm_metrics.h"
+
+StoragePromptState g_storage_prompt = {};
 
 StoragePromptLayout storage_prompt_layout()
 {

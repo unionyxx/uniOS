@@ -1,43 +1,11 @@
-#include "wm_core.h"
-
-Surface g_screen;
-Surface g_backbuffer;
-Surface g_presentbuffer;
-Surface g_wallpaper;
-Surface g_menubar_blur;
-Surface g_dock_blur;
-Surface g_menubar_blur_source;
-Surface g_dock_blur_source;
-DisplayCaps g_display_caps;
-bool g_display_copy_path = false;
-
-DisplayBufferHandle g_presentbuffer_handle = 0;
-PresentBufferSlot g_presentbuffer_slots[MAX_PRESENT_BUFFER_SLOTS] = {};
-uint32_t g_presentbuffer_slot_count = 0;
-uint32_t g_presentbuffer_active_slot = 0;
-DisplayQueueState g_display_queue = {};
-WmFrameStats g_frame_stats = {};
-WmBenchState g_bench = {};
-
-Window g_windows[MAX_WINDOWS];
-int g_window_count = 0;
-int g_add_fail_logs = 0;
-uint32_t g_system_flags = SYSTEM_FLAG_SHOW_DESKTOP_GRID;
-
-DirtyRect g_dirty_rects[MAX_DIRTY_RECTS];
-DirtyRect g_window_outer_cache[MAX_WINDOWS];
-DirtyRect g_window_client_cache[MAX_WINDOWS];
-bool g_window_visible_cache[MAX_WINDOWS];
-DirtyRect g_window_visible_regions[MAX_WINDOWS][MAX_VISIBLE_REGIONS];
-int g_window_visible_region_count[MAX_WINDOWS];
-bool g_window_visible_region_overflow[MAX_WINDOWS] = {};
-int g_dirty_count = 0;
-bool g_window_visibility_cache_dirty = true;
-bool g_dirty_frame_ready = false;
-
-ContextMenuState g_context_menu = {};
-StoragePromptState g_storage_prompt = {};
-WmInputState g_input;
+#include "wm_main.h"
+#include "wm_present.h"
+#include "wm_window.h"
+#include "wm_input.h"
+#include "wm_damage.h"
+#include "wm_settings.h"
+#include "wm_overlays.h"
+#include "wm_metrics.h"
 
 extern "C" int main(int argc, char **argv)
 {

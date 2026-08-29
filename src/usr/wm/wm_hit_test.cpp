@@ -1,4 +1,8 @@
-#include "wm_core.h"
+#include "wm_input.h"
+#include "wm_window.h"
+#include "wm_overlays.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
 
 int hit_test_resize(const Window &w, int px, int py)
 {

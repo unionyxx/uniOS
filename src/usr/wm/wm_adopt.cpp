@@ -1,4 +1,5 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_metrics.h"
 
 static bool process_is_alive(uint32_t pid)
 {

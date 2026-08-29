@@ -1,4 +1,14 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_render.h"
+#include "wm_overlays.h"
+#include "wm_input.h"
+#include "wm_present.h"
+#include "wm_damage.h"
+#include "wm_metrics.h"
+
+Window g_windows[MAX_WINDOWS];
+int g_window_count = 0;
+int g_add_fail_logs = 0;
 
 int find_top_visible_user_window()
 {

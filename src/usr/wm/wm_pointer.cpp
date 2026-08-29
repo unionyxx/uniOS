@@ -1,4 +1,11 @@
-#include "wm_core.h"
+#include "wm_input.h"
+#include "wm_window.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_overlays.h"
+#include "wm_metrics.h"
+
+WmInputState g_input;
 
 void mark_cursor_transition_damage(int old_x, int old_y, GuiCursorKind old_kind, int new_x, int new_y,
                                    GuiCursorKind new_kind)

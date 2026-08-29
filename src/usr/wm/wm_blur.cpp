@@ -1,4 +1,5 @@
-#include "wm_core.h"
+#include "wm_render.h"
+#include "wm_metrics.h"
 
 static Surface g_blur_scratch = {};
 static Surface g_blur_pass_a = {};

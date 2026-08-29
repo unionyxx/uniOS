@@ -1,4 +1,28 @@
-#include "wm_core.h"
+#include "wm_present.h"
+#include "wm_settings.h"
+#include "wm_window.h"
+#include "wm_input.h"
+#include "wm_damage.h"
+#include "wm_metrics.h"
+
+Surface g_screen;
+Surface g_backbuffer;
+Surface g_presentbuffer;
+Surface g_wallpaper;
+Surface g_menubar_blur;
+Surface g_dock_blur;
+Surface g_menubar_blur_source;
+Surface g_dock_blur_source;
+DisplayCaps g_display_caps;
+bool g_display_copy_path = false;
+
+DisplayBufferHandle g_presentbuffer_handle = 0;
+PresentBufferSlot g_presentbuffer_slots[MAX_PRESENT_BUFFER_SLOTS] = {};
+uint32_t g_presentbuffer_slot_count = 0;
+uint32_t g_presentbuffer_active_slot = 0;
+DisplayQueueState g_display_queue = {};
+WmFrameStats g_frame_stats = {};
+WmBenchState g_bench = {};
 
 // Frame sequence state: the last submitted present sequence and the sequence
 // the next present will use. Owned here so bootstrap, frame build, and the

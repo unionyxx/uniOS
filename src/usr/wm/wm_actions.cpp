@@ -1,4 +1,5 @@
-#include "wm_core.h"
+#include "wm_overlays.h"
+#include "wm_window.h"
 
 void publish_settings_changed(Registry *registry)
 {

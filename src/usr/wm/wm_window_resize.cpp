@@ -1,4 +1,7 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_render.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
 
 static uint32_t next_configure_serial(Window &w)
 {

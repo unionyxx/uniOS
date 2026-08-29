@@ -1,4 +1,4 @@
-#include "wm_core.h"
+#include "wm_render.h"
 
 uint32_t mix_rgb(uint32_t a, uint32_t b, uint8_t t)
 {

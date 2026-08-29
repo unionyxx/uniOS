@@ -1,4 +1,11 @@
-#include "wm_core.h"
+#include "wm_main.h"
+#include "wm_settings.h"
+#include "wm_render.h"
+#include "wm_overlays.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_window.h"
+#include "wm_metrics.h"
 
 // Generation trackers: consume registry-side requests exactly once per
 // generation bump so a restarting client cannot replay a stale request.

@@ -1,4 +1,7 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_input.h"
+#include "wm_damage.h"
+#include "wm_metrics.h"
 
 void publish_window_scroll(const Window &w)
 {

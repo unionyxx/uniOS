@@ -1,4 +1,14 @@
-#include "wm_core.h"
+#include "wm_window.h"
+#include "wm_damage.h"
+#include "wm_present.h"
+#include "wm_metrics.h"
+
+DirtyRect g_window_outer_cache[MAX_WINDOWS];
+DirtyRect g_window_client_cache[MAX_WINDOWS];
+bool g_window_visible_cache[MAX_WINDOWS];
+DirtyRect g_window_visible_regions[MAX_WINDOWS][MAX_VISIBLE_REGIONS];
+int g_window_visible_region_count[MAX_WINDOWS];
+bool g_window_visible_region_overflow[MAX_WINDOWS] = {};
 
 void refresh_window_cache()
 {
