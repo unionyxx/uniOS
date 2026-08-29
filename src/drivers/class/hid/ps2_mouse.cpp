@@ -121,6 +121,21 @@ void ps2_mouse_init()
     pic_clear_mask(12); // Enable mouse IRQ
 }
 
+// Pointer acceleration: small moves stay 1:1 for precision; faster moves are
+// amplified so the cursor crosses the screen without many swipes.
+static constexpr int32_t ACCEL_THRESHOLD = 6;
+static constexpr uint32_t ACCEL_GAIN = 384; // /256 -> 1.5x above threshold
+
+static int32_t accelerate_delta(int32_t raw)
+{
+    int32_t magnitude = raw < 0 ? -raw : raw;
+    if (magnitude <= ACCEL_THRESHOLD)
+        return raw;
+    int32_t excess = magnitude - ACCEL_THRESHOLD;
+    int32_t boosted = ACCEL_THRESHOLD + (int32_t)((uint32_t)excess * ACCEL_GAIN / 256u);
+    return raw < 0 ? -boosted : boosted;
+}
+
 void ps2_mouse_handler()
 {
     uint8_t data = inb(MOUSE_DATA);
@@ -163,6 +178,9 @@ void ps2_mouse_handler()
                 dx |= 0xFFFFFF00;
             if (mouse_byte[0] & 0x20)
                 dy |= 0xFFFFFF00;
+
+            dx = accelerate_delta(dx);
+            dy = accelerate_delta(dy);
 
             state.x += dx;
             state.y -= dy; // Y is inverted
