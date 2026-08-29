@@ -17,14 +17,14 @@ The loader logs only through the UEFI console (`ConOut`); it does not use the se
 
 ## Display Mode Selection
 
-Meridian enumerates GOP modes and ranks them against an EDID hint:
+Meridian enumerates GOP modes and ranks them against EDID mode hints:
 
-- EDID is read from `EFI_EDID_ACTIVE_PROTOCOL` (falling back to `EFI_EDID_DISCOVERED_PROTOCOL`), validated by header magic and per-block checksums.
-- Preferred timings come from base-block detailed timing descriptors, CTA-861 extension blocks (a fixed VIC table up to 3840x2160@120), and DisplayID blocks.
+- EDID is read from `EFI_EDID_ACTIVE_PROTOCOL` (falling back to `EFI_EDID_DISCOVERED_PROTOCOL`). Validation requires only the header magic: blocks with corrupt checksums and blobs truncated below the count byte 126 declares are still parsed, because rejecting them would lose high-refresh timings on otherwise healthy panels.
+- Mode hints come from base-block detailed timing descriptors, CTA-861 extension blocks (a fixed VIC table up to 3840x2160@120 plus HDMI 1.4 VSDB 4K2K VICs), and DisplayID blocks (detailed types I/VII with the interlaced option bit, formula blocks). Up to 48 hints are kept and deduplicated.
 - Usable modes are nonzero-resolution modes with RGB8, BGR8, or bitmask pixel formats.
 - Ranking: exact EDID hint match, then within-hint, then pixel count, aspect, width, height, current mode. There is no resolution cap; ultra-wide, 1440p, and 4K panels are allowed.
 
-When the EDID hint matches the active mode exactly, Meridian publishes a `BootDisplayTiming` configuration table (36 bytes of timing data under a fixed GUID) that the kernel picks up via `boot_display_timing_init()`.
+After the GOP mode is set, Meridian publishes a `BootDisplayTiming` configuration table (36 bytes of timing data under a fixed GUID) carrying the best exact timing at the active resolution — even when the EDID's largest hint is a resolution the firmware did not select. The kernel picks it up via `boot_display_timing_init()`.
 
 ## Page Tables Built by the Loader
 

@@ -58,7 +58,7 @@ struct EdidRangeLimits
 
 struct EdidTimingList
 {
-    EdidTiming timings[64];
+    EdidTiming timings[96];
     uint32_t count;
 };
 
@@ -801,6 +801,16 @@ static void add_timing_candidate(EdidTimingList *list, const EdidTiming &timing)
         }
         if ((uint32_t)timing.source > (uint32_t)existing.source)
             existing.source = timing.source;
+        // Established/standard entries carry no blanking/sync geometry. If a
+        // later detailed descriptor describes the same mode, adopt its full
+        // timing so the mode can be marked exact.
+        if (existing.pixel_clock_khz == 0 && timing.pixel_clock_khz != 0) {
+            uint32_t order = existing.order;
+            EdidTimingSource source = existing.source;
+            existing = timing;
+            existing.order = order;
+            existing.source = source;
+        }
         return;
     }
 
@@ -895,7 +905,7 @@ static bool parse_standard_timing(const uint8_t *descriptor, uint8_t edid_revisi
             height = (width * 9u) / 16u;
             break;
         default:
-            return 0;
+            return false;
     }
 
     uint32_t refresh_hz = (descriptor[1] & 0x3Fu) + 60u;
@@ -919,6 +929,48 @@ static bool parse_standard_timing(const uint8_t *descriptor, uint8_t edid_revisi
     out_timing->source = EdidTimingSource::BaseStandard;
     out_timing->interlaced = false;
     return true;
+}
+
+struct EstablishedTiming
+{
+    uint16_t width;
+    uint16_t height;
+    uint8_t refresh_hz;
+    uint8_t byte_offset;
+    uint8_t bit;
+    bool interlaced;
+};
+
+// EDID 1.x base block bytes 35-37 (Established Timings I-III), bit order per
+// the VESA E-EDID release tables.
+static const EstablishedTiming k_established_timings[] = {
+    {720, 400, 70, 35, 7, false},  {720, 400, 88, 35, 6, false},  {640, 480, 60, 35, 5, false},
+    {640, 480, 67, 35, 4, false},  {640, 480, 72, 35, 3, false},  {640, 480, 75, 35, 2, false},
+    {800, 600, 56, 35, 1, false},  {800, 600, 60, 35, 0, false},  {800, 600, 72, 36, 7, false},
+    {800, 600, 75, 36, 6, false},  {832, 624, 75, 36, 5, false},  {1024, 768, 87, 36, 4, true},
+    {1024, 768, 70, 36, 3, false}, {1024, 768, 75, 36, 2, false}, {1280, 1024, 75, 36, 1, false},
+    {1152, 870, 75, 37, 7, false},
+};
+
+static void parse_established_timings(const uint8_t *edid, EdidTimingList *timings)
+{
+    if (!edid || !timings)
+        return;
+
+    for (uint32_t i = 0; i < sizeof(k_established_timings) / sizeof(k_established_timings[0]); i++) {
+        const EstablishedTiming &entry = k_established_timings[i];
+        if ((edid[entry.byte_offset] & (1u << entry.bit)) == 0)
+            continue;
+
+        EdidTiming timing = {};
+        timing.width = entry.width;
+        timing.height = entry.height;
+        timing.refresh_millihz = hz_to_millihz(entry.refresh_hz);
+        timing.pixel_clock_khz = 0;
+        timing.source = EdidTimingSource::BaseStandard;
+        timing.interlaced = entry.interlaced;
+        add_timing_candidate(timings, timing);
+    }
 }
 
 static bool parse_cta_vic_timing(uint8_t vic, EdidTiming *out_timing)
@@ -1009,7 +1061,7 @@ static bool parse_displayid_detailed_timing(const uint8_t *timing, bool type_7, 
     out_timing->vsync_start = 0;
     out_timing->vsync_end = 0;
     out_timing->source = EdidTimingSource::DisplayIdDetailed;
-    out_timing->interlaced = false;
+    out_timing->interlaced = (timing[3] & 0x80u) != 0;
     return true;
 }
 
@@ -1098,12 +1150,70 @@ static bool parse_monitor_range_limits(const uint8_t *descriptor, EdidRangeLimit
 
     uint32_t min_vertical_hz = descriptor[5];
     uint32_t max_vertical_hz = descriptor[6];
+    // EDID 1.4 offset flags: each set bit adds 255 to the matching rate byte.
+    if ((descriptor[4] & 0x01u) != 0)
+        max_vertical_hz += 255u;
+    if ((descriptor[4] & 0x02u) != 0)
+        min_vertical_hz += 255u;
     if (min_vertical_hz == 0 || max_vertical_hz == 0 || min_vertical_hz > max_vertical_hz)
         return false;
 
     out_limits->min_vertical_hz = min_vertical_hz;
     out_limits->max_vertical_hz = max_vertical_hz;
     return true;
+}
+
+// HDMI 1.4 vendor specific data block (IEEE OUI 00-0C-03) inside a CTA-861
+// extension: the trailing 4K2K VIC bytes describe ultra-HD timings that the
+// fixed CTA VIC table would otherwise miss on HDMI-only EDIDs.
+static void parse_cta_hdmi_vsdb_4k(const uint8_t *ext, uint32_t offset, uint32_t next, EdidTimingList *timings)
+{
+    if (!ext || !timings)
+        return;
+    uint32_t payload = offset + 1u;
+    if (next - payload < 7u)
+        return;
+    if (ext[payload] != 0x03u || ext[payload + 1u] != 0x0Cu || ext[payload + 2u] != 0x00u)
+        return;
+
+    uint8_t flags = ext[payload + 6u];
+    if ((flags & 0x20u) == 0)
+        return;
+
+    uint32_t vic_index = payload + 7u;
+    if ((flags & 0x80u) != 0)
+        vic_index += 2u;
+    if ((flags & 0x40u) != 0)
+        vic_index += 2u;
+
+    static const struct
+    {
+        uint8_t vic;
+        uint16_t width;
+        uint16_t height;
+        uint8_t refresh_hz;
+    } k_4k_vics[] = {
+        {1, 3840, 2160, 30},
+        {2, 3840, 2160, 25},
+        {3, 3840, 2160, 24},
+        {4, 4096, 2160, 24},
+    };
+
+    for (uint32_t i = 0; i < 4u && vic_index + i < next; i++) {
+        uint8_t vic = ext[vic_index + i] & 0x7Fu;
+        for (uint32_t k = 0; k < sizeof(k_4k_vics) / sizeof(k_4k_vics[0]); k++) {
+            if (k_4k_vics[k].vic != vic)
+                continue;
+            EdidTiming timing = {};
+            timing.width = k_4k_vics[k].width;
+            timing.height = k_4k_vics[k].height;
+            timing.refresh_millihz = hz_to_millihz(k_4k_vics[k].refresh_hz);
+            timing.source = EdidTimingSource::CtaVic;
+            timing.interlaced = false;
+            add_timing_candidate(timings, timing);
+            break;
+        }
+    }
 }
 
 static void parse_descriptor_block(const uint8_t *block, uint32_t start_offset, uint32_t end_offset,
@@ -1222,6 +1332,11 @@ static uint32_t count_exact_timing_candidates(const EdidTimingList &timings, uin
     return count;
 }
 
+// Real-world EDIDs frequently arrive with a corrupt block checksum or with
+// firmware truncating the blob to fewer blocks than byte 126 declares. The
+// timing data is usually still intact, so parse every present block and only
+// reject blobs whose header magic is wrong; falling back to 60 Hz here loses
+// high-refresh modes on otherwise healthy panels.
 static bool collect_edid_timings(const uint8_t *edid, uint64_t edid_size, EdidTimingList *out_timings,
                                  uint32_t *out_max_range_refresh)
 {
@@ -1233,12 +1348,19 @@ static bool collect_edid_timings(const uint8_t *edid, uint64_t edid_size, EdidTi
         return false;
 
     uint32_t available_blocks = (uint32_t)(edid_size / 128u);
-    uint32_t required_blocks = (uint32_t)edid[126] + 1u;
-    if (required_blocks == 0 || required_blocks > available_blocks)
+    uint32_t declared_blocks = (uint32_t)edid[126] + 1u;
+    if (declared_blocks == 0 || available_blocks == 0)
         return false;
-    for (uint32_t block = 0; block < required_blocks; block++) {
+    uint32_t block_count = declared_blocks < available_blocks ? declared_blocks : available_blocks;
+
+    uint32_t corrupt_blocks = 0;
+    for (uint32_t block = 0; block < block_count; block++) {
         if (!edid_block_checksum_valid(&edid[block * 128u]))
-            return false;
+            corrupt_blocks++;
+    }
+    if (corrupt_blocks != 0) {
+        BOOT_LOG("Display: EDID has %u block%s with invalid checksum; parsing timings anyway", corrupt_blocks,
+                 corrupt_blocks == 1 ? "" : "s");
     }
 
     *out_timings = {};
@@ -1253,7 +1375,9 @@ static bool collect_edid_timings(const uint8_t *edid, uint64_t edid_size, EdidTi
         }
     }
 
-    for (uint32_t block = 1; block < required_blocks; block++) {
+    parse_established_timings(edid, out_timings);
+
+    for (uint32_t block = 1; block < block_count; block++) {
         const uint8_t *ext = &edid[block * 128u];
         if (ext[0] == 0x02) {
             uint32_t dtd_offset = ext[2];
@@ -1276,6 +1400,8 @@ static bool collect_edid_timings(const uint8_t *edid, uint64_t edid_size, EdidTi
                                 add_timing_candidate(out_timings, timing);
                             }
                         }
+                    } else if (tag == 0x03) {
+                        parse_cta_hdmi_vsdb_4k(ext, offset, next, out_timings);
                     }
                     offset = next;
                 }
@@ -1392,7 +1518,8 @@ static EdidRefreshDecision detect_refresh_from_edid(const uint8_t *edid, uint64_
         return decision;
     }
 
-    if (max_range_refresh >= 30 && max_range_refresh <= 360) {
+    // EDID 1.4 offset flags allow vertical rates up to 510 Hz.
+    if (max_range_refresh >= 30 && max_range_refresh <= 510) {
         decision.refresh_hz = max_range_refresh;
         decision.refresh_millihz = hz_to_millihz(max_range_refresh);
         decision.used_range_limits = true;
@@ -1450,19 +1577,28 @@ int display_detect_modes_from_edid(const uint8_t *edid, uint64_t edid_size, Disp
         }
     }
 
-    for (uint32_t i = 0; i < timings.count && count < max_modes; i++) {
-        const EdidTiming &timing = timings.timings[i];
-        uint32_t flags = 0;
-        if (have_preferred_timing && i == preferred_timing_index) {
-            flags |= DISPLAY_MODE_FLAG_PREFERRED;
-            marked_preferred = true;
+    // Detailed descriptors carry exact blanking/sync geometry; emit them
+    // first so they survive the fixed mode-array cap even on EDIDs that also
+    // enumerate many established/standard timings.
+    for (uint32_t pass = 0; pass < 2 && count < max_modes; pass++) {
+        for (uint32_t i = 0; i < timings.count && count < max_modes; i++) {
+            const EdidTiming &timing = timings.timings[i];
+            bool exact_geometry = timing.pixel_clock_khz != 0;
+            if ((pass == 0) != exact_geometry)
+                continue;
+
+            uint32_t flags = 0;
+            if (have_preferred_timing && i == preferred_timing_index) {
+                flags |= DISPLAY_MODE_FLAG_PREFERRED;
+                marked_preferred = true;
+            }
+            if (timing_matches_current_mode(timing, current_mode)) {
+                flags |= DISPLAY_MODE_FLAG_CURRENT;
+                current_index = (int)count;
+            }
+            populate_mode_from_timing(timing, count + 1u, flags, measured_refresh_millihz, &out_modes[count]);
+            count++;
         }
-        if (timing_matches_current_mode(timing, current_mode)) {
-            flags |= DISPLAY_MODE_FLAG_CURRENT;
-            current_index = (int)count;
-        }
-        populate_mode_from_timing(timing, count + 1u, flags, measured_refresh_millihz, &out_modes[count]);
-        count++;
     }
 
     if (count == 0)

@@ -743,16 +743,11 @@ static uint16_t read_le16(const uint8_t *data)
     return static_cast<uint16_t>(static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8));
 }
 
-static bool edid_block_checksum_valid(const uint8_t *block)
-{
-    if (!block)
-        return false;
-    uint32_t sum = 0;
-    for (UINTN i = 0; i < k_edid_block_size; i++)
-        sum += block[i];
-    return (sum & 0xFFu) == 0;
-}
-
+// Firmware-provided EDID frequently carries corrupt block checksums, or is
+// truncated below the block count byte 126 declares. Rejecting the blob
+// entirely would throw away mode hints (and the kernel's refresh detection)
+// for otherwise healthy high-refresh panels, so accept any blob with a valid
+// header and parse however many blocks are actually present.
 static bool edid_buffer_valid(const uint8_t *edid, UINTN edid_size, uint32_t *out_blocks)
 {
     if (!edid || edid_size < k_edid_block_size)
@@ -763,16 +758,13 @@ static bool edid_buffer_valid(const uint8_t *edid, UINTN edid_size, uint32_t *ou
         return false;
 
     const uint32_t available_blocks = static_cast<uint32_t>(edid_size / k_edid_block_size);
-    const uint32_t required_blocks = static_cast<uint32_t>(edid[126]) + 1u;
-    if (required_blocks > available_blocks)
+    const uint32_t declared_blocks = static_cast<uint32_t>(edid[126]) + 1u;
+    if (declared_blocks == 0 || available_blocks == 0)
         return false;
-    for (uint32_t block = 0; block < required_blocks; block++) {
-        if (!edid_block_checksum_valid(edid + static_cast<UINTN>(block) * k_edid_block_size))
-            return false;
-    }
+    const uint32_t block_count = declared_blocks < available_blocks ? declared_blocks : available_blocks;
 
     if (out_blocks)
-        *out_blocks = required_blocks;
+        *out_blocks = block_count;
     return true;
 }
 
@@ -800,14 +792,49 @@ static bool edid_hint_better(const BootEdidModeHint &candidate, const BootEdidMo
     return false;
 }
 
-static void consider_edid_hint(BootEdidModeHint *best, bool *have_best, const BootEdidModeHint &candidate)
+struct BootEdidHintList
 {
-    if (!best || !have_best)
+    BootEdidModeHint hints[48];
+    uint32_t count;
+};
+
+static void add_edid_hint(BootEdidHintList *list, const BootEdidModeHint &candidate)
+{
+    if (!list || !candidate.valid)
         return;
-    if (edid_hint_better(candidate, *best, *have_best)) {
-        *best = candidate;
-        *have_best = true;
+
+    for (uint32_t i = 0; i < list->count; i++) {
+        BootEdidModeHint &existing = list->hints[i];
+        if (existing.width != candidate.width || existing.height != candidate.height ||
+            existing.refresh_millihz != candidate.refresh_millihz) {
+            continue;
+        }
+        if (!existing.has_exact_timing && candidate.has_exact_timing)
+            existing.has_exact_timing = true;
+        return;
     }
+
+    if (list->count < sizeof(list->hints) / sizeof(list->hints[0]))
+        list->hints[list->count++] = candidate;
+}
+
+static bool pick_edid_hint(const BootEdidHintList &list, uint32_t match_width, uint32_t match_height,
+                           BootEdidModeHint *out_hint)
+{
+    BootEdidModeHint best = {};
+    bool have_best = false;
+    for (uint32_t i = 0; i < list.count; i++) {
+        const BootEdidModeHint &hint = list.hints[i];
+        if (match_width != 0 && (hint.width != match_width || hint.height != match_height))
+            continue;
+        if (edid_hint_better(hint, best, have_best)) {
+            best = hint;
+            have_best = true;
+        }
+    }
+    if (have_best && out_hint)
+        *out_hint = best;
+    return have_best;
 }
 
 static bool parse_edid_detailed_timing(const uint8_t *dtd, BootEdidModeHint *out_hint)
@@ -886,7 +913,7 @@ static bool parse_displayid_detailed_timing(const uint8_t *timing, bool type_7, 
     out_hint->pixel_clock_khz = static_cast<uint32_t>(pixel_clock_hz / 1000ULL);
     out_hint->h_total = h_total;
     out_hint->v_total = v_total;
-    out_hint->interlaced = false;
+    out_hint->interlaced = (timing[3] & 0x80u) != 0;
     return true;
 }
 
@@ -899,10 +926,10 @@ static bool parse_displayid_formula_timing(const uint8_t *timing, BootEdidModeHi
     if (timing_formula > 1u)
         return false;
 
-    uint32_t width = static_cast<uint32_t>(read_le16(&timing[1])) + 1u;
-    uint32_t height = static_cast<uint32_t>(read_le16(&timing[3])) + 1u;
-    uint32_t refresh_hz = static_cast<uint32_t>(timing[5]) + 1u;
-    if (false) // Always false due to +1u above, but keeping structure if needed for future logic changes
+    const uint32_t width = static_cast<uint32_t>(read_le16(&timing[1])) + 1u;
+    const uint32_t height = static_cast<uint32_t>(read_le16(&timing[3])) + 1u;
+    const uint32_t refresh_hz = static_cast<uint32_t>(timing[5]) + 1u;
+    if (width == 0 || height == 0 || refresh_hz == 0)
         return false;
 
     *out_hint = {};
@@ -914,9 +941,9 @@ static bool parse_displayid_formula_timing(const uint8_t *timing, BootEdidModeHi
     return true;
 }
 
-static void parse_displayid_extension_for_hint(const uint8_t *ext, BootEdidModeHint *best, bool *have_best)
+static void parse_displayid_extension_for_hint(const uint8_t *ext, BootEdidHintList *list)
 {
-    if (!ext || !best || !have_best)
+    if (!ext || !list)
         return;
 
     uint32_t payload_len = ext[2];
@@ -938,13 +965,13 @@ static void parse_displayid_extension_for_hint(const uint8_t *ext, BootEdidModeH
             for (uint32_t i = 0; i < block_len; i += 20u) {
                 BootEdidModeHint hint = {};
                 if (parse_displayid_detailed_timing(&ext[payload + i], type_7, &hint))
-                    consider_edid_hint(best, have_best, hint);
+                    add_edid_hint(list, hint);
             }
         } else if ((tag == 0x24u || tag == 0x25u) && (block_len % 6u) == 0) {
             for (uint32_t i = 0; i < block_len; i += 6u) {
                 BootEdidModeHint hint = {};
                 if (parse_displayid_formula_timing(&ext[payload + i], &hint))
-                    consider_edid_hint(best, have_best, hint);
+                    add_edid_hint(list, hint);
             }
         }
 
@@ -990,18 +1017,73 @@ static bool parse_cta_vic_hint(uint8_t vic, BootEdidModeHint *out_hint)
     return false;
 }
 
-static BootEdidModeHint parse_best_edid_mode_hint(const uint8_t *edid, UINTN edid_size)
+// HDMI 1.4 vendor specific data block (IEEE OUI 00-0C-03): the trailing 4K2K
+// VIC bytes describe ultra-HD timings that HDMI-only EDIDs use instead of the
+// CTA VIC table.
+static void parse_cta_hdmi_vsdb_4k_hints(const uint8_t *ext, uint32_t offset, uint32_t next, BootEdidHintList *list)
 {
-    BootEdidModeHint best = {};
-    bool have_best = false;
+    if (!ext || !list)
+        return;
+    const uint32_t payload = offset + 1u;
+    if (next < payload + 7u)
+        return;
+    if (ext[payload] != 0x03u || ext[payload + 1u] != 0x0Cu || ext[payload + 2u] != 0x00u)
+        return;
+
+    const uint8_t flags = ext[payload + 6u];
+    if ((flags & 0x20u) == 0)
+        return;
+
+    uint32_t vic_index = payload + 7u;
+    if ((flags & 0x80u) != 0)
+        vic_index += 2u;
+    if ((flags & 0x40u) != 0)
+        vic_index += 2u;
+
+    static const struct
+    {
+        uint8_t vic;
+        uint16_t width;
+        uint16_t height;
+        uint8_t refresh_hz;
+    } k_4k_vics[] = {
+        {1, 3840, 2160, 30},
+        {2, 3840, 2160, 25},
+        {3, 3840, 2160, 24},
+        {4, 4096, 2160, 24},
+    };
+
+    for (uint32_t i = 0; i < 4u && vic_index + i < next; i++) {
+        const uint8_t vic = ext[vic_index + i] & 0x7Fu;
+        for (uint32_t k = 0; k < sizeof(k_4k_vics) / sizeof(k_4k_vics[0]); k++) {
+            if (k_4k_vics[k].vic != vic)
+                continue;
+            BootEdidModeHint hint = {};
+            hint.valid = true;
+            hint.width = k_4k_vics[k].width;
+            hint.height = k_4k_vics[k].height;
+            hint.refresh_millihz = static_cast<uint32_t>(k_4k_vics[k].refresh_hz) * 1000u;
+            hint.interlaced = false;
+            add_edid_hint(list, hint);
+            break;
+        }
+    }
+}
+
+static void parse_edid_mode_hints(const uint8_t *edid, UINTN edid_size, BootEdidHintList *list)
+{
+    if (!list)
+        return;
+    *list = {};
+
     uint32_t block_count = 0;
     if (!edid_buffer_valid(edid, edid_size, &block_count))
-        return best;
+        return;
 
     for (uint32_t offset = 54; offset + 18u <= 126u; offset += 18u) {
         BootEdidModeHint hint = {};
         if (parse_edid_detailed_timing(&edid[offset], &hint))
-            consider_edid_hint(&best, &have_best, hint);
+            add_edid_hint(list, hint);
     }
 
     for (uint32_t block = 1; block < block_count; block++) {
@@ -1018,12 +1100,15 @@ static BootEdidModeHint parse_best_edid_mode_hint(const uint8_t *edid, UINTN edi
                     uint32_t next = offset + 1u + payload_len;
                     if (next > dtd_offset)
                         break;
-                    if ((header >> 5) == 0x02u) {
+                    const uint8_t tag = header >> 5;
+                    if (tag == 0x02u) {
                         for (uint32_t i = offset + 1u; i < next; i++) {
                             BootEdidModeHint hint = {};
                             if (parse_cta_vic_hint(ext[i] & 0x7Fu, &hint))
-                                consider_edid_hint(&best, &have_best, hint);
+                                add_edid_hint(list, hint);
                         }
+                    } else if (tag == 0x03u) {
+                        parse_cta_hdmi_vsdb_4k_hints(ext, offset, next, list);
                     }
                     offset = next;
                 }
@@ -1031,24 +1116,22 @@ static BootEdidModeHint parse_best_edid_mode_hint(const uint8_t *edid, UINTN edi
             for (uint32_t offset = dtd_offset; offset + 18u <= 127u; offset += 18u) {
                 BootEdidModeHint hint = {};
                 if (parse_edid_detailed_timing(&ext[offset], &hint))
-                    consider_edid_hint(&best, &have_best, hint);
+                    add_edid_hint(list, hint);
             }
             continue;
         }
 
         if (ext[0] == 0x70u) {
-            parse_displayid_extension_for_hint(ext, &best, &have_best);
+            parse_displayid_extension_for_hint(ext, list);
             continue;
         }
 
         for (uint32_t offset = 0; offset + 18u <= 127u; offset += 18u) {
             BootEdidModeHint hint = {};
             if (parse_edid_detailed_timing(&ext[offset], &hint))
-                consider_edid_hint(&best, &have_best, hint);
+                add_edid_hint(list, hint);
         }
     }
-
-    return best;
 }
 
 static bool gop_pixel_format_supported(EFI_GRAPHICS_PIXEL_FORMAT format)
@@ -1310,9 +1393,12 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     void *edid_copy = nullptr;
     UINTN edid_size = 0;
     copy_edid_from_protocols(gop_handle, &edid_copy, &edid_size);
-    BootEdidModeHint edid_hint = parse_best_edid_mode_hint(static_cast<const uint8_t *>(edid_copy), edid_size);
+    BootEdidHintList edid_hints = {};
+    parse_edid_mode_hints(static_cast<const uint8_t *>(edid_copy), edid_size, &edid_hints);
+    BootEdidModeHint edid_hint = {};
+    const bool have_edid_hint = pick_edid_hint(edid_hints, 0, 0, &edid_hint);
 
-    status = select_best_gop_mode(gop, edid_hint.valid ? &edid_hint : nullptr);
+    status = select_best_gop_mode(gop, have_edid_hint ? &edid_hint : nullptr);
     if (efi_error(status)) {
         if (edid_copy)
             g_boot_services->FreePool(edid_copy);
@@ -1389,8 +1475,15 @@ static void publish_boot_display_timing(const BootEdidModeHint &hint, uint32_t a
     *out_base = gop->Mode->FrameBufferBase;
     *out_size = gop->Mode->FrameBufferSize;
 
-    publish_boot_display_timing(edid_hint, static_cast<uint32_t>(out_framebuffer->width),
-                                static_cast<uint32_t>(out_framebuffer->height));
+    // Publish the best exact timing for the resolution the display is
+    // actually scanning out, even when the EDID's largest hint is a
+    // resolution the firmware did not (or could not) select.
+    BootEdidModeHint active_hint = {};
+    if (pick_edid_hint(edid_hints, static_cast<uint32_t>(out_framebuffer->width),
+                       static_cast<uint32_t>(out_framebuffer->height), &active_hint)) {
+        publish_boot_display_timing(active_hint, static_cast<uint32_t>(out_framebuffer->width),
+                                    static_cast<uint32_t>(out_framebuffer->height));
+    }
 
     return EFI_SUCCESS;
 }

@@ -16,9 +16,8 @@ static void init_edid(uint8_t *edid, uint32_t block_count)
     edid[19] = 0x04;
     edid[20] = 0xA5;
     edid[24] = 0x0A;
-    edid[35] = 0x01;
-    edid[36] = 0x01;
-    edid[37] = 0x01;
+    // Established timing bytes 35-37 stay zero so tests only see the modes
+    // they write explicitly.
     for (uint32_t offset = 38; offset < 54; offset += 2) {
         edid[offset] = 0x01;
         edid[offset + 1] = 0x01;
@@ -363,16 +362,180 @@ KTEST(display_edid_uses_cta_vic_when_exact_mode_is_only_in_extension)
     KTEST_EXPECT_EQ(detected, 120u);
 }
 
-KTEST(display_edid_invalid_checksum_falls_back_to_60hz)
+KTEST(display_edid_tolerates_corrupt_base_block_checksum)
 {
     uint8_t edid[128];
     init_edid(edid, 1);
     write_detailed_timing(&edid[54], 1920, 1080, 180, false);
     finalize_edid_block(edid);
-    edid[127] ^= 0x01u;
+    edid[127] ^= 0x5Au;
+
+    uint32_t detected = display_detect_refresh_hz_from_edid(edid, sizeof(edid), 1920, 1080);
+    KTEST_EXPECT_EQ(detected, 180u);
+}
+
+KTEST(display_edid_tolerates_corrupt_extension_block_checksum)
+{
+    uint8_t edid[256];
+    init_edid(edid, 2);
+    write_detailed_timing(&edid[54], 1280, 720, 60, false);
+    write_cta_video_block(&edid[128], 63);
+    finalize_edid_block(&edid[0]);
+    finalize_edid_block(&edid[128]);
+    edid[128 + 127] ^= 0xFFu;
+
+    uint32_t detected = display_detect_refresh_hz_from_edid(edid, sizeof(edid), 1920, 1080);
+    KTEST_EXPECT_EQ(detected, 120u);
+}
+
+KTEST(display_edid_tolerates_truncated_extension_block)
+{
+    uint8_t edid[256];
+    init_edid(edid, 2);
+    write_detailed_timing(&edid[54], 1920, 1080, 180, false);
+    finalize_edid_block(&edid[0]);
+    finalize_edid_block(&edid[128]);
+
+    // Firmware handed over only the base block even though byte 126 declares
+    // an extension; the base timings must still be usable.
+    uint32_t detected = display_detect_refresh_hz_from_edid(edid, 128, 1920, 1080);
+    KTEST_EXPECT_EQ(detected, 180u);
+}
+
+KTEST(display_edid_rejects_missing_header_magic)
+{
+    uint8_t edid[128];
+    init_edid(edid, 1);
+    write_detailed_timing(&edid[54], 1920, 1080, 180, false);
+    finalize_edid_block(edid);
+    edid[3] = 0x00u;
 
     uint32_t detected = display_detect_refresh_hz_from_edid(edid, sizeof(edid), 1920, 1080);
     KTEST_EXPECT_EQ(detected, 60u);
+}
+
+KTEST(display_edid_detects_established_timings)
+{
+    uint8_t edid[128];
+    init_edid(edid, 1);
+    write_detailed_timing(&edid[54], 1920, 1080, 60, false);
+    edid[35] = 0x20u; // 640x480@60
+    edid[36] = 0x1Cu; // 1024x768@87 interlaced, @70, @75
+    finalize_edid_block(edid);
+
+    KTEST_EXPECT_EQ(display_detect_refresh_hz_from_edid(edid, sizeof(edid), 640, 480), 60u);
+    // Progressive candidates win first, so the 87 Hz interlaced entry loses.
+    KTEST_EXPECT_EQ(display_detect_refresh_hz_from_edid(edid, sizeof(edid), 1024, 768), 75u);
+}
+
+KTEST(display_edid_range_limits_honor_edid14_offsets)
+{
+    uint8_t edid[128];
+    init_edid(edid, 1);
+    write_detailed_timing(&edid[54], 1920, 1080, 60, false);
+    write_range_limits(&edid[72], 48, 200);
+    edid[72 + 4] = 0x01u; // EDID 1.4: add 255 to the max vertical rate
+    finalize_edid_block(edid);
+
+    uint32_t detected = display_detect_refresh_hz_from_edid(edid, sizeof(edid), 2560, 1440);
+    KTEST_EXPECT_EQ(detected, 455u);
+}
+
+KTEST(display_edid_uses_hdmi_vsdb_4k_vics)
+{
+    uint8_t edid[256];
+    init_edid(edid, 2);
+    write_detailed_timing(&edid[54], 1920, 1080, 60, false);
+
+    uint8_t *ext = &edid[128];
+    kstring::zero_memory(ext, 128);
+    ext[0] = 0x02;
+    ext[1] = 0x03;
+    ext[2] = 0x10;
+    ext[4] = (uint8_t)((0x03u << 5) | 0x0Bu); // vendor specific data block, 11 payload bytes
+    ext[5] = 0x03;                            // IEEE OUI 00-0C-03 (HDMI)
+    ext[6] = 0x0C;
+    ext[7] = 0x00;
+    ext[8] = 0x10; // physical address 1.0.0.0
+    ext[9] = 0x00;
+    ext[10] = 0x00;
+    ext[11] = 0x20; // HDMI_Video_Present, no latency fields
+    ext[12] = 1;    // 3840x2160@30
+    ext[13] = 2;    // 3840x2160@25
+    ext[14] = 3;    // 3840x2160@24
+    ext[15] = 4;    // 4096x2160@24
+    finalize_edid_block(&edid[0]);
+    finalize_edid_block(ext);
+
+    KTEST_EXPECT_EQ(display_detect_refresh_hz_from_edid(edid, sizeof(edid), 3840, 2160), 30u);
+    KTEST_EXPECT_EQ(display_detect_refresh_hz_from_edid(edid, sizeof(edid), 4096, 2160), 24u);
+}
+
+KTEST(display_edid_displayid_detailed_marks_interlaced)
+{
+    uint8_t edid[256];
+    init_edid(edid, 2);
+    write_detailed_timing(&edid[54], 1920, 1080, 60, false);
+    write_displayid_detailed_block(&edid[128], 1920, 1080, 180, true);
+    edid[128 + 11] |= 0x80u; // options byte: interlaced
+    finalize_edid_block(&edid[0]);
+    finalize_edid_block(&edid[128]);
+
+    // Only the progressive 60 Hz DTD may answer when progressive modes exist.
+    KTEST_EXPECT_EQ(display_detect_refresh_hz_from_edid(edid, sizeof(edid), 1920, 1080), 60u);
+
+    DisplayMode modes[4] = {};
+    int count = display_detect_modes_from_edid(edid, sizeof(edid), modes, 4u, nullptr, 0u);
+    KTEST_EXPECT_EQ(count, 2);
+    bool found_interlaced_180 = false;
+    for (int i = 0; i < count; i++) {
+        if (modes[i].refresh_hz == 180u) {
+            found_interlaced_180 = (modes[i].flags & DISPLAY_MODE_FLAG_INTERLACED) != 0;
+        }
+    }
+    KTEST_EXPECT(found_interlaced_180);
+}
+
+KTEST(display_edid_detailed_geometry_upgrades_established_duplicate)
+{
+    uint8_t edid[256];
+    init_edid(edid, 2);
+    edid[36] = 0x04u; // established 1024x768@75 (no geometry)
+    uint8_t *ext = &edid[128];
+    kstring::zero_memory(ext, 128);
+    ext[0] = 0x02;
+    ext[1] = 0x03;
+    ext[2] = 0x04; // DTDs start right after the empty data section
+    write_detailed_timing(&ext[4], 1024, 768, 75, false);
+    finalize_edid_block(&edid[0]);
+    finalize_edid_block(ext);
+
+    DisplayMode modes[8] = {};
+    int count = display_detect_modes_from_edid(edid, sizeof(edid), modes, 8u, nullptr, 0u);
+    bool found_exact = false;
+    for (int i = 0; i < count; i++) {
+        if (modes[i].width == 1024u && modes[i].height == 768u && modes[i].refresh_hz == 75u &&
+            (modes[i].flags & DISPLAY_MODE_FLAG_EXACT_TIMING) != 0) {
+            found_exact = true;
+        }
+    }
+    KTEST_EXPECT(found_exact);
+}
+
+KTEST(display_edid_mode_list_prefers_exact_geometry_when_capped)
+{
+    uint8_t edid[128];
+    init_edid(edid, 1);
+    write_detailed_timing(&edid[54], 1920, 1080, 180, false);
+    edid[35] = 0xFFu; // eight established low-resolution modes
+    finalize_edid_block(edid);
+
+    DisplayMode modes[1] = {};
+    int count = display_detect_modes_from_edid(edid, sizeof(edid), modes, 1u, nullptr, 0u);
+    KTEST_EXPECT_EQ(count, 1);
+    KTEST_EXPECT_EQ(modes[0].width, 1920u);
+    KTEST_EXPECT_EQ(modes[0].height, 1080u);
+    KTEST_EXPECT_EQ(modes[0].refresh_hz, 180u);
 }
 
 KTEST(display_edid_uses_range_limits_when_exact_mode_is_missing)

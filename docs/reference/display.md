@@ -1,6 +1,15 @@
 # Display
 
-The display path is built on the UEFI GOP framebuffer handed off by Meridian. There is no native GPU modesetting: the only backend is `FirmwareFramebuffer`, and the runtime resolution is fixed to the boot GOP mode. EDID-derived mode lists are reported through the display API, but a mode change succeeds only when it matches the active mode.
+The display path is built on the UEFI GOP framebuffer handed off by Meridian. There is no native GPU modesetting: the only backend is `FirmwareFramebuffer`, and the runtime resolution is fixed to the boot GOP mode. EDID-derived mode lists are reported through the display API, but a mode change succeeds only when it matches the active mode. The scanout refresh the firmware programmed is likewise fixed; EDID detection reports it, it cannot change it.
+
+## Refresh Rate Detection
+
+The kernel re-parses the EDID blob handed off in `BootFramebuffer` (`display_detect_refresh_millihz_from_edid`, `display_detect_modes_from_edid` in `src/drivers/video/display.cpp`):
+
+- Timing sources: base-block detailed timing descriptors, standard timings, established timings I-III, CTA-861 video data block VICs (fixed table up to 3840x2160@120), HDMI 1.4 VSDB 4K2K VICs, CTA detailed descriptors, and DisplayID extensions (detailed types I/VII with the interlaced option bit, formula blocks). Monitor range limits are read including the EDID 1.4 +255 Hz offset flags.
+- Tolerance: only the header magic is fatal. Blocks with corrupt checksums and blobs truncated below the declared extension count are still parsed (real-world high-refresh EDIDs frequently fail checksums), and duplicate timings from weaker sources are upgraded in place when a detailed descriptor later supplies exact blanking/sync geometry.
+- Decision order for the active resolution: exact timing match (closest to the hint when one is supplied, otherwise the highest refresh, progressive preferred), then monitor range limits (30-510 Hz), then the firmware boot handoff, then a 60 Hz fallback.
+- Mode lists (up to 32 per connector) emit detailed descriptors first so exact-geometry modes survive the cap; `DISPLAY_MODE_FLAG_PREFERRED` marks the highest-resolution/highest-refresh entry, `DISPLAY_MODE_FLAG_CURRENT` the entry matching the active mode, `DISPLAY_MODE_FLAG_EXACT_TIMING` entries with full blanking/sync data.
 
 ## Kernel 2D Engine
 
