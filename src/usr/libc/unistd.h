@@ -26,10 +26,15 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 
 #include <uapi/display.h>
 #include <uapi/fs.h>
+#include <uapi/input.h>
 int stat(const char *path, struct VNodeStat *buf);
 int get_volumes(struct VolumeInfo *out, size_t max_count);
 int get_storage_mode(void);
 int set_storage_mode(int mode);
+int input_enum_devices(InputDeviceInfo *out, size_t max_count);
+int input_set_pointer_speed(uint32_t multiplier);
+int input_set_repeat_rate(uint32_t delay_ms, uint32_t rate_ms);
+int input_set_device_enabled(uint32_t id, int enabled);
 #include <uapi/event.h>
 #include <uapi/sysinfo.h>
 int get_procs(struct ProcessInfo *out, size_t max_count);
@@ -93,4 +98,3 @@ void sync(void);
 #ifdef __cplusplus
 }
 #endif
-

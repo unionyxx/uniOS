@@ -3,13 +3,12 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <uapi/fs.h>
-#include <uapi/syscalls.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
+#include <uapi/fs.h>
+#include <uapi/syscalls.h>
 
 #include "syscall.h"
-
 
 void exit(int status)
 {
@@ -123,6 +122,26 @@ int get_storage_mode(void)
 int set_storage_mode(int mode)
 {
     return (int)syscall1(SYS_STORAGE_SET_MODE, (uint64_t)mode);
+}
+
+int input_enum_devices(InputDeviceInfo *out, size_t max_count)
+{
+    return (int)syscall2(SYS_INPUT_ENUM_DEVICES, (uint64_t)out, (uint64_t)max_count);
+}
+
+int input_set_pointer_speed(uint32_t multiplier)
+{
+    return (int)syscall1(SYS_INPUT_SET_POINTER_SPEED, (uint64_t)multiplier);
+}
+
+int input_set_repeat_rate(uint32_t delay_ms, uint32_t rate_ms)
+{
+    return (int)syscall2(SYS_INPUT_SET_REPEAT_RATE, (uint64_t)delay_ms, (uint64_t)rate_ms);
+}
+
+int input_set_device_enabled(uint32_t id, int enabled)
+{
+    return (int)syscall2(SYS_INPUT_SET_DEVICE_ENABLED, (uint64_t)id, (uint64_t)enabled);
 }
 
 int get_time(struct SysTime *time)
@@ -369,7 +388,8 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 
 int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 {
-    return (int)syscall6(SYS_EPOLL_WAIT, (uint64_t)epfd, (uint64_t)events, (uint64_t)maxevents, (uint64_t)timeout, 0, 0);
+    return (int)syscall6(SYS_EPOLL_WAIT, (uint64_t)epfd, (uint64_t)events, (uint64_t)maxevents, (uint64_t)timeout, 0,
+                         0);
 }
 
 int mprotect(void *addr, size_t len, int prot)
@@ -379,7 +399,8 @@ int mprotect(void *addr, size_t len, int prot)
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, int64_t offset)
 {
-    return (void *)syscall6(SYS_MMAP, (uint64_t)addr, (uint64_t)length, (uint64_t)prot, (uint64_t)flags, (uint64_t)fd, (uint64_t)offset);
+    return (void *)syscall6(SYS_MMAP, (uint64_t)addr, (uint64_t)length, (uint64_t)prot, (uint64_t)flags, (uint64_t)fd,
+                            (uint64_t)offset);
 }
 
 int munmap(void *addr, size_t length)
@@ -421,4 +442,3 @@ void sync(void)
 {
     syscall0(SYS_SYNC);
 }
-

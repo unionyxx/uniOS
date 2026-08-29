@@ -66,6 +66,32 @@ static inline bool cfg_write_text_file(const char *path, const char *contents)
     return ok;
 }
 
+// Atomic-ish replacement: write <path>.tmp, unlink the destination, then rename.
+// FAT32 rename refuses to overwrite an existing destination, so the unlink is
+// required. A crash mid-write leaves <path>.tmp (or nothing) and the original
+// intact; a crash between unlink and rename drops <path>, which the bootstrap
+// config (/etc/...) covers. This avoids the truncate-then-write window where a
+// crashed write of <path> itself would corrupt the boot config.
+static inline bool cfg_write_text_file_atomic(const char *path, const char *contents)
+{
+    if (!path || !contents)
+        return false;
+    char tmp[260];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof(tmp))
+        return cfg_write_text_file(path, contents); // path too long: best effort
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return false;
+    size_t len = strlen(contents);
+    bool ok = write(fd, contents, len) == (int)len;
+    close(fd);
+    if (!ok)
+        return false;
+    unlink(path); // best-effort; ignore "no such file"
+    return rename(tmp, path) == 0;
+}
+
 static inline bool cfg_line_value(const char *config, const char *key, char *out, size_t out_size)
 {
     if (!config || !key || !out || out_size == 0)
