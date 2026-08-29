@@ -43,7 +43,7 @@ At startup the GUI picks a pixel size from the framebuffer dimensions (11-15, cl
 | `inter-title` | Inter Title | Headings and emphasis |
 | `geist-mono` | Geist Mono | Terminal and code |
 
-Filenames follow `<prefix>-<size>.uof`. Each family applies a gamma boost through its alpha lookup table (UI 145, Title 100, Mono 175). When a font fails to load, a built-in 8x8 bitmap font takes over.
+Filenames follow `<prefix>-<size>.uof`. The atlas stores 8-bit linear pixel-coverage per glyph; the runtime blitter lifts fg/bg to linear light, blends by coverage, and encodes back to sRGB, so anti-aliased edges composite with correct perceptual weights. Only light text on a dark backdrop gets coverage shaping (a strong gamma pulls its bright fringes toward the background, which otherwise read as a bold halo); dark text on a light backdrop is blended unshaped, since any coverage gamma crushes thin strokes and makes weight uneven. When a glyph is drawn over a fully opaque background, the blend is write-only (no destination read). When a font fails to load, a built-in 8x8 bitmap font takes over.
 
 Generated font files are staged under:
 
