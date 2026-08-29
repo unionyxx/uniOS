@@ -52,6 +52,13 @@ void draw_toast_overlay_clipped(const DirtyRect &clip)
     if (!g_backbuffer.buffer || g_notifications.count == 0)
         return;
 
+    // Suppress the toast while the control center is open: the notification
+    // center list already shows recent notifications, so a live toast would
+    // only overlap the panel. New arrivals appear at the top of the list
+    // instead; a still-live toast reappears once the center closes.
+    if (g_control_center.open)
+        return;
+
     int toast_w = gui_scaled_metric(320);
     int toast_h = notification_pill_h();
     int margin = gui_space_2();
