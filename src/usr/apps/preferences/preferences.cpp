@@ -5,6 +5,7 @@
 #include <uapi/event.h>
 #include <uapi/fs.h>
 #include <uapi/gui.h>
+#include <uapi/input.h>
 
 #include "../../libapp/app.h"
 #include "../../libapp/widgets.h"
@@ -30,8 +31,36 @@ enum PrefSection
     PREF_SECTION_DESKTOP = 1,
     PREF_SECTION_NETWORK = 2,
     PREF_SECTION_SYSTEM = 3,
-    PREF_SECTION_COUNT = 4,
+    PREF_SECTION_DEVICES = 4,
+    PREF_SECTION_COUNT = 5,
 };
+
+// Pointer-speed slider runs 50..200 (percent of 1.0x); the kernel multiplier is
+// Q8 (256 == 1.0x), so value 100 maps to 256. Key-repeat slider runs 0..100
+// (higher == faster); rate_ms is derived from it while the delay is persisted.
+static constexpr uint32_t POINTER_SPEED_MIN = 50;
+static constexpr uint32_t POINTER_SPEED_MAX = 200;
+static constexpr uint32_t POINTER_SPEED_DEFAULT = 100;
+static constexpr uint32_t KEY_REPEAT_DEFAULT = 95;
+
+static uint32_t pointer_speed_to_mult(uint32_t slider)
+{
+    return slider * 256u / 100u;
+}
+static uint32_t pointer_mult_to_slider(uint32_t mult)
+{
+    return mult * 100u / 256u;
+}
+static uint32_t key_repeat_slider_to_rate(uint32_t slider)
+{
+    if (slider > 100)
+        slider = 100;
+    return 500u - slider * 490u / 100u;
+}
+static uint32_t key_repeat_rate_to_slider(uint32_t rate_ms)
+{
+    return (500u - rate_ms) * 100u / 490u;
+}
 
 struct PreferencesState
 {
@@ -46,6 +75,13 @@ struct PreferencesState
     char wallpaper_path[256];
     char status[128];
     int section;
+    // Input device settings (Devices tab).
+    uint32_t input_pointer_speed; // Q8 kernel multiplier (256 == 1.0x)
+    uint32_t input_repeat_delay;  // ms
+    uint32_t input_repeat_rate;   // ms
+    InputDeviceInfo devices[INPUT_MAX_DEVICES];
+    int device_count;
+    uint64_t last_enum_tick;
 };
 
 struct PreferencesApp
@@ -67,6 +103,10 @@ struct PreferencesApp
     WidgetToggle dhcp;
     WidgetToggle terminal;
     WidgetSlider volume;
+    WidgetSlider pointer_speed;
+    WidgetSlider key_repeat;
+    WidgetToggle device_toggles[INPUT_MAX_DEVICES];
+    Rect device_row_rects[INPUT_MAX_DEVICES];
     WidgetHelp help;
 };
 
@@ -93,6 +133,38 @@ static void safe_copy_text(char *dst, size_t dst_size, const char *src)
     dst[i] = '\0';
 }
 
+// Refresh the input-device snapshot from the kernel. Called lazily when the
+// Devices tab is shown and debounced from idle to track hotplug.
+static void refresh_input_devices(PreferencesState *state)
+{
+    if (!state)
+        return;
+    int count = input_enum_devices(state->devices, INPUT_MAX_DEVICES);
+    state->device_count = count < 0 ? 0 : (count > INPUT_MAX_DEVICES ? INPUT_MAX_DEVICES : count);
+}
+
+static bool input_device_find(const PreferencesState *state, uint32_t id, int *out_index)
+{
+    if (!state || !out_index)
+        return false;
+    for (int i = 0; i < state->device_count; i++) {
+        if (state->devices[i].id == id) {
+            *out_index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Apply the loaded pointer-speed/repeat scalars to the kernel (idempotent).
+static void apply_input_scalars(const PreferencesState *state)
+{
+    if (!state)
+        return;
+    input_set_pointer_speed(state->input_pointer_speed);
+    input_set_repeat_rate(state->input_repeat_delay, state->input_repeat_rate);
+}
+
 static void load_preferences_state(PreferencesState *state, Registry *registry)
 {
     if (!state)
@@ -106,6 +178,11 @@ static void load_preferences_state(PreferencesState *state, Registry *registry)
     state->animations_enabled = true;
     state->transparency_level = 180;
     state->volume_level = 75;
+    state->input_pointer_speed = 256;
+    state->input_repeat_delay = 500;
+    state->input_repeat_rate = 33;
+    state->device_count = 0;
+    state->last_enum_tick = 0;
     state->section = PREF_SECTION_APPEARANCE;
     safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path),
                    wallpaper_default_path_for_theme(state->theme_mode));
@@ -151,6 +228,21 @@ static void load_preferences_state(PreferencesState *state, Registry *registry)
             if (volume > 100)
                 volume = 100;
             state->volume_level = (uint32_t)volume;
+        }
+        if (cfg_line_value(config, "input_pointer_speed", value, sizeof(value))) {
+            int mult = atoi(value);
+            if (mult >= 16)
+                state->input_pointer_speed = (uint32_t)mult;
+        }
+        if (cfg_line_value(config, "input_repeat_delay", value, sizeof(value))) {
+            int delay = atoi(value);
+            if (delay > 0)
+                state->input_repeat_delay = (uint32_t)delay;
+        }
+        if (cfg_line_value(config, "input_repeat_rate", value, sizeof(value))) {
+            int rate = atoi(value);
+            if (rate > 0)
+                state->input_repeat_rate = (uint32_t)rate;
         }
     }
     if (wallpaper_is_default_family_path(state->wallpaper_path)) {
@@ -251,14 +343,20 @@ static bool persist_system_settings(const PreferencesState &state)
              "ethernet_use_dhcp=%d\n"
              "animations_enabled=%d\n"
              "transparency_level=%u\n"
-             "volume_level=%u\n",
+             "volume_level=%u\n"
+             "input_pointer_speed=%u\n"
+             "input_repeat_delay=%u\n"
+             "input_repeat_rate=%u\n",
              state.theme_mode == GUI_THEME_LIGHT ? "light" : "dark",
              (state.system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) ? 1 : 0,
              (state.system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) ? 1 : 0,
              (state.system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) ? 1 : 0, state.ethernet_enabled ? 1 : 0,
              state.ethernet_use_dhcp ? 1 : 0, state.animations_enabled ? 1 : 0, state.transparency_level,
-             state.volume_level <= 100 ? state.volume_level : 100);
-    return cfg_write_text_file(SYSTEM_CONFIG_PATH, config);
+             state.volume_level <= 100 ? state.volume_level : 100, state.input_pointer_speed, state.input_repeat_delay,
+             state.input_repeat_rate);
+    // Atomic write-temp-then-rename so a crashed write cannot corrupt the boot
+    // config (the bootstrap /etc/system.conf covers the rename window).
+    return cfg_write_text_file_atomic(SYSTEM_CONFIG_PATH, config);
 }
 
 static void publish_system_settings(const PreferencesState &state, Registry *registry)
@@ -277,26 +375,11 @@ static void publish_system_settings(const PreferencesState &state, Registry *reg
     asm volatile("sfence" ::: "memory");
 }
 
-static void apply_system_settings(PreferencesState *state, Registry *registry, const char *persisted_status,
-                                  const char *session_only_status)
-{
-    if (!state)
-        return;
-    publish_system_settings(*state, registry);
-    if (!storage_is_persist_writable(*state)) {
-        set_session_only_status(state, session_only_status);
-        return;
-    }
-    if (persist_system_settings(*state)) {
-        snprintf(state->status, sizeof(state->status), "%s", persisted_status);
-    } else {
-        LOG_ERROR("preferences", "failed to persist %s to %s", persisted_status, SYSTEM_CONFIG_PATH);
-        snprintf(state->status, sizeof(state->status), "%s", session_only_status);
-    }
-}
-
-static void apply_network_settings(PreferencesState *state, Registry *registry, const char *persisted_status,
-                                   const char *session_only_status)
+// Publish to the WM Registry and persist to SYSTEM.CFG. apply_system_settings
+// and apply_network_settings were byte-identical save for status strings, so a
+// single helper covers both; callers supply the persisted/session labels.
+static void apply_settings(PreferencesState *state, Registry *registry, const char *persisted_status,
+                           const char *session_only_status)
 {
     if (!state)
         return;
@@ -340,7 +423,7 @@ static bool apply_wallpaper(PreferencesState *state, Registry *registry, const c
     }
     char config[320];
     snprintf(config, sizeof(config), "%s\n", resolved_path);
-    if (cfg_write_text_file(WALLPAPER_CONFIG_PATH, config)) {
+    if (cfg_write_text_file_atomic(WALLPAPER_CONFIG_PATH, config)) {
         snprintf(state->status, sizeof(state->status), "Wallpaper updated");
     } else {
         LOG_ERROR("preferences", "failed to persist wallpaper to %s", WALLPAPER_CONFIG_PATH);
@@ -374,9 +457,18 @@ static int compute_preferences_content_height(PreferencesState *state, int detai
         int row_h = gui_app_row_tall_h();
         section_h += row_h * 2 + gui_space_1_5();
         section_h += gui_space_2() + gui_line_height() * 2;
-    } else {
+    } else if (state->section == PREF_SECTION_SYSTEM) {
         section_h += gui_app_row_tall_h();
         section_h += gui_space_3() + gui_line_height() + gui_space_0_5() + gui_app_control_h();
+        section_h += gui_space_2() + gui_line_height();
+    } else { // PREF_SECTION_DEVICES
+        section_h += gui_line_height() + gui_space_0_5() + gui_app_slider_h();
+        section_h += gui_space_1_5();
+        section_h += gui_line_height() + gui_space_0_5() + gui_app_slider_h();
+        section_h += gui_space_3() + gui_line_height() + gui_space_0_5();
+        int rows = state->device_count > 0 ? state->device_count : 1;
+        int row_h = gui_app_row_tall_h();
+        section_h += row_h * rows + gui_space_1_5() * (rows > 0 ? rows - 1 : 0);
         section_h += gui_space_2() + gui_line_height();
     }
     return section_h;
@@ -513,7 +605,7 @@ static void draw_preferences(App *app, Surface *win)
                         g_gui_style.text_muted, g_gui_style.app_surface);
         gui_draw_string(win, content_x, note_y + gui_line_height(), state->status, g_gui_style.text_muted,
                         g_gui_style.app_surface);
-    } else {
+    } else if (state->section == PREF_SECTION_SYSTEM) {
         st->terminal.rect = gui_rect_make(content_x, content_y, content_w, gui_app_row_tall_h());
         widget_toggle_draw(win, &st->terminal, "Open Terminal at startup", nullptr,
                            (state->system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) != 0);
@@ -525,6 +617,43 @@ static void draw_preferences(App *app, Surface *win)
         widget_segment_draw(win, &st->storage, storage_labels, 3, state->storage_mode);
         gui_draw_string(win, content_x, st->storage.rect.y + st->storage.rect.h + gui_space_2(), state->status,
                         g_gui_style.text_muted, g_gui_style.app_surface);
+    } else { // PREF_SECTION_DEVICES
+        int y = content_y;
+        gui_draw_string(win, content_x, y, "Pointer speed", g_gui_style.text_dim, g_gui_style.app_surface);
+        y += gui_line_height() + gui_space_0_5();
+        st->pointer_speed.rect = gui_rect_make(content_x, y, content_w, gui_app_slider_h());
+        widget_slider_draw(win, &st->pointer_speed, "Pointer speed", POINTER_SPEED_MAX);
+        y = st->pointer_speed.rect.y + st->pointer_speed.rect.h + gui_space_1_5();
+
+        gui_draw_string(win, content_x, y, "Key repeat rate", g_gui_style.text_dim, g_gui_style.app_surface);
+        y += gui_line_height() + gui_space_0_5();
+        st->key_repeat.rect = gui_rect_make(content_x, y, content_w, gui_app_slider_h());
+        widget_slider_draw(win, &st->key_repeat, "Key repeat rate", 100);
+        y = st->key_repeat.rect.y + st->key_repeat.rect.h + gui_space_3();
+
+        gui_draw_string(win, content_x, y, "Devices", g_gui_style.text_dim, g_gui_style.app_surface);
+        y += gui_line_height() + gui_space_0_5();
+        int row_h = gui_app_row_tall_h();
+        if (state->device_count <= 0) {
+            gui_draw_string(win, content_x, y, "No input devices detected.", g_gui_style.text_muted,
+                            g_gui_style.app_surface);
+            y += gui_line_height();
+        }
+        for (int i = 0; i < state->device_count; i++) {
+            st->device_row_rects[i] = gui_rect_make(content_x, y, content_w, row_h);
+            char detail[48];
+            if (state->devices[i].vendor_id != 0 || state->devices[i].product_id != 0)
+                snprintf(detail, sizeof(detail), "%04X:%04X", state->devices[i].vendor_id,
+                         state->devices[i].product_id);
+            else
+                safe_copy_text(detail, sizeof(detail), "Built-in");
+            widget_toggle_draw(win, &st->device_toggles[i], state->devices[i].name, detail, state->devices[i].enabled);
+            y += row_h;
+            if (i + 1 < state->device_count)
+                y += gui_space_1_5();
+        }
+        y += gui_space_2();
+        gui_draw_string(win, content_x, y, state->status, g_gui_style.text_muted, g_gui_style.app_surface);
     }
 
     if (!stacked_nav) {
@@ -535,8 +664,9 @@ static void draw_preferences(App *app, Surface *win)
                              g_gui_style.chrome_bg_alt);
     }
 
-    const char *nav_labels[PREF_SECTION_COUNT] = {"Appearance", "Desktop", "Network", "System"};
-    const char *nav_details[PREF_SECTION_COUNT] = {"Theme and wallpaper", "Desktop", "Ethernet", "Startup and storage"};
+    const char *nav_labels[PREF_SECTION_COUNT] = {"Appearance", "Desktop", "Network", "System", "Devices"};
+    const char *nav_details[PREF_SECTION_COUNT] = {"Theme and wallpaper", "Desktop", "Ethernet", "Startup and storage",
+                                                   "Mouse and keyboard"};
     for (int i = 0; i < PREF_SECTION_COUNT; i++) {
         int item_x = nav_x + 1;
         int item_y = sticky_nav_y + 1 + i * (nav_item_h + gui_space_1());
@@ -563,17 +693,18 @@ static void draw_preferences(App *app, Surface *win)
                              nav_details[state->section]);
     }
 
-    gui_app_draw_header(win, &layout, "Settings", "Appearance, desktop, network, and system", nullptr);
+    gui_app_draw_header(win, &layout, "Settings", "Appearance, desktop, network, system, and devices", nullptr);
 
     if (st->help.open) {
         static const char *tips[] = {
             "Pick a section on the left to change its settings",
             "Theme, volume and toggles apply immediately",
-            "Wallpaper Apply needs a readable .uowp path",
+            "Devices lists connected mice and keyboards; toggles freeze a source",
+            "Pointer speed and key repeat apply to all input devices",
             "Storage mode controls whether changes persist to /data",
             "Settings marked session-only reset on the next boot",
         };
-        widget_help_draw(win, view_w, view_h, scroll_y, "Settings Help", tips, 5);
+        widget_help_draw(win, view_w, view_h, scroll_y, "Settings Help", tips, 6);
     }
 }
 
@@ -595,6 +726,8 @@ static void preferences_sync_from_registry(PreferencesApp *st, Registry *registr
     state->transparency_level = registry->transparency_level;
     state->volume_level = registry->volume_level <= 100 ? registry->volume_level : 100;
     st->volume.value = state->volume_level;
+    st->pointer_speed.value = pointer_mult_to_slider(state->input_pointer_speed);
+    st->key_repeat.value = key_repeat_rate_to_slider(state->input_repeat_rate);
     if (registry->wallpaper_active[0])
         safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path), registry->wallpaper_active);
     widget_field_set(&st->wallpaper, state->wallpaper_path);
@@ -626,7 +759,11 @@ static void preferences_clear_hover(PreferencesApp *st)
     widget_toggle_reset(&st->ethernet);
     widget_toggle_reset(&st->dhcp);
     widget_toggle_reset(&st->terminal);
+    for (int i = 0; i < INPUT_MAX_DEVICES; i++)
+        widget_toggle_reset(&st->device_toggles[i]);
     widget_slider_reset(&st->volume);
+    widget_slider_reset(&st->pointer_speed);
+    widget_slider_reset(&st->key_repeat);
     widget_segment_reset(&st->theme);
     widget_segment_reset(&st->storage);
     widget_button_reset(&st->apply);
@@ -648,6 +785,8 @@ static void preferences_event(App *app, const Event *ev)
             break;
 
         case EVT_MOUSE_MOVE: {
+            // Slider drags are global (a drag started in one section continues
+            // until release) so they are handled before the section gate.
             if (st->volume.dragging) {
                 if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) {
                     state->volume_level = st->volume.value;
@@ -656,22 +795,56 @@ static void preferences_event(App *app, const Event *ev)
                 app_invalidate_all(app);
                 break;
             }
+            if (st->pointer_speed.dragging) {
+                if (widget_slider_event(&st->pointer_speed, ev, POINTER_SPEED_MAX) & WIDGET_CHANGED) {
+                    state->input_pointer_speed = pointer_speed_to_mult(st->pointer_speed.value);
+                    input_set_pointer_speed(state->input_pointer_speed);
+                }
+                app_invalidate_all(app);
+                break;
+            }
+            if (st->key_repeat.dragging) {
+                if (widget_slider_event(&st->key_repeat, ev, 100) & WIDGET_CHANGED) {
+                    state->input_repeat_rate = key_repeat_slider_to_rate(st->key_repeat.value);
+                    input_set_repeat_rate(state->input_repeat_delay, state->input_repeat_rate);
+                }
+                app_invalidate_all(app);
+                break;
+            }
             int previous_nav = st->nav_hover;
             st->nav_hover = widget_hit_rects(st->nav, PREF_SECTION_COUNT, ev->mouse.x, ev->mouse.y);
             bool changed = st->nav_hover != previous_nav;
-            changed |= (widget_segment_event(&st->theme, ev, 2, nullptr) & WIDGET_CHANGED) != 0;
-            changed |= (widget_segment_event(&st->storage, ev, 3, nullptr) & WIDGET_CHANGED) != 0;
-            changed |= (widget_field_event(&st->wallpaper, st->wallpaper_rect, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_button_event(&st->apply, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_button_event(&st->def, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->animations, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->transparency, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->grid, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->seconds, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->ethernet, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->dhcp, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_toggle_event(&st->terminal, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
+            // Only dispatch hover for the current section's widgets; the others
+            // hold stale rects from their own draw and must not be hit-tested.
+            switch (state->section) {
+                case PREF_SECTION_APPEARANCE:
+                    changed |= (widget_segment_event(&st->theme, ev, 2, nullptr) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_field_event(&st->wallpaper, st->wallpaper_rect, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_button_event(&st->apply, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_button_event(&st->def, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_toggle_event(&st->animations, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_toggle_event(&st->transparency, ev) & WIDGET_CHANGED) != 0;
+                    break;
+                case PREF_SECTION_DESKTOP:
+                    changed |= (widget_toggle_event(&st->grid, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_toggle_event(&st->seconds, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
+                    break;
+                case PREF_SECTION_NETWORK:
+                    changed |= (widget_toggle_event(&st->ethernet, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_toggle_event(&st->dhcp, ev) & WIDGET_CHANGED) != 0;
+                    break;
+                case PREF_SECTION_SYSTEM:
+                    changed |= (widget_toggle_event(&st->terminal, ev) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_segment_event(&st->storage, ev, 3, nullptr) & WIDGET_CHANGED) != 0;
+                    break;
+                case PREF_SECTION_DEVICES:
+                    changed |= (widget_slider_event(&st->pointer_speed, ev, POINTER_SPEED_MAX) & WIDGET_CHANGED) != 0;
+                    changed |= (widget_slider_event(&st->key_repeat, ev, 100) & WIDGET_CHANGED) != 0;
+                    for (int i = 0; i < state->device_count; i++)
+                        changed |= (widget_toggle_event(&st->device_toggles[i], ev) & WIDGET_CHANGED) != 0;
+                    break;
+            }
             if (changed)
                 app_invalidate_all(app);
             break;
@@ -686,97 +859,139 @@ static void preferences_event(App *app, const Event *ev)
                 break;
             }
 
-            if (widget_toggle_event(&st->animations, ev) & WIDGET_CLICKED) {
-                state->animations_enabled = !state->animations_enabled;
-                apply_system_settings(state, registry, "Animations updated", "Animations applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_toggle_event(&st->transparency, ev) & WIDGET_CLICKED) {
-                state->transparency_level = (state->transparency_level > 200) ? 180 : 255;
-                apply_system_settings(state, registry, "Transparency updated", "Transparency applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_toggle_event(&st->grid, ev) & WIDGET_CLICKED) {
-                state->system_flags ^= SYSTEM_FLAG_SHOW_DESKTOP_GRID;
-                apply_system_settings(state, registry, "Desktop setting updated",
-                                      "Desktop setting applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_toggle_event(&st->seconds, ev) & WIDGET_CLICKED) {
-                state->system_flags ^= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
-                apply_system_settings(state, registry, "Clock setting updated",
-                                      "Clock setting applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_toggle_event(&st->ethernet, ev) & WIDGET_CLICKED) {
-                state->ethernet_enabled = !state->ethernet_enabled;
-                apply_network_settings(state, registry, "Ethernet updated",
-                                       "Ethernet setting applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_toggle_event(&st->dhcp, ev) & WIDGET_CLICKED) {
-                state->ethernet_use_dhcp = !state->ethernet_use_dhcp;
-                apply_network_settings(state, registry, "DHCP updated",
-                                       "Ethernet DHCP setting applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_toggle_event(&st->terminal, ev) & WIDGET_CLICKED) {
-                state->system_flags ^= SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
-                apply_system_settings(state, registry, "Startup setting updated",
-                                      "Startup setting applied for this session");
-                app_invalidate_all(app);
-                break;
-            }
-
-            int seg_index = -1;
-            if (widget_segment_event(&st->theme, ev, 2, &seg_index) & WIDGET_CLICKED) {
-                bool wallpaper_tracks_theme = wallpaper_is_default_family_path(state->wallpaper_path);
-                state->theme_mode = (seg_index == 1) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
-                if (wallpaper_tracks_theme) {
-                    safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path),
-                                   wallpaper_default_path_for_theme(state->theme_mode));
-                    widget_field_set(&st->wallpaper, state->wallpaper_path);
-                }
-                apply_system_settings(state, registry, "Theme updated", "Theme applied for this session");
-                gui_sync_theme_from_registry();
-                app_invalidate_all(app);
-                break;
-            }
-            if (widget_segment_event(&st->storage, ev, 3, &seg_index) & WIDGET_CLICKED) {
-                if (request_storage_mode_change(registry, seg_index))
-                    snprintf(state->status, sizeof(state->status), "Storage Mode update requested");
-                else
-                    snprintf(state->status, sizeof(state->status), "Failed to update Storage Mode");
-                app_invalidate_all(app);
-                break;
-            }
-
-            if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) {
-                state->volume_level = st->volume.value;
-                publish_system_settings(*state, registry);
-                app_invalidate_all(app);
-                break;
-            }
-
-            if (widget_button_event(&st->apply, ev) & WIDGET_CHANGED)
-                app_invalidate_all(app);
-            if (widget_button_event(&st->def, ev) & WIDGET_CHANGED)
-                app_invalidate_all(app);
-
-            int field_rc = widget_field_event(&st->wallpaper, st->wallpaper_rect, ev);
-            if (field_rc & WIDGET_CHANGED)
-                app_invalidate_all(app);
-
+            // Navigation is always live (its rects are recomputed every frame).
             int nav_index = widget_hit_rects(st->nav, PREF_SECTION_COUNT, ev->mouse.x, ev->mouse.y);
             if (nav_index >= 0 && nav_index != state->section) {
                 state->section = nav_index;
+                if (state->section == PREF_SECTION_DEVICES)
+                    refresh_input_devices(state);
                 app_invalidate_all(app);
+                break;
+            }
+
+            // Per-section dispatch: only the current section's widgets have
+            // valid rects, so stale rects can no longer steal a click.
+            switch (state->section) {
+                case PREF_SECTION_APPEARANCE: {
+                    int seg_index = -1;
+                    if (widget_segment_event(&st->theme, ev, 2, &seg_index) & WIDGET_CLICKED) {
+                        bool wallpaper_tracks_theme = wallpaper_is_default_family_path(state->wallpaper_path);
+                        state->theme_mode = (seg_index == 1) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
+                        if (wallpaper_tracks_theme) {
+                            safe_copy_text(state->wallpaper_path, sizeof(state->wallpaper_path),
+                                           wallpaper_default_path_for_theme(state->theme_mode));
+                            widget_field_set(&st->wallpaper, state->wallpaper_path);
+                        }
+                        apply_settings(state, registry, "Theme updated", "Theme applied for this session");
+                        gui_sync_theme_from_registry();
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    if (widget_toggle_event(&st->animations, ev) & WIDGET_CLICKED) {
+                        state->animations_enabled = !state->animations_enabled;
+                        apply_settings(state, registry, "Animations updated", "Animations applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    if (widget_toggle_event(&st->transparency, ev) & WIDGET_CLICKED) {
+                        state->transparency_level = (state->transparency_level > 200) ? 180 : 255;
+                        apply_settings(state, registry, "Transparency updated",
+                                       "Transparency applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    // Apply/Default press here; the action fires on mouse-up.
+                    if (widget_button_event(&st->apply, ev) & WIDGET_CHANGED)
+                        app_invalidate_all(app);
+                    if (widget_button_event(&st->def, ev) & WIDGET_CHANGED)
+                        app_invalidate_all(app);
+                    if (widget_field_event(&st->wallpaper, st->wallpaper_rect, ev) & WIDGET_CHANGED)
+                        app_invalidate_all(app);
+                    break;
+                }
+                case PREF_SECTION_DESKTOP: {
+                    if (widget_toggle_event(&st->grid, ev) & WIDGET_CLICKED) {
+                        state->system_flags ^= SYSTEM_FLAG_SHOW_DESKTOP_GRID;
+                        apply_settings(state, registry, "Desktop setting updated",
+                                       "Desktop setting applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    if (widget_toggle_event(&st->seconds, ev) & WIDGET_CLICKED) {
+                        state->system_flags ^= SYSTEM_FLAG_CLOCK_SHOW_SECONDS;
+                        apply_settings(state, registry, "Clock setting updated",
+                                       "Clock setting applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) {
+                        state->volume_level = st->volume.value;
+                        publish_system_settings(*state, registry);
+                        app_invalidate_all(app);
+                    }
+                    break;
+                }
+                case PREF_SECTION_NETWORK: {
+                    if (widget_toggle_event(&st->ethernet, ev) & WIDGET_CLICKED) {
+                        state->ethernet_enabled = !state->ethernet_enabled;
+                        apply_settings(state, registry, "Ethernet updated",
+                                       "Ethernet setting applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    if (widget_toggle_event(&st->dhcp, ev) & WIDGET_CLICKED) {
+                        state->ethernet_use_dhcp = !state->ethernet_use_dhcp;
+                        apply_settings(state, registry, "DHCP updated",
+                                       "Ethernet DHCP setting applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    break;
+                }
+                case PREF_SECTION_SYSTEM: {
+                    if (widget_toggle_event(&st->terminal, ev) & WIDGET_CLICKED) {
+                        state->system_flags ^= SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
+                        apply_settings(state, registry, "Startup setting updated",
+                                       "Startup setting applied for this session");
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    int seg_index = -1;
+                    if (widget_segment_event(&st->storage, ev, 3, &seg_index) & WIDGET_CLICKED) {
+                        if (request_storage_mode_change(registry, seg_index))
+                            snprintf(state->status, sizeof(state->status), "Storage Mode update requested");
+                        else
+                            snprintf(state->status, sizeof(state->status), "Failed to update Storage Mode");
+                        app_invalidate_all(app);
+                    }
+                    break;
+                }
+                case PREF_SECTION_DEVICES: {
+                    if (widget_slider_event(&st->pointer_speed, ev, POINTER_SPEED_MAX) & WIDGET_CHANGED) {
+                        state->input_pointer_speed = pointer_speed_to_mult(st->pointer_speed.value);
+                        input_set_pointer_speed(state->input_pointer_speed);
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    if (widget_slider_event(&st->key_repeat, ev, 100) & WIDGET_CHANGED) {
+                        state->input_repeat_rate = key_repeat_slider_to_rate(st->key_repeat.value);
+                        input_set_repeat_rate(state->input_repeat_delay, state->input_repeat_rate);
+                        app_invalidate_all(app);
+                        break;
+                    }
+                    for (int i = 0; i < state->device_count; i++) {
+                        if (widget_toggle_event(&st->device_toggles[i], ev) & WIDGET_CLICKED) {
+                            bool now_enabled = !state->devices[i].enabled;
+                            state->devices[i].enabled = now_enabled;
+                            input_set_device_enabled(state->devices[i].id, now_enabled);
+                            snprintf(state->status, sizeof(state->status), "%s %s", state->devices[i].name,
+                                     now_enabled ? "enabled" : "disabled");
+                            app_invalidate_all(app);
+                            break;
+                        }
+                    }
+                    break;
+                }
             }
             break;
         }
@@ -786,7 +1001,19 @@ static void preferences_event(App *app, const Event *ev)
                 break;
             if (st->volume.dragging) {
                 if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CLICKED)
-                    apply_system_settings(state, registry, "Volume updated", "Volume applied for this session");
+                    apply_settings(state, registry, "Volume updated", "Volume applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (st->pointer_speed.dragging) {
+                if (widget_slider_event(&st->pointer_speed, ev, POINTER_SPEED_MAX) & WIDGET_CLICKED)
+                    apply_settings(state, registry, "Pointer speed updated", "Pointer speed applied for this session");
+                app_invalidate_all(app);
+                break;
+            }
+            if (st->key_repeat.dragging) {
+                if (widget_slider_event(&st->key_repeat, ev, 100) & WIDGET_CLICKED)
+                    apply_settings(state, registry, "Key repeat updated", "Key repeat applied for this session");
                 app_invalidate_all(app);
                 break;
             }
@@ -813,13 +1040,17 @@ static void preferences_event(App *app, const Event *ev)
                     app_invalidate_all(app);
                 break;
             }
-            int field_rc = widget_field_event(&st->wallpaper, st->wallpaper_rect, ev);
-            if (field_rc & WIDGET_FIELD_ENTER) {
-                apply_wallpaper(state, registry, state->wallpaper_path);
-                widget_field_set(&st->wallpaper, state->wallpaper_path);
-                app_invalidate_all(app);
-            } else if (field_rc & WIDGET_CHANGED) {
-                app_invalidate_all(app);
+            // The wallpaper field only exists in the Appearance section; only
+            // dispatch it there so a stale rect cannot grab focus elsewhere.
+            if (state->section == PREF_SECTION_APPEARANCE) {
+                int field_rc = widget_field_event(&st->wallpaper, st->wallpaper_rect, ev);
+                if (field_rc & WIDGET_FIELD_ENTER) {
+                    apply_wallpaper(state, registry, state->wallpaper_path);
+                    widget_field_set(&st->wallpaper, state->wallpaper_path);
+                    app_invalidate_all(app);
+                } else if (field_rc & WIDGET_CHANGED) {
+                    app_invalidate_all(app);
+                }
             }
             break;
         }
@@ -832,13 +1063,27 @@ static void preferences_event(App *app, const Event *ev)
 static void preferences_idle(App *app)
 {
     PreferencesApp *st = (PreferencesApp *)app_user(app);
+    PreferencesState *state = &st->state;
     Registry *registry = gui_registry();
     int current_storage_mode =
         registry && registry->storage_mode <= STORAGE_MODE_WRITABLE ? (int)registry->storage_mode : get_storage_mode();
     if (current_storage_mode >= STORAGE_MODE_OFF && current_storage_mode <= STORAGE_MODE_WRITABLE &&
-        current_storage_mode != st->state.storage_mode) {
-        st->state.storage_mode = current_storage_mode;
+        current_storage_mode != state->storage_mode) {
+        state->storage_mode = current_storage_mode;
         app_invalidate_all(app);
+    }
+
+    // Debounced device re-enumeration while the Devices tab is open so USB
+    // attach/detach is reflected without a syscall every idle tick.
+    if (state->section == PREF_SECTION_DEVICES) {
+        uint64_t now = get_ticks();
+        if (now - state->last_enum_tick >= 500) {
+            state->last_enum_tick = now;
+            int prev_count = state->device_count;
+            refresh_input_devices(state);
+            if (state->device_count != prev_count)
+                app_invalidate_all(app);
+        }
     }
 }
 
@@ -848,6 +1093,9 @@ extern "C" int main()
     st.nav_hover = -1;
     load_preferences_state(&st.state, nullptr);
     widget_field_init(&st.wallpaper, st.state.wallpaper_path, sizeof(st.state.wallpaper_path));
+    st.pointer_speed.value = pointer_mult_to_slider(st.state.input_pointer_speed);
+    st.key_repeat.value = key_repeat_rate_to_slider(st.state.input_repeat_rate);
+    refresh_input_devices(&st.state);
 
     AppConfig config = {};
     config.title = "Settings";
@@ -877,7 +1125,7 @@ extern "C" int main()
     app_commit(app);
     while (app_pump(app)) {
         app_commit(app);
-        if (!app_needs_draw(app) && !st.volume.dragging)
+        if (!app_needs_draw(app) && !st.volume.dragging && !st.pointer_speed.dragging && !st.key_repeat.dragging)
             sleep_ms(config.idle_ms);
     }
     app_destroy(app);
