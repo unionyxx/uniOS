@@ -3539,7 +3539,6 @@ static void latitude_draw(App *app, Surface *canvas)
     AppState *state = &lat->state;
     draw_latitude(canvas, state, &lat->rects);
     state->needs_redraw = false;
-    app_invalidate_all(app);
 
     // Keep the titlebar in sync with the open file.
     char title[128];

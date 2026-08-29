@@ -1978,7 +1978,6 @@ static void files_draw(App *app, Surface *canvas)
     FilesApp *st = (FilesApp *)app_user(app);
     draw_files(app, canvas, &st->state, &st->cache);
     st->state.needs_redraw = false;
-    app_invalidate_all(app);
 }
 
 static void files_menus(App *app)

@@ -65,9 +65,10 @@ void apply_window_resize_flip(Window &w)
     w.resize_configure_pending = false;
     w.last_configure_ticks = 0;
     w.last_commit_ticks = get_ticks();
-    // The buffer now holds the freshly committed frame: refresh the snapshot
-    // so the next configure generation starts from it.
-    wm_resize_snapshot_capture(w);
+    // No snapshot recapture here: resize_configure_pending is now false, so the
+    // compositor reads the live (stable) backing directly. If the target moved
+    // on, post_window_resize_configure below captures its own snapshot; if not,
+    // the old snapshot simply stays unused until released.
     if (w.target_x != w.x || w.target_y != w.y || w.target_w != w.w || w.target_h != w.h)
         post_window_resize_configure(w);
 }
