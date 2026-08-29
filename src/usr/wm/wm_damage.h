@@ -17,3 +17,7 @@ bool clip_dirty_rect_to_screen(DirtyRect &rect);
 bool dirty_set_is_single_fullscreen_rect();
 bool dirty_set_intersects_rect(const DirtyRect &target);
 bool dirty_set_contains_rect(const DirtyRect &target);
+
+// Internals shared between the damage queue and window damage marking.
+void shell_sort_dirty_rects(DirtyRect *arr, int n);
+void enqueue_damage_rect_expanded(const DirtyRect &rect, int pad);

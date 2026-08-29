@@ -74,6 +74,7 @@ void clear_window_focus(Registry *registry);
 int focus_window(int index, bool raise);
 int bring_window_to_front(int index);
 int send_window_to_back(int index);
+void clear_hover_feedback_state();
 
 // Lifecycle and state transitions.
 void close_window(int index, bool kill_owner = true);
@@ -82,7 +83,10 @@ void maximize_window(int index);
 void toggle_maximize_window(int index);
 void restore_window(int index, bool raise);
 void set_window_bounds(Window &w, int x, int y, int width, int height);
+void apply_window_bounds_now(Window &w, int x, int y, int width, int height, bool publish);
 void apply_pending_window_bounds();
+void apply_window_move_snap(const Window &w, int *x, int *y, int width, int height);
+void reset_window_snap_state();
 bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title, Damage *d_ptr, WindowEntry *entry,
                       bool transparent);
 
@@ -96,11 +100,15 @@ void wm_resize_snapshot_release(Window &w);
 // Content scrolling.
 bool clamp_window_scroll(Window &w);
 bool scroll_window_content(Window &w, int delta_x, int delta_y);
+void publish_window_scroll(const Window &w);
 
 // Damage marking.
 void mark_window_frame_damage(const Window &w);
 void mark_window_chrome_damage(const Window &w);
+void mark_window_decoration_damage(const Window &w);
+void mark_exposed_transition_damage(const DirtyRect &old_outer, const DirtyRect &new_outer);
 void mark_window_transition_damage(const Window &old_w, const Window &new_w);
+void post_focus_change_events(uint32_t prev_pid, uint32_t next_pid);
 
 static inline int window_effective_w(const Window &w)
 {

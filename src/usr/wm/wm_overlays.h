@@ -8,6 +8,11 @@ extern ContextMenuState g_context_menu;
 extern StoragePromptState g_storage_prompt;
 extern NotificationCenterState g_notifications;
 
+// Actions shared by the overlays (launch, show-desktop, settings publish).
+void launch_or_focus_app(Registry *registry, const char *title, const char *path);
+void show_desktop_windows();
+void publish_settings_changed(Registry *registry);
+
 // Index launcher.
 DirtyRect index_overlay_bounds();
 void open_index();
