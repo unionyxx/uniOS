@@ -1,5 +1,6 @@
 #include <boot/boot_info.h>
 #include <drivers/apic/ioapic.h>
+#include <drivers/class/hid/input.h>
 #include <drivers/class/hid/ps2_mouse.h>
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/pic.h>
@@ -141,6 +142,14 @@ void ps2_mouse_handler()
     uint8_t data = inb(MOUSE_DATA);
     uint64_t flags = spinlock_acquire_irqsave(&g_mouse_lock);
 
+    // Disabled via Settings: drop the packet (the inb above already acks IRQ12)
+    // so the frozen cursor position is preserved rather than snapping to origin.
+    if (!input_device_enabled(INPUT_DEVICE_ID_PS2_MOUSE)) {
+        mouse_cycle = 0;
+        spinlock_release_irqrestore(&g_mouse_lock, flags);
+        return;
+    }
+
     switch (mouse_cycle) {
         case 0:
             mouse_byte[0] = data;
@@ -179,8 +188,8 @@ void ps2_mouse_handler()
             if (mouse_byte[0] & 0x20)
                 dy |= 0xFFFFFF00;
 
-            dx = accelerate_delta(dx);
-            dy = accelerate_delta(dy);
+            dx = input_scale_pointer(accelerate_delta(dx));
+            dy = input_scale_pointer(accelerate_delta(dy));
 
             state.x += dx;
             state.y -= dy; // Y is inverted

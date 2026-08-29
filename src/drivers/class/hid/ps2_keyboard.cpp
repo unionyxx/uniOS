@@ -94,6 +94,13 @@ void ps2_keyboard_handler()
 {
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
 
+    // Disabled via Settings: drop the scan code (the inb above already acks the
+    // IRQ) so no new keys are buffered; the merged cursor/char state freezes.
+    if (!input_device_enabled(INPUT_DEVICE_ID_PS2_KEYBOARD)) {
+        extended_scancode = 0;
+        return;
+    }
+
     // Handle extended scancode prefix
     if (scancode == 0xE0) {
         extended_scancode = 1;

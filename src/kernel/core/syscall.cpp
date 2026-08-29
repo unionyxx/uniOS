@@ -33,6 +33,7 @@
 #include <libk/kstd.h>
 #include <libk/kstring.h>
 #include <stddef.h>
+#include <uapi/input.h>
 #include <uapi/signal.h>
 #include <uapi/sound.h>
 
@@ -2351,8 +2352,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint64_t chk_flags = spinlock_acquire_irqsave(&p->vma_lock);
             VMA *existing_fb = vma_find(p->vma_list, virt_start);
             if (existing_fb) {
-                const bool same_mapping = existing_fb->start == virt_start &&
-                                          existing_fb->end >= virt_start + size && (existing_fb->flags & PTE_SHARED);
+                const bool same_mapping = existing_fb->start == virt_start && existing_fb->end >= virt_start + size &&
+                                          (existing_fb->flags & PTE_SHARED);
                 spinlock_release_irqrestore(&p->vma_lock, chk_flags);
                 return same_mapping ? virt_start : static_cast<uint64_t>(-1);
             }
@@ -2427,8 +2428,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // ENABLED: this copy touches no shared kernel state, and disabling
             // IRQs for a full-frame VRAM blit stalled input and timers.
             for (uint32_t y = 0; y < height; y++) {
-                kstring::memcpy(dest + static_cast<size_t>(y) * pitch, src + static_cast<size_t>(y) * pitch,
-                                row_bytes);
+                kstring::memcpy(dest + static_cast<size_t>(y) * pitch, src + static_cast<size_t>(y) * pitch, row_bytes);
             }
             CLAC();
 
@@ -3158,6 +3158,36 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (arg1 > SOUND_VOLUME_MAX)
                 return static_cast<uint64_t>(-22); // -EINVAL
             sound_set_volume(static_cast<uint8_t>(arg1));
+            return 0;
+        }
+        case SYS_INPUT_ENUM_DEVICES: {
+            size_t max_count = (size_t)arg2;
+            size_t bytes = 0;
+            if (!checked_mul_size(max_count, sizeof(InputDeviceInfo), &bytes))
+                return static_cast<uint64_t>(-22); // -EINVAL
+            if (max_count != 0 && !validate_user_ptr(reinterpret_cast<void *>(arg1), bytes, true))
+                return static_cast<uint64_t>(-14); // -EFAULT
+            InputDeviceInfo infos[INPUT_MAX_DEVICES];
+            size_t count = input_enum_devices(infos, INPUT_MAX_DEVICES);
+            if (max_count != 0 && count != 0) {
+                size_t copy = count > max_count ? max_count : count;
+                STAC();
+                kstring::memcpy(reinterpret_cast<void *>(arg1), infos, copy * sizeof(InputDeviceInfo));
+                CLAC();
+            }
+            return static_cast<uint64_t>(count);
+        }
+        case SYS_INPUT_SET_POINTER_SPEED:
+            input_set_pointer_speed(static_cast<uint32_t>(arg1));
+            return 0;
+        case SYS_INPUT_SET_REPEAT_RATE:
+            input_set_repeat_rate(static_cast<uint32_t>(arg1), static_cast<uint32_t>(arg2));
+            return 0;
+        case SYS_INPUT_SET_DEVICE_ENABLED: {
+            uint32_t id = static_cast<uint32_t>(arg1);
+            if (!input_is_valid_device_id(id))
+                return static_cast<uint64_t>(-22); // -EINVAL
+            input_set_device_enabled(id, arg2 != 0);
             return 0;
         }
         default:

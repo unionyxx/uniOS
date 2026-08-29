@@ -89,17 +89,17 @@
 #define SYS_KILL 37
 
 /* Extended System Calls */
-#define SYS_FUTEX          270
-#define SYS_THREAD_CREATE  271
-#define SYS_EPOLL_CREATE   272
-#define SYS_EPOLL_CTL      273
-#define SYS_EPOLL_WAIT     274
-#define SYS_MPROTECT       275
-#define SYS_MEMFD_CREATE   276
-#define SYS_FTRUNCATE      277
-#define SYS_FD_TRANSFER    278
-#define SYS_FSIZE          279
-#define SYS_SYNC           280
+#define SYS_FUTEX 270
+#define SYS_THREAD_CREATE 271
+#define SYS_EPOLL_CREATE 272
+#define SYS_EPOLL_CTL 273
+#define SYS_EPOLL_WAIT 274
+#define SYS_MPROTECT 275
+#define SYS_MEMFD_CREATE 276
+#define SYS_FTRUNCATE 277
+#define SYS_FD_TRANSFER 278
+#define SYS_FSIZE 279
+#define SYS_SYNC 280
 #define SYS_LSEEK 281
 #define SYS_SOUND_STREAM_OPEN 282
 #define SYS_SOUND_STREAM_END 283
@@ -109,36 +109,44 @@
 #define SYS_SOUND_STATUS 287
 #define SYS_SOUND_VOLUME 288
 
+/* Input device management (extended: return negative errno). */
+#define SYS_INPUT_ENUM_DEVICES 289
+#define SYS_INPUT_SET_POINTER_SPEED 290
+#define SYS_INPUT_SET_REPEAT_RATE 291
+#define SYS_INPUT_SET_DEVICE_ENABLED 292
+
 /* Futex Opcodes */
-#define FUTEX_WAIT         0
-#define FUTEX_WAKE         1
-#define FUTEX_REQUEUE      2
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#define FUTEX_REQUEUE 2
 
 /* Epoll Operations & Event Flags */
-#define EPOLL_CTL_ADD      1
-#define EPOLL_CTL_MOD      2
-#define EPOLL_CTL_DEL      3
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_MOD 2
+#define EPOLL_CTL_DEL 3
 
-#define EPOLLIN      (1u << 0)
-#define EPOLLOUT     (1u << 1)
-#define EPOLLERR     (1u << 2)
-#define EPOLLHUP     (1u << 3)
-#define EPOLLET      (1u << 31)
+#define EPOLLIN (1u << 0)
+#define EPOLLOUT (1u << 1)
+#define EPOLLERR (1u << 2)
+#define EPOLLHUP (1u << 3)
+#define EPOLLET (1u << 31)
 
-typedef union epoll_data {
+typedef union epoll_data
+{
     void *ptr;
     int fd;
     uint32_t u32;
     uint64_t u64;
 } epoll_data_t;
 
-struct epoll_event {
+struct epoll_event
+{
     uint32_t events;
     epoll_data_t data;
 };
 
 /* Memory Protection Flags */
-#define PROT_NONE  0x0
-#define PROT_READ  0x1
+#define PROT_NONE 0x0
+#define PROT_READ 0x1
 #define PROT_WRITE 0x2
-#define PROT_EXEC  0x4
+#define PROT_EXEC 0x4

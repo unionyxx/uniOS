@@ -6,6 +6,7 @@
 #include <drivers/bus/usb/usb.h>
 #include <drivers/bus/usb/xhci/xhci.h>
 #include <drivers/class/hid/hid_report_parser.h>
+#include <drivers/class/hid/input.h>
 #include <drivers/class/hid/usb_hid.h>
 #include <kernel/debug.h>
 #include <kernel/scheduler.h>
@@ -48,13 +49,12 @@ static int8_t mouse_scroll = 0;
 static int32_t screen_width = 1024;
 static int32_t screen_height = 768;
 
-// Key repeat
+// Key repeat (delay/rate come from the input settings layer so the Settings
+// app can tune them via SYS_INPUT_SET_REPEAT_RATE).
 static uint8_t repeat_key = 0;
 static uint64_t repeat_start = 0;
 static uint64_t repeat_last = 0;
 static bool repeat_shift = false;
-static const uint32_t REPEAT_DELAY = 500;
-static const uint32_t REPEAT_RATE = 33;
 
 static Spinlock g_kb_lock = SPINLOCK_INIT;
 static Spinlock g_mouse_lock = SPINLOCK_INIT;
@@ -259,10 +259,15 @@ static void handle_key_repeat()
 {
     if (repeat_key == 0)
         return;
-    const uint64_t now = timer_get_ticks();
-    if (now - repeat_start < REPEAT_DELAY)
+    // If the active keyboard was disabled mid-repeat, stop repeating.
+    if (keyboard_device && !input_usb_slot_enabled(keyboard_device->slot_id)) {
+        clear_repeat_state();
         return;
-    if (now - repeat_last < REPEAT_RATE)
+    }
+    const uint64_t now = timer_get_ticks();
+    if (now - repeat_start < input_repeat_delay_ms())
+        return;
+    if (now - repeat_last < input_repeat_rate_ms())
         return;
 
     const char c = repeat_shift ? hid_to_ascii_shift[repeat_key] : hid_to_ascii[repeat_key];
@@ -439,8 +444,14 @@ static bool load_keyboard_report_layout(UsbDeviceInfo *dev)
 
 static void keyboard_interrupt_cb(uint8_t slot_id, uint8_t ep_num, void *data, uint16_t length)
 {
-    (void)slot_id;
     (void)ep_num;
+
+    // Disabled via Settings: drop the report and stop any in-flight repeat so
+    // the device freezes without buffering chars that spill on re-enable.
+    if (!input_usb_slot_enabled(slot_id)) {
+        clear_repeat_state();
+        return;
+    }
 
     if (!data || length == 0) {
         clear_repeat_state();
@@ -521,8 +532,8 @@ static void process_mouse_report(uint8_t *data, uint16_t length)
     mouse_right = (btn & HID_MOUSE_RIGHT) != 0;
     mouse_middle = (btn & HID_MOUSE_MIDDLE) != 0;
     mouse_scroll += wheel;
-    mouse_x += dx;
-    mouse_y += dy;
+    mouse_x += input_scale_pointer(dx);
+    mouse_y += input_scale_pointer(dy);
 
     if (mouse_x < 0)
         mouse_x = 0;
@@ -540,8 +551,12 @@ static void process_mouse_report(uint8_t *data, uint16_t length)
 
 static void mouse_interrupt_cb(uint8_t slot_id, uint8_t ep_num, void *data, uint16_t length)
 {
-    (void)slot_id;
     (void)ep_num;
+    // Disabled via Settings: freeze this device's accumulated position by
+    // dropping the report (do not zero the merged state, which would snap the
+    // cursor to the origin).
+    if (!input_usb_slot_enabled(slot_id))
+        return;
     if (length >= 3)
         process_mouse_report(reinterpret_cast<uint8_t *>(data), length);
     scheduler_notify_input_waiters();
@@ -676,7 +691,7 @@ void usb_hid_update()
 
     if (keyboard_preferred && keyboard_device && repeat_key != 0 &&
         !xhci_interrupt_transfer_pending(keyboard_device->slot_id, keyboard_device->kbd_endpoint) &&
-        timer_get_ticks() - keyboard_last_valid_report_tick > REPEAT_DELAY) {
+        timer_get_ticks() - keyboard_last_valid_report_tick > input_repeat_delay_ms()) {
         clear_repeat_state();
     }
 
