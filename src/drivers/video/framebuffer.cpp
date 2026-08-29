@@ -102,8 +102,7 @@ static inline bool rect_contains(const GfxRect &outer, const GfxRect &inner)
 {
     if (outer.w <= 0 || outer.h <= 0 || inner.w <= 0 || inner.h <= 0)
         return false;
-    return inner.x >= outer.x && inner.y >= outer.y &&
-           (int64_t)inner.x + inner.w <= (int64_t)outer.x + outer.w &&
+    return inner.x >= outer.x && inner.y >= outer.y && (int64_t)inner.x + inner.w <= (int64_t)outer.x + outer.w &&
            (int64_t)inner.y + inner.h <= (int64_t)outer.y + outer.h;
 }
 
@@ -144,8 +143,8 @@ static inline void mark_dirty_rect(int32_t x, int32_t y, int32_t w, int32_t h)
     if (full_redraw_needed || w <= 0 || h <= 0)
         return;
 
-    if (framebuffer && !clip_rect_to_bounds(&x, &y, &w, &h, (uint32_t)framebuffer->width,
-                                            (uint32_t)framebuffer->height))
+    if (framebuffer &&
+        !clip_rect_to_bounds(&x, &y, &w, &h, (uint32_t)framebuffer->width, (uint32_t)framebuffer->height))
         return;
 
     GfxRect candidate = {x, y, w, h};
@@ -465,8 +464,8 @@ void gfx_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 
 void gfx_fill_rect_to_buffer(uint32_t *buf, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color)
 {
-    if (!buf || !framebuffer || !clip_rect_to_bounds(&x, &y, &w, &h, (uint32_t)framebuffer->width,
-                                                     (uint32_t)framebuffer->height))
+    if (!buf || !framebuffer ||
+        !clip_rect_to_bounds(&x, &y, &w, &h, (uint32_t)framebuffer->width, (uint32_t)framebuffer->height))
         return;
 
     uint32_t pitch = static_cast<uint32_t>(framebuffer->pitch / 4);
@@ -543,61 +542,28 @@ static inline uint64_t gfx_isqrt_u64(uint64_t value)
     return res;
 }
 
-static bool rounded_row_span_local(int32_t w, int32_t h, int32_t r, int32_t row, int32_t *left, int32_t *right,
-                                   uint8_t *edge_alpha)
+// Fixed-point disk coverage: returns 0-255 coverage for a disk of radius r,
+// where the pixel center is at squared distance dist_sq_fp (in (1/256 pixel)^2
+// units) from the disk center. Early-out skips the isqrt for fully-interior
+// and fully-exterior pixels. 256-level analytic AA — no supersampling.
+static uint8_t disk_coverage_fp(int64_t dist_sq_fp, int32_t r)
 {
-    if (w <= 0 || h <= 0 || row < 0 || row >= h)
-        return false;
-    if (r > w / 2)
-        r = w / 2;
-    if (r > h / 2)
-        r = h / 2;
-    if (r <= 0) {
-        *left = 0;
-        *right = w - 1;
-        if (edge_alpha)
-            *edge_alpha = 255;
-        return true;
-    }
+    int64_t r_fp = (int64_t)r * 256;
+    int64_t r_in_fp = r_fp - 128;
+    int64_t r_out_fp = r_fp + 128;
 
-    int32_t local_row = row;
-    if (row >= h - r)
-        local_row = h - 1 - row;
-    if (local_row >= r) {
-        *left = 0;
-        *right = w - 1;
-        if (edge_alpha)
-            *edge_alpha = 255;
-        return true;
-    }
+    if (dist_sq_fp <= r_in_fp * r_in_fp)
+        return 255;
+    if (dist_sq_fp >= r_out_fp * r_out_fp)
+        return 0;
 
-    // Fixed-point equivalent of the float edge computation, in 1/256 pixel
-    // units: center = r - 0.5, py = local_row + 0.5, so dy = r - row - 1 is
-    // integral. edge = center - sqrt(r^2 - dy^2).
-    const int64_t dy = (int64_t)r - local_row - 1;
-    int64_t term = (int64_t)r * r - dy * dy;
-    if (term < 0)
-        term = 0;
-    const int64_t dx_q = (int64_t)gfx_isqrt_u64((uint64_t)term << 16);
-    const int64_t edge_q = (int64_t)r * 256 - 128 - dx_q;
-
-    int32_t inset = (int32_t)((edge_q + 255) / 256); // ceil(edge)
-    if (inset < 0)
-        inset = 0;
-    if (inset > r)
-        inset = r;
-
-    *left = inset;
-    *right = w - inset - 1;
-    if (edge_alpha) {
-        int64_t frac_q = (int64_t)inset * 256 - edge_q;
-        if (frac_q < 0)
-            frac_q = 0;
-        if (frac_q > 256)
-            frac_q = 256;
-        *edge_alpha = (uint8_t)((frac_q * 255 + 128) / 256);
-    }
-    return *left <= *right;
+    int64_t dist_fp = (int64_t)gfx_isqrt_u64((uint64_t)dist_sq_fp);
+    int64_t cov_fp = r_fp + 128 - dist_fp;
+    if (cov_fp <= 0)
+        return 0;
+    if (cov_fp >= 256)
+        return 255;
+    return (uint8_t)((cov_fp * 255 + 128) / 256);
 }
 
 void gfx_fill_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_t color)
@@ -627,30 +593,56 @@ void gfx_fill_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r
         return;
 
     for (int32_t row = row_start; row < row_end; row++) {
-        int32_t left = 0;
-        int32_t right = w - 1;
-        uint8_t edge_alpha = 255;
-        if (!rounded_row_span_local(w, h, r, row, &left, &right, &edge_alpha))
+        int32_t py = y + row;
+        if (py < 0 || py >= (int32_t)target_height)
             continue;
 
-        int32_t draw_x = x + left;
-        int32_t draw_w = right - left + 1;
-        if (draw_w > 0)
-            gfx_fill_rect(draw_x, y + row, draw_w, 1, color);
+        int32_t local_row;
+        if (row < r) {
+            local_row = row;
+        } else if (row >= h - r) {
+            local_row = h - 1 - row;
+        } else {
+            gfx_fill_rect(x, py, w, 1, color);
+            continue;
+        }
 
-        int32_t py = y + row;
-        if (edge_alpha != 255 && py >= 0 && py < (int32_t)target_height) {
-            int32_t lx = draw_x - 1;
-            int32_t rx = draw_x + draw_w;
-            if (lx >= 0 && lx < (int32_t)target_width) {
-                uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)lx];
-                dst = blend_rgb888(dst, color, edge_alpha);
-                mark_dirty_if_backbuffer(lx, py);
-            }
-            if (rx >= 0 && rx < (int32_t)target_width) {
-                uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)rx];
-                dst = blend_rgb888(dst, color, edge_alpha);
-                mark_dirty_if_backbuffer(rx, py);
+        // Corner row: fill middle at full opacity, per-pixel AA for corners.
+        int32_t mid_start = r;
+        int32_t mid_end = w - r;
+        if (mid_end > mid_start)
+            gfx_fill_rect(x + mid_start, py, mid_end - mid_start, 1, color);
+
+        int64_t dy_fp = (int64_t)r * 256 - (int64_t)local_row * 256 - 128;
+        int64_t dy_sq_fp = dy_fp * dy_fp;
+
+        for (int32_t side = 0; side < 2; side++) {
+            int32_t col_start = (side == 0) ? 0 : (w - r);
+            int32_t col_end = (side == 0) ? r : w;
+            if (col_start < 0)
+                col_start = 0;
+            if (col_end > w)
+                col_end = w;
+
+            for (int32_t col = col_start; col < col_end; col++) {
+                int32_t local_col = (side == 0) ? col : (w - 1 - col);
+                int64_t dx_fp = (int64_t)r * 256 - (int64_t)local_col * 256 - 128;
+                int64_t dist_sq_fp = dx_fp * dx_fp + dy_sq_fp;
+
+                uint8_t coverage = disk_coverage_fp(dist_sq_fp, r);
+                if (coverage == 0)
+                    continue;
+
+                int32_t px = x + col;
+                if (px < 0 || px >= (int32_t)target_width)
+                    continue;
+
+                uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)px];
+                if (coverage == 255)
+                    dst = color;
+                else
+                    dst = blend_rgb888(dst, color, coverage);
+                mark_dirty_if_backbuffer(px, py);
             }
         }
     }
@@ -682,54 +674,68 @@ void gfx_draw_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r
     if (row_start >= row_end)
         return;
 
-    int32_t inner_w = w - 2;
-    int32_t inner_h = h - 2;
     int32_t inner_r = r - 1;
     if (inner_r < 0)
         inner_r = 0;
 
     for (int32_t row = row_start; row < row_end; row++) {
-        int32_t outer_l = 0;
-        int32_t outer_r = w - 1;
-        uint8_t outer_edge = 255;
-        if (!rounded_row_span_local(w, h, r, row, &outer_l, &outer_r, &outer_edge))
+        int32_t py = y + row;
+        if (py < 0 || py >= (int32_t)target_height)
             continue;
 
-        int32_t inner_l = 1;
-        int32_t inner_rp = w - 2;
-        bool has_inner = false;
-        if (row > 0 && row < h - 1 && inner_w > 0 && inner_h > 0)
-            has_inner = rounded_row_span_local(inner_w, inner_h, inner_r, row - 1, &inner_l, &inner_rp, nullptr);
-        if (has_inner) {
-            inner_l += 1;
-            inner_rp += 1;
+        int32_t local_row;
+        if (row < r) {
+            local_row = row;
+        } else if (row >= h - r) {
+            local_row = h - 1 - row;
+        } else {
+            // Non-corner row: left and right edge pixels only.
+            int32_t px_l = x;
+            int32_t px_r = x + w - 1;
+            if (px_l >= 0 && px_l < (int32_t)target_width) {
+                target_buffer[(size_t)py * pitch + (size_t)px_l] = color;
+                mark_dirty_if_backbuffer(px_l, py);
+            }
+            if (px_r >= 0 && px_r < (int32_t)target_width) {
+                target_buffer[(size_t)py * pitch + (size_t)px_r] = color;
+                mark_dirty_if_backbuffer(px_r, py);
+            }
+            continue;
         }
 
-        int32_t py = y + row;
-        if (outer_l <= outer_r) {
-            int32_t left_w = has_inner ? (inner_l - outer_l) : (outer_r - outer_l + 1);
-            if (left_w > 0)
-                gfx_fill_rect(x + outer_l, py, left_w, 1, color);
-            if (has_inner && inner_rp < outer_r) {
-                int32_t right_w = outer_r - inner_rp;
-                if (right_w > 0)
-                    gfx_fill_rect(x + inner_rp + 1, py, right_w, 1, color);
-            }
-        }
+        // Corner row: per-pixel stroke coverage (outer - inner disk).
+        int64_t dy_fp = (int64_t)r * 256 - (int64_t)local_row * 256 - 128;
+        int64_t dy_sq_fp = dy_fp * dy_fp;
 
-        if (outer_edge != 255 && py >= 0 && py < (int32_t)target_height) {
-            int32_t lx = x + outer_l - 1;
-            int32_t rx = x + outer_r + 1;
-            if (lx >= 0 && lx < (int32_t)target_width) {
-                uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)lx];
-                dst = blend_rgb888(dst, color, outer_edge);
-                mark_dirty_if_backbuffer(lx, py);
+        for (int32_t col = 0; col < w; col++) {
+            int32_t px = x + col;
+            if (px < 0 || px >= (int32_t)target_width)
+                continue;
+
+            uint8_t outer_cov;
+            uint8_t inner_cov;
+
+            int32_t local_col = (col < r) ? col : (w - 1 - col);
+            if (local_col < r) {
+                int64_t dx_fp = (int64_t)r * 256 - (int64_t)local_col * 256 - 128;
+                int64_t dist_sq_fp = dx_fp * dx_fp + dy_sq_fp;
+                outer_cov = disk_coverage_fp(dist_sq_fp, r);
+                inner_cov = (inner_r > 0) ? disk_coverage_fp(dist_sq_fp, inner_r) : 0;
+            } else {
+                outer_cov = 255;
+                inner_cov = (row >= 1 && row < h - 1) ? 255 : 0;
             }
-            if (rx >= 0 && rx < (int32_t)target_width) {
-                uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)rx];
-                dst = blend_rgb888(dst, color, outer_edge);
-                mark_dirty_if_backbuffer(rx, py);
-            }
+
+            uint8_t coverage = (outer_cov > inner_cov) ? (uint8_t)(outer_cov - inner_cov) : 0;
+            if (coverage == 0)
+                continue;
+
+            uint32_t &dst = target_buffer[(size_t)py * pitch + (size_t)px];
+            if (coverage == 255)
+                dst = color;
+            else
+                dst = blend_rgb888(dst, color, coverage);
+            mark_dirty_if_backbuffer(px, py);
         }
     }
 }
@@ -768,7 +774,6 @@ void gfx_draw_gradient_v(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t to
             kstring::memcpy(&row_ptr[i], &color64, 8);
         for (; i < w; i++)
             row_ptr[i] = color;
-
     }
 
     if (target_buffer == backbuffer)
@@ -808,9 +813,8 @@ static void gfx_draw_char_no_dirty(int32_t x, int32_t y, char c, uint32_t color)
 
 void gfx_draw_char_to_buffer(uint32_t *buf, int32_t x, int32_t y, char c, uint32_t color)
 {
-    if (!buf || target_width == 0 || target_height == 0 || target_pitch_u32 == 0 ||
-        x >= (int32_t)target_width || y >= (int32_t)target_height ||
-        (int64_t)x + 8 <= 0 || (int64_t)y + 16 <= 0)
+    if (!buf || target_width == 0 || target_height == 0 || target_pitch_u32 == 0 || x >= (int32_t)target_width ||
+        y >= (int32_t)target_height || (int64_t)x + 8 <= 0 || (int64_t)y + 16 <= 0)
         return;
 
     init_font_mask();
@@ -870,8 +874,7 @@ void gfx_draw_char(int32_t x, int32_t y, char c, uint32_t color)
 void gfx_draw_char_fixed(int32_t x, int32_t y, char c, uint32_t fg, uint32_t bg)
 {
     if (!target_buffer || target_width == 0 || target_height == 0 || target_pitch_u32 == 0 ||
-        x >= (int32_t)target_width || y >= (int32_t)target_height ||
-        (int64_t)x + 8 <= 0 || (int64_t)y + 16 <= 0)
+        x >= (int32_t)target_width || y >= (int32_t)target_height || (int64_t)x + 8 <= 0 || (int64_t)y + 16 <= 0)
         return;
 
     init_font_mask();
@@ -938,8 +941,8 @@ void gfx_draw_string(int32_t x, int32_t y, const char *str, uint32_t color)
         }
         if (cy + 16 > my)
             my = cy + 16;
-        if (cx > (int64_t)INT32_MAX + 1024 || cy > (int64_t)INT32_MAX + 1024 ||
-            cx < (int64_t)INT32_MIN - 1024 || cy < (int64_t)INT32_MIN - 1024)
+        if (cx > (int64_t)INT32_MAX + 1024 || cy > (int64_t)INT32_MAX + 1024 || cx < (int64_t)INT32_MIN - 1024 ||
+            cy < (int64_t)INT32_MIN - 1024)
             break;
         str++;
     }
@@ -1041,8 +1044,7 @@ void gfx_scroll_up_buffer(uint32_t *buf, int pixels, uint32_t fill_color)
 void gfx_copy_rect(uint32_t *dst, uint32_t dst_pitch, int32_t dx, int32_t dy, const uint32_t *src, uint32_t src_pitch,
                    int32_t sx, int32_t sy, int32_t w, int32_t h)
 {
-    if (!dst || !src || dst_pitch == 0 || src_pitch == 0 || w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 ||
-        sy < 0)
+    if (!dst || !src || dst_pitch == 0 || src_pitch == 0 || w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 || sy < 0)
         return;
     for (int32_t row = 0; row < h; row++) {
         uint32_t *d = &dst[(size_t)(dy + row) * dst_pitch + (size_t)dx];
@@ -1054,8 +1056,7 @@ void gfx_copy_rect(uint32_t *dst, uint32_t dst_pitch, int32_t dx, int32_t dy, co
 void gfx_copy_rect_nt(uint32_t *dst, uint32_t dst_pitch, int32_t dx, int32_t dy, const uint32_t *src,
                       uint32_t src_pitch, int32_t sx, int32_t sy, int32_t w, int32_t h)
 {
-    if (!dst || !src || dst_pitch == 0 || src_pitch == 0 || w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 ||
-        sy < 0)
+    if (!dst || !src || dst_pitch == 0 || src_pitch == 0 || w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 || sy < 0)
         return;
     for (int32_t row = 0; row < h; row++) {
         uint32_t *d = &dst[(size_t)(dy + row) * dst_pitch + (size_t)dx];

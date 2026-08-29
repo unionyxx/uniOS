@@ -707,24 +707,31 @@ static inline float libgui_maxf(float a, float b)
 
 static inline float libgui_sqrt(float n)
 {
-    if (n <= 0.0f)
-        return 0.0f;
-    float x = n;
-    float y = 1.0f;
-    float e = 0.000001f;
-    for (int i = 0; i < 15; i++) {
-        x = (x + y) * 0.5f;
-        y = n / x;
-        if (libgui_fabsf(x - y) <= e)
-            break;
-    }
-    return x;
+    float result;
+    asm("sqrtss %1, %0" : "=x"(result) : "x"(n));
+    return result;
 }
 
-static constexpr int k_round_aa_samples = 8;
-static constexpr int k_round_aa_total = k_round_aa_samples * k_round_aa_samples;
-static const float k_round_aa_offsets[k_round_aa_samples] = {0.0625f, 0.1875f, 0.3125f, 0.4375f,
-                                                             0.5625f, 0.6875f, 0.8125f, 0.9375f};
+// 256-level analytic coverage for a disk of radius r, evaluated from a
+// pre-computed squared distance (pixel-center to disk-center). Early-out
+// skips the sqrt for fully-interior and fully-exterior pixels.
+static inline uint8_t disk_coverage_from_dist_sq(float dist_sq, float r)
+{
+    float r_in = r - 0.5f;
+    float r_out = r + 0.5f;
+    if (dist_sq <= r_in * r_in)
+        return 255;
+    if (dist_sq >= r_out * r_out)
+        return 0;
+    float dist = libgui_sqrt(dist_sq);
+    float cov = r + 0.5f - dist;
+    return static_cast<uint8_t>(cov * 255.0f + 0.5f);
+}
+
+static inline uint8_t disk_coverage(float dx, float dy, float r)
+{
+    return disk_coverage_from_dist_sq(dx * dx + dy * dy, r);
+}
 static constexpr int k_round_mask_cache_entries = 16;
 static constexpr uint32_t GUI_ROUNDED_EDGE_TOP = 1u;
 static constexpr uint32_t GUI_ROUNDED_EDGE_BOTTOM = 2u;
@@ -741,16 +748,6 @@ struct RoundedCornerMaskCacheEntry
 static RoundedCornerMaskCacheEntry g_round_mask_cache[k_round_mask_cache_entries];
 static uint32_t g_round_mask_cache_age = 1;
 
-static inline uint8_t rounded_hits_to_alpha(int hits)
-{
-    return hits <= 0 ? 0
-                     : (hits >= k_round_aa_total
-                            ? 255
-                            : static_cast<uint8_t>((hits * 255 + k_round_aa_total / 2) / k_round_aa_total));
-}
-
-static constexpr int32_t k_round_aa_offsets_fp[8] = {16, 48, 80, 112, 144, 176, 208, 240};
-
 static uint8_t *build_rounded_corner_fill_mask(int radius)
 {
     if (radius <= 0)
@@ -760,25 +757,13 @@ static uint8_t *build_rounded_corner_fill_mask(int radius)
     if (!mask)
         return nullptr;
 
-    const int64_t rr_fp = static_cast<int64_t>(radius) * radius * 256 * 256;
-    const int64_t center_fp = static_cast<int64_t>(radius) * 256;
-
+    float rf = static_cast<float>(radius);
     for (int row = 0; row < radius; row++) {
-        const int64_t sample_y_base = static_cast<int64_t>(row) * 256;
         for (int col = 0; col < radius; col++) {
-            const int64_t sample_x_base = static_cast<int64_t>(col) * 256;
-            int hits = 0;
-            for (int sy = 0; sy < k_round_aa_samples; sy++) {
-                int64_t dy_fp = sample_y_base + k_round_aa_offsets_fp[sy] - center_fp;
-                int64_t dy_sq = dy_fp * dy_fp;
-                for (int sx = 0; sx < k_round_aa_samples; sx++) {
-                    int64_t dx_fp = sample_x_base + k_round_aa_offsets_fp[sx] - center_fp;
-                    if (dx_fp * dx_fp + dy_sq <= rr_fp)
-                        hits++;
-                }
-            }
+            float dx = static_cast<float>(col) + 0.5f - rf;
+            float dy = static_cast<float>(row) + 0.5f - rf;
             mask[static_cast<size_t>(row) * static_cast<size_t>(radius) + static_cast<size_t>(col)] =
-                rounded_hits_to_alpha(hits);
+                disk_coverage(dx, dy, rf);
         }
     }
     return mask;
@@ -850,23 +835,11 @@ uint8_t gui_rounded_rect_coverage_local(int32_t col, int32_t row, int32_t w, int
 
     const RoundedCornerMaskCacheEntry *entry = get_rounded_corner_mask_entry(r);
     if (!entry) {
-        const int64_t center_x_fp = static_cast<int64_t>((col < r) ? r : (w - r)) * 256;
-        const int64_t center_y_fp = static_cast<int64_t>(top_band ? r : (h - r)) * 256;
-        const int64_t rr_fp = static_cast<int64_t>(r) * r * 256 * 256;
-        int hits = 0;
-        const int64_t sample_y_base = static_cast<int64_t>(row) * 256;
-        const int64_t sample_x_base = static_cast<int64_t>(col) * 256;
-
-        for (int sy = 0; sy < k_round_aa_samples; sy++) {
-            int64_t dy_fp = sample_y_base + k_round_aa_offsets_fp[sy] - center_y_fp;
-            int64_t dy_sq = dy_fp * dy_fp;
-            for (int sx = 0; sx < k_round_aa_samples; sx++) {
-                int64_t dx_fp = sample_x_base + k_round_aa_offsets_fp[sx] - center_x_fp;
-                if (dx_fp * dx_fp + dy_sq <= rr_fp)
-                    hits++;
-            }
-        }
-        return rounded_hits_to_alpha(hits);
+        float cx_f = static_cast<float>((col < r) ? r : (w - r));
+        float cy_f = static_cast<float>(top_band ? r : (h - r));
+        float dx = static_cast<float>(col) + 0.5f - cx_f;
+        float dy = static_cast<float>(row) + 0.5f - cy_f;
+        return disk_coverage(dx, dy, static_cast<float>(r));
     }
 
     int local_x = (col < r) ? col : (w - 1 - col);
@@ -895,30 +868,7 @@ static inline uint8_t circle_fill_coverage(int32_t px, int32_t py, int32_t cx, i
         return 0;
     float dx = static_cast<float>(px) + 0.5f - static_cast<float>(cx);
     float dy = static_cast<float>(py) + 0.5f - static_cast<float>(cy);
-    float dist_sq = dx * dx + dy * dy;
-
-    float r_inner = static_cast<float>(r) - 0.75f;
-    float r_outer = static_cast<float>(r) + 0.75f;
-
-    if (dist_sq <= r_inner * r_inner)
-        return 255;
-    if (dist_sq >= r_outer * r_outer)
-        return 0;
-
-    int hits = 0;
-    float rr = static_cast<float>(r) * static_cast<float>(r);
-    float center_x = static_cast<float>(cx);
-    float center_y = static_cast<float>(cy);
-    for (int sy = 0; sy < k_round_aa_samples; sy++) {
-        float sample_y = static_cast<float>(py) + k_round_aa_offsets[sy] - center_y;
-        float sample_y_sq = sample_y * sample_y;
-        for (int sx = 0; sx < k_round_aa_samples; sx++) {
-            float sample_x = static_cast<float>(px) + k_round_aa_offsets[sx] - center_x;
-            if (sample_x * sample_x + sample_y_sq <= rr)
-                hits++;
-        }
-    }
-    return rounded_hits_to_alpha(hits);
+    return disk_coverage_from_dist_sq(dx * dx + dy * dy, static_cast<float>(r));
 }
 
 void gui_fill_rounded_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_t color)
@@ -1035,6 +985,8 @@ void gui_fill_circle(Surface *s, int32_t x, int32_t y, int32_t r, uint32_t color
     if (base_alpha == 0)
         return;
     uint32_t pitch = s->pitch / 4;
+    float rf = static_cast<float>(r);
+    float r_out_sq = (rf + 0.5f) * (rf + 0.5f);
 
     int32_t start_y = y - r;
     if (start_y < 0)
@@ -1051,8 +1003,14 @@ void gui_fill_circle(Surface *s, int32_t x, int32_t y, int32_t r, uint32_t color
 
     for (int32_t py = start_y; py < end_y; py++) {
         uint32_t *dst_row = &s->buffer[static_cast<size_t>(py) * pitch];
+        float dy = static_cast<float>(py) + 0.5f - static_cast<float>(y);
+        float dy_sq = dy * dy;
         for (int32_t px = start_x; px < end_x; px++) {
-            uint8_t coverage = circle_fill_coverage(px, py, x, y, r);
+            float dx = static_cast<float>(px) + 0.5f - static_cast<float>(x);
+            float dist_sq = dx * dx + dy_sq;
+            if (dist_sq >= r_out_sq)
+                continue;
+            uint8_t coverage = disk_coverage_from_dist_sq(dist_sq, rf);
             if (coverage == 0)
                 continue;
             uint32_t *dst = &dst_row[px];
@@ -1081,6 +1039,9 @@ void gui_draw_circle_stroke(Surface *s, int32_t x, int32_t y, int32_t r, int32_t
     }
 
     int32_t inner_r = r - thickness;
+    float rf = static_cast<float>(r);
+    float inner_rf = static_cast<float>(inner_r);
+    float r_out_sq = (rf + 0.5f) * (rf + 0.5f);
     uint32_t pitch = s->pitch / 4;
 
     int32_t start_y = y - r;
@@ -1098,12 +1059,19 @@ void gui_draw_circle_stroke(Surface *s, int32_t x, int32_t y, int32_t r, int32_t
 
     for (int32_t py = start_y; py < end_y; py++) {
         uint32_t *dst_row = &s->buffer[static_cast<size_t>(py) * pitch];
+        float dy = static_cast<float>(py) + 0.5f - static_cast<float>(y);
+        float dy_sq = dy * dy;
         for (int32_t px = start_x; px < end_x; px++) {
-            uint8_t outer = circle_fill_coverage(px, py, x, y, r);
+            float dx = static_cast<float>(px) + 0.5f - static_cast<float>(x);
+            float dist_sq = dx * dx + dy_sq;
+            if (dist_sq >= r_out_sq)
+                continue;
+
+            uint8_t outer = disk_coverage_from_dist_sq(dist_sq, rf);
             if (outer == 0)
                 continue;
 
-            uint8_t inner = (inner_r > 0) ? circle_fill_coverage(px, py, x, y, inner_r) : 0;
+            uint8_t inner = (inner_r > 0) ? disk_coverage_from_dist_sq(dist_sq, inner_rf) : 0;
             uint8_t coverage = inner >= outer ? 0 : static_cast<uint8_t>(outer - inner);
             if (coverage == 0)
                 continue;
@@ -2665,22 +2633,24 @@ void gui_app_draw_button_ex(Surface *s, int x, int y, int w, int h, const char *
     if (pressed)
         bg = blend_pixel(bg, 0xFF000000u, primary ? 56 : 36);
     uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
+    if (primary)
+        border = blend_pixel(bg, 0xFF000000u, 48);
     int r = gui_corner_radius(w, h, gui_radius_md());
+    int ir = r > 0 ? r - 1 : 0;
 
     // A pressed button sits flush with the surface: no drop shadow.
     if (!pressed)
         gui_fill_rounded_rect(s, x, y + 1, w, h, r, primary ? 0x18000000u : 0x10000000u);
 
-    // Main surface
-    gui_fill_rounded_rect(s, x, y, w, h, r, bg);
+    // Border as a solid fill first, then inner fill inset 1px — prevents
+    // the fill's AA edge from bleeding through the border's AA edge when
+    // bg and border differ sharply (e.g. accent buttons in light theme).
+    gui_fill_rounded_rect(s, x, y, w, h, r, border);
+    if (w > 2 && h > 2)
+        gui_fill_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, ir, bg);
 
-    // Outer border
-    gui_draw_rounded_rect(s, x, y, w, h, r, border);
-
-    // Inner highlight / polish (Unified logic)
+    // Inner highlight / polish
     if (w > 4 && h > 4) {
-        int ir = r > 0 ? r - 1 : 0;
-        // Highlight / inner shadow
         uint32_t highlight = primary ? 0x20FFFFFFu : g_gui_style.chrome_bg;
         gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, ir, highlight);
     }
