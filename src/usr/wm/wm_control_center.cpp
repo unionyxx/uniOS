@@ -7,15 +7,41 @@
 
 ControlCenterState g_control_center = {false, CONTROL_ITEM_NONE, 75, true, true, true, false, true, 180, false};
 
+// Control center geometry: a 300px panel, 10px from the screen edges, holding
+// a 2x3 quick-toggle tile grid, a capsule volume slider and two actions.
+static int cc_pad()
+{
+    return gui_scaled_metric(12);
+}
+static int cc_tile_h()
+{
+    return gui_scaled_metric(44);
+}
+static int cc_tile_gap()
+{
+    return gui_scaled_metric(8);
+}
+static int cc_slider_h()
+{
+    return gui_scaled_metric(26);
+}
+static int cc_radius()
+{
+    return gui_radius_xl();
+}
+
 DirtyRect control_center_bounds()
 {
-    int margin = gui_space_1();
+    int margin = gui_scaled_metric(10);
     int max_w = (int)g_screen.width - margin * 2;
     int max_h = (int)g_screen.height - wm_menubar_h() - margin * 2;
     int min_w = gui_scaled_metric(280);
-    int min_h = gui_scaled_metric(300);
-    int bw = gui_scaled_metric(348);
-    int bh = gui_scaled_metric(366);
+    int min_h = gui_scaled_metric(240);
+    int bw = gui_scaled_metric(300);
+    int pad = cc_pad();
+    int gap = cc_tile_gap();
+    int bh = pad + 3 * cc_tile_h() + 2 * gap + pad + cc_slider_h() + pad + gui_app_control_h() + gui_space_1() +
+             gui_app_control_h() + pad;
     if (max_w > 0 && bw > max_w)
         bw = max_w;
     if (max_h > 0 && bh > max_h)
@@ -48,56 +74,56 @@ static DirtyRect control_center_damage_bounds()
     DirtyRect damage = rect_expand(cc, gui_scaled_metric(14));
     if (g_notifications.count > 0) {
         int notif_h = notification_center_panel_h();
-        int notif_y = cc.y + cc.h + gui_space_2();
+        int notif_y = cc.y + cc.h + gui_space_1();
         DirtyRect notif_damage = rect_expand({cc.x, notif_y, cc.w, notif_h}, gui_scaled_metric(14));
         damage = rect_union(damage, notif_damage);
     }
     return damage;
 }
 
-int control_panel_card_h()
-{
-    return gui_app_row_tall_h();
-}
-
 DirtyRect control_panel_item_rect(ControlPanelItem item)
 {
     DirtyRect box = control_center_bounds();
-    int pad = gui_space_1_5();
-    int gap = gui_space_1();
-    int header_h = gui_card_header_h();
-    int card_h = control_panel_card_h();
-    int half_w = (box.w - pad * 2 - gap) / 2;
-    int y = box.y + header_h + pad;
+    int pad = cc_pad();
+    int gap = cc_tile_gap();
+    int tile_h = cc_tile_h();
+    int tile_w = (box.w - pad * 2 - gap) / 2;
+    int y = box.y + pad;
 
+    // 2x3 quick-toggle tile grid (row-major).
+    int toggle_index = -1;
     if (item == CONTROL_ITEM_NETWORK)
-        return {box.x + pad, y, half_w, card_h};
-    if (item == CONTROL_ITEM_DARK_MODE)
-        return {box.x + pad + half_w + gap, y, half_w, card_h};
+        toggle_index = 0;
+    else if (item == CONTROL_ITEM_DARK_MODE)
+        toggle_index = 1;
+    else if (item == CONTROL_ITEM_DESKTOP_GRID)
+        toggle_index = 2;
+    else if (item == CONTROL_ITEM_CLOCK_SECONDS)
+        toggle_index = 3;
+    else if (item == CONTROL_ITEM_ANIMATIONS)
+        toggle_index = 4;
+    else if (item == CONTROL_ITEM_TRANSPARENCY)
+        toggle_index = 5;
+    if (toggle_index >= 0) {
+        int col = toggle_index % 2;
+        int row = toggle_index / 2;
+        int w = (col == 1) ? (box.x + box.w - pad - (box.x + pad + tile_w + gap)) : tile_w;
+        return {box.x + pad + col * (tile_w + gap), y + row * (tile_h + gap), w, tile_h};
+    }
 
-    y += card_h + gap;
-    if (item == CONTROL_ITEM_DESKTOP_GRID)
-        return {box.x + pad, y, half_w, card_h};
-    if (item == CONTROL_ITEM_CLOCK_SECONDS)
-        return {box.x + pad + half_w + gap, y, half_w, card_h};
-
-    y += card_h + gap;
-    if (item == CONTROL_ITEM_ANIMATIONS)
-        return {box.x + pad, y, half_w, card_h};
-    if (item == CONTROL_ITEM_TRANSPARENCY)
-        return {box.x + pad + half_w + gap, y, half_w, card_h};
-
-    y += card_h + gap;
+    y += 3 * tile_h + 2 * gap + pad;
     if (item == CONTROL_ITEM_VOLUME)
-        return {box.x + pad, y, box.w - pad * 2, gui_app_slider_h()};
+        return {box.x + pad, y, box.w - pad * 2, cc_slider_h()};
 
     int action_h = gui_app_control_h();
-    int action_y = box.y + box.h - pad - action_h;
-    int action_w = (box.w - pad * 2 - gap) / 2;
+    int action_gap = gui_space_1();
+    int action_w = box.w - pad * 2;
+    // Storage and Settings are full-width rows stacked above the panel's
+    // bottom edge, Storage above Settings.
     if (item == CONTROL_ITEM_STORAGE)
-        return {box.x + pad, action_y, action_w, action_h};
+        return {box.x + pad, box.y + box.h - pad - action_h * 2 - action_gap, action_w, action_h};
     if (item == CONTROL_ITEM_SETTINGS)
-        return {box.x + pad + action_w + gap, action_y, action_w, action_h};
+        return {box.x + pad, box.y + box.h - pad - action_h, action_w, action_h};
 
     return {0, 0, 0, 0};
 }
@@ -117,9 +143,8 @@ static ControlPanelItem control_panel_item_at(int mouse_x, int mouse_y)
 
 static DirtyRect control_panel_volume_track_rect()
 {
-    DirtyRect card = control_panel_item_rect(CONTROL_ITEM_VOLUME);
-    Rect track = gui_app_slider_track_rect(card.x, card.y, card.w, card.h);
-    return {track.x, track.y, track.w, track.h};
+    // The whole row is the capsule track; the speaker glyph sits inside it.
+    return control_panel_item_rect(CONTROL_ITEM_VOLUME);
 }
 
 static bool set_control_center_volume_from_x(int mouse_x)
@@ -328,18 +353,72 @@ bool handle_control_center_scroll(Registry *registry, int mouse_x, int mouse_y, 
     return true;
 }
 
-static void draw_control_toggle(ControlPanelItem item, const char *label, const char *detail, bool on)
+// One quick-toggle tile: compact card with a glyph on the left and a
+// title/status pair on the right. Active tiles fill with the accent color.
+static void draw_control_tile(ControlPanelItem item, GuiGlyphKind icon, const char *title, const char *status, bool on)
 {
     DirtyRect r = control_panel_item_rect(item);
-    gui_app_draw_toggle_row(&g_backbuffer, r.x, r.y, r.w, r.h, label, detail, on, false,
-                            g_control_center.hovered_item == item);
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    bool hovered = g_control_center.hovered_item == item;
+    int tile_r = gui_radius_sm() + gui_scaled_metric(2);
+
+    // Tile background: subtle card wash, slightly brighter on hover. The active
+    // state highlights the *icon* with an accent circle — the tile itself never
+    // turns solid blue.
+    uint32_t bg = hovered ? gui_hover_wash_color() : gui_subtle_card_wash_color();
+    gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, tile_r, bg);
+
+    uint32_t title_fg = g_gui_style.text;
+    uint32_t status_fg = g_gui_style.text_muted;
+
+    int icon_size = gui_glyph_std_size();
+    int icon_x = r.x + gui_space_1_5();
+    int icon_y = r.y + (r.h - icon_size) / 2;
+    // Active: accent-tinted circle behind the glyph.
+    if (on) {
+        int well = icon_size + gui_scaled_metric(6);
+        int wx = icon_x - gui_scaled_metric(3);
+        int wy = r.y + (r.h - well) / 2;
+        gui_fill_rounded_rect(&g_backbuffer, wx, wy, well, well, well / 2, g_gui_style.accent);
+    }
+    uint32_t icon_fg = on ? COLOR_WHITE : g_gui_style.text_dim;
+    gui_draw_glyph(&g_backbuffer, icon_x, icon_y, icon_size, icon, icon_fg);
+
+    int text_x = icon_x + icon_size + gui_space_1();
+    int text_w = r.x + r.w - gui_space_1() - text_x;
+    int line_h = gui_line_height();
+    int title_y = r.y + (r.h - line_h * 2 - gui_scaled_metric(2)) / 2;
+    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, title_y, text_w, title, title_fg, 0);
+    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, title_y + line_h + gui_scaled_metric(2), text_w,
+                          status, status_fg, 0);
 }
 
-static void draw_control_volume_card()
+static void draw_control_volume_slider()
 {
     DirtyRect r = control_panel_item_rect(CONTROL_ITEM_VOLUME);
-    bool hovered = g_control_center.hovered_item == CONTROL_ITEM_VOLUME || g_control_center.volume_dragging;
-    gui_app_draw_slider(&g_backbuffer, r.x, r.y, r.w, r.h, "Volume", g_control_center.volume, 100, hovered);
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    int track_r = r.h / 2;
+
+    // Capsule track filling the whole row, accent fill up to the volume.
+    gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, r.w, r.h, track_r, gui_inset_wash_color());
+    uint64_t fill_w64 = ((uint64_t)g_control_center.volume * r.w + 50u) / 100u;
+    int fill_w = (int)fill_w64;
+    if (g_control_center.volume > 0 && fill_w < r.h)
+        fill_w = r.h;
+    if (fill_w > r.w)
+        fill_w = r.w;
+    if (fill_w > 0)
+        gui_fill_rounded_rect(&g_backbuffer, r.x, r.y, fill_w, r.h, track_r, g_gui_style.accent);
+
+    // Speaker glyph sits inside the left end of the capsule and turns white once
+    // the accent fill reaches it.
+    int icon_size = gui_glyph_std_size();
+    int icon_x = r.x + gui_space_1();
+    int icon_center_dx = icon_x + icon_size / 2 - r.x;
+    uint32_t icon_fg = (fill_w >= icon_center_dx) ? COLOR_WHITE : g_gui_style.text_muted;
+    gui_draw_glyph(&g_backbuffer, icon_x, r.y + (r.h - icon_size) / 2, icon_size, GUI_GLYPH_VOLUME, icon_fg);
 }
 
 void draw_control_center_overlay_clipped(const DirtyRect &clip)
@@ -352,30 +431,29 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     if (!rect_intersection(clip, damage, nullptr))
         return;
 
-    int radius = gui_radius_xl();
+    int radius = cc_radius();
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
-    // Panel surface.
-    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+    // Panel surface: the window outline recipe (opaque body + 1 px hairline).
+    gui_draw_window_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface);
 
-    // Card header.
-    gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius - 1, "Control Panel", "uniOS");
+    // 2x3 quick-toggle tile grid.
+    draw_control_tile(CONTROL_ITEM_NETWORK, GUI_GLYPH_NETWORK, "Network",
+                      g_control_center.network_enabled ? "Ethernet" : "Disconnected", g_control_center.network_enabled);
+    draw_control_tile(CONTROL_ITEM_DARK_MODE, GUI_GLYPH_APPEARANCE, "Dark Mode",
+                      g_control_center.dark_mode ? "On" : "Off", g_control_center.dark_mode);
+    draw_control_tile(CONTROL_ITEM_DESKTOP_GRID, GUI_GLYPH_GRID, "Grid",
+                      g_control_center.desktop_grid ? "Shown" : "Hidden", g_control_center.desktop_grid);
+    draw_control_tile(CONTROL_ITEM_CLOCK_SECONDS, GUI_GLYPH_CLOCK, "Seconds",
+                      g_control_center.clock_seconds ? "Shown" : "Hidden", g_control_center.clock_seconds);
+    draw_control_tile(CONTROL_ITEM_ANIMATIONS, GUI_GLYPH_ANIMATION, "Motion",
+                      g_control_center.animations_enabled ? "On" : "Off", g_control_center.animations_enabled);
+    draw_control_tile(CONTROL_ITEM_TRANSPARENCY, GUI_GLYPH_TRANSPARENCY, "Glass",
+                      g_control_center.transparency_level < 255 ? "On" : "Off",
+                      g_control_center.transparency_level < 255);
 
-    draw_control_toggle(CONTROL_ITEM_NETWORK, "Network", g_control_center.network_enabled ? "Ethernet" : "Disconnected",
-                        g_control_center.network_enabled);
-    draw_control_toggle(CONTROL_ITEM_DARK_MODE, "Dark", g_control_center.dark_mode ? "On" : "Off",
-                        g_control_center.dark_mode);
-    draw_control_toggle(CONTROL_ITEM_DESKTOP_GRID, "Grid", g_control_center.desktop_grid ? "Shown" : "Hidden",
-                        g_control_center.desktop_grid);
-    draw_control_toggle(CONTROL_ITEM_CLOCK_SECONDS, "Seconds", g_control_center.clock_seconds ? "Show" : "Hide",
-                        g_control_center.clock_seconds);
-    draw_control_toggle(CONTROL_ITEM_ANIMATIONS, "Motion", g_control_center.animations_enabled ? "On" : "Off",
-                        g_control_center.animations_enabled);
-    draw_control_toggle(CONTROL_ITEM_TRANSPARENCY, "Transparency",
-                        g_control_center.transparency_level < 255 ? "On" : "Off",
-                        g_control_center.transparency_level < 255);
-    draw_control_volume_card();
+    draw_control_volume_slider();
 
     DirtyRect storage = control_panel_item_rect(CONTROL_ITEM_STORAGE);
     DirtyRect settings = control_panel_item_rect(CONTROL_ITEM_SETTINGS);
@@ -384,6 +462,6 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
     gui_app_draw_button(&g_backbuffer, settings.x, settings.y, settings.w, settings.h, "Settings", true, false,
                         g_control_center.hovered_item == CONTROL_ITEM_SETTINGS);
 
-    int notif_y = box.y + box.h + gui_space_2();
+    int notif_y = box.y + box.h + gui_space_1();
     draw_notification_center_clipped(clip, notif_y);
 }

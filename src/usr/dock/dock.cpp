@@ -76,7 +76,16 @@ static inline Rect dock_full_rect(uint32_t dock_w, uint32_t dock_h)
 }
 static inline int dock_panel_radius(int panel_w, int panel_h)
 {
-    return gui_corner_radius(panel_w, panel_h, gui_radius_xl());
+    // The app-icon corner ratio (25% of the square edge, see appicons/*.svg):
+    // the dock silhouette rounds like the icons it carries.
+    return gui_corner_radius(panel_w, panel_h, panel_h / 4);
+}
+
+// App icons round at 25% of their edge (appicons/*.svg); fallbacks, shadows
+// and press overlays share the same ratio so every tile corner matches.
+static inline int dock_icon_radius(int icon_size)
+{
+    return gui_corner_radius(icon_size, icon_size, icon_size / 4);
 }
 
 // Shared hover-pill (tooltip) geometry: used by the draw path and the damage
@@ -313,10 +322,22 @@ static void blit_blur_rounded_rect(Surface *canvas, Surface *blur, int x, int y,
 {
     if (!canvas || !blur || !canvas->buffer || !blur->buffer)
         return;
+    // Clip to both surfaces so a panel that runs past the dock canvas or the
+    // blur backing can never read/write out of bounds.
+    int x0 = x > 0 ? x : 0;
+    int y0 = y > 0 ? y : 0;
+    int x1 = x + w < (int)canvas->width ? x + w : (int)canvas->width;
+    int y1 = y + h < (int)canvas->height ? y + h : (int)canvas->height;
+    if (x1 > (int)blur->width)
+        x1 = (int)blur->width;
+    if (y1 > (int)blur->height)
+        y1 = (int)blur->height;
+    if (x0 >= x1 || y0 >= y1)
+        return;
     uint32_t dst_stride = canvas->pitch / 4u;
     uint32_t src_stride = blur->pitch / 4u;
-    for (int py = y; py < y + h; py++) {
-        for (int px = x; px < x + w; px++) {
+    for (int py = y0; py < y1; py++) {
+        for (int px = x0; px < x1; px++) {
             uint8_t coverage = gui_rounded_rect_coverage_local(px - x, py - y, w, h, radius, 3u);
             if (coverage == 0)
                 continue;
@@ -333,9 +354,8 @@ static void draw_dock_glass(Surface *canvas, Registry *registry, int panel_x, in
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
     bool solid = registry && registry->transparency_level >= 255;
 
-    // Approximate glass body color: drives the chrome-ring color derivation
-    // and is the solid-mode fill.
-    uint32_t body = is_light ? 0xFFF7F9FCu : 0xFF141820u;
+    // Approximate glass body color; the solid-mode fill.
+    uint32_t body = is_light ? 0xFFF6F5F4u : 0xFF26262Bu;
 
     // Drop shadow: the canonical layer stack, restricted to the region below
     // the panel's top-corner band. Shadow pixels under the translucent glass
@@ -355,27 +375,18 @@ static void draw_dock_glass(Surface *canvas, Registry *registry, int panel_x, in
     }
 
     if (solid) {
-        gui_draw_chrome_frame(canvas, panel_x, panel_y, panel_w, panel_h, radius, body, true);
+        gui_draw_window_frame(canvas, panel_x, panel_y, panel_w, panel_h, radius, body);
         return;
     }
 
-    // Chrome ring first: its silhouette fills are opaque, so the glass body
-    // must be painted afterwards, inset like window client content.
-    gui_draw_chrome_ring(canvas, panel_x, panel_y, panel_w, panel_h, radius, body, true);
-
-    int border = gui_chrome_border();
-    int inset = border + gui_chrome_detail_inset();
-    int inner_w = panel_w - inset * 2;
-    int inner_h = panel_h - inset * 2;
-    int inner_r = gui_corner_radius(inner_w, inner_h, radius - inset);
-    if (inner_w > 0 && inner_h > 0) {
-        uint32_t tint_color = is_light ? 0x80FFFFFFu : 0x801B1D21u;
-        bool blur_ready = ensure_blur_surface(registry, canvas->width, canvas->height);
-        if (blur_ready)
-            blit_blur_rounded_rect(canvas, &g_blur_surface, panel_x + inset, panel_y + inset, inner_w, inner_h,
-                                   inner_r);
-        gui_fill_rounded_rect(canvas, panel_x + inset, panel_y + inset, inner_w, inner_h, inner_r, tint_color);
-    }
+    // Glass body fills the whole silhouette, then the shared window hairline
+    // sits on its edge — the exact outline every window and panel carries.
+    uint32_t tint_color = is_light ? 0x62FFFFFFu : 0x6626262Bu;
+    bool blur_ready = ensure_blur_surface(registry, canvas->width, canvas->height);
+    if (blur_ready)
+        blit_blur_rounded_rect(canvas, &g_blur_surface, panel_x, panel_y, panel_w, panel_h, radius);
+    gui_fill_rounded_rect(canvas, panel_x, panel_y, panel_w, panel_h, radius, tint_color);
+    gui_draw_window_ring(canvas, panel_x, panel_y, panel_w, panel_h, radius);
 }
 
 static uint32_t dock_visual_signature(Registry *registry)
@@ -484,7 +495,7 @@ static Rect dock_item_damage_rect(int item_index, uint32_t dock_w, uint32_t dock
 static void draw_fallback_icon(Surface *canvas, int item_index, int x, int y, int size)
 {
     const DockItem &item = k_dock_items[item_index];
-    int r = gui_corner_radius(size, size, gui_scaled_metric(11));
+    int r = dock_icon_radius(size);
     uint32_t fill = item.fallback_color;
     uint32_t highlight = (fill == 0xFFEAF0F8u) ? 0x66FFFFFFu : 0x32FFFFFFu;
     uint32_t border = (fill == 0xFFEAF0F8u) ? 0x42000000u : 0x44FFFFFFu;
@@ -515,7 +526,7 @@ static void draw_icon_shadow(Surface *canvas, int x, int y, int size)
 
     int outer_x = x + outer_inset;
     int outer_y = y + outer_inset + gui_scaled_metric(1);
-    int outer_radius = gui_corner_radius(outer_w, outer_h, gui_scaled_metric(11));
+    int outer_radius = gui_corner_radius(outer_w, outer_h, outer_w / 4);
     gui_fill_rounded_rect(canvas, outer_x, outer_y, outer_w, outer_h, outer_radius, 0x0D000000u);
 
     int inner_inset = gui_scaled_metric(6);
@@ -524,7 +535,7 @@ static void draw_icon_shadow(Surface *canvas, int x, int y, int size)
     if (inner_w > 0 && inner_h > 0) {
         int inner_x = x + inner_inset;
         int inner_y = y + inner_inset;
-        int inner_radius = gui_corner_radius(inner_w, inner_h, gui_scaled_metric(8));
+        int inner_radius = gui_corner_radius(inner_w, inner_h, inner_w / 4);
         gui_fill_rounded_rect(canvas, inner_x, inner_y, inner_w, inner_h, inner_radius, 0x05000000u);
     }
 }
@@ -620,6 +631,8 @@ static inline void draw_scaled_app_icon(Surface *canvas, const Surface *icon, in
 static int day_of_week(int year, int month, int day)
 {
     static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (month < 1 || month > 12)
+        month = 1;
     int y = year;
     int m = month;
     int d = day;
@@ -631,6 +644,10 @@ static void draw_calendar_contents(Surface *canvas, int x, int y, int size)
 {
     SysTime t;
     if (get_time(&t) != 0)
+        return;
+    // The RTC fields are raw CMOS values; skip out-of-range dates so the
+    // weekday and digit asset tables are never indexed out of bounds.
+    if (t.month < 1 || t.month > 12 || t.day < 1 || t.day > 31)
         return;
 
     int weekday_h = (size * 40) / 100;
@@ -712,7 +729,7 @@ static void draw_hover_label(Surface *canvas, const DockItem &item, int panel_y,
     int pill_x = icon_x + (icon_size - pill_w) / 2;
     int gap = gui_scaled_metric(4);
     int pill_y = panel_y - pill_h - gap;
-    uint32_t pill_bg = is_light ? 0xF4FFFFFFu : 0xF01E2126u;
+    uint32_t pill_bg = is_light ? 0xF4FFFFFFu : 0xF02F2F36u;
     uint32_t pill_border = is_light ? 0x22000000u : 0x30FFFFFFu;
     uint32_t text_color = is_light ? 0xFF121722u : 0xFFF4F6FAu;
     int radius = gui_corner_radius(pill_w, pill_h, pill_h / 2);
@@ -768,12 +785,13 @@ static void draw_dock(Surface *canvas, Registry *registry, int hovered_idx)
         }
 
         if (g_pressed_item == i) {
-            int press_r = gui_corner_radius(icon_size, icon_size, gui_radius_lg());
-            gui_fill_rounded_rect(canvas, x_ptr, icon_y, icon_size, icon_size, press_r, 0x2E000000u);
+            gui_fill_rounded_rect(canvas, x_ptr, icon_y, icon_size, icon_size, dock_icon_radius(icon_size),
+                                  0x2E000000u);
         }
 
         if (open_count > 0) {
-            bool focused = registry->focused_window >= 2 && registry->focused_window < (int)registry->window_count &&
+            bool focused = registry->focused_window >= 2 && registry->focused_window < MAX_WINDOWS &&
+                           registry->focused_window < (int)registry->window_count &&
                            window_title_matches_item(registry->windows[registry->focused_window], k_dock_items[i]);
             int dot_h = shell_dock_indicator_size();
             int dot_w = focused ? gui_scaled_metric(8) : dot_h;
@@ -828,15 +846,6 @@ static int get_hovered_icon(const Registry *reg, uint32_t dock_w, uint32_t dock_
     return dock_hit_test_local(local_mx, local_my, dock_w, dock_h);
 }
 
-static int get_clicked_icon(const Registry *reg, uint32_t dock_w, uint32_t dock_h)
-{
-    if (!reg)
-        return -1;
-    int local_mx = (int)reg->dk_click_x - reg->windows[1].x;
-    int local_my = (int)reg->dk_click_y - reg->windows[1].y;
-    return dock_hit_test_local(local_mx, local_my, dock_w, dock_h);
-}
-
 extern "C" int main(int argc, char **argv)
 {
     (void)argc;
@@ -863,13 +872,23 @@ extern "C" int main(int argc, char **argv)
     load_dock_icons();
 
     uint64_t shm_bytes = syscall1(SYS_SHM_INFO, (uint64_t)registry->dk_shm_id);
-    uint32_t dock_w = registry->dk_width ? registry->dk_width : (uint32_t)shell_dock_window_w(k_dock_item_count);
-    if (shm_bytes == (uint64_t)-1 || shm_bytes < (uint64_t)dock_w * 4) {
-        shm_bytes = (uint64_t)dock_w * (uint64_t)shell_dock_window_h() * 4;
+    uint32_t default_w = (uint32_t)shell_dock_window_w(k_dock_item_count);
+    uint32_t default_h = (uint32_t)shell_dock_window_h();
+    // dk_width comes from shared memory; bound it so it cannot force an
+    // oversized canvas.
+    uint32_t dock_w = registry->dk_width;
+    if (dock_w == 0 || dock_w > default_w)
+        dock_w = default_w;
+    uint32_t dock_h = default_h;
+    if (shm_bytes != (uint64_t)-1) {
+        // Derive the height from the authoritative mapping size, and never let
+        // the canvas we draw/copy exceed that mapping.
+        uint32_t h_from_shm = (uint32_t)(shm_bytes / ((uint64_t)dock_w * 4));
+        if (h_from_shm > 0 && h_from_shm < dock_h)
+            dock_h = h_from_shm;
+        if ((uint64_t)dock_w * dock_h * 4 > shm_bytes)
+            return 1;
     }
-    uint32_t dock_h = (uint32_t)(shm_bytes / ((uint64_t)dock_w * 4));
-    if (dock_h == 0 || dock_h > 128)
-        dock_h = (uint32_t)shell_dock_window_h();
 
     registry->dk_width = dock_w;
     asm volatile("sfence" ::: "memory");
@@ -925,10 +944,15 @@ extern "C" int main(int argc, char **argv)
         };
 
         if (registry->dk_clicked) {
+            // Snapshot the click coordinates before clearing the flag so a
+            // second click arriving mid-handling cannot replace them.
+            uint32_t click_x = registry->dk_click_x;
+            uint32_t click_y = registry->dk_click_y;
             registry->dk_clicked = false;
             asm volatile("sfence" ::: "memory");
 
-            int clicked_icon = get_clicked_icon(registry, dock_w, dock_h);
+            int clicked_icon = dock_hit_test_local((int)click_x - registry->windows[1].x,
+                                                   (int)click_y - registry->windows[1].y, dock_w, dock_h);
             if (clicked_icon != -1) {
                 g_pressed_item = clicked_icon;
                 g_pressed_ticks = get_ticks();

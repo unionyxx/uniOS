@@ -230,6 +230,9 @@ void restore_window(int index, bool raise)
     int rh = w.entry->restore_h > 0 ? w.entry->restore_h : w.h;
     w.entry->state = WIN_NORMAL;
     w.active = true;
+    // A configure posted for the maximized state must not land after the
+    // restore and flip the window back.
+    cancel_window_resize_configure(w);
     set_window_bounds(w, w.entry->restore_x, w.entry->restore_y, rw, rh);
     close_context_menu();
     invalidate_window_visibility_cache();
@@ -250,10 +253,13 @@ void maximize_window(int index)
     }
     w.entry->state = WIN_MAXIMIZED;
     w.active = true;
-    set_window_bounds(w, wm_desktop_margin(), wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin(),
-                      (int)g_screen.width - wm_desktop_margin() * 2,
-                      (int)g_screen.height - wm_dock_reserved_h() -
-                          (wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin()));
+    // Supersede any resize configure posted for the previous state.
+    cancel_window_resize_configure(w);
+    // Fill the work area between the menubar and the dock, keeping the same
+    // desktop-margin gap on all four sides.
+    int margin = wm_desktop_margin();
+    set_window_bounds(w, margin, wm_menubar_h() + margin, (int)g_screen.width - margin * 2,
+                      (int)g_screen.height - wm_dock_reserved_h() - wm_menubar_h() - margin * 2);
     close_context_menu();
     invalidate_window_visibility_cache();
     focus_window(index, true);
@@ -349,7 +355,6 @@ void close_window(int index, bool kill_owner)
         }
     }
     gui_destroy_surface(&doomed.decoration_cache);
-    gui_destroy_surface(&doomed.button_cache);
     wm_resize_snapshot_release(doomed);
     wm_commit_snapshot_release(doomed);
     if (doomed.entry) {

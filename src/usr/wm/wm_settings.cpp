@@ -8,17 +8,6 @@ uint32_t g_system_flags = SYSTEM_FLAG_SHOW_DESKTOP_GRID;
 
 static bool g_persist_settings_pending = false;
 
-static bool cfg_value_enabled(const char *value, bool fallback)
-{
-    if (!value || !*value)
-        return fallback;
-    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0)
-        return false;
-    if (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0 || strcmp(value, "yes") == 0)
-        return true;
-    return fallback;
-}
-
 static const char *flag_text(uint32_t flags, uint32_t flag)
 {
     return (flags & flag) ? "1" : "0";
@@ -166,10 +155,10 @@ void load_wm_settings()
             g_control_center.dark_mode = (strcmp(value, "light") != 0);
         }
         if (cfg_line_value(config, "show_desktop_grid", value, sizeof(value))) {
-            g_control_center.desktop_grid = (value[0] != '0');
+            g_control_center.desktop_grid = cfg_value_enabled(value, g_control_center.desktop_grid);
         }
         if (cfg_line_value(config, "clock_show_seconds", value, sizeof(value))) {
-            g_control_center.clock_seconds = (value[0] != '0');
+            g_control_center.clock_seconds = cfg_value_enabled(value, g_control_center.clock_seconds);
         }
         if (cfg_line_value(config, "ethernet_enabled", value, sizeof(value))) {
             g_control_center.network_enabled = cfg_value_enabled(value, g_control_center.network_enabled);

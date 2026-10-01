@@ -201,17 +201,24 @@ void update_hover_feedback()
             if (nhf >= 0)
                 break;
             nre = hit_test_resize(w, g_input.mouse_x, g_input.mouse_y);
-            if (nre != RESIZE_NONE || point_in_titlebar(w, g_input.mouse_x, g_input.mouse_y)) {
+            if (nre != RESIZE_NONE) {
                 nhf = i;
                 break;
             }
-            break;
+            // Interactive headerbar controls keep the normal pointer (no
+            // move-cursor) and never start a frame drag on hover.
+            if (point_in_header_input(w, g_input.mouse_x, g_input.mouse_y))
+                break;
+            if (point_in_titlebar(w, g_input.mouse_x, g_input.mouse_y)) {
+                nhf = i;
+                break;
+            }
+            if (point_in_client(w, g_input.mouse_x, g_input.mouse_y))
+                break;
+            // Shadow-only overlap: the window body does not cover the pointer,
+            // so a lower window under the cursor keeps its hover feedback.
+            continue;
         }
-    }
-    if (nhf >= WM_FIRST_USER_WINDOW && nhf != g_window_count - 1) {
-        nhf = -1;
-        nre = RESIZE_NONE;
-        nhb = -1;
     }
     if (nhf == g_input.hover_frame_index && nre == g_input.hover_resize_edges && nhb == g_input.hover_button)
         return;

@@ -148,14 +148,14 @@ void wm_bench_tick(Registry *registry)
     Window old = w;
     if (!g_bench.resize_mode) {
         int step = static_cast<int>(done % 512u);
-        int phase = step < 256 ? step : 512 - step;
+        int phase = step < 256 ? step : 511 - step;
         int span_x = static_cast<int>(g_screen.width) - w.w;
         int span_y = static_cast<int>(g_screen.height) - w.h;
         w.x = span_x > 0 ? (phase * span_x) / 255 : w.x;
         w.y = span_y > 0 ? (phase * span_y) / 255 : w.y;
     } else {
         int step = static_cast<int>(done % 256u);
-        int phase = step < 128 ? step : 256 - step;
+        int phase = step < 128 ? step : 255 - step;
         int max_w = static_cast<int>(g_screen.width);
         int max_h = static_cast<int>(g_screen.height) - wm_menubar_h();
         int min_w = w.min_w > 0 ? w.min_w : 240;
@@ -207,9 +207,9 @@ void draw_stats_overlay_clipped(const DirtyRect &clip)
     DisplayStatus status = {};
     display_get_status(&status);
 
-    int radius = gui_radius_md();
+    int radius = gui_radius_xl();
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
-    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+    gui_draw_window_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface);
 
     const GuiFont *mono = gui_font_mono();
     int lh = gui_font_line_height(mono) + 2;

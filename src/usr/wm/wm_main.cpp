@@ -20,11 +20,7 @@ extern "C" int main(int argc, char **argv)
     Event ev;
 
     while (true) {
-        uint64_t t0 = get_ticks();
         uint64_t frame_tsc_start = wm_tsc_now();
-        uint64_t t_events_start = get_ticks();
-        (void)t0;
-        (void)t_events_start;
 
         wm_handle_events(registry, ev);
         apply_pending_window_bounds();
@@ -37,6 +33,7 @@ extern "C" int main(int argc, char **argv)
         registry->mouse_y = g_input.mouse_y;
         update_hover_feedback();
         update_cursor_kind();
+        wm_pump_notification_expiry();
         if (g_context_menu.open) {
             update_context_menu_hover(registry, g_input.mouse_x, g_input.mouse_y);
         }

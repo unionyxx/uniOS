@@ -12,8 +12,11 @@ DirtyRect window_outer_bounds(const Window &w)
     int eff_h = window_effective_h(w);
     if (w.transparent)
         return {w.x, w.y, eff_w, eff_h};
-    int t_h = wm_title_bar_h();
-    return {w.x, w.y - t_h, eff_w + wm_frame_shadow_offset_x(), eff_h + t_h + wm_frame_shadow_offset_y()};
+    // With the unified headerbar, title_bar_h is 0 — the client IS the full
+    // window. The outer bounds extend symmetrically on all four sides by the
+    // shadow pad so the soft shadow can spread equally around the window.
+    int pad = wm_frame_shadow_offset_y();
+    return {w.x - pad, w.y - pad, eff_w + pad * 2, eff_h + pad * 2};
 }
 
 static inline int window_safe_side_inset()
@@ -35,7 +38,6 @@ void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects, int *o
     int eff_h = window_effective_h(w);
 
     int side_inset = window_safe_side_inset();
-    int title_h = wm_title_bar_h();
     int radius = gui_scaled_metric(12) - wm_frame_border();
     if (radius < side_inset)
         radius = side_inset;
@@ -44,12 +46,13 @@ void get_window_opaque_cover_rects(const Window &w, DirtyRect *out_rects, int *o
     int count = 0;
 
     int shadow_pad = wm_frame_shadow_offset_y();
-    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, eff_w - side_inset * 2,
-                      eff_h + title_h - radius - radius - shadow_pad};
+    // With title_bar_h == 0, the opaque cover is the client minus rounded
+    // corners and shadow pad.
+    DirtyRect main = {w.x + side_inset, w.y + radius, eff_w - side_inset * 2, eff_h - radius - radius - shadow_pad};
     if (main.w > 0 && main.h > 0)
         rects[count++] = main;
 
-    DirtyRect top_band = {w.x + radius, w.y - title_h + side_inset, eff_w - radius * 2, radius - side_inset};
+    DirtyRect top_band = {w.x + radius, w.y + side_inset, eff_w - radius * 2, radius - side_inset};
     if (top_band.w > 0 && top_band.h > 0)
         rects[count++] = top_band;
 
@@ -75,13 +78,13 @@ DirtyRect window_opaque_bounds(const Window &w)
     int eff_w = window_effective_w(w);
     int eff_h = window_effective_h(w);
     int side_inset = window_safe_side_inset();
-    int title_h = wm_title_bar_h();
     int radius = gui_scaled_metric(12) - wm_frame_border();
     if (radius < side_inset)
         radius = side_inset;
 
-    DirtyRect main = {w.x + side_inset, w.y - title_h + radius, eff_w - side_inset * 2,
-                      eff_h + title_h - radius - radius};
+    // With title_bar_h == 0, the opaque bounds are the client minus rounded
+    // corners.
+    DirtyRect main = {w.x + side_inset, w.y + radius, eff_w - side_inset * 2, eff_h - radius - radius};
     if (main.w > 0 && main.h > 0)
         return main;
 

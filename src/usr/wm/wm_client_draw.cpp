@@ -47,15 +47,16 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
 
     const uint32_t dst_stride = dst->pitch / 4;
     int radius = gui_radius_xl();
-    int border = gui_chrome_border();
-    int detail_inset = gui_chrome_detail_inset();
 
-    int body_inset = border + detail_inset;
+    // The client body is inset by the hairline frame on every side (the same
+    // wm_frame_body_inset() the mouse/hit-test paths use), leaving the thin
+    // outline ring visible all the way around — top edge included.
+    int body_inset = wm_frame_body_inset();
     int inner_r = radius - body_inset;
-    int inner_left = w.x + border;
-    int inner_top = w.y;
-    int inner_w = w.w - border * 2;
-    int inner_h = w.h - border;
+    int inner_left = w.x + body_inset;
+    int inner_top = w.y + body_inset;
+    int inner_w = w.w - body_inset * 2;
+    int inner_h = w.h - body_inset * 2;
 
     if (inner_w <= 0 || inner_h <= 0) {
         inner_left = w.x;
@@ -81,6 +82,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         return;
 
     const int rounded_start_y = inner_top + inner_h - inner_r;
+    const int rounded_end_top_y = inner_top + inner_r;
     const int center_start_x = inner_left + inner_r;
     const int center_end_x = inner_left + inner_w - inner_r;
     const int dst_height_int = static_cast<int>(dst->height);
@@ -92,6 +94,17 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
             return;
         compute_bottom_corner_row(local_y, inner_w, inner_h, inner_r, corner_mask);
         corner_mask_y = local_y;
+    };
+    // Top corners: the coverage pattern is the bottom LUT with a flipped Y
+    // index (row 0 of the top = row r-1 of the bottom).
+    auto refresh_top_corner_mask = [&](int local_y) {
+        if (inner_r <= 0)
+            return;
+        int flipped = inner_h - 1 - local_y;
+        if (flipped == corner_mask_y)
+            return;
+        compute_bottom_corner_row(flipped, inner_w, inner_h, inner_r, corner_mask);
+        corner_mask_y = flipped;
     };
 
     int copy_x = 0, copy_y = 0, copy_w = 0, copy_h = 0;
@@ -205,7 +218,7 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                 uint32_t *dst_ptr = &dst->buffer[static_cast<size_t>(dst_y) * dst_stride];
                 bool row_in_blit = (copy_w > 0 && copy_h > 0 && dst_y >= copy_y && dst_y < copy_y + copy_h);
 
-                if (dst_y < rounded_start_y) {
+                if (dst_y >= rounded_end_top_y && dst_y < rounded_start_y) {
                     if (!row_in_blit) {
                         int span = rect_right - rx;
                         if (span > 0) {
@@ -240,7 +253,11 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
                     continue;
                 }
 
-                refresh_corner_mask(dst_y - inner_top);
+                int local_y = dst_y - inner_top;
+                if (dst_y < rounded_end_top_y)
+                    refresh_top_corner_mask(local_y);
+                else
+                    refresh_corner_mask(local_y);
 
                 int left_end = center_start_x < rect_right ? center_start_x : rect_right;
                 if (!row_in_blit) {
@@ -408,12 +425,16 @@ void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &
         uint32_t *dst_ptr = &dst->buffer[static_cast<size_t>(dst_y) * dst_stride];
         const uint32_t *src_ptr = &blit_buffer[static_cast<size_t>(src_row_base) * blit_w];
 
-        if (dst_y < rounded_start_y) {
+        if (dst_y >= rounded_end_top_y && dst_y < rounded_start_y) {
             memcpy(&dst_ptr[copy_x], &src_ptr[src_x], static_cast<size_t>(copy_w) * sizeof(uint32_t));
             continue;
         }
 
-        refresh_corner_mask(dst_y - inner_top);
+        int local_y = dst_y - inner_top;
+        if (dst_y < rounded_end_top_y)
+            refresh_top_corner_mask(local_y);
+        else
+            refresh_corner_mask(local_y);
 
         int left_end = center_start_x < copy_right ? center_start_x : copy_right;
         for (int x = copy_x; x < left_end; ++x) {

@@ -71,7 +71,7 @@ static const IndexCatalogEntry k_index_catalog[] = {
     {"Files", "Browse files and volumes", "/bin/files.elf", true, INDEX_ACTION_LAUNCH_APP},
     {"Settings", "System settings", "/bin/preferences.elf", true, INDEX_ACTION_LAUNCH_APP},
     {"Latitude", "Project editor", "/bin/latitude.elf", true, INDEX_ACTION_LAUNCH_APP},
-    {"About uniOS", "System information", "/bin/about.elf", true, INDEX_ACTION_LAUNCH_APP},
+    {"About uniOS", "System information", "", true, INDEX_ACTION_SHOW_ABOUT},
     {"Control Panel", "Network, appearance, volume", "control", false, INDEX_ACTION_OPEN_CONTROL_PANEL},
     {"Storage Mode", "Choose storage access", "storage", false, INDEX_ACTION_OPEN_STORAGE_PROMPT},
     {"Show Desktop", "Hide open windows", "desktop", false, INDEX_ACTION_SHOW_DESKTOP},
@@ -159,32 +159,18 @@ static DirtyRect index_damage_bounds()
     return rect_expand(index_overlay_bounds(), gui_scaled_metric(14));
 }
 
-static int index_result_item_h()
-{
-    int h = gui_scaled_metric(52);
-    return h < gui_scaled_metric(40) ? gui_scaled_metric(40) : h;
-}
-
-static DirtyRect index_search_bounds()
-{
-    DirtyRect box = index_overlay_bounds();
-    int pad = gui_space_2();
-    int h = gui_scaled_metric(44);
-    return {box.x + pad, box.y + pad, box.w - pad * 2, h};
-}
-
-static int index_results_start_y()
-{
-    DirtyRect search = index_search_bounds();
-    return search.y + search.h + gui_space_1();
-}
+static int wm_index_result_item_h();
+static int wm_index_results_start_y();
 
 static int index_result_at(int mouse_x, int mouse_y)
 {
     if (!g_index.active || !point_in_rect(index_overlay_bounds(), mouse_x, mouse_y))
         return -1;
-    int y = index_results_start_y();
-    int h = index_result_item_h();
+    // The hit rows must match the drawn rows exactly (same height and gap), so
+    // reuse the same helpers the draw path uses.
+    int y = wm_index_results_start_y();
+    int h = wm_index_result_item_h();
+    int row_gap = gui_app_row_gap();
     int pad = gui_space_2();
     DirtyRect box = index_overlay_bounds();
     int bottom = box.y + box.h - pad;
@@ -194,7 +180,7 @@ static int index_result_at(int mouse_x, int mouse_y)
             break;
         if (point_in_rect(row, mouse_x, mouse_y))
             return i;
-        y += h + gui_scaled_metric(2);
+        y += h + row_gap;
     }
     return -1;
 }
@@ -250,7 +236,6 @@ void open_index()
     g_index.active = true;
     g_index.selected_index = 0;
     g_index.hovered_index = -1;
-    g_index.open_ticks = get_ticks();
     update_index_search();
 }
 
@@ -284,6 +269,9 @@ bool activate_index_selection(Registry *registry)
             return true;
         case INDEX_ACTION_SHOW_DESKTOP:
             show_desktop_windows();
+            return true;
+        case INDEX_ACTION_SHOW_ABOUT:
+            open_settings_about(registry);
             return true;
         case INDEX_ACTION_TOGGLE_THEME:
             if (registry) {
@@ -401,25 +389,33 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
-    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+    gui_draw_window_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface);
 
     DirtyRect search = wm_index_search_bounds();
     const char *query = g_index.query_len > 0 ? g_index.query : "";
-    gui_app_draw_text_field(&g_backbuffer, search.x, search.y, search.w, search.h, query, g_index.query_len > 0, false);
+    int search_icon_size = gui_glyph_std_size();
+    int search_icon_x = search.x + gui_space_1_5();
+    int search_icon_y = search.y + (search.h - search_icon_size) / 2;
+    gui_draw_glyph(&g_backbuffer, search_icon_x, search_icon_y, search_icon_size, GUI_GLYPH_SEARCH,
+                   g_gui_style.text_muted);
+    int search_text_x = search_icon_x + search_icon_size + gui_space_1();
+    int search_text_w = search.x + search.w - search_text_x - gui_space_1();
+    gui_app_draw_text_field(&g_backbuffer, search_text_x, search.y, search_text_w, search.h, query,
+                            g_index.query_len > 0, false);
     if (g_index.query_len == 0) {
         int placeholder_y = gui_align_text_y(gui_font_default(), search.y, search.h);
-        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), search.x + gui_space_1(), placeholder_y,
-                              search.w - gui_space_2(), "Search apps, commands, settings", g_gui_style.text_muted,
-                              g_gui_style.app_surface);
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), search_text_x + gui_space_1(), placeholder_y,
+                              search_text_w - gui_space_2(), "Search apps, commands, settings", g_gui_style.text_muted,
+                              g_gui_style.app_bg);
     }
 
     int hint_w = gui_measure_text(gui_font_default(), "Enter");
-    int hint_x = search.x + search.w - hint_w - gui_space_1();
-    if (hint_x > search.x + search.w / 2) {
+    int hint_x = search_text_x + search_text_w - hint_w - gui_space_1();
+    if (hint_x > search_text_x + search_text_w / 2) {
         int hint_y = gui_align_text_y(gui_font_default(), search.y, search.h);
         gui_draw_text_clipped(&g_backbuffer, gui_font_default(), hint_x, hint_y,
-                              search.x + search.w - hint_x - gui_space_1(), "Enter", g_gui_style.text_muted,
-                              g_gui_style.app_surface);
+                              search_text_x + search_text_w - hint_x - gui_space_1(), "Enter", g_gui_style.text_muted,
+                              g_gui_style.app_bg);
     }
 
     int pad = gui_space_2();
@@ -444,9 +440,9 @@ void draw_index_overlay_clipped(const DirtyRect &clip, const Registry *registry)
         bool selected = i == g_index.selected_index;
         bool hovered = i == g_index.hovered_index;
         const IndexResult &result = g_index.results[i];
-        const char *badge = result.is_app ? "APP" : "CMD";
+        GuiGlyphKind glyph = result.is_app ? GUI_GLYPH_APP : GUI_GLYPH_COMMAND;
         const char *detail = result.detail[0] ? result.detail : result.path;
-        gui_app_draw_list_row(&g_backbuffer, box.x + pad, row_y, box.w - pad * 2, row_h, badge, result.title, detail,
+        gui_app_draw_list_row(&g_backbuffer, box.x + pad, row_y, box.w - pad * 2, row_h, glyph, result.title, detail,
                               selected, hovered, false);
         row_y += row_h + row_gap;
     }

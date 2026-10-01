@@ -84,35 +84,17 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
     wm_cursor_begin_frame();
 
     if (g_scene_is_presentbuffer || select_presentbuffer_slot_for_frame()) {
-        uint64_t now = get_ticks();
-        bool toast_expired = false;
-
-        int toast_idx = (g_notifications.head - 1 + MAX_NOTIFICATIONS) % MAX_NOTIFICATIONS;
-        for (int i = 0; i < g_notifications.count; i++) {
-            Notification &notif = g_notifications.history[toast_idx];
-            if (notif.active_toast && (now - notif.timestamp_ticks > TOAST_DURATION_TICKS)) {
-                notif.active_toast = false;
-                toast_expired = true;
-            }
-            toast_idx = (toast_idx - 1 + MAX_NOTIFICATIONS) % MAX_NOTIFICATIONS;
-        }
-
-        if (toast_expired) {
-            int toast_w = gui_scaled_metric(320);
-            int toast_h = notification_pill_h();
-            int margin = gui_space_2();
-            DirtyRect toast_box = {static_cast<int>(g_backbuffer.width) - toast_w - margin, wm_menubar_h() + margin,
-                                   toast_w, toast_h};
-            enqueue_damage_rect(toast_box.x - 16, toast_box.y - 16, toast_box.w + 32, toast_h + 32);
-        }
-
+        // Toast expiry (and its removal damage) is pumped from the main loop
+        // (wm_pump_notification_expiry) so it does not depend on frames being
+        // built; the damage rects below just fold the live toast region into
+        // any dirty rect that touches it.
         int focus = find_registry_focused_user_window(registry);
 
         DirtyRect cc_damage = {};
         bool has_cc_damage = false;
         if (g_control_center.open) {
             DirtyRect cc_box = control_center_bounds();
-            DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_2(), cc_box.w,
+            DirtyRect notif_box = {cc_box.x, cc_box.y + cc_box.h + gui_space_1(), cc_box.w,
                                    notification_center_panel_h()};
             cc_damage = rect_expand(rect_union(cc_box, notif_box), gui_scaled_metric(14));
             has_cc_damage = true;

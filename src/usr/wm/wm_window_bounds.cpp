@@ -32,7 +32,7 @@ void apply_window_move_snap(const Window &w, int *x, int *y, int width, int heig
         return;
 
     int threshold = wm_snap_threshold();
-    int min_y = wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin();
+    int min_y = wm_menubar_h() + wm_desktop_margin();
     int left = wm_desktop_margin();
     int right = (int)g_screen.width - wm_desktop_margin();
     int bottom = (int)g_screen.height - wm_dock_reserved_h();
@@ -128,8 +128,9 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         width = min_width;
     if (height < min_height)
         height = min_height;
-    int min_y = wm_menubar_h() + wm_title_bar_h() + wm_desktop_margin();
-    int max_width = (int)g_screen.width - wm_desktop_margin() * 2;
+    int margin = wm_desktop_margin();
+    int min_y = wm_menubar_h() + margin;
+    int max_width = (int)g_screen.width - margin * 2;
     int max_height = (int)g_screen.height - wm_dock_reserved_h() - min_y;
     if (max_width < min_width)
         max_width = min_width;
@@ -139,13 +140,13 @@ void set_window_bounds(Window &w, int x, int y, int width, int height)
         width = max_width;
     if (height > max_height)
         height = max_height;
-    int max_x = (int)g_screen.width - width - wm_desktop_margin();
+    int max_x = (int)g_screen.width - width - margin;
     int max_y = (int)g_screen.height - wm_dock_reserved_h() - height;
-    if (max_x < wm_desktop_margin())
-        max_x = wm_desktop_margin();
+    if (max_x < margin)
+        max_x = margin;
     if (max_y < min_y)
         max_y = min_y;
-    x = x < wm_desktop_margin() ? wm_desktop_margin() : (x > max_x ? max_x : x);
+    x = x < margin ? margin : (x > max_x ? max_x : x);
     y = y < min_y ? min_y : (y > max_y ? max_y : y);
     w.target_x = x;
     w.target_y = y;
@@ -248,10 +249,9 @@ void apply_window_bounds_now(Window &w, int x, int y, int width, int height, boo
                 last_rendered_outer = {old.last_rendered_x, old.last_rendered_y, old.last_rendered_w,
                                        old.last_rendered_h};
             } else {
-                int t_h = wm_title_bar_h();
-                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y - t_h,
+                last_rendered_outer = {old.last_rendered_x, old.last_rendered_y,
                                        old.last_rendered_w + wm_frame_shadow_offset_x(),
-                                       old.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
+                                       old.last_rendered_h + wm_frame_shadow_offset_y()};
             }
             DirtyRect full_bounds = rect_expand(rect_union(last_rendered_outer, window_outer_bounds(w)), pad);
             enqueue_damage_rect(full_bounds.x, full_bounds.y, full_bounds.w, full_bounds.h);

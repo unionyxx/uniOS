@@ -62,6 +62,10 @@ Registry *wm_bootstrap()
         LOG_INFO("wm", "pixel op self-test: %s", pixops_ok ? "PASS" : "FAIL");
         if (!pixops_ok)
             LOG_ERROR("wm", "SIMD pixel ops diverge from scalar reference; rendering may be corrupt");
+        bool blur_ok = blur_self_test();
+        LOG_INFO("wm", "blur self-test: %s", blur_ok ? "PASS" : "FAIL");
+        if (!blur_ok)
+            LOG_ERROR("wm", "blur kernels diverge from scalar reference; shell glass may be corrupt");
     }
     g_control_center.network_enabled = runtime_settings.ethernet_enabled;
     g_control_center.animations_enabled = runtime_settings.animations_enabled;

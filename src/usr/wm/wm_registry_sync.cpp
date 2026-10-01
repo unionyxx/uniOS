@@ -38,15 +38,23 @@ void wm_sync_registry(Registry *registry)
             g_applied_theme_mode = next_theme;
             gui_apply_theme(next_theme);
             refresh_wm_metrics();
+            // Release every window's locked chrome tint and keep re-sampling
+            // the live buffer for a short window: the sampled app-background
+            // color belongs to the old theme and must follow the app's
+            // re-themed canvas before it locks again.
+            uint64_t resample_until = get_ticks() + 750;
+            for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
+                invalidate_window_decoration_cache(g_windows[i]);
+                g_windows[i].decoration_resample_until = resample_until;
+            }
             reload_wallpaper(registry, true);
             recapture_shell_blur_sources(registry);
             enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
         } else if (flags_changed) {
-            enqueue_damage_rect(0, 0, g_screen.width, wm_menubar_h());
-            if (registry->window_count > 1) {
-                enqueue_damage_rect(registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
-                                    registry->windows[1].h);
-            }
+            // System flags drive the menubar clock, the debug-stats overlay and
+            // other chrome; repaint the full screen so every flag-driven region
+            // updates regardless of which flag changed.
+            enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
         }
         if (transparency_changed) {
             capture_shell_backdrop_for_rect({0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height)},

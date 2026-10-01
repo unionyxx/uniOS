@@ -101,17 +101,24 @@ void open_context_menu(const Registry *registry, ContextMenuKind kind, int targe
     g_context_menu.h = gui_popup_menu_height(items, count);
     g_context_menu.x = anchor_x;
     g_context_menu.y = anchor_y;
-    if (g_context_menu.x + g_context_menu.w > (int)g_screen.width)
-        g_context_menu.x = g_screen.width - g_context_menu.w - gui_scaled_metric(8);
-    if (g_context_menu.y + g_context_menu.h > (int)g_screen.height)
-        g_context_menu.y = g_screen.height - g_context_menu.h - gui_scaled_metric(8);
-    if (g_context_menu.x < 0)
-        g_context_menu.x = 0;
-    if (g_context_menu.y < 0)
-        g_context_menu.y = 0;
+    // Clamp inside the visible screen, keeping the symmetric popup shadow
+    // (gui_draw_panel_shadow pad) inside bounds and the menu below the
+    // menubar so it never covers shell chrome.
+    int shadow = gui_scaled_metric(12);
+    if (g_context_menu.x + g_context_menu.w + shadow > (int)g_screen.width)
+        g_context_menu.x = g_screen.width - g_context_menu.w - shadow;
+    if (g_context_menu.y + g_context_menu.h + shadow > (int)g_screen.height)
+        g_context_menu.y = g_screen.height - g_context_menu.h - shadow;
+    if (g_context_menu.x - shadow < 0)
+        g_context_menu.x = shadow;
+    if (g_context_menu.y - shadow < wm_menubar_h())
+        g_context_menu.y = wm_menubar_h() + shadow;
     g_context_menu.hovered_index =
         gui_popup_menu_hit_test(items, count, g_context_menu.x, g_context_menu.y, g_context_menu.w, anchor_x, anchor_y);
-    enqueue_damage_rect(g_context_menu.x, g_context_menu.y, g_context_menu.w, g_context_menu.h);
+    // Damage the full bounds (including the drop shadow), matching the close
+    // and hover paths, so the shadow is composed in immediately.
+    DirtyRect bounds = context_menu_bounds();
+    enqueue_damage_rect(bounds.x, bounds.y, bounds.w, bounds.h);
 }
 
 void close_context_menu()
@@ -152,7 +159,7 @@ bool activate_context_menu_item(Registry *registry, int index)
             launch_or_focus_app(registry, "Terminal", "/bin/terminal.elf");
         else if (index == 1)
             launch_or_focus_app(registry, "Files", "/bin/files.elf");
-        else if (index == WM_FIRST_USER_WINDOW)
+        else if (index == 2)
             launch_or_focus_app(registry, "Settings", "/bin/preferences.elf");
         else if (index == 3)
             open_storage_prompt();
@@ -182,7 +189,7 @@ bool activate_context_menu_item(Registry *registry, int index)
                 t.entry->request_maximize = true;
         } else if (index == 1)
             t.entry->request_minimize = true;
-        else if (index == WM_FIRST_USER_WINDOW)
+        else if (index == 2)
             t.entry->request_close = true;
         else if (index == 3)
             launch_or_focus_app(registry, "Settings", "/bin/preferences.elf");
@@ -201,10 +208,10 @@ DirtyRect context_menu_bounds()
 {
     if (!g_context_menu.open)
         return {0, 0, 0, 0};
-    int shadow_pad_x = gui_scaled_metric(8);
-    int shadow_pad_y = gui_scaled_metric(12);
-    return {g_context_menu.x - shadow_pad_x, g_context_menu.y, g_context_menu.w + shadow_pad_x * 2,
-            g_context_menu.h + shadow_pad_y};
+    // Symmetric: gui_draw_panel_shadow spreads gui_scaled_metric(12) on all
+    // four sides of the popup, so the damage/menubar-bounds rect must too.
+    int pad = gui_scaled_metric(12);
+    return {g_context_menu.x - pad, g_context_menu.y - pad, g_context_menu.w + pad * 2, g_context_menu.h + pad * 2};
 }
 
 void draw_context_menu_overlay(const Registry *registry)

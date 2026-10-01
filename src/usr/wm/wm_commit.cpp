@@ -1,4 +1,5 @@
 #include "wm_damage.h"
+#include "wm_input.h"
 #include "wm_metrics.h"
 #include "wm_present.h"
 #include "wm_render.h"
@@ -75,9 +76,7 @@ static void mark_titlebar_dirty(const Window &w)
     if (outer.w <= 0 || outer.h <= 0)
         return;
 
-    int title_h = wm_title_bar_h() + wm_frame_border() + wm_frame_shadow_offset_y();
-    if (title_h < 0)
-        title_h = 0;
+    int title_h = wm_frame_body_inset() + gui_headerbar_h();
     if (title_h > outer.h)
         title_h = outer.h;
     if (title_h > 0)
@@ -110,11 +109,18 @@ static void sync_window_runtime_metadata(Window &w, const WindowEntrySnapshot &e
                 g_frame_stats.resize_stale_acks++;
             }
 
-            if (clamp_window_scroll(w) && w.entry) {
+            // A configure ack clamps the offset to the new bounds, but the
+            // client drew this ack with the pre-clamp offset, so the sticky
+            // panels land off-canvas until it redraws. Publish the clamped
+            // offset and nudge the client to redraw with it.
+            const bool scroll_clamped = clamp_window_scroll(w);
+            if (scroll_clamped && w.entry) {
                 w.entry->scroll_x = w.scroll_x;
                 w.entry->scroll_y = w.scroll_y;
                 smp_wmb();
             }
+            if (scroll_clamped)
+                post_scroll_event_to_window(w);
 
             w.needs_full_redraw = true;
             invalidate_window_decoration_cache(w);
@@ -345,11 +351,14 @@ void wm_commit_windows(Registry *registry)
                     w.w = nw;
                     w.h = nh;
                     w.needs_full_redraw = (old.w != nw) || (old.h != nh);
-                    if (clamp_window_scroll(w) && w.entry) {
+                    const bool scroll_clamped = clamp_window_scroll(w);
+                    if (scroll_clamped && w.entry) {
                         w.entry->scroll_x = w.scroll_x;
                         w.entry->scroll_y = w.scroll_y;
                         smp_wmb();
                     }
+                    if (scroll_clamped)
+                        post_scroll_event_to_window(w);
                     mark_window_transition_damage(old, w);
                     invalidate_window_visibility_cache();
                 }

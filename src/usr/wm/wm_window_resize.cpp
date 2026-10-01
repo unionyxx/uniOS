@@ -73,6 +73,16 @@ void apply_window_resize_flip(Window &w)
         post_window_resize_configure(w);
 }
 
+void cancel_window_resize_configure(Window &w)
+{
+    if (!w.resize_configure_pending)
+        return;
+    w.resize_configure_pending = false;
+    w.pending_configure_serial = 0;
+    w.last_configure_ticks = 0;
+    wm_resize_snapshot_release(w);
+}
+
 // Retransmit the outstanding configure unchanged (same serial, same
 // geometry) after a client went quiet; no new generation, no snapshot.
 void resend_window_resize_configure(Window &w)

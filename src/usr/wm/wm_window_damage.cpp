@@ -3,21 +3,6 @@
 #include "wm_metrics.h"
 #include "wm_window.h"
 
-static void mark_window_titlebar_damage(const Window &w)
-{
-    if (w.transparent)
-        return;
-
-    DirtyRect outer = window_outer_bounds(w);
-    int title_h = w.y - outer.y;
-    if (title_h < 0)
-        title_h = 0;
-    if (title_h > outer.h)
-        title_h = outer.h;
-    if (title_h > 0)
-        enqueue_damage_rect(outer.x, outer.y, outer.w, title_h);
-}
-
 void mark_window_frame_damage(const Window &w)
 {
     DirtyRect outer = window_outer_bounds(w);
@@ -60,14 +45,11 @@ void mark_window_decoration_damage(const Window &w)
         return;
 
     DirtyRect outer = window_outer_bounds(w);
-    mark_window_titlebar_damage(w);
     mark_window_chrome_damage(w);
 
-    bool interactive = g_input.pointer_down && g_input.drag_index >= WM_FIRST_USER_WINDOW;
-    int shadow_extent = interactive
-                            ? (wm_frame_shadow_offset_x() > wm_frame_shadow_offset_y() ? wm_frame_shadow_offset_x()
-                                                                                       : wm_frame_shadow_offset_y())
-                            : gui_scaled_metric(8) + gui_scaled_metric(3) + gui_scaled_metric(2) + gui_scaled_metric(1);
+    // The shadow spreads symmetrically by the shadow pad, so damage that much of
+    // the outer bounds' sides/bottom to keep the shadow redrawn correctly.
+    int shadow_extent = wm_frame_shadow_offset_y();
     if (shadow_extent < CURSOR_DAMAGE_PAD)
         shadow_extent = CURSOR_DAMAGE_PAD;
 
@@ -108,10 +90,12 @@ void mark_window_transition_damage(const Window &old_w, const Window &new_w)
         last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y, old_w.last_rendered_w,
                                old_w.last_rendered_h};
     } else {
-        int t_h = wm_title_bar_h();
-        last_rendered_outer = {old_w.last_rendered_x, old_w.last_rendered_y - t_h,
-                               old_w.last_rendered_w + wm_frame_shadow_offset_x(),
-                               old_w.last_rendered_h + t_h + wm_frame_shadow_offset_y()};
+        // The outer bounds extend symmetrically by the shadow pad on all four
+        // sides, so the old shadow must be damaged on every side or a move leaves
+        // a shadow trail.
+        int pad = wm_frame_shadow_offset_y();
+        last_rendered_outer = {old_w.last_rendered_x - pad, old_w.last_rendered_y - pad,
+                               old_w.last_rendered_w + pad * 2, old_w.last_rendered_h + pad * 2};
     }
     DirtyRect o = rect_expand(last_rendered_outer, pad);
     DirtyRect n = rect_expand(window_outer_bounds(new_w), pad);

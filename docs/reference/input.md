@@ -16,6 +16,7 @@ Input comes from PS/2 controllers and USB HID devices, is merged in the kernel i
 
 - ID 3 or 4: 4-byte packets with scroll wheel; otherwise 3-byte packets.
 - Packet validation (bit 3), sign extension, Y inversion, scroll accumulation, pointer acceleration (small moves stay 1:1, faster moves amplified ~1.5×), cursor clamping to the framebuffer; position starts at screen center. IRQ12 (vector 44).
+- The wheel is vertical-only: the 4th byte is a single signed Z axis (typically -1/0/+1). Neither the PS/2 IntelliMouse nor the USB HID boot-mouse report a horizontal/pan axis, so `EventMouseData.scroll_x` is never generated and horizontal wheel scroll is inert; supporting it would require HID report-protocol pan-usage parsing (future work).
 
 ## Merging
 
@@ -27,7 +28,9 @@ Two paths, both syscall-based:
 
 **Graphical (window manager).** Kernel event pumping converts polled input into `Event` records — mouse move/down/up/scroll, key down/up, window resize/close (`include/uapi/event.h`) — and pushes them into the window manager's per-process `EventQueue` (128-slot ring, IRQ-safe spinlock). The WM drains it with `SYS_GET_EVENT` (blocking or non-blocking, interruptible by fatal signals) and retargets events to client windows with `SYS_POST_EVENT`, translating screen coordinates to window-local space. The WM registers itself with `SYS_GUI_REGISTER_WM`; focus is tracked with `SYS_GUI_SET_FOCUS`.
 
-**Client delivery rules (WM → app).** Mouse moves are forwarded only to the focused user window while the pointer is inside its client area — except while a client holds a pointer grab. A mouse-down delivered to a client grabs the pointer for that window: until the matching button is released, moves and the release are forwarded to the grabbed window even outside its client area, so in-window drags (sliders, scrollbars, selections) keep working past the frame. The release is likewise delivered outside the client area when a grab is active. Keys go to the focused window; the wheel scrolls WM-side content first and is only forwarded to the client when there is nothing to scroll.
+**Client delivery rules (WM → app).** Mouse moves are forwarded only to the focused user window while the pointer is inside its client area — except while a client holds a pointer grab. A mouse-down delivered to a client grabs the pointer for that window: until the matching button is released, moves and the release are forwarded to the grabbed window even outside its client area, so in-window drags (sliders, scrollbars, selections) keep working past the frame. The release is likewise delivered outside the client area when a grab is active. Keys go to the focused window; the wheel scrolls WM-side content first and is only forwarded to the client when there is nothing to scroll. Mouse coordinates are translated into client canvas space (frame inset subtracted, scroll offset added), so they match the coordinates the app drew its controls in.
+
+**Headerbar hit-testing.** A mouse-down in the top `gui_headerbar_h()` band of a window is resolved in order: the WM traffic-light buttons, then resize grips, then the client's published header input rects (`gui_window_set_header_input`), then the drag zone. A click in a header input rect focuses the window and is forwarded to the client like any client click (and grabs the pointer); anything else in the band starts a window move (double-click toggles maximize). See [Window manager — Window Chrome and Unified Headerbar](wm.md#window-chrome-and-unified-headerbar).
 
 ## Client Lifecycle Events
 
@@ -37,7 +40,7 @@ The WM posts synthetic lifecycle events so clients never have to poll the regist
 | --- | --- |
 | `EVT_FOCUS` / `EVT_UNFOCUS` | the window's owner gains/loses keyboard focus |
 | `EVT_MOUSE_LEAVE` | the pointer exits the client area, a shell overlay takes over, the WM starts a window drag, or the window is minimized |
-| `EVT_WINDOW_SCROLL` | the WM changed the window's scroll offset (wheel); `scroll` data carries the new offsets |
+| `EVT_WINDOW_SCROLL` | the WM changed the window's scroll offset — wheel scroll, or a configure-ack/manual-resize clamp to the new bounds; `scroll` data carries the new offsets |
 
 Clients use these to clear hover state, stop drags, and redraw sticky overlays; unknown events are ignored by older apps.
 

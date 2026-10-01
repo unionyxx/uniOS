@@ -218,8 +218,8 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 
     gui_draw_panel_shadow(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r);
 
-    gui_draw_chrome_frame(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
-                          g_gui_style.app_surface, true);
+    gui_draw_window_frame(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
+                          g_gui_style.app_surface);
     gui_draw_card_header_ext(&g_backbuffer, layout.box.x + 1, layout.box.y + 1, layout.box.w - 2, box_r - 1,
                              "Storage Mode", "Choose how uniOS should expose AHCI and ATA storage");
 
@@ -236,19 +236,20 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
     int note_y = content_y + gui_space_1_5();
     int note_h = gui_app_row_tall_h();
     if (note_y + note_h < layout.off_button.y - gui_space_1()) {
-        gui_fill_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(), g_gui_style.chrome_bg);
-        gui_draw_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(), g_gui_style.border);
+        gui_fill_rounded_rect(&g_backbuffer, text_x, note_y, text_w, note_h, gui_radius_md(),
+                              g_gui_style.app_surface_alt);
         gui_draw_badge(&g_backbuffer, text_x + gui_space_1(), note_y + (note_h - gui_badge_h()) / 2, "CAUTION",
-                       g_gui_style.warning, g_gui_style.app_surface);
+                       g_gui_style.warning, g_gui_style.app_surface_alt);
         int note_text_x = text_x + gui_scaled_metric(92);
         gui_draw_wrapped_value(
             &g_backbuffer, note_text_x, note_y + gui_scaled_metric(8), text_w - (note_text_x - text_x) - gui_space_1(),
             "Choose Writable only if you are intentionally testing on hardware you are prepared to modify.",
-            g_gui_style.text_dim, g_gui_style.chrome_bg);
+            g_gui_style.text_dim, g_gui_style.app_surface_alt);
     }
 
     int footer_y = layout.off_button.y - gui_space_1();
-    gui_draw_separator_h(&g_backbuffer, layout.box.x + 1, footer_y, layout.box.w - 2, g_gui_style.chrome_edge);
+    gui_draw_separator_h(&g_backbuffer, layout.box.x + gui_space_1_5(), footer_y, layout.box.w - gui_space_3(),
+                         gui_hairline_color());
 
     gui_app_draw_button(&g_backbuffer, layout.off_button.x, layout.off_button.y, layout.off_button.w,
                         layout.off_button.h, "Off", false, false, g_storage_prompt.hovered_button == 0);

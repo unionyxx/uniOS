@@ -54,15 +54,23 @@ bool adoption_exhausted(int shm_id, uint32_t owner_pid)
 void adoption_note_failure(int shm_id, uint32_t owner_pid)
 {
     int slot = adoption_failure_slot(shm_id, owner_pid);
-    if (slot < 0)
+    if (slot < 0) {
+        // No match and no free slot: evict the stalest tombstone rather than a
+        // fixed slot, so an unrelated active failure is not arbitrarily cleared.
         slot = 0;
-    if (g_adoption_failures[slot].count == 0) {
-        g_adoption_failures[slot].shm_id = shm_id;
-        g_adoption_failures[slot].owner_pid = owner_pid;
+        for (int i = 1; i < ADOPTION_FAILURE_SLOTS; i++)
+            if (g_adoption_failures[i].last_ticks < g_adoption_failures[slot].last_ticks)
+                slot = i;
     }
-    if (g_adoption_failures[slot].count < ADOPTION_FAILURE_LIMIT)
-        g_adoption_failures[slot].count++;
-    g_adoption_failures[slot].last_ticks = get_ticks();
+    AdoptionFailure &f = g_adoption_failures[slot];
+    if (f.count == 0 || f.shm_id != shm_id || f.owner_pid != owner_pid) {
+        f.shm_id = shm_id;
+        f.owner_pid = owner_pid;
+        f.count = 0;
+    }
+    if (f.count < ADOPTION_FAILURE_LIMIT)
+        f.count++;
+    f.last_ticks = get_ticks();
 }
 
 void adoption_clear(int shm_id, uint32_t owner_pid)

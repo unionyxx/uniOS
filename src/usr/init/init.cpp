@@ -21,7 +21,7 @@ static bool config_flag_enabled(const char *config, const char *key, bool defaul
     char value[8];
     if (!cfg_line_value(config, key, value, sizeof(value)))
         return default_value;
-    return value[0] != '0';
+    return cfg_value_enabled(value, default_value);
 }
 
 static int spawn_process(const char *label, const char *path)
@@ -81,10 +81,13 @@ static bool start_desktop(int &wm_pid, int &menubar_pid, int &dock_pid)
     }
 
     menubar_pid = spawn_process("Menu Bar", "/bin/menubar.elf");
-    sleep_ms(20);
-
     dock_pid = spawn_process("Dock", "/bin/dock.elf");
     sleep_ms(20);
+
+    // A failed fork leaves pid -1, which the supervisor can never match to a
+    // reaped child; report failure so the whole desktop is retried.
+    if (menubar_pid < 0 || dock_pid < 0)
+        return false;
     return true;
 }
 

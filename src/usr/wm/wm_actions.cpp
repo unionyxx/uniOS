@@ -35,3 +35,28 @@ void launch_or_focus_app(Registry *registry, const char *title, const char *path
         exit(1);
     }
 }
+
+void open_settings_about(Registry *registry)
+{
+    if (!registry)
+        return;
+    const uint32_t win_limit = registry->window_count > MAX_WINDOWS ? MAX_WINDOWS : registry->window_count;
+    for (uint32_t i = WM_FIRST_USER_WINDOW; i < win_limit; i++) {
+        WindowEntry &e = registry->windows[i];
+        if (!e.ready || !gui_shm_id_is_valid(e.shm_id) || !e.owner_pid ||
+            !gui_window_title_matches(e.title, "Settings"))
+            continue;
+        if (e.state == WIN_MINIMIZED || e.state == WIN_HIDDEN)
+            e.request_restore = true;
+        e.request_focus = true;
+        e.menu_command_id = MENU_CMD_PREFERENCES_ABOUT;
+        asm volatile("sfence" ::: "memory");
+        __sync_add_and_fetch(&e.menu_command_seq, 1u);
+        return;
+    }
+    gui_open_request_submit("about");
+    if (fork() == 0) {
+        exec("/bin/preferences.elf");
+        exit(1);
+    }
+}

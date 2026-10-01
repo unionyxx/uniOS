@@ -1,5 +1,7 @@
 #pragma once
 
+#include <../libgui/gui.h>
+
 #include "wm_rect.h"
 
 extern WmMetrics g_metrics;
@@ -25,10 +27,6 @@ static inline int wm_button_spacing()
 {
     return g_metrics.button_spacing;
 }
-static inline int wm_title_bar_h()
-{
-    return g_metrics.title_bar_h;
-}
 static inline int wm_menubar_h()
 {
     return g_metrics.menubar_h;
@@ -52,6 +50,10 @@ static inline int wm_default_min_h()
 static inline int wm_frame_border()
 {
     return g_metrics.frame_border;
+}
+static inline int wm_frame_body_inset()
+{
+    return g_metrics.frame_body_inset;
 }
 static inline int wm_frame_shadow_offset_x()
 {
@@ -77,9 +79,12 @@ static inline int wm_window_damage_pad_interactive()
 static inline DirtyRect window_button_bounds(const Window &w, int button_index)
 {
     int button_size = wm_button_size();
-    int title_bar_h = wm_title_bar_h();
-    int border = wm_frame_border();
-    int button_y = w.y - title_bar_h + border + (title_bar_h - border - button_size) / 2 + wm_button_inset_y();
+    // Traffic lights overlay the client area, vertically centered in the
+    // unified headerbar region (top gui_headerbar_h() pixels of the client).
+    // The client body begins frame_body_inset below the window's top edge, so
+    // the band's on-screen origin is offset by the same amount.
+    int header_h = gui_headerbar_h();
+    int button_y = w.y + wm_frame_body_inset() + (header_h - button_size) / 2 + wm_button_inset_y();
     return {w.x + wm_button_inset_x() + button_index * wm_button_spacing(), button_y, button_size, button_size};
 }
 static inline void window_button_center(const Window &w, int button_index, int *cx, int *cy)

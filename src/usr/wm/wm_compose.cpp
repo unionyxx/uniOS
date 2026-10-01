@@ -23,9 +23,11 @@ void compose_rect_unclipped(const DirtyRect &r, int focused_index, int hover_fra
         if (w.transparent) {
             draw_window_client_clipped(&g_backbuffer, w, r);
         } else {
-            draw_window_decoration_clipped(&g_backbuffer, w, r, (i == focused_index), (i == hover_frame_index),
-                                           (i == hover_frame_index) ? hover_button : -1);
+            bool focused = (i == focused_index);
+            int hover_btn = (i == hover_frame_index) ? hover_button : -1;
+            draw_window_decoration_clipped(&g_backbuffer, w, r);
             draw_window_client_clipped(&g_backbuffer, w, r);
+            draw_window_decoration_buttons_clipped(&g_backbuffer, w, r, focused, hover_btn);
         }
     }
 
@@ -161,9 +163,12 @@ bool compose_rect_clipped(const DirtyRect &r, int focused_index, int hover_frame
             if (w.transparent) {
                 draw_window_client_clipped(&g_backbuffer, w, visible);
             } else {
-                draw_window_decoration_clipped(&g_backbuffer, w, visible, focused, hovered_frame, hover_btn);
+                draw_window_decoration_clipped(&g_backbuffer, w, visible);
                 if (rect_intersection(visible, g_window_client_cache[i], nullptr))
                     draw_window_client_clipped(&g_backbuffer, w, visible);
+                // Traffic lights overlay the client area AFTER the blit so they
+                // sit on top of the app's sidebar header, not under it.
+                draw_window_decoration_buttons_clipped(&g_backbuffer, w, visible, focused, hover_btn);
             }
         }
     }

@@ -7,8 +7,10 @@ void post_mouse_event_to_window(const Window &w, EventType type, int px, int py,
         return;
     Event ev = {};
     ev.type = type;
-    ev.mouse.x = px - w.x + w.scroll_x;
-    ev.mouse.y = py - w.y + w.scroll_y;
+    // The client body is inset by the chrome frame (see draw_window_client_clipped),
+    // so client pixel (0,0) sits frame_body_inset inside the window origin.
+    ev.mouse.x = px - w.x - wm_frame_body_inset() + w.scroll_x;
+    ev.mouse.y = py - w.y - wm_frame_body_inset() + w.scroll_y;
     ev.mouse.button = button;
     ev.mouse.scroll_y = scroll_y;
     syscall2(SYS_POST_EVENT, w.owner_pid, (uint64_t)&ev);

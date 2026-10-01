@@ -94,6 +94,10 @@ bool add_win_internal(int shm_id, int x, int y, int w, int h, const char *title,
 bool post_window_resize_configure(Window &w);
 void resend_window_resize_configure(Window &w);
 void apply_window_resize_flip(Window &w);
+// Drop an outstanding resize configure (release its snapshot, clear the pending
+// serial). Maximize/restore use this so a configure posted for the previous
+// state cannot flip the window back after the state change lands.
+void cancel_window_resize_configure(Window &w);
 void wm_resize_snapshot_capture(Window &w);
 void wm_resize_snapshot_release(Window &w);
 void wm_commit_snapshot_capture(Window &w);
@@ -129,11 +133,11 @@ static inline DirtyRect window_visible_client_bounds(const Window &w)
     if (w.transparent)
         return {w.x, w.y, eff_w, eff_h};
 
-    int border = wm_frame_border();
-    int left = w.x + border;
-    int top = w.y;
-    int right = w.x + eff_w - border;
-    int bottom = w.y + eff_h - border;
+    int inset = wm_frame_body_inset();
+    int left = w.x + inset;
+    int top = w.y + inset;
+    int right = w.x + eff_w - inset;
+    int bottom = w.y + eff_h - inset;
     int width = right - left;
     int height = bottom - top;
     if (width <= 0 || height <= 0)

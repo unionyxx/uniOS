@@ -10,6 +10,9 @@ bool point_in_titlebar(const Window &w, int px, int py);
 bool point_in_client(const Window &w, int px, int py);
 bool point_in_outer(const Window &w, int px, int py);
 bool point_in_button(const Window &w, int px, int py, int button_index);
+// True when (px,py) lands in one of the client's declared headerbar input
+// rects (interactive controls exempt from the titlebar drag zone).
+bool point_in_header_input(const Window &w, int px, int py);
 int system_window_hit(int px, int py);
 bool pointer_blocked_by_shell_overlay(int px, int py);
 

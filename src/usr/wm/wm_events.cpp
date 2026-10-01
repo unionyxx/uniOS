@@ -109,8 +109,16 @@ void wm_handle_events(Registry *registry, Event &ev)
                 system_window_hit(g_input.mouse_x, g_input.mouse_y) < 0)
                 dismiss = true;
             if (dismiss) {
+                // A grown menubar window means a dropdown is open: menu
+                // tracking is modal, so the dismissing click is consumed and
+                // must not also raise a window or press a control underneath.
+                // With no menu open the flag is a no-op for the menubar and
+                // the click must flow through normally.
+                bool menu_open = registry->windows[0].h > (uint32_t)wm_menubar_h();
                 registry->mb_menu_dismiss_requested = true;
                 smp_wmb();
+                if (menu_open)
+                    continue;
             }
         }
 
@@ -124,7 +132,10 @@ void wm_handle_events(Registry *registry, Event &ev)
                     activate_context_menu_item(registry, h);
                     continue;
                 }
+                // Clicking outside dismisses the menu and is consumed: the
+                // same click must not press a control "through" the menu.
                 close_context_menu();
+                continue;
             }
 
             g_input.pointer_down = true;
@@ -133,11 +144,21 @@ void wm_handle_events(Registry *registry, Event &ev)
 
             int hit_idx = -1;
             bool fwd_client = false;
+            bool clicked_titlebar = false;
             int sys_hit = system_window_hit(g_input.mouse_x, g_input.mouse_y);
 
             if (sys_hit >= 0) {
                 if (sys_hit == 0) {
-                    if (g_input.mouse_x > static_cast<int>(g_screen.width) - 120) {
+                    // Date/control-center corner: the menubar publishes the
+                    // live left edge of its date button (0 = not yet drawn);
+                    // fall back to the legacy margin until it has. Any open
+                    // menubar menu yields to the toggle.
+                    int cc_zone_x = registry->mb_cc_zone_x;
+                    if (cc_zone_x <= 0 || cc_zone_x > static_cast<int>(g_screen.width))
+                        cc_zone_x = static_cast<int>(g_screen.width) - 120;
+                    if (g_input.mouse_x >= cc_zone_x) {
+                        registry->mb_menu_dismiss_requested = true;
+                        smp_wmb();
                         g_input.pointer_down = false;
                         g_input.drag_index = -1;
                         g_input.drag_edges = RESIZE_NONE;
@@ -200,8 +221,16 @@ void wm_handle_events(Registry *registry, Event &ev)
                     g_input.drag_origin_mouse_y = g_input.mouse_y;
                     break;
                 }
+                // Client-declared headerbar controls take the click instead of
+                // starting a titlebar drag.
+                if (point_in_header_input(w, g_input.mouse_x, g_input.mouse_y)) {
+                    hit_idx = i;
+                    fwd_client = is_user_window(w);
+                    break;
+                }
                 if (point_in_titlebar(w, g_input.mouse_x, g_input.mouse_y)) {
                     hit_idx = focus_window(i, true);
+                    clicked_titlebar = true;
                     WindowEntry *click_entry = g_windows[hit_idx].entry;
                     const uint64_t click_ticks = get_ticks();
                     const int click_shm = g_windows[hit_idx].shm_id;
@@ -228,16 +257,28 @@ void wm_handle_events(Registry *registry, Event &ev)
                     g_input.titlebar_click_shm_id = click_shm;
                     g_input.titlebar_click_owner_pid = click_owner;
                     if (g_windows[hit_idx].entry) {
+                        // When a maximized window is grabbed, restore it under the
+                        // pointer first. The drag must track the restored size even
+                        // though the committed w/h stay stale until the restore
+                        // configure acks, so remember the override here.
+                        int drag_size_w = g_windows[hit_idx].w;
+                        int drag_size_h = g_windows[hit_idx].h;
                         if (g_windows[hit_idx].entry->state == WIN_MAXIMIZED) {
                             int old_x = g_windows[hit_idx].x;
                             int ow = g_windows[hit_idx].w;
+                            int restore_w = g_windows[hit_idx].entry->restore_w > 0
+                                                ? g_windows[hit_idx].entry->restore_w
+                                                : g_windows[hit_idx].w;
+                            int restore_h = g_windows[hit_idx].entry->restore_h > 0
+                                                ? g_windows[hit_idx].entry->restore_h
+                                                : g_windows[hit_idx].h;
                             restore_window(hit_idx, false);
-                            int nw = g_windows[hit_idx].w;
-                            int px = (ow > 0) ? (g_input.mouse_x - old_x) * nw / ow : nw / 2;
-                            px = px < 0 ? 0 : (px >= nw ? nw - 1 : px);
+                            int px = (ow > 0) ? (g_input.mouse_x - old_x) * restore_w / ow : restore_w / 2;
+                            px = px < 0 ? 0 : (px >= restore_w ? restore_w - 1 : px);
                             set_window_bounds(g_windows[hit_idx], g_input.mouse_x - px,
-                                              g_input.mouse_y + wm_title_bar_h() / 2, g_windows[hit_idx].w,
-                                              g_windows[hit_idx].h);
+                                              g_input.mouse_y + gui_headerbar_h() / 2, restore_w, restore_h);
+                            drag_size_w = restore_w;
+                            drag_size_h = restore_h;
                         }
                         g_input.drag_index = hit_idx;
                         g_input.drag_edges = RESIZE_NONE;
@@ -247,14 +288,25 @@ void wm_handle_events(Registry *registry, Event &ev)
                         g_input.drag_offset_x = g_input.mouse_x - g_windows[hit_idx].x;
                         g_input.drag_offset_y = g_input.mouse_y - g_windows[hit_idx].y;
                         g_input.drag_origin = g_windows[hit_idx];
+                        g_input.drag_origin.w = drag_size_w;
+                        g_input.drag_origin.h = drag_size_h;
                     }
                     break;
                 }
                 if (point_in_client(w, g_input.mouse_x, g_input.mouse_y)) {
                     hit_idx = i;
                     fwd_client = is_user_window(w);
+                    break;
                 }
-                break;
+                // The click landed in the shadow rim between the silhouette
+                // and the outer bounds: fall through to lower windows instead
+                // of dead-ending here (which would also spurious-defocus).
+                continue;
+            }
+            if (!clicked_titlebar) {
+                g_input.titlebar_click_entry = nullptr;
+                g_input.titlebar_click_shm_id = WIN_SHM_INVALID;
+                g_input.titlebar_click_owner_pid = 0;
             }
             if (hit_idx >= 0) {
                 if (hit_idx >= 2 && fwd_client) {
@@ -274,6 +326,8 @@ void wm_handle_events(Registry *registry, Event &ev)
             g_input.drag_edges = RESIZE_NONE;
             close_context_menu();
             bool opened = false;
+            // Shell surfaces (menubar/dock) own their right-clicks: consume
+            // them instead of falling through to the desktop menu + defocus.
             if (system_window_hit(g_input.mouse_x, g_input.mouse_y) < 0) {
                 for (int i = g_window_count - 1; i >= WM_FIRST_USER_WINDOW; i--) {
                     if (!is_window_visible(g_windows[i]))
@@ -296,7 +350,17 @@ void wm_handle_events(Registry *registry, Event &ev)
                         continue;
 
                     if (point_in_client(g_windows[i], g_input.mouse_x, g_input.mouse_y)) {
-                        if (is_user_window(g_windows[i])) {
+                        // Right-click on the headerbar drag zone (outside any
+                        // client-published interactive rect) opens the window
+                        // menu, GNOME-style; header controls and body content
+                        // still receive the event.
+                        if (is_user_window(g_windows[i]) &&
+                            point_in_titlebar(g_windows[i], g_input.mouse_x, g_input.mouse_y) &&
+                            !point_in_header_input(g_windows[i], g_input.mouse_x, g_input.mouse_y)) {
+                            open_context_menu(registry, CONTEXT_MENU_WINDOW, focus_window(i, true), g_input.mouse_x,
+                                              g_input.mouse_y);
+                            opened = true;
+                        } else if (is_user_window(g_windows[i])) {
                             int focused_idx = focus_window(i, true);
                             post_mouse_event_to_window(g_windows[focused_idx], EVT_MOUSE_DOWN, g_input.mouse_x,
                                                        g_input.mouse_y, ev.mouse.button);
@@ -333,7 +397,7 @@ void wm_handle_events(Registry *registry, Event &ev)
 
             if (g_input.hover_frame_index >= WM_FIRST_USER_WINDOW && g_input.hover_button >= 0) {
                 DirtyRect outer = window_outer_bounds(g_windows[g_input.hover_frame_index]);
-                int title_h = wm_title_bar_h() + wm_frame_border() + wm_frame_shadow_offset_y();
+                int title_h = wm_frame_body_inset() + gui_headerbar_h();
                 if (title_h > outer.h)
                     title_h = outer.h;
                 enqueue_damage_rect(outer.x, outer.y, outer.w, title_h);
@@ -465,7 +529,13 @@ void wm_handle_events(Registry *registry, Event &ev)
                 int scroll_step = gui_scaled_metric(48);
                 if (scroll_step < 16)
                     scroll_step = 16;
-                if (scroll_window_content(g_windows[tgt], -ev.mouse.scroll_x * scroll_step,
+                // Vertical and horizontal are sign-inverted: a positive
+                // wheel-y (up) reveals earlier content so the offset
+                // decreases, but a positive wheel-x (tilt right) reveals
+                // later content so the offset increases. This matches the
+                // scroll-view widget so WM-scrolled and widget-scrolled
+                // windows move the same way.
+                if (scroll_window_content(g_windows[tgt], ev.mouse.scroll_x * scroll_step,
                                           -ev.mouse.scroll_y * scroll_step))
                     continue;
                 post_mouse_event_to_window(g_windows[tgt], ev.type, g_input.mouse_x, g_input.mouse_y, 0,

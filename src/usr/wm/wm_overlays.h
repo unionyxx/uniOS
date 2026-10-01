@@ -12,6 +12,8 @@ extern NotificationCenterState g_notifications;
 void launch_or_focus_app(Registry *registry, const char *title, const char *path);
 void show_desktop_windows();
 void publish_settings_changed(Registry *registry);
+// Open the Settings window on its About section (About is a Preferences tab).
+void open_settings_about(Registry *registry);
 
 // Index launcher.
 DirtyRect index_overlay_bounds();
@@ -61,6 +63,10 @@ void draw_storage_prompt_overlay();
 
 // Notifications and toasts.
 void wm_push_notification(const char *title, const char *message);
+// Expire due toasts and enqueue their removal damage. Runs from the main loop
+// every iteration so toast lifetime is independent of frame damage (an idle
+// desktop with the hardware cursor plane otherwise builds no frames at all).
+void wm_pump_notification_expiry(void);
 void draw_toast_overlay_clipped(const DirtyRect &clip);
 void draw_notification_center_clipped(const DirtyRect &clip, int start_y);
 // Shared height of a notification pill: the live toast and notification-center

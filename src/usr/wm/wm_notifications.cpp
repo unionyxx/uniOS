@@ -7,7 +7,7 @@ NotificationCenterState g_notifications = {};
 
 int notification_pill_h(void)
 {
-    return gui_scaled_metric(76);
+    return gui_scaled_metric(56);
 }
 
 int notification_center_panel_h(void)
@@ -15,7 +15,9 @@ int notification_center_panel_h(void)
     int n = g_notifications.count < 3 ? g_notifications.count : 3;
     if (n <= 0)
         return 0;
-    return gui_card_header_h() + gui_space_2() + n * notification_pill_h() + (n - 1) * gui_space_1() + gui_space_2();
+    int pad = gui_space_1_5();
+    int card_gap = gui_space_1();
+    return gui_card_header_h() + pad + n * notification_pill_h() + (n - 1) * card_gap + pad;
 }
 
 void wm_push_notification(const char *title, const char *message)
@@ -45,6 +47,72 @@ void wm_push_notification(const char *title, const char *message)
     int toast_y = wm_menubar_h() + margin;
 
     enqueue_damage_rect(toast_x - 16, toast_y - 16, toast_w + 32, toast_h + 32);
+}
+
+void wm_pump_notification_expiry(void)
+{
+    if (g_notifications.count == 0 || !g_backbuffer.buffer)
+        return;
+    uint64_t now = get_ticks();
+    bool expired = false;
+    int idx = (g_notifications.head - 1 + MAX_NOTIFICATIONS) % MAX_NOTIFICATIONS;
+    for (int i = 0; i < g_notifications.count; i++) {
+        Notification &notif = g_notifications.history[idx];
+        if (notif.active_toast && (now - notif.timestamp_ticks > TOAST_DURATION_TICKS)) {
+            notif.active_toast = false;
+            expired = true;
+        }
+        idx = (idx - 1 + MAX_NOTIFICATIONS) % MAX_NOTIFICATIONS;
+    }
+    if (expired) {
+        int toast_w = gui_scaled_metric(320);
+        int toast_h = notification_pill_h();
+        int margin = gui_space_2();
+        DirtyRect toast_box = {static_cast<int>(g_backbuffer.width) - toast_w - margin, wm_menubar_h() + margin,
+                               toast_w, toast_h};
+        // Match the expansion used when the toast is drawn so the whole
+        // shadow region is repainted at any UI scale.
+        DirtyRect expired_rect = rect_expand(toast_box, gui_scaled_metric(14));
+        enqueue_damage_rect(expired_rect.x, expired_rect.y, expired_rect.w, expired_rect.h);
+    }
+}
+
+// Shared notification card content, used identically by the live toast and the
+// Notification Center rows: an accent glyph well on the left, then a title and
+// a message line vertically centered as one block, and an optional trailing
+// string (the relative timestamp in the list) aligned with the title. Keeping
+// the metrics in one place guarantees the toast and the list read the same.
+static void draw_notification_card_content(int x, int y, int w, int h, const char *title, const char *message,
+                                           const char *trailing)
+{
+    int icon_size = gui_glyph_std_size() + gui_scaled_metric(4);
+    int icon_x = x + gui_space_1_5();
+    int icon_y = y + (h - icon_size) / 2;
+    gui_fill_rounded_rect(&g_backbuffer, icon_x, icon_y, icon_size, icon_size, gui_radius_sm(),
+                          g_gui_style.accent_soft);
+    int glyph_size = gui_glyph_std_size();
+    gui_draw_glyph(&g_backbuffer, icon_x + (icon_size - glyph_size) / 2, icon_y + (icon_size - glyph_size) / 2,
+                   glyph_size, GUI_GLYPH_INFO, g_gui_style.accent);
+
+    int text_x = icon_x + icon_size + gui_space_1_5();
+    int right_pad = gui_space_1_5();
+    int trailing_w = (trailing && trailing[0]) ? gui_measure_text(gui_font_default(), trailing) : 0;
+    int trailing_gap = trailing_w > 0 ? gui_space_1() : 0;
+    int text_w = x + w - right_pad - trailing_w - trailing_gap - text_x;
+    if (text_w < 0)
+        text_w = 0;
+
+    int title_line = gui_font_line_height(gui_font_title());
+    int row_gap = gui_space_0_5();
+    int block_h = title_line + row_gap + gui_line_height();
+    int title_y = y + (h - block_h) / 2;
+
+    gui_draw_text_clipped(&g_backbuffer, gui_font_title(), text_x, title_y, text_w, title, g_gui_style.text, 0);
+    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, title_y + title_line + row_gap, text_w, message,
+                          g_gui_style.text_muted, 0);
+    if (trailing_w > 0)
+        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), x + w - right_pad - trailing_w, title_y, trailing_w,
+                              trailing, g_gui_style.text_muted, 0);
 }
 
 void draw_toast_overlay_clipped(const DirtyRect &clip)
@@ -100,23 +168,11 @@ void draw_toast_overlay_clipped(const DirtyRect &clip)
 
     gui_draw_panel_shadow(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius);
 
-    gui_draw_chrome_frame(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius,
-                          g_gui_style.app_surface, true);
-
-    int accent_x = toast_box.x + gui_space_1();
-    int accent_w = gui_scaled_metric(4);
-    int accent_h = toast_box.h - gui_space_3();
-    gui_fill_rounded_rect(&g_backbuffer, accent_x, toast_box.y + gui_space_1_5(), accent_w, accent_h, accent_w / 2,
-                          g_gui_style.accent);
-
-    int text_x = accent_x + accent_w + gui_space_1_5();
-    int text_y = toast_box.y + gui_space_2();
-
-    gui_draw_text_clipped(&g_backbuffer, gui_font_title(), text_x, text_y, toast_box.w - gui_scaled_metric(30),
-                          active_toast->title, g_gui_style.text, g_gui_style.app_surface);
-    gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, text_y + gui_line_height() + gui_space_0_5(),
-                          toast_box.w - gui_scaled_metric(30), active_toast->message, g_gui_style.text_dim,
+    gui_draw_window_frame(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius,
                           g_gui_style.app_surface);
+
+    draw_notification_card_content(toast_box.x, toast_box.y, toast_box.w, toast_box.h, active_toast->title,
+                                   active_toast->message, nullptr);
 }
 
 void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
@@ -134,40 +190,35 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
     int radius = gui_radius_xl();
 
     gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
-    gui_draw_chrome_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface, true);
+    // Draw the frame without the light rim, then the header, then the rim on top,
+    // so the rim stays visible along the top edge instead of being buried under
+    // the header fill.
+    gui_draw_window_frame_no_rim(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface);
     gui_draw_card_header_ext(&g_backbuffer, box.x + 1, box.y + 1, box.w - 2, radius - 1, "Notifications", "Recent");
+    gui_draw_window_rim(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
 
-    int item_y = box.y + gui_card_header_h() + gui_space_2();
+    int pad = gui_space_1_5();
+    int card_gap = gui_space_1();
+    int shown = g_notifications.count < 3 ? g_notifications.count : 3;
+    int card_h = notification_pill_h();
+    int card_x = box.x + pad;
+    int card_w = box.w - pad * 2;
+    int card_r = gui_radius_sm() + gui_scaled_metric(2);
+
+    int item_y = box.y + gui_card_header_h() + pad;
     int index = g_notifications.head - 1;
     if (index < 0)
         index = MAX_NOTIFICATIONS - 1;
 
     uint64_t now = get_ticks();
-    for (int i = 0; i < g_notifications.count && i < 3; i++) {
+    for (int i = 0; i < shown; i++) {
         Notification &notif = g_notifications.history[index];
 
-        int card_x = box.x + gui_space_1_5();
-        int card_w = box.w - gui_space_3();
-        int card_h = notification_pill_h();
-        int card_r = gui_radius_lg();
+        // Individual flat card on a subtle wash (no nested frame); the content
+        // layout is byte-for-byte the same as the live toast.
+        gui_fill_rounded_rect(&g_backbuffer, card_x, item_y, card_w, card_h, card_r, gui_subtle_card_wash_color());
 
-        // Individual notification card background
-        gui_fill_rounded_rect(&g_backbuffer, card_x, item_y, card_w, card_h, card_r, g_gui_style.app_surface_alt);
-        gui_draw_rounded_rect(&g_backbuffer, card_x, item_y, card_w, card_h, card_r, g_gui_style.border);
-
-        // Mirror the live toast: accent strip on the left, then title/message.
-        int accent_x = card_x + gui_space_1();
-        int accent_w = gui_scaled_metric(4);
-        int accent_h = card_h - gui_space_3();
-        gui_fill_rounded_rect(&g_backbuffer, accent_x, item_y + gui_space_1_5(), accent_w, accent_h, accent_w / 2,
-                              g_gui_style.accent);
-
-        int text_x = accent_x + accent_w + gui_space_1_5();
-        int text_y = item_y + gui_space_2();
-        int message_y = text_y + gui_line_height() + gui_space_0_5();
-
-        // Relative timestamp, reserved as a right gutter on the message line so the
-        // title keeps the full card width and no text gets shrunk.
+        // Relative timestamp on the title line's right gutter.
         uint64_t diff = now - notif.timestamp_ticks;
         char time_str[32];
         if (diff < 60000) {
@@ -175,19 +226,10 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
         } else {
             snprintf(time_str, sizeof(time_str), "%u min ago", (unsigned)(diff / 60000));
         }
-        int time_w = gui_measure_text(gui_font_default(), time_str);
-        int time_x = card_x + card_w - gui_space_1_5() - time_w;
-        int title_w = card_x + card_w - gui_space_1_5() - text_x;
-        int body_w = title_w - (time_w + gui_space_1());
 
-        gui_draw_text_clipped(&g_backbuffer, gui_font_title(), text_x, text_y, title_w, notif.title, g_gui_style.text,
-                              g_gui_style.app_surface_alt);
-        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), text_x, message_y, body_w, notif.message,
-                              g_gui_style.text_dim, g_gui_style.app_surface_alt);
-        gui_draw_text_clipped(&g_backbuffer, gui_font_default(), time_x, message_y, time_w, time_str,
-                              g_gui_style.text_dim, g_gui_style.app_surface_alt);
+        draw_notification_card_content(card_x, item_y, card_w, card_h, notif.title, notif.message, time_str);
 
-        item_y += card_h + gui_space_1();
+        item_y += card_h + card_gap;
         index--;
         if (index < 0)
             index = MAX_NOTIFICATIONS - 1;

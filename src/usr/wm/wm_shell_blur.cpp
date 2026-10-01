@@ -7,7 +7,6 @@
 
 static bool g_menubar_blur_dirty = false;
 static bool g_dock_blur_dirty = false;
-static uint64_t g_last_blur_vblank = 0;
 
 // Blur source dirty rect tracking - must be declared before first use in mark_shell_blur_dirty
 static DirtyRect g_menubar_blur_dirty_rects[MAX_DIRTY_RECTS];
@@ -22,10 +21,10 @@ static void add_blur_dirty_rect(DirtyRect *rects, int *count, const DirtyRect &r
         return;
     if (*count < MAX_DIRTY_RECTS) {
         rects[(*count)++] = clip;
-    } else {
-        if (*count == 1) {
-            rects[0] = rect_union(rects[0], clip);
-        }
+    } else if (*count > 0) {
+        // Full: fold into the first rect so the region is still recomposed
+        // (previously the rect was silently dropped, leaving stale blur).
+        rects[0] = rect_union(rects[0], clip);
     }
 }
 
@@ -263,15 +262,19 @@ void flush_shell_blur_updates(Registry *registry)
         }
     }
 
-    g_last_blur_vblank = g_display_queue.vblank_count;
     bool is_light = registry->theme_mode == GUI_THEME_LIGHT;
 
-    // Always process both surfaces every frame - no stagger
+    // Always process both surfaces every frame - no stagger. Dirty rects were
+    // recorded against geometry that may have changed since (dock moves on
+    // resolution/scale changes), so clamp them back to the current bounds.
     if (g_menubar_blur_dirty && g_menubar_blur.buffer && g_menubar_blur_source.buffer) {
         if (g_menubar_blur_dirty_count > 0) {
-            // Recompose only dirty regions
+            int menubar_h = wm_menubar_h();
+            DirtyRect mb_bounds = {0, 0, static_cast<int>(g_screen.width), menubar_h};
             for (int i = 0; i < g_menubar_blur_dirty_count; i++) {
-                compose_desktop_for_blur(&g_menubar_blur_source, g_menubar_blur_dirty_rects[i], 0, 0);
+                DirtyRect clipped;
+                if (rect_intersection(g_menubar_blur_dirty_rects[i], mb_bounds, &clipped))
+                    compose_desktop_for_blur(&g_menubar_blur_source, clipped, 0, 0);
             }
             clear_blur_dirty_rects(g_menubar_blur_dirty_rects, &g_menubar_blur_dirty_count);
         } else {
@@ -280,30 +283,30 @@ void flush_shell_blur_updates(Registry *registry)
             DirtyRect full = {0, 0, static_cast<int>(g_screen.width), menubar_h};
             compose_desktop_for_blur(&g_menubar_blur_source, full, 0, 0);
         }
-        blur_surface_material(&g_menubar_blur_source, &g_menubar_blur, 48.0f, is_light ? 85 : 80, is_light ? 8 : 12);
-        registry->mb_blur_generation = registry->mb_blur_generation + 1u;
+        blur_surface_material(&g_menubar_blur_source, &g_menubar_blur, 56.0f, is_light ? 140 : 130, is_light ? 10 : 12);
+        asm volatile("" ::: "memory");
+        __sync_add_and_fetch(&registry->mb_blur_generation, 1u);
         g_menubar_blur_dirty = false;
     }
 
     if (g_dock_blur_dirty && g_dock_blur.buffer && g_dock_blur_source.buffer) {
+        DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
+                               registry->windows[1].h};
+        clip_dirty_rect_to_screen(dock_rect);
         if (g_dock_blur_dirty_count > 0) {
-            // Recompose only dirty regions
-            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
-                                   registry->windows[1].h};
-            clip_dirty_rect_to_screen(dock_rect);
             for (int i = 0; i < g_dock_blur_dirty_count; i++) {
-                compose_desktop_for_blur(&g_dock_blur_source, g_dock_blur_dirty_rects[i], dock_rect.x, dock_rect.y);
+                DirtyRect clipped;
+                if (rect_intersection(g_dock_blur_dirty_rects[i], dock_rect, &clipped))
+                    compose_desktop_for_blur(&g_dock_blur_source, clipped, dock_rect.x, dock_rect.y);
             }
             clear_blur_dirty_rects(g_dock_blur_dirty_rects, &g_dock_blur_dirty_count);
         } else {
             // Full recomposition
-            DirtyRect dock_rect = {registry->windows[1].x, registry->windows[1].y, registry->windows[1].w,
-                                   registry->windows[1].h};
-            clip_dirty_rect_to_screen(dock_rect);
             compose_desktop_for_blur(&g_dock_blur_source, dock_rect, dock_rect.x, dock_rect.y);
         }
-        blur_surface_material(&g_dock_blur_source, &g_dock_blur, 36.0f, is_light ? 82 : 78, is_light ? 8 : 10);
-        registry->dk_blur_generation = registry->dk_blur_generation + 1u;
+        blur_surface_material(&g_dock_blur_source, &g_dock_blur, 42.0f, is_light ? 135 : 125, is_light ? 8 : 10);
+        asm volatile("" ::: "memory");
+        __sync_add_and_fetch(&registry->dk_blur_generation, 1u);
         g_dock_blur_dirty = false;
     }
 

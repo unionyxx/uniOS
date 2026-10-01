@@ -27,6 +27,25 @@ static const char *get_month_name(int month)
     return (month >= 1 && month <= 12) ? months[month - 1] : "???";
 }
 
+// Single source of truth for the clock string: the button-geometry pass and the
+// draw pass must measure the exact same text, otherwise the hover/pressed rect
+// is mis-sized when seconds are shown.
+static bool format_menu_bar_time(const Registry *reg, char *out, size_t out_size)
+{
+    struct SysTime t;
+    if (get_time(&t) != 0 || !out || out_size == 0) {
+        if (out && out_size > 0)
+            out[0] = '\0';
+        return false;
+    }
+    const char *month_name = get_month_name(t.month);
+    if (reg && (reg->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0)
+        snprintf(out, out_size, "%s %d  %02d:%02d:%02d", month_name, t.day, t.hour, t.minute, t.second);
+    else
+        snprintf(out, out_size, "%s %d  %02d:%02d", month_name, t.day, t.hour, t.minute);
+    return true;
+}
+
 static void reap_exited_children()
 {
     int status = 0;
@@ -356,7 +375,6 @@ static SystemMenuModel build_system_menu_model(Registry *reg)
         model.items[model.count++] = {label, enabled, separator};
     };
 
-    push("About uniOS", true, false);
     push("Settings", true, false);
     push(nullptr, false, true);
     push(model.close_item, focus.valid, false);
@@ -413,17 +431,22 @@ static WindowEntry *find_window_by_title(Registry *reg, const char *title)
 
 static void launch_about(Registry *reg)
 {
-    WindowEntry *entry = find_window_by_title(reg, "About uniOS");
+    // About lives in the Settings app: focus an existing window and switch it
+    // to the About section, or launch a fresh one via the open-request slot.
+    WindowEntry *entry = find_window_by_title(reg, "Settings");
     if (entry) {
         if (entry->state == WIN_MINIMIZED || entry->state == WIN_HIDDEN)
             entry->request_restore = true;
         entry->request_focus = true;
+        entry->menu_command_id = MENU_CMD_PREFERENCES_ABOUT;
         asm volatile("sfence" ::: "memory");
+        __sync_add_and_fetch(&entry->menu_command_seq, 1u);
         return;
     }
+    gui_open_request_submit("about");
     int pid = fork();
     if (pid == 0) {
-        exec("/bin/about.elf");
+        exec("/bin/preferences.elf");
         exit(1);
     }
 }
@@ -685,9 +708,9 @@ void draw_menubar(Surface *canvas, Registry *reg)
 
     bool is_light = reg ? (reg->theme_mode == GUI_THEME_LIGHT) : false;
 
-    uint32_t tint_color = is_light ? 0x70F7F9FCu : 0x60141820u;
+    uint32_t tint_color = is_light ? 0x5CF6F5F4u : 0x5426262Bu;
     uint32_t divider_color = is_light ? 0x16000000u : 0x14FFFFFFu;
-    uint32_t fallback_color = is_light ? 0xFFF7F9FCu : 0xFF141820u;
+    uint32_t fallback_color = is_light ? 0xFFF6F5F4u : 0xFF26262Bu;
     // Shared hover wash for every menubar button (glass surface).
     uint32_t hover_fill = is_light ? 0x1E000000u : 0x22FFFFFFu;
 
@@ -712,16 +735,15 @@ void draw_menubar(Surface *canvas, Registry *reg)
         g_logo_btn_w = logo_text_w + padding * 2;
         g_logo_btn_x = logo_x();
 
-        struct SysTime t;
+        char time_str[64];
         int date_text_w = 0;
-        if (get_time(&t) == 0) {
-            char time_str[32];
-            const char *month_name = get_month_name(t.month);
-            snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d", month_name, t.day, t.hour, t.minute);
+        if (format_menu_bar_time(reg, time_str, sizeof(time_str)))
             date_text_w = gui_measure_text(menu_font, time_str);
-        }
         g_date_btn_w = date_text_w + padding * 2;
         g_date_btn_x = (int)canvas->width - g_date_btn_w - logo_x();
+        // Publish the live button rect so the WM's control-center click fast
+        // path matches the drawn button edge-for-edge.
+        reg->mb_cc_zone_x = g_date_btn_x;
 
         int mx = pointer_local_x(reg);
         int my = pointer_local_y(reg);
@@ -769,17 +791,8 @@ void draw_menubar(Surface *canvas, Registry *reg)
     }
     (void)x;
 
-    struct SysTime t;
-    if (get_time(&t) == 0) {
-        char time_str[64];
-        const char *month_name = get_month_name(t.month);
-
-        if ((reg->system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) != 0) {
-            snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d:%02d", month_name, t.day, t.hour, t.minute,
-                     t.second);
-        } else {
-            snprintf(time_str, sizeof(time_str), "%s %d  %02d:%02d", month_name, t.day, t.hour, t.minute);
-        }
+    char time_str[64];
+    if (format_menu_bar_time(reg, time_str, sizeof(time_str))) {
         int time_x = gui_align_text_x_center(menu_font, g_date_btn_x, g_date_btn_w, time_str);
         draw_menubar_text(canvas, menu_font, time_x, menu_text_y, time_str, g_gui_style.text, is_light);
     }
@@ -959,18 +972,16 @@ extern "C" int main(int argc, char **argv)
                 int item = gui_popup_menu_hit_test(model.items, model.count, menu_x(), menu_y(), model.width, mx, my);
                 if (item >= 0) {
                     if (item == 0)
-                        launch_about(registry);
-                    else if (item == 1)
                         launch_preferences(registry);
-                    else if (item == 3)
+                    else if (item == 2)
                         request_window_action(registry, focused_slot, 0);
-                    else if (item == 4)
+                    else if (item == 3)
                         request_window_action(registry, focused_slot, 1);
-                    else if (item == 5)
+                    else if (item == 4)
                         request_window_action(registry, focused_slot, 2);
-                    else if (item == 7)
+                    else if (item == 6)
                         request_system_power_action(registry, SYS_REBOOT);
-                    else if (item == 8)
+                    else if (item == 7)
                         request_system_power_action(registry, SYS_POWEROFF);
                     g_menu_open = false;
                 } else {

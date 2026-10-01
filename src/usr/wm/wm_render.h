@@ -15,11 +15,13 @@ bool ensure_surface_capacity(Surface *surface, uint32_t width, uint32_t height);
 // Blur.
 void blur_surface_box(const Surface *src, Surface *dst, int radius);
 void blur_surface_material(const Surface *src, Surface *dst, float sigma, int saturation_pct, int brightness_bias);
+bool blur_self_test(void);
 
 // Window decoration and client drawing.
 void invalidate_window_decoration_cache(Window &w);
-void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &clip, bool focused, bool hovered_frame,
-                                    int hovered_button);
+void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &clip);
+void draw_window_decoration_buttons_clipped(Surface *dst, const Window &w, const DirtyRect &clip, bool focused,
+                                            int hovered_button);
 void draw_window_client_clipped(Surface *dst, const Window &w, const DirtyRect &clip);
 
 #ifdef __cplusplus

@@ -31,10 +31,10 @@ static constexpr int WINDOW_DAMAGE_PAD_BASE = 3;
 static constexpr int FRAME_BORDER = 1;
 static constexpr int FRAME_OCCLUSION_INSET = 4;
 static constexpr int RESIZE_GRIP = 9;
-static constexpr int BTN_SIZE = 13;
-static constexpr int BTN_INSET_X = 10;
+static constexpr int BTN_SIZE = HEADER_TRAFFIC_SIZE;
+static constexpr int BTN_INSET_X = HEADER_TRAFFIC_INSET_X;
 static constexpr int BTN_INSET_Y = 0;
-static constexpr int BTN_SPACING = 20;
+static constexpr int BTN_SPACING = HEADER_TRAFFIC_SPACING;
 static constexpr int MIN_WINDOW_W = 180;
 static constexpr int MIN_WINDOW_H = 120;
 static constexpr int DESKTOP_MARGIN = 6;
@@ -86,6 +86,7 @@ enum IndexActionKind
     INDEX_ACTION_OPEN_CONTROL_PANEL,
     INDEX_ACTION_OPEN_STORAGE_PROMPT,
     INDEX_ACTION_SHOW_DESKTOP,
+    INDEX_ACTION_SHOW_ABOUT,
     INDEX_ACTION_TOGGLE_THEME,
     INDEX_ACTION_TOGGLE_DESKTOP_GRID,
     INDEX_ACTION_TOGGLE_CLOCK_SECONDS,
@@ -135,18 +136,20 @@ struct Window
     int decoration_cache_w;
     int decoration_cache_h;
     uint32_t decoration_cache_theme_sig;
-    bool decoration_cache_focused;
-    char decoration_cache_title[64];
 
-    Surface button_cache;
-    int button_cache_alloc_w;
-    int button_cache_alloc_h;
-    int button_cache_w;
-    int button_cache_h;
-    uint32_t button_cache_theme_sig;
-    bool button_cache_focused;
-    bool button_cache_hovered_frame;
-    int button_cache_hovered_button;
+    // The decoration chrome is tinted by the client's own background, sampled
+    // from its buffer. While an app launches the buffer transitions from the
+    // zeroed mmap through several progressive frames, and re-sampling every
+    // commit would rebuild the (expensive) shadow cache each time the pixel
+    // changes — freezing the compositor mid-launch. Lock the tint after the
+    // first opaque sample; invalidate_window_decoration_cache() releases it.
+    uint32_t decoration_bg_color = 0;
+    bool decoration_bg_locked = false;
+    // Theme switches release the tint lock (see wm_sync_registry) and set this
+    // deadline: while it is in the future the tint keeps sampling the live
+    // buffer so the chrome follows the app's re-themed canvas, then locks
+    // again on the final color.
+    uint64_t decoration_resample_until = 0;
 
     // Internal state.
     uint32_t buffer_generation_seen;
@@ -317,7 +320,6 @@ struct IndexState
     int result_count;
     int selected_index;
     int hovered_index;
-    uint64_t open_ticks;
 };
 
 struct ControlCenterState
@@ -382,8 +384,8 @@ struct WmInputState
 
 struct WmMetrics
 {
-    int resize_grip, button_size, button_inset_x, button_inset_y, button_spacing, title_bar_h, menubar_h,
-        desktop_margin, dock_reserved_h, frame_border, frame_shadow_offset_x, frame_shadow_offset_y, default_min_w,
+    int resize_grip, button_size, button_inset_x, button_inset_y, button_spacing, menubar_h, desktop_margin,
+        dock_reserved_h, frame_border, frame_body_inset, frame_shadow_offset_x, frame_shadow_offset_y, default_min_w,
         default_min_h;
 };
 
