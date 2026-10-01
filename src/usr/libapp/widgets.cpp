@@ -78,7 +78,9 @@ int widget_button_event(WidgetButton *b, const Event *ev)
     if (event_left_up(ev) && b->pressed) {
         b->pressed = false;
         int result = WIDGET_CHANGED;
-        if (widget_contains(b->rect, ev->mouse.x, ev->mouse.y))
+        // fire_on_down buttons already reported CLICKED on the press; only
+        // fire-on-release buttons click again here.
+        if (!b->fire_on_down && widget_contains(b->rect, ev->mouse.x, ev->mouse.y))
             result |= WIDGET_CLICKED;
         return result;
     }
@@ -132,7 +134,8 @@ void widget_toggle_draw(Surface *s, const WidgetToggle *t, const char *label, co
 {
     if (!s || !t || gui_rect_is_empty(t->rect))
         return;
-    gui_app_draw_toggle_row(s, t->rect.x, t->rect.y, t->rect.w, t->rect.h, label, detail, on, false, t->hovered);
+    gui_app_draw_toggle_row(s, t->rect.x, t->rect.y, t->rect.w, t->rect.h, GUI_GLYPH_NONE, label, detail, on, false,
+                            t->hovered);
 }
 
 // --- Slider ------------------------------------------------------------------
@@ -496,6 +499,11 @@ int widget_dialog_event(WidgetDialog *d, const Event *ev)
         return WIDGET_NONE;
     }
 
+    // The layout rects only become valid on the first draw; ignore mouse input
+    // until then so a queued click cannot dismiss an unrendered dialog.
+    if (gui_rect_is_empty(d->layout.confirm))
+        return WIDGET_NONE;
+
     if (ev->type == EVT_MOUSE_MOVE) {
         int hover = 0;
         if (widget_contains(d->layout.confirm, ev->mouse.x, ev->mouse.y))
@@ -629,7 +637,7 @@ void widget_scroll_view_reveal_y(WidgetScrollView *sv, int y, int h)
     if (!sv)
         return;
     if (y < sv->scroll_y)
-        sv->scroll_y = y;
+        sv->scroll_y = scroll_clamp(y, widget_scroll_view_max_y(sv));
     else if (y + h > sv->scroll_y + sv->viewport.h)
         sv->scroll_y = scroll_clamp(y + h - sv->viewport.h, widget_scroll_view_max_y(sv));
 }

@@ -19,14 +19,6 @@ typedef struct
 
 typedef struct
 {
-    DisplaySurface surface;
-    DisplaySurfaceImport import_request;
-    DisplaySyncPoint last_sync;
-    bool valid;
-} GuiDisplaySurfaceState;
-
-typedef struct
-{
     uint32_t codepoint;
     uint16_t atlas_x;
     uint16_t atlas_y;
@@ -59,25 +51,6 @@ typedef struct
     uint8_t *atlas;
 } GuiFont;
 
-#define COLOR_BLACK 0xFF000000
-#define COLOR_WHITE 0xFFFFFFFF
-#define COLOR_BLUE 0xFF0000FF
-#define COLOR_RED 0xFFFF0000
-
-typedef struct
-{
-    uint32_t background;
-    uint32_t foreground;
-    uint32_t accent;
-    uint32_t window_border;
-    uint32_t window_title;
-    uint32_t taskbar;
-} Theme;
-
-extern Theme g_current_theme;
-
-#define COLOR_BG g_current_theme.background
-
 typedef struct
 {
     uint32_t app_bg;
@@ -103,19 +76,11 @@ typedef struct
 typedef struct
 {
     uint32_t desktop_bg;
-    uint32_t desktop_grid;
-    uint32_t window_bar_active;
-    uint32_t window_bar_inactive;
-    uint32_t window_bar_hover;
-    uint32_t window_title_active;
-    uint32_t window_title_inactive;
-    uint32_t frame_shadow;
     uint32_t frame_outline;
     uint32_t button_close;
     uint32_t button_minimize;
     uint32_t button_maximize;
     uint32_t button_outline;
-    uint32_t badge_text;
 } GuiChromePalette;
 
 enum
@@ -130,7 +95,6 @@ enum
     GUI_BADGE_H = 18,
     GUI_BADGE_PAD_X = 8,
     GUI_BADGE_RADIUS = 9,
-    GUI_WINDOW_TITLE_MIN_X = 76,
     GUI_APP_OUTER_PADDING = 16,
     GUI_APP_SECTION_GAP = 14,
     GUI_APP_HEADER_H = 58,
@@ -181,6 +145,54 @@ typedef enum
     GUI_CURSOR_RESIZE_D1,
     GUI_CURSOR_RESIZE_D2,
 } GuiCursorKind;
+
+// Monochrome icon set authored as SVG sources under glyphs/ and rasterized to
+// white .uoic silhouettes staged at /usr/share/glyphs/. gui_draw_glyph loads
+// and caches a silhouette per kind/size and tints it to `fg` at draw time, so
+// one asset serves every color context. `size` is the square edge.
+typedef enum
+{
+    GUI_GLYPH_NONE = 0,
+    GUI_GLYPH_FOLDER,
+    GUI_GLYPH_FOLDER_UP,
+    GUI_GLYPH_FILE,
+    GUI_GLYPH_FILE_TEXT,
+    GUI_GLYPH_FILE_CODE,
+    GUI_GLYPH_FILE_CONFIG,
+    GUI_GLYPH_FILE_IMAGE,
+    GUI_GLYPH_FILE_ARCHIVE,
+    GUI_GLYPH_FILE_BINARY,
+    GUI_GLYPH_DRIVE,
+    GUI_GLYPH_HOME,
+    GUI_GLYPH_DESKTOP,
+    GUI_GLYPH_DOCUMENTS,
+    GUI_GLYPH_DOWNLOADS,
+    GUI_GLYPH_PICTURES,
+    GUI_GLYPH_ARROW_UP,
+    GUI_GLYPH_NETWORK,
+    GUI_GLYPH_SETTINGS,
+    GUI_GLYPH_APPEARANCE,
+    GUI_GLYPH_DEVICES,
+    GUI_GLYPH_INFO,
+    GUI_GLYPH_WARNING,
+    GUI_GLYPH_DISPLAY,
+    GUI_GLYPH_CLOCK,
+    GUI_GLYPH_GRID,
+    GUI_GLYPH_ANIMATION,
+    GUI_GLYPH_TRANSPARENCY,
+    GUI_GLYPH_VOLUME,
+    GUI_GLYPH_STORAGE,
+    GUI_GLYPH_CALENDAR,
+    GUI_GLYPH_TERMINAL,
+    GUI_GLYPH_APP,
+    GUI_GLYPH_COMMAND,
+    GUI_GLYPH_SEARCH,
+    GUI_GLYPH_COUNT,
+} GuiGlyphKind;
+
+void gui_draw_glyph(Surface *s, int32_t x, int32_t y, int32_t size, GuiGlyphKind glyph, uint32_t fg);
+// Square edge for the standard 16px sidebar/list glyph, UI-scaled.
+int gui_glyph_std_size(void);
 
 #define GUI_UOWP_VARIANT_DEFAULT 0u
 #define GUI_UOWP_VARIANT_LIGHT 1u
@@ -240,15 +252,15 @@ int gui_poll_frame(uint64_t *frame_ticks, uint32_t *completed_sequence);
 int gui_window_set_min_size(int width, int height);
 int gui_window_get_min_size(int *width, int *height);
 int gui_set_content_size(Surface *s, int content_w, int content_h);
+// Declare the interactive (non-drag) rects of the unified headerbar band, in
+// client canvas coordinates. The WM forwards clicks/hovers landing in them to
+// this window instead of treating them as a titlebar drag. count 0 makes the
+// whole band draggable. Rects beyond WINDOW_HEADER_INPUT_MAX are dropped.
+void gui_window_set_header_input(const Rect *rects, int count);
 extern WindowEntry *g_my_window;
 
 Surface gui_create_surface(uint32_t width, uint32_t height);
 void gui_destroy_surface(Surface *s);
-void gui_surface_reset_display_state(Surface *s, GuiDisplaySurfaceState *state);
-bool gui_surface_prepare_display_import(const Surface *s, uint32_t dirty_generation, uint32_t resize_generation,
-                                        DisplaySurfaceImport *out_import);
-bool gui_surface_import_display(const Surface *s, uint32_t dirty_generation, uint32_t resize_generation,
-                                DisplaySurface *out_surface);
 
 void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color);
 void gui_draw_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
@@ -319,7 +331,6 @@ int gui_space_4(void);
 int gui_card_header_h(void);
 int gui_badge_h(void);
 int gui_badge_pad_x(void);
-int gui_window_title_min_x(void);
 int gui_app_outer_padding(void);
 int gui_app_section_gap(void);
 int gui_app_header_h(void);
@@ -331,7 +342,12 @@ int gui_app_row_tall_h(void);
 // Two-line navigation item (title + detail).
 int gui_app_nav_h(void);
 int gui_app_control_h(void);
-int gui_title_bar_h(void);
+// The unified headerbar height — the top region of the client area that apps
+// reserve for traffic lights + toolbar. The WM overlays traffic lights there.
+int gui_headerbar_h(void);
+// Width of the WM traffic-light cluster (close/minimize/maximize) at the left
+// of the headerbar, so apps keep their own controls clear of it.
+int gui_traffic_lights_w(void);
 int gui_menubar_h(void);
 int gui_system_menubar_canvas_h(void);
 int gui_scrollbar_w(void);
@@ -339,14 +355,16 @@ int gui_scrollbar_min_thumb(void);
 int gui_dialog_button_w(void);
 
 GuiAppLayout gui_app_begin(Surface *s);
-void gui_app_draw_header(Surface *s, const GuiAppLayout *layout, const char *title, const char *subtitle,
-                         const char *detail);
-void gui_app_draw_nav_item(Surface *s, int x, int y, int w, int h, const char *label, const char *detail, bool active,
+void gui_app_draw_nav_item(Surface *s, int x, int y, int w, int h, GuiGlyphKind icon, const char *label, bool active,
                            bool hovered);
-void gui_app_draw_list_row(Surface *s, int x, int y, int w, int h, const char *badge, const char *title,
+void gui_app_draw_list_row(Surface *s, int x, int y, int w, int h, GuiGlyphKind icon, const char *title,
                            const char *detail, bool active, bool hovered, bool muted);
-void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, const char *label, const char *detail, bool on,
-                             bool active, bool hovered);
+// Flat list row carrying a small text badge pill (for symbol/outline markers
+// where a glyph is not a fit).
+void gui_app_draw_badged_row(Surface *s, int x, int y, int w, int h, const char *badge, const char *title,
+                             const char *detail, bool active, bool hovered, bool muted);
+void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, GuiGlyphKind icon, const char *label,
+                             const char *detail, bool on, bool active, bool hovered);
 // Slider row: label left, percent value right, track along the bottom.
 // Track geometry for hit-testing comes from gui_app_slider_track_rect; map a
 // pointer x position to a value with gui_app_slider_value_from_x.
@@ -364,6 +382,18 @@ void gui_app_draw_button(Surface *s, int x, int y, int w, int h, const char *lab
 // nudged down) for click feedback.
 void gui_app_draw_button_ex(Surface *s, int x, int y, int w, int h, const char *label, bool primary, bool focused,
                             bool hovered, bool pressed);
+
+// Boxed list group (libadwaita-style grouped card): one continuous rounded
+// container that rows share, instead of each row carrying its own framed box.
+void gui_draw_boxed_container(Surface *s, int x, int y, int w, int h);
+// Hairline divider between boxed rows. The stroke is indented from the left so
+// it starts past the row's icon/label gutter and never touches the card edge.
+void gui_draw_boxed_divider(Surface *s, int x, int y, int w, int indent);
+// Uppercase, reduced-opacity caption used to segment sidebar sections without
+// horizontal rules.
+void gui_app_draw_section_caption(Surface *s, int x, int y, int w, const char *caption);
+// Height of a single-line sidebar navigation pill.
+int gui_app_sidebar_row_h(void);
 int gui_popup_menu_item_h(void);
 int gui_popup_menu_height(const GuiMenuItem *items, int count);
 int gui_popup_menu_width(const GuiMenuItem *items, int count, int min_width);
@@ -461,7 +491,7 @@ static inline int gui_radius_sm(void)
 
 static inline int gui_radius_md(void)
 {
-    return gui_scaled_metric(8);
+    return gui_scaled_metric(10);
 }
 
 static inline int gui_radius_lg(void)
@@ -471,7 +501,7 @@ static inline int gui_radius_lg(void)
 
 static inline int gui_radius_xl(void)
 {
-    return gui_scaled_metric(16);
+    return gui_scaled_metric(12);
 }
 
 static inline int gui_panel_radius(int w, int h)
@@ -486,51 +516,43 @@ static inline void gui_fill_surface(Surface *s, uint32_t color)
 
 static inline void gui_draw_separator_h(Surface *s, int x, int y, int w, uint32_t color)
 {
-    gui_fill_rect(s, x, y, w, 1, color);
+    gui_fill_rect_blend(s, x, y, w, 1, color);
 }
 
-static inline void gui_draw_panel(Surface *s, int x, int y, int w, int h, uint32_t bg, uint32_t border)
+static inline void gui_draw_separator_v(Surface *s, int x, int y, int h, uint32_t color)
 {
-    int r = gui_panel_radius(w, h);
-    gui_fill_rounded_rect(s, x, y, w, h, r, bg);
-    gui_draw_rounded_rect(s, x, y, w, h, r, border);
+    gui_fill_rect_blend(s, x, y, 1, h, color);
 }
 
-// Window-grade chrome frame: the exact multi-layer outline the WM paints
-// around windows — a crisp 1 px outline ring, a tinted transition ring and a
-// subtle inner highlight. Every floating surface (popup menus, dialogs, shell
-// overlays, dock) uses this so all outlines are pixel-identical.
-typedef struct
-{
-    uint32_t outline;
-    uint32_t frame_fill;
-    uint32_t inner_stroke;
-} GuiChromeFrameColors;
+// Theme-aware translucent washes. Dark theme washes are white at low alpha
+// (specular lifts on #141416..#22222A); light theme washes are black at low
+// alpha. All row hovers, hairlines and inset wells route through these so both
+// themes read identically.
+uint32_t gui_hairline_color(void);         // divider hairlines (~8%)
+uint32_t gui_hover_wash_color(void);       // row/button hover lift (~6%)
+uint32_t gui_inset_wash_color(void);       // wells: off switch tracks, slider tracks
+uint32_t gui_edge_wash_color(void);        // input/segment container edges (~7%)
+uint32_t gui_subtle_card_wash_color(void); // flat tiles/notification cards (~6%)
+uint32_t gui_active_wash_color(void);      // active sidebar selection pill (~12%)
+bool gui_theme_is_light(void);             // true when the active theme is GUI_THEME_LIGHT
 
-// Border ring thickness and the extra body inset (both 1 px base, scaled).
-int gui_chrome_border(void);
-int gui_chrome_detail_inset(void);
-GuiChromeFrameColors gui_chrome_frame_colors(uint32_t body, bool active);
-// Full frame including the body fill.
-void gui_draw_chrome_frame(Surface *s, int x, int y, int w, int h, int radius, uint32_t body, bool active);
-// Outline rings only, for surfaces that paint their own body (glass panels).
-void gui_draw_chrome_ring(Surface *s, int x, int y, int w, int h, int radius, uint32_t body_hint, bool active);
-
-static inline void gui_draw_panel_inset_ext(Surface *s, int x, int y, int w, int h, int r, uint32_t bg, uint32_t border,
-                                            uint32_t inset)
-{
-    gui_fill_rounded_rect(s, x, y, w, h, r, bg);
-    gui_draw_rounded_rect(s, x, y, w, h, r, border);
-    if (w > 4 && h > 4) {
-        gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, gui_corner_radius(w - 2, h - 2, r - 1), inset);
-    }
-}
-
-static inline void gui_draw_panel_inset(Surface *s, int x, int y, int w, int h, uint32_t bg, uint32_t border,
-                                        uint32_t inset)
-{
-    gui_draw_panel_inset_ext(s, x, y, w, h, gui_panel_radius(w, h), bg, border, inset);
-}
+// The edge every floating surface shares with windows (macOS-style): a dark
+// translucent stroke on the outside of the silhouette (it reads as part of the
+// drop shadow) and a light translucent rim just inside it so the layer stays
+// defined when windows overlap. Dark theme raises both opacities a little for a
+// crisper, more defined edge. Popup menus, dialogs, shell overlays and the dock
+// all use these so every edge is pixel-identical to a window frame.
+uint32_t gui_window_outer_stroke_color(void);
+uint32_t gui_window_inner_rim_color(void);
+// Opaque body fill + the outer/inner edge strokes.
+void gui_draw_window_frame(Surface *s, int x, int y, int w, int h, int radius, uint32_t body);
+// Body + outer stroke only, without the light inner rim. For surfaces that draw
+// content flush to the top edge and then draw the rim on top of it.
+void gui_draw_window_frame_no_rim(Surface *s, int x, int y, int w, int h, int radius, uint32_t body);
+// The light inner rim only.
+void gui_draw_window_rim(Surface *s, int x, int y, int w, int h, int radius);
+// Edge strokes only, for surfaces that paint their own body (glass panels).
+void gui_draw_window_ring(Surface *s, int x, int y, int w, int h, int radius);
 
 static inline void gui_fill_top_rounded_panel(Surface *s, int x, int y, int w, int h, int r, uint32_t color)
 {
@@ -541,34 +563,16 @@ static inline void gui_fill_top_rounded_panel(Surface *s, int x, int y, int w, i
         gui_fill_rect(s, x, y + r, w, h - r, color);
 }
 
-static inline void gui_draw_card(Surface *s, int x, int y, int w, int h, const char *title)
-{
-    int header_h = gui_card_header_h();
-    int r = gui_panel_radius(w, h);
-    gui_fill_rounded_rect(s, x, y + 1, w, h, r, g_gui_style.chrome_bg);
-    gui_draw_panel_inset_ext(s, x, y, w, h, r, g_gui_style.app_surface, g_gui_style.border, g_gui_style.chrome_bg_alt);
-    if (header_h > 0 && w > 2) {
-        gui_fill_top_rounded_panel(s, x + 1, y + 1, w - 2, header_h, gui_corner_radius(w - 2, header_h, r - 1),
-                                   g_gui_style.chrome_bg);
-        gui_draw_separator_h(s, x + 1, y + header_h + 1, w - 2, g_gui_style.chrome_edge);
-    }
-    if (title) {
-        int title_y = gui_align_text_y(gui_font_title(), y + 1, header_h);
-        gui_draw_text_clipped(s, gui_font_title(), x + gui_space_2(), title_y, w - gui_space_3(), title,
-                              g_gui_style.text, g_gui_style.chrome_bg);
-    }
-}
-
 static inline void gui_draw_card_header_ext(Surface *s, int x, int y, int w, int r, const char *title,
                                             const char *detail)
 {
     int header_h = gui_card_header_h();
-    gui_fill_top_rounded_panel(s, x, y, w, header_h, gui_corner_radius(w, header_h, r), g_gui_style.chrome_bg);
-    gui_draw_separator_h(s, x, y + header_h, w, g_gui_style.chrome_edge);
+    gui_fill_top_rounded_panel(s, x, y, w, header_h, gui_corner_radius(w, header_h, r), g_gui_style.app_surface_alt);
+    gui_draw_separator_h(s, x + gui_space_1_5(), y + header_h - 1, w - gui_space_3(), gui_hairline_color());
     int title_y = gui_align_text_y(gui_font_title(), y, header_h);
     if (title)
         gui_draw_text_clipped(s, gui_font_title(), x + gui_space_2(), title_y, w - gui_space_3(), title,
-                              g_gui_style.text, g_gui_style.chrome_bg);
+                              g_gui_style.text, g_gui_style.app_surface_alt);
     if (detail && *detail) {
         int detail_w = gui_measure_text(gui_font_default(), detail);
         int detail_x = x + w - gui_space_2() - detail_w;
@@ -576,7 +580,7 @@ static inline void gui_draw_card_header_ext(Surface *s, int x, int y, int w, int
             detail_x = x + gui_space_4();
         int detail_y = gui_align_text_y(gui_font_default(), y, header_h);
         gui_draw_text_clipped(s, gui_font_default(), detail_x, detail_y, w - (detail_x - x) - gui_space_2(), detail,
-                              g_gui_style.text_dim, g_gui_style.chrome_bg);
+                              g_gui_style.text_muted, g_gui_style.app_surface_alt);
     }
 }
 
@@ -605,26 +609,6 @@ static inline void gui_draw_focus_frame(Surface *s, int x, int y, int w, int h, 
     if (focused && w > 4 && h > 4)
         gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, gui_corner_radius(w - 2, h - 2, r - 1),
                               g_gui_style.accent_soft);
-}
-
-static inline void gui_draw_metric_row(Surface *s, int x, int y, int w, const char *label, const char *value,
-                                       bool accent)
-{
-    const GuiFont *label_font = gui_font_default();
-    uint32_t fg = accent ? g_gui_style.text : g_gui_style.text_dim;
-    gui_draw_text_clipped(s, label_font, x, y, w / 2, label ? label : "", fg, g_gui_style.app_surface);
-    int value_w = gui_measure_text(gui_font_default(), value ? value : "");
-    int value_x = x + w - value_w;
-    if (value_x < x + gui_scaled_metric(92))
-        value_x = x + gui_scaled_metric(92);
-    gui_draw_text_clipped(s, gui_font_default(), value_x, y, x + w - value_x, value ? value : "", g_gui_style.text,
-                          g_gui_style.app_surface);
-}
-
-static inline void gui_draw_kv(Surface *s, int x, int y, const char *label, const char *value, uint32_t bg)
-{
-    gui_draw_string(s, x, y, label, g_gui_style.text_dim, bg);
-    gui_draw_string(s, x, y + gui_line_height(), value, g_gui_style.text, bg);
 }
 
 static inline int gui_draw_wrapped_value(Surface *s, int x, int y, int w, const char *value, uint32_t fg, uint32_t bg)
@@ -675,15 +659,6 @@ static inline int gui_draw_wrapped_value(Surface *s, int x, int y, int w, const 
     }
 
     return line_count * gui_line_height();
-}
-
-static inline int gui_draw_detail_item(Surface *s, int x, int y, int w, const char *label, const char *value,
-                                       uint32_t bg)
-{
-    gui_draw_string(s, x, y, label, g_gui_style.text_muted, bg);
-    int label_gap = gui_line_height() + 2;
-    int value_h = gui_draw_wrapped_value(s, x, y + label_gap, w, value, g_gui_style.text, bg);
-    return label_gap + value_h + 10;
 }
 
 #ifdef __cplusplus

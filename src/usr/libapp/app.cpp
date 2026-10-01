@@ -17,6 +17,7 @@ struct App
     Surface window;
     Surface canvas;
     size_t canvas_capacity; // bytes
+    bool canvas_sync_pending;
     bool focused;
     bool exit_requested;
     int exit_code;
@@ -53,10 +54,18 @@ static bool app_sync_canvas(App *app)
         uint32_t *grown = (uint32_t *)malloc(needed);
         if (!grown)
             return false;
+        // gui_app_begin clears the canvas before app_set_content_size grows
+        // it, so the freshly allocated region is otherwise uninitialized and
+        // uncovered pixels would reach the backing as garbage when the
+        // viewport scrolls into them. Fill the whole allocation with the app
+        // background first, then preserve the previously drawn rows over it.
+        uint32_t new_stride = w->pitch / 4;
+        const uint32_t bg = g_gui_style.app_bg;
+        for (uint64_t i = 0; i < (uint64_t)new_stride * w->height; i++)
+            grown[i] = bg;
         if (c->buffer && c->pitch > 0) {
             uint32_t rows = app_min_u32(c->height, w->height);
             uint32_t row_px = app_min_u32(c->pitch / 4, w->pitch / 4);
-            uint32_t new_stride = w->pitch / 4;
             uint32_t old_stride = c->pitch / 4;
             for (uint32_t y = 0; y < rows; y++)
                 memcpy(grown + (size_t)y * new_stride, c->buffer + (size_t)y * old_stride, row_px * sizeof(uint32_t));
@@ -111,7 +120,7 @@ App *app_create(const AppConfig *config, void *user)
         free(app);
         return nullptr;
     }
-    if (config->min_width > 0 && config->min_height > 0)
+    if (config->min_width > 0 || config->min_height > 0)
         gui_window_set_min_size(config->min_width, config->min_height);
 
     gui_sync_theme_from_registry();
@@ -320,6 +329,13 @@ void app_commit(App *app)
 {
     if (!app || !app_needs_draw(app))
         return;
+    // A resize may have failed to grow the canvas (OOM); retry before drawing so
+    // the new size is never laid out into a stale, too-small canvas.
+    if (app->canvas_sync_pending) {
+        if (!app_sync_canvas(app))
+            return;
+        app->canvas_sync_pending = false;
+    }
     if (app->config.on_draw && app->canvas.buffer)
         app->config.on_draw(app, &app->canvas);
     app_publish(app);
@@ -339,7 +355,7 @@ static bool app_drain_events(App *app)
             case EVT_WINDOW_RESIZE:
                 if (gui_sync_window_size(&app->window) > 0) {
                     if (app->config.on_draw)
-                        app_sync_canvas(app);
+                        app->canvas_sync_pending = !app_sync_canvas(app);
                     app_invalidate_all(app);
                     if (app->config.on_event)
                         app->config.on_event(app, &ev);

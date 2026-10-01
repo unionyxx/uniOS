@@ -69,4 +69,13 @@ python3 tools/appicon_rasterize.py \
     --output-root rootfs/usr/share/appicons
 ```
 
+The UI glyph set uses the same tool against the `glyphs/` SVG sources, rasterized at the glyph size ladder (16-40 px, covering every UI scale of the 16 px base glyph):
+
+```sh
+python3 tools/appicon_rasterize.py \
+    --source-root glyphs \
+    --output-root rootfs/usr/share/glyphs \
+    --sizes 16 20 24 28 32 40 --filter box
+```
+
 Generated binaries are committed; keep binaries and sources in sync in the same change.

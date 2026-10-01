@@ -196,6 +196,12 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
         free(data);
         return false;
     }
+    // Glyph indices are cached in int16_t (ascii_index); reject tables that
+    // would wrap a stored index.
+    if (header->glyph_count > 32767u) {
+        free(data);
+        return false;
+    }
     if (header->glyph_offset > size || header->atlas_offset > size || header->kerning_offset > size) {
         free(data);
         return false;
@@ -245,7 +251,14 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
         font->ascii_index[i] = -1;
 
     for (uint32_t i = 0; i < font->glyph_count; i++) {
-        const GuiGlyph &glyph = font->glyphs[i];
+        GuiGlyph &glyph = font->glyphs[i];
+        // A glyph whose atlas rect escapes the atlas would read out of bounds at
+        // draw time (corrupt .uof); blank its ink so it renders nothing.
+        if ((uint32_t)glyph.atlas_x + glyph.width > font->atlas_width ||
+            (uint32_t)glyph.atlas_y + glyph.height > font->atlas_height) {
+            glyph.width = 0;
+            glyph.height = 0;
+        }
         if (glyph.advance_x > font->max_advance)
             font->max_advance = glyph.advance_x;
         if ((int16_t)glyph.width > font->max_ink_width)

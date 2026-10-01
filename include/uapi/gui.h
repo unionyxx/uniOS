@@ -9,9 +9,16 @@ extern "C" {
 
 #define MAX_WINDOWS 32
 #define DAMAGE_QUEUE_CAPACITY 8
-#define MENUBAR_HEIGHT 36
-#define MENUBAR_CANVAS_HEIGHT 272
-#define TITLE_BAR_HEIGHT 24
+// Max client-declared interactive rects within the unified headerbar band.
+#define WINDOW_HEADER_INPUT_MAX 8
+// Unified headerbar traffic-light geometry (base px at 100% UI scale). The WM
+// overlays the close/minimize/maximize cluster at the left of the headerband;
+// apps use the cluster width to keep their own controls clear of it.
+#define HEADER_TRAFFIC_INSET_X 14
+#define HEADER_TRAFFIC_SIZE 13
+#define HEADER_TRAFFIC_SPACING 21
+// Right edge of the 3-button cluster, measured from the window's left edge.
+#define HEADER_TRAFFIC_CLUSTER_W (HEADER_TRAFFIC_INSET_X + HEADER_TRAFFIC_SPACING * 2 + HEADER_TRAFFIC_SIZE)
 #define MENU_MAX_MENUS 8
 #define MENU_MAX_ITEMS 16
 #define MENU_LABEL_MAX 20
@@ -22,7 +29,16 @@ extern "C" {
 // Menu command IDs at or above this value are handled by the menubar itself
 // and are never dispatched to the publishing app.
 #define MENU_CMD_RESERVED_BASE 0xF000u
+// App menu command ids must stay below this. The menubar reserves the range
+// from here upward for its own window-operation (0xE001..), system (0xF000..)
+// and window-list (0x10000..) commands; publishing an id in that range would be
+// intercepted instead of dispatched to the app.
+#define MENU_CMD_APP_MAX 0xE000u
 #define MENU_CMD_ABOUT_UNIOS 0xF000u
+// Delivered to the Settings window (via WindowEntry.menu_command_id) to switch
+// it to its About section; a fresh launch passes "about" through the
+// open-request slot instead.
+#define MENU_CMD_PREFERENCES_ABOUT 0xF001u
 #define WIN_FLAG_TRANSPARENT 0x1u
 #define WIN_FLAG_SYSTEM 0x2u
 #define WIN_FLAG_RESIZABLE 0x4u
@@ -55,12 +71,9 @@ enum
     SYSTEM_FLAG_WM_PIXEL_SELFTEST = 1u << 6,
 };
 
+// On-accent foreground: labels on accent-filled controls stay white in both
+// themes (primary buttons, toggle knobs, the calendar today chip).
 #define COLOR_WHITE 0xFFFFFFFF
-#define COLOR_BLACK 0xFF000000
-#define COLOR_RED 0xFFFF0000
-#define COLOR_GREEN 0xFF00FF00
-#define COLOR_BLUE 0xFF0000FF
-#define COLOR_GRAY 0xFF808080
 
 typedef struct DamageEntry
 {
@@ -116,15 +129,23 @@ typedef struct WindowEntry
     // menu_command_seq. The owning app polls and consumes each new seq.
     volatile uint32_t menu_command_seq;
     volatile uint32_t menu_command_id;
+    // Headerbar input regions: client-canvas-space rects the app declares
+    // interactive inside the unified headerbar drag band. The WM forwards
+    // clicks/hovers landing in them to the client instead of dragging the
+    // window. Writer bumps header_input_seq before and after the payload
+    // (store fences around both); the WM reads a stable snapshot.
+    volatile uint32_t header_input_seq;
+    volatile int32_t header_input_count;
+    Rect header_input[WINDOW_HEADER_INPUT_MAX];
 } WindowEntry;
 
 typedef struct MenuItem
 {
     char label[MENU_LABEL_MAX]; // empty => separator row
     char accel[MENU_ACCEL_MAX]; // display text, e.g. "Ctrl+S"; empty = none
-    uint16_t id;                // 0 = separator
+    uint32_t id;                // 0 = separator
     uint8_t flags;              // MENU_FLAG_DISABLED | MENU_FLAG_CHECKED
-    uint8_t reserved;
+    uint8_t reserved[3];
 } MenuItem;
 
 typedef struct MenuDef
@@ -166,6 +187,10 @@ typedef struct Registry
 
     volatile bool mb_clicked;
     volatile uint32_t mb_click_x, mb_click_y;
+    // Live screen-space left edge of the menubar date/control-center button,
+    // published by the menubar so the WM's click fast path matches the drawn
+    // button exactly. 0 = not yet published (WM falls back to a margin).
+    volatile int32_t mb_cc_zone_x;
     volatile bool mb_menu_dismiss_requested;
     volatile bool cp_toggle_requested;
     volatile bool dk_clicked;

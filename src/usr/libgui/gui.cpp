@@ -1,5 +1,6 @@
 #include "gui.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +34,7 @@ static RetiredWindowBuffer g_retired_window_buffers[GUI_RETIRED_WINDOW_BUFFER_SL
 static int g_ui_scale_pct = 0;
 static constexpr int k_system_menu_gap_px = 6;
 static constexpr int k_system_menu_item_h_px = 24;
-static constexpr int k_system_menu_item_count = 9;
+static constexpr int k_system_menu_item_count = 8;
 static constexpr int k_system_menu_extra_h_px = 6;
 // Worst-case dropdown: an app menu (MENU_MAX_ITEMS) plus a separator and the
 // menubar-composed Window list. Drives the shared menubar canvas height.
@@ -42,36 +43,30 @@ static constexpr int k_menubar_canvas_max_rows = MENU_MAX_ITEMS + 1 + 8;
 #include <drivers/video/font.h>
 
 extern "C" {
-Theme g_current_theme = {};
 GuiStylePalette g_gui_style = {};
 GuiChromePalette g_gui_chrome = {};
 }
 
-// One unified control accent (#0A84FF, the macOS dark-mode system blue) is used
-// in both themes so focus rings, carets, toggles, sliders, primary buttons and
-// selections read the same everywhere. The dark palette is AMOLED-leaning true
-// black with a cool-neutral elevation ramp; the light palette is a clean cool
-// off-white. Semantic colors track macOS system colors. Field order matches the
-// struct declarations in gui.h — keep them aligned when editing.
-static const Theme k_gui_theme_dark = {0xFF000000, 0xFFEDEFF2, 0xFF0A84FF, 0xFF1C2026, 0xFF16181C, 0xFF0A0B0D};
-
-static const Theme k_gui_theme_light = {0xFFF4F6F8, 0xFF15171C, 0xFF0A84FF, 0xFFD4D9E1, 0xFFE8EBEF, 0xFFECEFF3};
+// A 4-tier tinted-slate elevation system. Dark mode never uses pure black for
+// content surfaces: the canvas (#1E1E22) lifts through a sidebar/header surface
+// (#26262B) up to boxed-list cards (#2F2F36), giving physical depth without
+// harsh high-contrast edges. The Adwaita blue (#3584E4) anchors only primary
+// CTAs, toggle tracks and focus rings; sidebar selection is a neutral 12% white
+// capsule, never solid blue. Field order matches gui.h — keep aligned.
 
 static const GuiStylePalette k_gui_style_dark = {
-    0xFF000000, 0xFF0B0C0E, 0xFF121417, 0xFF0E1013, 0xFF1A1D22, 0xFF23262C, 0xFF1C2026, 0xFF0A84FF, 0xFF2E333C,
-    0xFF0A84FF, 0xFF102338, 0xFFEDEFF2, 0xFFB0B6C2, 0xFF717785, 0xFF30D158, 0xFFFF9F0A, 0xFFFF453A, 0x80000000u};
+    0xFF1E1E22, 0xFF26262B, 0xFF2F2F36, 0xFF26262B, 0xFF2F2F36, 0xFF37373C, 0xFF33333A, 0xFF3584E4, 0xFF3C3C44,
+    0xFF3584E4, 0xFF2A3850, 0xFFFFFFFF, 0xFFDEDDDA, 0xFF9A9996, 0xFF30D158, 0xFFFF9F0A, 0xFFFF453A, 0x7A000000u};
 
 static const GuiStylePalette k_gui_style_light = {
-    0xFFF4F6F8, 0xFFFFFFFF, 0xFFEDF0F3, 0xFFEAEDF1, 0xFFDEE2E8, 0xFFD4D9E1, 0xFFD4D9E1, 0xFF0A84FF, 0xFFBCC2CC,
-    0xFF0A84FF, 0xFFDBEBFF, 0xFF15171C, 0xFF565E6C, 0xFF868D9A, 0xFF34C759, 0xFFFF9500, 0xFFFF3B30, 0x66000000u};
+    0xFFF6F5F4, 0xFFFFFFFF, 0xFFF0EFEE, 0xFFF6F5F4, 0xFFECECEC, 0xFFE0DEDE, 0xFFE0E0E0, 0xFF3584E4, 0xFFD4D4D4,
+    0xFF3584E4, 0xFFD9E7FA, 0xFF1C1C1E, 0xFF5E5E5E, 0xFF858589, 0xFF34C759, 0xFFFF9500, 0xFFFF3B30, 0x55000000u};
 
-static const GuiChromePalette k_gui_chrome_dark = {0xFF000000, 0xFF0D0F12, 0xFF16181C, 0xFF0E0F12, 0xFF1F2329,
-                                                   0xFFEDEFF2, 0xFF717785, 0x28000000, 0xFF1C2026, 0xFFFF5F57,
-                                                   0xFFFFBD2E, 0xFF28C840, 0xFF1C2026, 0xFFEDEFF2};
+static const GuiChromePalette k_gui_chrome_dark = {0xFF141416, 0xFF33333A, 0xFFFF5F57,
+                                                   0xFFFFBD2E, 0xFF28C840, 0xFF33333A};
 
-static const GuiChromePalette k_gui_chrome_light = {0xFFECEFF3, 0xFFDFE3EA, 0xFFE8EBEF, 0xFFF0F2F5, 0xFFDEE2E8,
-                                                    0xFF15171C, 0xFF868D9A, 0x14000000, 0xFFD4D9E1, 0xFFFF5F57,
-                                                    0xFFFFBD2E, 0xFF28C840, 0xFFD4D9E1, 0xFF15171C};
+static const GuiChromePalette k_gui_chrome_light = {0xFFECECEC, 0xFFE0E0E0, 0xFFFF5F57,
+                                                    0xFFFFBD2E, 0xFF28C840, 0xFFE0E0E0};
 
 static GuiThemeMode g_applied_theme_mode = GUI_THEME_DARK;
 static bool g_theme_tables_init = false;
@@ -362,16 +357,13 @@ static bool gui_resize_window_backing(Surface *s, uint32_t target_w, uint32_t ta
 
 static void copy_theme_tables(GuiThemeMode mode)
 {
-    const Theme *theme = &k_gui_theme_dark;
     const GuiStylePalette *style = &k_gui_style_dark;
     const GuiChromePalette *chrome = &k_gui_chrome_dark;
     if (mode == GUI_THEME_LIGHT) {
-        theme = &k_gui_theme_light;
         style = &k_gui_style_light;
         chrome = &k_gui_chrome_light;
     }
 
-    g_current_theme = *theme;
     g_gui_style = *style;
     g_gui_chrome = *chrome;
     asm volatile("sfence" ::: "memory");
@@ -656,42 +648,28 @@ static void paint_solid_rect(Surface *s, int32_t x, int32_t y, int32_t w, int32_
     uint32_t src_ag = (color >> 8) & 0x00FF00FFu;
     uint32_t inv_a = 255u - base_alpha;
 
-    // Check if the target row destination pixels are opaque to use the fast branchless SWAR loop
-    bool opaque_dst = true;
     for (int32_t py = 0; py < h; py++) {
         uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
-        if ((dst[0] >> 24) != 255) {
-            opaque_dst = false;
-            break;
-        }
-    }
-
-    if (opaque_dst) {
-        for (int32_t py = 0; py < h; py++) {
-            uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
-            int32_t px = 0;
-            // Vectorization-friendly loop with hoisted constants and zero divisions
-            for (; px < w; px++) {
-                uint32_t d = dst[px];
-                uint32_t d_rb = d & 0x00FF00FFu;
-                uint32_t d_ag = (d >> 8) & 0x00FF00FFu;
-
-                uint32_t rb = src_rb * base_alpha + d_rb * inv_a + 0x00800080u;
-                rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
-                rb &= 0x00FF00FFu;
-
-                uint32_t ag = src_ag * base_alpha + d_ag * inv_a + 0x00800080u;
-                ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
-                ag &= 0x00FF00FFu;
-
-                dst[px] = 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
+        for (int32_t px = 0; px < w; px++) {
+            uint32_t d = dst[px];
+            if ((d >> 24) != 255u) {
+                // Translucent destination: full compositing keeps its alpha.
+                dst[px] = blend_pixel(d, color, 255);
+                continue;
             }
-        }
-    } else {
-        for (int32_t py = 0; py < h; py++) {
-            uint32_t *dst = &s->buffer[static_cast<size_t>(y + py) * pitch + x];
-            for (int32_t px = 0; px < w; px++)
-                dst[px] = blend_pixel(dst[px], color, 255);
+            // Opaque destination: branchless SWAR blend, result stays opaque.
+            uint32_t d_rb = d & 0x00FF00FFu;
+            uint32_t d_ag = (d >> 8) & 0x00FF00FFu;
+
+            uint32_t rb = src_rb * base_alpha + d_rb * inv_a + 0x00800080u;
+            rb = (rb + ((rb >> 8) & 0x00FF00FFu)) >> 8;
+            rb &= 0x00FF00FFu;
+
+            uint32_t ag = src_ag * base_alpha + d_ag * inv_a + 0x00800080u;
+            ag = (ag + ((ag >> 8) & 0x00FF00FFu)) >> 8;
+            ag &= 0x00FF00FFu;
+
+            dst[px] = 0xFF000000u | ((ag << 8) & 0x0000FF00u) | rb;
         }
     }
 }
@@ -1835,8 +1813,45 @@ int gui_set_content_size(Surface *s, int content_w, int content_h)
     s->height = static_cast<uint32_t>(content_h);
     g_my_window->content_w = content_w;
     g_my_window->content_h = content_h;
+    // Clamp the WM-owned scroll offset to the new content bounds in the same
+    // store-fence group as the content size. The WM re-clamps in its commit
+    // pass, but that runs after the app already drew this frame with the stale
+    // offset, which left sticky panels off-canvas for a frame on shrink
+    // (navigate to a smaller folder while scrolled). Clamping here makes the
+    // app draw and the compositor agree on the offset immediately.
+    int max_scroll_x = content_w > view_w ? content_w - view_w : 0;
+    int max_scroll_y = content_h > view_h ? content_h - view_h : 0;
+    if (max_scroll_x <= 0 || g_my_window->scroll_x < 0)
+        g_my_window->scroll_x = 0;
+    else if (g_my_window->scroll_x > max_scroll_x)
+        g_my_window->scroll_x = max_scroll_x;
+    if (max_scroll_y <= 0 || g_my_window->scroll_y < 0)
+        g_my_window->scroll_y = 0;
+    else if (g_my_window->scroll_y > max_scroll_y)
+        g_my_window->scroll_y = max_scroll_y;
     asm volatile("sfence" ::: "memory");
     return 0;
+}
+
+void gui_window_set_header_input(const Rect *rects, int count)
+{
+    if (!g_my_window)
+        return;
+    if (!rects)
+        count = 0;
+    if (count < 0)
+        count = 0;
+    if (count > WINDOW_HEADER_INPUT_MAX)
+        count = WINDOW_HEADER_INPUT_MAX;
+
+    WindowEntry *e = g_my_window;
+    e->header_input_seq++;
+    asm volatile("sfence" ::: "memory");
+    e->header_input_count = count;
+    for (int i = 0; i < count; i++)
+        e->header_input[i] = rects[i];
+    asm volatile("sfence" ::: "memory");
+    e->header_input_seq++;
 }
 
 int gui_set_window_title(const char *title)
@@ -1853,18 +1868,30 @@ bool gui_window_title_matches(const char *window_title, const char *app_title)
 {
     if (!window_title || !window_title[0] || !app_title || !app_title[0])
         return false;
-    if (strcmp(window_title, app_title) == 0)
+
+    // window_title lives in shared memory (WindowEntry.title[64]); copy it into
+    // a NUL-forced local so a writer that omitted the terminator cannot run
+    // strlen past the field.
+    char title[68];
+    size_t n = 0;
+    for (; n < 64 && window_title[n]; n++)
+        title[n] = window_title[n];
+    title[n] = '\0';
+    if (!title[0])
+        return false;
+
+    if (strcmp(title, app_title) == 0)
         return true;
 
     // Apps rename their windows to "detail - App" (e.g. "data - Files"); the
     // app identity is the segment after the last " - " separator.
-    size_t window_len = strlen(window_title);
+    size_t window_len = strlen(title);
     size_t app_len = strlen(app_title);
     if (window_len < app_len + 3)
         return false;
-    if (strcmp(window_title + window_len - app_len, app_title) != 0)
+    if (strcmp(title + window_len - app_len, app_title) != 0)
         return false;
-    const char *sep = window_title + window_len - app_len - 3;
+    const char *sep = title + window_len - app_len - 3;
     return sep[0] == ' ' && sep[1] == '-' && sep[2] == ' ';
 }
 
@@ -1887,6 +1914,11 @@ bool gui_open_request_submit(const char *path)
     Registry *registry = gui_registry();
     if (!registry || !path || !path[0])
         return false;
+    // Seqlock: bump to an odd generation to mark the write in flight, publish
+    // the path, then bump to even. A reader that observes an odd generation
+    // knows the payload is mid-write and retries instead of copying it.
+    __sync_fetch_and_add(&registry->open_generation, 1u);
+    asm volatile("sfence" ::: "memory");
     strncpy(registry->open_path, path, sizeof(registry->open_path) - 1);
     registry->open_path[sizeof(registry->open_path) - 1] = '\0';
     asm volatile("sfence" ::: "memory");
@@ -1903,13 +1935,14 @@ bool gui_open_request_take(char *out, size_t out_size)
     Registry *registry = gui_registry();
     if (!registry)
         return false;
-    // Seqlock-style snapshot: the launcher bumps open_generation after
-    // writing open_path, so a copy bracketed by two equal generation reads
-    // cannot observe a torn path. Retry briefly if one lands mid-write.
-    for (int attempt = 0; attempt < 4; attempt++) {
+    // Seqlock snapshot: only an even, stable generation means the payload is
+    // complete. Odd means the writer is mid-publish; retry briefly.
+    for (int attempt = 0; attempt < 8; attempt++) {
         uint32_t gen = registry->open_generation;
         if (gen == 0)
             return false;
+        if (gen & 1u)
+            continue;
         asm volatile("lfence" ::: "memory");
         strncpy(out, registry->open_path, out_size - 1);
         out[out_size - 1] = '\0';
@@ -1945,6 +1978,10 @@ bool gui_menu_model_add_item(MenuModel *model, int menu_index, const char *label
 {
     if (!model || menu_index < 0 || menu_index >= (int)model->menu_count || !label || !label[0])
         return false;
+    // Ids in the menubar-reserved range would be intercepted by the menubar
+    // instead of dispatched to the app; reject them at publish time.
+    if (id >= MENU_CMD_APP_MAX)
+        return false;
     MenuDef *def = &model->menus[menu_index];
     if (def->count >= MENU_MAX_ITEMS)
         return false;
@@ -1956,7 +1993,7 @@ bool gui_menu_model_add_item(MenuModel *model, int menu_index, const char *label
         strncpy(item->accel, accel, sizeof(item->accel) - 1);
         item->accel[sizeof(item->accel) - 1] = '\0';
     }
-    item->id = (uint16_t)id;
+    item->id = id;
     item->flags = (uint8_t)(flags & 0xFFu);
     def->count++;
     return true;
@@ -2101,6 +2138,43 @@ bool gui_sync_theme_from_registry(void)
     return false;
 }
 
+// Theme-aware translucent washes (see gui.h). Dark surfaces lift with low-alpha
+// white; light surfaces shade with low-alpha black.
+bool gui_theme_is_light(void)
+{
+    return g_applied_theme_mode == GUI_THEME_LIGHT;
+}
+
+uint32_t gui_hairline_color(void)
+{
+    return gui_theme_is_light() ? 0x14000000u : 0x14FFFFFFu;
+}
+
+uint32_t gui_hover_wash_color(void)
+{
+    return gui_theme_is_light() ? 0x0A000000u : 0x0FFFFFFFu;
+}
+
+uint32_t gui_inset_wash_color(void)
+{
+    return gui_theme_is_light() ? 0x14000000u : 0x1FFFFFFFu;
+}
+
+uint32_t gui_edge_wash_color(void)
+{
+    return gui_theme_is_light() ? 0x1A000000u : 0x12FFFFFFu;
+}
+
+uint32_t gui_subtle_card_wash_color(void)
+{
+    return gui_theme_is_light() ? 0x0A000000u : 0x0FFFFFFFu;
+}
+
+uint32_t gui_active_wash_color(void)
+{
+    return gui_theme_is_light() ? 0x1A000000u : 0x1FFFFFFFu;
+}
+
 int gui_ui_scale_pct(void)
 {
     return resolve_ui_scale_pct();
@@ -2137,8 +2211,8 @@ int gui_space_4(void)
 }
 int gui_card_header_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_scaled_metric(12), scaled_metric_floor(28),
-                        scaled_metric_floor(34));
+    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_scaled_metric(14), scaled_metric_floor(32),
+                        scaled_metric_floor(40));
 }
 int gui_badge_h(void)
 {
@@ -2147,10 +2221,6 @@ int gui_badge_h(void)
 int gui_badge_pad_x(void)
 {
     return scaled_metric_floor(GUI_BADGE_PAD_X);
-}
-int gui_window_title_min_x(void)
-{
-    return scaled_metric_floor(GUI_WINDOW_TITLE_MIN_X);
 }
 int gui_app_outer_padding(void)
 {
@@ -2163,33 +2233,32 @@ int gui_app_section_gap(void)
 int gui_app_header_h(void)
 {
     return clamp_metric(gui_font_line_height(gui_font_title()) + gui_font_line_height(gui_font_default()) +
-                            gui_scaled_metric(24),
-                        scaled_metric_floor(GUI_APP_HEADER_H), scaled_metric_floor(76));
+                            gui_scaled_metric(22),
+                        scaled_metric_floor(GUI_APP_HEADER_H), scaled_metric_floor(80));
 }
 int gui_app_row_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_default()) + gui_scaled_metric(15), scaled_metric_floor(32),
-                        scaled_metric_floor(40));
+    return clamp_metric(gui_font_line_height(gui_font_default()) + gui_scaled_metric(24), scaled_metric_floor(40),
+                        scaled_metric_floor(48));
 }
 int gui_app_control_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_default()) + gui_scaled_metric(10), scaled_metric_floor(24),
-                        scaled_metric_floor(30));
+    return clamp_metric(gui_font_line_height(gui_font_default()) + gui_scaled_metric(12), scaled_metric_floor(28),
+                        scaled_metric_floor(34));
 }
 int gui_app_row_gap(void)
 {
-    return gui_scaled_metric(4);
+    return gui_scaled_metric(2);
 }
 int gui_app_row_tall_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_default()) * 2 + gui_scaled_metric(10), scaled_metric_floor(40),
-                        scaled_metric_floor(52));
+    return clamp_metric(gui_font_line_height(gui_font_default()) * 2 + gui_scaled_metric(16), scaled_metric_floor(48),
+                        scaled_metric_floor(58));
 }
 int gui_app_nav_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_font_line_height(gui_font_default()) +
-                            gui_scaled_metric(14),
-                        scaled_metric_floor(44), scaled_metric_floor(56));
+    return clamp_metric(gui_font_line_height(gui_font_default()) + gui_scaled_metric(16), scaled_metric_floor(32),
+                        scaled_metric_floor(36));
 }
 int gui_scrollbar_w(void)
 {
@@ -2203,10 +2272,17 @@ int gui_dialog_button_w(void)
 {
     return scaled_metric_floor(GUI_DIALOG_BUTTON_W);
 }
-int gui_title_bar_h(void)
+int gui_headerbar_h(void)
 {
-    return clamp_metric(gui_font_line_height(gui_font_title()) + gui_scaled_metric(12), scaled_metric_floor(32),
-                        scaled_metric_floor(36));
+    // The unified header height apps reserve at the top of their client area for
+    // traffic lights + toolbar/breadcrumbs.
+    return clamp_metric(gui_scaled_metric(44), scaled_metric_floor(40), scaled_metric_floor(48));
+}
+int gui_traffic_lights_w(void)
+{
+    // Right edge of the 3-button cluster the WM overlays at the headerbar's
+    // left; apps start their own headerbar content at or past this x.
+    return gui_scaled_metric(HEADER_TRAFFIC_CLUSTER_W);
 }
 int gui_menubar_h(void)
 {
@@ -2231,6 +2307,254 @@ static void gui_draw_accent_strip(Surface *s, int x, int y, int w, int h, uint32
     gui_fill_rounded_rect(s, x, y, w, h, gui_corner_radius(w, h, w / 2), color);
 }
 
+// ---------------------------------------------------------------------------
+// Glyph assets.
+//
+// Icons are authored as SVG sources under glyphs/ and rasterized to white
+// .uoic silhouettes (the same pipeline as the app icons), staged under
+// /usr/share/glyphs/. gui_draw_glyph decodes a silhouette once per
+// kind/size, caches it and tints it to the requested foreground at draw
+// time, so one asset serves every color context.
+// ---------------------------------------------------------------------------
+
+struct GlyphAssetEntry
+{
+    GuiGlyphKind kind;
+    int size;
+    uint32_t last_use;
+    Surface surface;
+};
+
+static constexpr int GLYPH_ASSET_CACHE_SLOTS = 40;
+static GlyphAssetEntry g_glyph_asset_cache[GLYPH_ASSET_CACHE_SLOTS] = {};
+static uint32_t g_glyph_asset_clock = 0;
+
+static const char *glyph_asset_name(GuiGlyphKind kind)
+{
+    switch (kind) {
+        case GUI_GLYPH_FOLDER:
+            return "folder";
+        case GUI_GLYPH_FOLDER_UP:
+            return "folder-up";
+        case GUI_GLYPH_FILE:
+            return "file";
+        case GUI_GLYPH_FILE_TEXT:
+            return "file-text";
+        case GUI_GLYPH_FILE_CODE:
+            return "file-code";
+        case GUI_GLYPH_FILE_CONFIG:
+            return "file-sliders";
+        case GUI_GLYPH_FILE_IMAGE:
+            return "file-image";
+        case GUI_GLYPH_FILE_ARCHIVE:
+            return "archive";
+        case GUI_GLYPH_FILE_BINARY:
+            return "file-binary";
+        case GUI_GLYPH_DRIVE:
+        case GUI_GLYPH_STORAGE:
+            return "hard-drive";
+        case GUI_GLYPH_HOME:
+            return "house";
+        case GUI_GLYPH_DESKTOP:
+        case GUI_GLYPH_DISPLAY:
+            return "monitor";
+        case GUI_GLYPH_DOCUMENTS:
+            return "copy";
+        case GUI_GLYPH_DOWNLOADS:
+            return "download";
+        case GUI_GLYPH_PICTURES:
+            return "image";
+        case GUI_GLYPH_ARROW_UP:
+            return "arrow-up";
+        case GUI_GLYPH_NETWORK:
+            return "globe";
+        case GUI_GLYPH_SETTINGS:
+            return "settings";
+        case GUI_GLYPH_APPEARANCE:
+            return "sun";
+        case GUI_GLYPH_DEVICES:
+            return "laptop";
+        case GUI_GLYPH_INFO:
+            return "info";
+        case GUI_GLYPH_WARNING:
+            return "triangle-alert";
+        case GUI_GLYPH_CLOCK:
+            return "clock";
+        case GUI_GLYPH_GRID:
+            return "grid-2x2";
+        case GUI_GLYPH_ANIMATION:
+            return "play";
+        case GUI_GLYPH_TRANSPARENCY:
+            return "checkerboard";
+        case GUI_GLYPH_VOLUME:
+            return "volume-2";
+        case GUI_GLYPH_CALENDAR:
+            return "calendar";
+        case GUI_GLYPH_TERMINAL:
+            return "square-terminal";
+        case GUI_GLYPH_APP:
+            return "layout-grid";
+        case GUI_GLYPH_COMMAND:
+            return "terminal";
+        case GUI_GLYPH_SEARCH:
+            return "search";
+        default:
+            return nullptr;
+    }
+}
+
+// Bilinearly resample a premultiplied BGRA frame into a square surface of
+// the requested size (premultiplied channels filter without color fringing).
+static bool glyph_resample_frame(Surface *dst, const Surface *src, int size)
+{
+    if (!dst || !dst->buffer || !src || !src->buffer || size <= 0)
+        return false;
+    const uint32_t dst_stride = dst->pitch / 4u;
+    const uint32_t src_stride = src->pitch / 4u;
+    const uint32_t src_w = src->width;
+    const uint32_t src_h = src->height;
+
+    for (int py = 0; py < size; py++) {
+        uint64_t src_y_fp = ((uint64_t)py * (uint64_t)src_h * 65536u) / (uint32_t)size;
+        uint32_t sy0 = (uint32_t)(src_y_fp >> 16);
+        uint32_t frac_y = ((uint32_t)src_y_fp >> 8) & 0xFFu;
+        uint32_t sy1 = sy0 + 1u < src_h ? sy0 + 1u : sy0;
+        const uint32_t *src_row0 = &src->buffer[(size_t)sy0 * src_stride];
+        const uint32_t *src_row1 = &src->buffer[(size_t)sy1 * src_stride];
+        uint32_t *dst_row = &dst->buffer[(size_t)py * dst_stride];
+
+        for (int px = 0; px < size; px++) {
+            uint64_t src_x_fp = ((uint64_t)px * (uint64_t)src_w * 65536u) / (uint32_t)size;
+            uint32_t sx0 = (uint32_t)(src_x_fp >> 16);
+            uint32_t frac_x = ((uint32_t)src_x_fp >> 8) & 0xFFu;
+            uint32_t sx1 = sx0 + 1u < src_w ? sx0 + 1u : sx0;
+
+            uint32_t p00 = src_row0[sx0], p10 = src_row0[sx1];
+            uint32_t p01 = src_row1[sx0], p11 = src_row1[sx1];
+            uint32_t inv_fx = 256u - frac_x, inv_fy = 256u - frac_y;
+
+            uint32_t out = 0;
+            for (int shift = 0; shift < 32; shift += 8) {
+                uint32_t c00 = (p00 >> shift) & 0xFFu, c10 = (p10 >> shift) & 0xFFu;
+                uint32_t c01 = (p01 >> shift) & 0xFFu, c11 = (p11 >> shift) & 0xFFu;
+                uint32_t top = c00 * inv_fx + c10 * frac_x;
+                uint32_t bot = c01 * inv_fx + c11 * frac_x;
+                uint32_t v = (top * inv_fy + bot * frac_y + 32768u) >> 16;
+                if (v > 255u)
+                    v = 255u;
+                out |= v << shift;
+            }
+            dst_row[px] = out;
+        }
+    }
+    return true;
+}
+
+static const Surface *glyph_asset_get(GuiGlyphKind kind, const char *name, int size)
+{
+    g_glyph_asset_clock++;
+
+    for (int i = 0; i < GLYPH_ASSET_CACHE_SLOTS; i++) {
+        GlyphAssetEntry &entry = g_glyph_asset_cache[i];
+        if (entry.surface.buffer && entry.kind == kind && entry.size == size) {
+            entry.last_use = g_glyph_asset_clock;
+            return &entry.surface;
+        }
+    }
+
+    int victim = 0;
+    for (int i = 0; i < GLYPH_ASSET_CACHE_SLOTS; i++) {
+        if (!g_glyph_asset_cache[i].surface.buffer) {
+            victim = i;
+            break;
+        }
+        if (g_glyph_asset_cache[i].last_use < g_glyph_asset_cache[victim].last_use)
+            victim = i;
+    }
+
+    GlyphAssetEntry &entry = g_glyph_asset_cache[victim];
+    if (entry.surface.buffer)
+        gui_destroy_surface(&entry.surface);
+    entry = {};
+
+    char path[64];
+    snprintf(path, sizeof(path), "/usr/share/glyphs/%s.uoic", name);
+
+    Surface frame = {};
+    if (!gui_load_uoic(path, (uint32_t)size, 100u, &frame) || !frame.buffer)
+        return nullptr;
+
+    if ((int)frame.width == size && (int)frame.height == size) {
+        entry.surface = frame;
+    } else {
+        entry.surface = gui_create_surface((uint32_t)size, (uint32_t)size);
+        if (!entry.surface.buffer || !glyph_resample_frame(&entry.surface, &frame, size)) {
+            if (entry.surface.buffer)
+                gui_destroy_surface(&entry.surface);
+            gui_destroy_surface(&frame);
+            entry = {};
+            return nullptr;
+        }
+        gui_destroy_surface(&frame);
+    }
+
+    entry.kind = kind;
+    entry.size = size;
+    entry.last_use = g_glyph_asset_clock;
+    return &entry.surface;
+}
+
+int gui_glyph_std_size(void)
+{
+    return gui_scaled_metric(16);
+}
+
+void gui_draw_glyph(Surface *s, int32_t x, int32_t y, int32_t size, GuiGlyphKind glyph, uint32_t fg)
+{
+    if (!s || !s->buffer || size < 8 || glyph == GUI_GLYPH_NONE || glyph >= GUI_GLYPH_COUNT)
+        return;
+    const char *name = glyph_asset_name(glyph);
+    if (!name)
+        return;
+    const Surface *asset = glyph_asset_get(glyph, name, size);
+    if (!asset || !asset->buffer || (int)asset->width != size || (int)asset->height != size)
+        return;
+
+    int sx = 0, sy = 0;
+    int w = size, h = size;
+    if (x < 0) {
+        sx = -x;
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        sy = -y;
+        h += y;
+        y = 0;
+    }
+    if (x + w > (int)s->width)
+        w = (int)s->width - x;
+    if (y + h > (int)s->height)
+        h = (int)s->height - y;
+    if (w <= 0 || h <= 0)
+        return;
+
+    // The asset is a white premultiplied silhouette: alpha carries coverage,
+    // so tinting is a plain coverage blend of the requested foreground.
+    const uint32_t src_stride = asset->pitch / 4u;
+    const uint32_t dst_stride = s->pitch / 4u;
+    for (int py = 0; py < h; py++) {
+        const uint32_t *src_row = &asset->buffer[(size_t)(sy + py) * src_stride + sx];
+        uint32_t *dst_row = &s->buffer[(size_t)(y + py) * dst_stride + x];
+        for (int px = 0; px < w; px++) {
+            uint8_t coverage = (uint8_t)(src_row[px] >> 24);
+            if (coverage == 0)
+                continue;
+            dst_row[px] = gui_blend_straight_opaque_dst_coverage(dst_row[px], fg, coverage);
+        }
+    }
+}
+
 GuiAppLayout gui_app_begin(Surface *s)
 {
     GuiAppLayout layout = {};
@@ -2247,122 +2571,126 @@ GuiAppLayout gui_app_begin(Surface *s)
     }
 
     const int outer_padding = gui_app_outer_padding();
-    const int top_padding = gui_scaled_metric(8);
-    const int header_h = gui_app_header_h();
-    const int section_gap = gui_app_section_gap();
-    const int bottom_padding = outer_padding;
+    // Unified headerbar: the top gui_headerbar_h() pixels are a layout-only
+    // region for traffic lights and toolbar controls — NOT a painted box. The
+    // canvas background fills the entire window continuously with no divider
+    // below the band, so header and content read as one seamless surface.
+    const int top_padding = gui_headerbar_h();
     gui_fill_surface(s, g_gui_style.app_bg);
+    const int content_top = top_padding + gui_space_1();
     layout.outer_x = outer_padding;
-    layout.outer_y = top_padding;
+    layout.outer_y = content_top;
     layout.outer_w = view_w - outer_padding * 2;
-    layout.outer_h = view_h - top_padding - bottom_padding;
+    layout.outer_h = view_h - content_top - outer_padding;
     if (layout.outer_w < 0)
         layout.outer_w = 0;
     if (layout.outer_h < 0)
         layout.outer_h = 0;
 
-    layout.header_rect = gui_rect_make(layout.outer_x, layout.outer_y, layout.outer_w, header_h);
-    int body_y = layout.outer_y + header_h + section_gap;
-    int body_h = layout.outer_h - header_h - section_gap;
-    if (body_h < 0)
-        body_h = 0;
-    layout.body_rect = gui_rect_make(layout.outer_x, body_y, layout.outer_w, body_h);
+    // header_rect is the unified headerbar band itself (full width, top
+    // gui_headerbar_h() rows). Apps place toolbar controls there and publish
+    // them via gui_window_set_header_input so they stay clickable; body_rect
+    // fills the content region below.
+    layout.header_rect = gui_rect_make(0, 0, view_w, top_padding);
+    layout.body_rect = gui_rect_make(layout.outer_x, layout.outer_y, layout.outer_w, layout.outer_h);
     return layout;
 }
 
-void gui_app_draw_header(Surface *s, const GuiAppLayout *layout, const char *title, const char *subtitle,
-                         const char *detail)
-{
-    if (!s || !layout)
-        return;
-    const int pad_x = gui_space_2();
-    const int right_pad = gui_space_2();
-    Rect r = layout->header_rect;
-    if (g_my_window)
-        r.y += g_my_window->scroll_y;
-
-    gui_fill_rounded_rect(s, r.x, r.y + 1, r.w, r.h, gui_panel_radius(r.w, r.h), 0x10000000u);
-    gui_draw_panel_inset(s, r.x, r.y, r.w, r.h, g_gui_style.app_surface_alt, g_gui_style.border,
-                         g_gui_style.app_surface);
-
-    int text_x = r.x + pad_x;
-    int title_h = gui_font_line_height(gui_font_title());
-    int subtitle_h = (subtitle && *subtitle) ? gui_font_line_height(gui_font_default()) : 0;
-    int block_h = title_h + (subtitle_h > 0 ? gui_scaled_metric(3) + subtitle_h : 0);
-    int title_y = r.y + (r.h - block_h) / 2;
-    int subtitle_y = title_y + title_h + gui_scaled_metric(3);
-
-    int detail_reserved_w = detail && *detail ? gui_scaled_metric(170) : 0;
-    int title_max_w = r.w - pad_x - right_pad - detail_reserved_w;
-    if (title_max_w < gui_scaled_metric(96))
-        title_max_w = r.w - pad_x - right_pad;
-
-    if (title) {
-        gui_draw_text_clipped(s, gui_font_title(), text_x, title_y, title_max_w, title, g_gui_style.text, 0);
-    }
-    if (subtitle && *subtitle) {
-        gui_draw_text_clipped(s, gui_font_default(), text_x, subtitle_y, title_max_w, subtitle, g_gui_style.text_dim,
-                              0);
-    }
-    if (detail && *detail) {
-        int detail_w = gui_measure_text(gui_font_default(), detail);
-        int detail_x = r.x + r.w - right_pad - detail_w;
-        if (detail_x < text_x + gui_scaled_metric(120))
-            detail_x = text_x + gui_scaled_metric(120);
-        int detail_y = gui_align_text_y(gui_font_default(), r.y, r.h);
-        gui_draw_text_clipped(s, gui_font_default(), detail_x, detail_y, r.x + r.w - right_pad - detail_x, detail,
-                              g_gui_style.text_muted, 0);
-    }
-}
-
-void gui_app_draw_nav_item(Surface *s, int x, int y, int w, int h, const char *label, const char *detail, bool active,
+void gui_app_draw_nav_item(Surface *s, int x, int y, int w, int h, GuiGlyphKind icon, const char *label, bool active,
                            bool hovered)
 {
     if (!s || w <= 0 || h <= 0)
         return;
-    const int pad_x = gui_space_2();
-    uint32_t bg = active ? g_gui_style.chrome_bg : (hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface);
-    if (active || hovered) {
-        gui_fill_rounded_rect(s, x, y, w, h, gui_radius_md(), bg);
-        if (active)
-            gui_draw_rounded_rect(s, x, y, w, h, gui_radius_md(), g_gui_style.border_hover);
-    }
+    const int pad_x = gui_space_1();
+    const int r = gui_radius_sm();
     if (active) {
-        int strip_w = gui_scaled_metric(2);
-        int strip_inset = gui_scaled_metric(9);
-        gui_draw_accent_strip(s, x + gui_scaled_metric(5), y + strip_inset, strip_w, h - strip_inset * 2,
-                              g_gui_style.border_focus);
+        // Neutral selection capsule, not solid blue — Adwaita/macOS sidebar
+        // selection uses a subtle white overlay with crisp white text.
+        gui_fill_rounded_rect(s, x, y, w, h, r, gui_active_wash_color());
+    } else if (hovered) {
+        gui_fill_rounded_rect(s, x, y, w, h, r, gui_hover_wash_color());
     }
-    int title_h = gui_font_line_height(gui_font_title());
-    int detail_h = (detail && *detail) ? gui_line_height() : 0;
-    int block_h = title_h + (detail_h > 0 ? (gui_scaled_metric(2) + detail_h) : 0);
-    int title_y = y + (h - block_h) / 2;
-    int text_x = x + pad_x + (active ? gui_scaled_metric(3) : 0);
-    gui_draw_text_clipped(s, gui_font_title(), text_x, title_y, w - (text_x - x) - pad_x, label ? label : "",
-                          active ? g_gui_style.text : g_gui_style.text_dim, bg);
-    if (detail && *detail) {
-        gui_draw_text_clipped(s, gui_font_default(), text_x, title_y + title_h + gui_scaled_metric(2),
-                              w - (text_x - x) - pad_x, detail, g_gui_style.text_muted, bg);
+
+    int text_x = x + pad_x;
+    uint32_t fg = active ? g_gui_style.text : (hovered ? g_gui_style.text : g_gui_style.text_dim);
+    if (icon != GUI_GLYPH_NONE) {
+        int icon_size = gui_glyph_std_size();
+        if (icon_size > h - gui_space_0_5())
+            icon_size = h - gui_space_0_5();
+        if (icon_size < 8)
+            icon_size = 8;
+        gui_draw_glyph(s, text_x, y + (h - icon_size) / 2, icon_size, icon, fg);
+        text_x += icon_size + gui_space_1();
     }
+    int text_y = gui_align_text_y(gui_font_default(), y, h);
+    gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, x + w - pad_x - text_x, label ? label : "", fg, 0);
 }
 
-void gui_app_draw_list_row(Surface *s, int x, int y, int w, int h, const char *badge, const char *title,
+void gui_app_draw_list_row(Surface *s, int x, int y, int w, int h, GuiGlyphKind icon, const char *title,
                            const char *detail, bool active, bool hovered, bool muted)
 {
     if (!s || w <= 0 || h <= 0)
         return;
     const int space_1 = gui_space_1();
     const int space_2 = gui_space_2();
-    uint32_t bg =
-        active ? g_gui_style.chrome_bg_alt : (hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface);
-    gui_fill_rounded_rect(s, x, y, w, h, gui_radius_md(), bg);
-    gui_draw_rounded_rect(s, x, y, w, h, gui_radius_md(), active ? g_gui_style.border_focus : g_gui_style.border);
+    const int r = gui_radius_sm();
+
+    // Flat rows: selection/hover are soft tonal washes, never framed boxes.
+    if (active)
+        gui_fill_rounded_rect(s, x, y, w, h, r, g_gui_style.accent_soft);
+    else if (hovered)
+        gui_fill_rounded_rect(s, x, y, w, h, r, gui_hover_wash_color());
 
     int text_x = x + space_2;
+    uint32_t icon_fg = active ? g_gui_style.accent : (muted ? g_gui_style.text_muted : g_gui_style.text_dim);
+    if (icon != GUI_GLYPH_NONE) {
+        int icon_size = gui_glyph_std_size();
+        if (icon_size > h - gui_space_0_5())
+            icon_size = h - gui_space_0_5();
+        if (icon_size < 8)
+            icon_size = 8;
+        gui_draw_glyph(s, text_x, y + (h - icon_size) / 2, icon_size, icon, icon_fg);
+        text_x += icon_size + space_1 + gui_scaled_metric(2);
+    }
+
+    uint32_t detail_bg = active ? g_gui_style.accent_soft : 0;
+    int text_w = w - (text_x - x) - space_2;
+    if (detail && *detail) {
+        int detail_w = gui_measure_text(gui_font_default(), detail);
+        int detail_x = x + w - space_2 - detail_w;
+        if (detail_x > text_x + gui_scaled_metric(64)) {
+            int detail_y = gui_align_text_y(gui_font_default(), y, h);
+            gui_draw_text_clipped(s, gui_font_default(), detail_x, detail_y, w - (detail_x - x) - space_2, detail,
+                                  g_gui_style.text_muted, detail_bg);
+            text_w = detail_x - text_x - space_1;
+        }
+    }
+
+    int title_y = gui_align_text_y(gui_font_default(), y, h);
+    gui_draw_text_clipped(s, gui_font_default(), text_x, title_y, text_w, title ? title : "",
+                          muted ? g_gui_style.text_muted : g_gui_style.text, detail_bg);
+}
+
+void gui_app_draw_badged_row(Surface *s, int x, int y, int w, int h, const char *badge, const char *title,
+                             const char *detail, bool active, bool hovered, bool muted)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    const int space_1 = gui_space_1();
+    const int space_2 = gui_space_2();
+    const int r = gui_radius_sm();
+
+    if (active)
+        gui_fill_rounded_rect(s, x, y, w, h, r, g_gui_style.accent_soft);
+    else if (hovered)
+        gui_fill_rounded_rect(s, x, y, w, h, r, gui_hover_wash_color());
+
+    int text_x = x + space_2;
+    uint32_t wash = active ? g_gui_style.accent_soft : 0;
     if (badge && *badge) {
-        uint32_t badge_bg = muted ? g_gui_style.chrome_bg : g_gui_style.accent_soft;
-        gui_draw_badge(s, x + space_2, y + (h - gui_badge_h()) / 2, badge, badge_bg,
-                       muted ? g_gui_style.text_muted : g_gui_chrome.badge_text);
+        uint32_t badge_bg = muted ? gui_edge_wash_color() : g_gui_style.accent_soft;
+        uint32_t badge_fg = muted ? g_gui_style.text_muted : g_gui_style.accent;
+        gui_draw_badge(s, x + space_2, y + (h - gui_badge_h()) / 2, badge, badge_bg, badge_fg);
         text_x += gui_measure_text(gui_font_default(), badge) + gui_badge_pad_x() * 2 + space_2;
     }
 
@@ -2373,60 +2701,70 @@ void gui_app_draw_list_row(Surface *s, int x, int y, int w, int h, const char *b
         if (detail_x > text_x + gui_scaled_metric(64)) {
             int detail_y = gui_align_text_y(gui_font_default(), y, h);
             gui_draw_text_clipped(s, gui_font_default(), detail_x, detail_y, w - (detail_x - x) - space_2, detail,
-                                  g_gui_style.text_muted, bg);
+                                  g_gui_style.text_muted, wash);
             text_w = detail_x - text_x - space_1;
         }
     }
 
     int title_y = gui_align_text_y(gui_font_default(), y, h);
     gui_draw_text_clipped(s, gui_font_default(), text_x, title_y, text_w, title ? title : "",
-                          muted ? g_gui_style.text_dim : g_gui_style.text, bg);
+                          muted ? g_gui_style.text_muted : g_gui_style.text, wash);
 }
 
-void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, const char *label, const char *detail, bool on,
-                             bool active, bool hovered)
+void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, GuiGlyphKind icon, const char *label,
+                             const char *detail, bool on, bool active, bool hovered)
 {
     if (!s || w <= 0 || h <= 0)
         return;
     const int space_2 = gui_space_2();
-    uint32_t bg =
-        active ? g_gui_style.chrome_bg_alt : (hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface);
-    gui_fill_rounded_rect(s, x, y, w, h, gui_radius_md(), bg);
-    gui_draw_rounded_rect(s, x, y, w, h, gui_radius_md(), active ? g_gui_style.border_focus : g_gui_style.border);
+    (void)active;
+    if (hovered)
+        gui_fill_rounded_rect(s, x, y, w, h, gui_radius_sm(), gui_hover_wash_color());
 
-    int switch_w = scaled_metric_floor(36);
-    int switch_h = scaled_metric_floor(20);
-    int text_limit = w - (switch_w + space_2 * 2 + scaled_metric_floor(18));
+    int switch_w = scaled_metric_floor(38);
+    int switch_h = scaled_metric_floor(22);
+    int text_limit = w - (switch_w + space_2 * 2 + scaled_metric_floor(16));
     if (text_limit < scaled_metric_floor(84))
         text_limit = scaled_metric_floor(84);
+
+    int text_x = x + space_2;
+    if (icon != GUI_GLYPH_NONE) {
+        int icon_size = gui_glyph_std_size();
+        if (icon_size > h - gui_space_0_5())
+            icon_size = h - gui_space_0_5();
+        if (icon_size < 8)
+            icon_size = 8;
+        gui_draw_glyph(s, text_x, y + (h - icon_size) / 2, icon_size, icon,
+                       on ? g_gui_style.accent : g_gui_style.text_dim);
+        text_x += icon_size + gui_space_1() + gui_scaled_metric(2);
+        text_limit -= (text_x - (x + space_2));
+    }
+
     int text_block_h = gui_line_height() + ((detail && *detail) ? (gui_scaled_metric(2) + gui_line_height()) : 0);
     int label_y = y + (h - text_block_h) / 2;
-    gui_draw_text_clipped(s, gui_font_default(), x + space_2, label_y, text_limit, label ? label : "", g_gui_style.text,
-                          bg);
+    gui_draw_text_clipped(s, gui_font_default(), text_x, label_y, text_limit, label ? label : "", g_gui_style.text, 0);
     if (detail && *detail) {
-        gui_draw_text_clipped(s, gui_font_default(), x + space_2, label_y + gui_line_height() + gui_scaled_metric(2),
-                              text_limit, detail, g_gui_style.text_muted, bg);
+        gui_draw_text_clipped(s, gui_font_default(), text_x, label_y + gui_line_height() + gui_scaled_metric(2),
+                              text_limit, detail, g_gui_style.text_muted, 0);
     }
 
     int switch_x = x + w - space_2 - switch_w;
     int switch_y = y + (h - switch_h) / 2;
     int switch_r = switch_h / 2;
-    uint32_t track_bg = on ? g_gui_style.accent : g_gui_style.chrome_bg_alt;
-    uint32_t track_border = on ? g_gui_style.border_focus : (hovered ? g_gui_style.border_hover : g_gui_style.border);
+    uint32_t track_bg = on ? g_gui_style.accent : gui_inset_wash_color();
     gui_fill_rounded_rect(s, switch_x, switch_y, switch_w, switch_h, switch_r, track_bg);
-    gui_draw_rounded_rect(s, switch_x, switch_y, switch_w, switch_h, switch_r, track_border);
+    if (!on)
+        gui_draw_rounded_rect(s, switch_x, switch_y, switch_w, switch_h, switch_r, gui_edge_wash_color());
 
-    int knob_d = switch_h - gui_scaled_metric(6);
-    if (knob_d < gui_scaled_metric(12))
-        knob_d = gui_scaled_metric(12);
-    if (knob_d > switch_h - gui_scaled_metric(4))
-        knob_d = switch_h - gui_scaled_metric(4);
+    int knob_d = switch_h - gui_scaled_metric(5);
+    if (knob_d < gui_scaled_metric(13))
+        knob_d = gui_scaled_metric(13);
+    if (knob_d > switch_h - gui_scaled_metric(3))
+        knob_d = switch_h - gui_scaled_metric(3);
     int knob_y = switch_y + (switch_h - knob_d) / 2;
     int knob_x = on ? (switch_x + switch_w - knob_d - gui_scaled_metric(3)) : (switch_x + gui_scaled_metric(3));
-    uint32_t knob_bg = on ? 0xFFFFFFFFu : g_gui_style.text_dim;
-    uint32_t knob_shadow = on ? 0x28000000u : g_gui_style.chrome_edge;
-    gui_fill_rounded_rect(s, knob_x, knob_y + 1, knob_d, knob_d, knob_d / 2, knob_shadow);
-    gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, knob_bg);
+    gui_fill_rounded_rect(s, knob_x, knob_y + 1, knob_d, knob_d, knob_d / 2, 0x33000000u);
+    gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, COLOR_WHITE);
 }
 
 int gui_app_slider_h(void)
@@ -2471,26 +2809,23 @@ void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *lab
         value = max_value;
 
     const int space_2 = gui_space_2();
-    uint32_t bg = hovered ? g_gui_style.app_surface_alt : g_gui_style.app_surface;
-    gui_fill_rounded_rect(s, x, y, w, h, gui_radius_md(), bg);
-    gui_draw_rounded_rect(s, x, y, w, h, gui_radius_md(), hovered ? g_gui_style.border_hover : g_gui_style.border);
+    (void)hovered;
 
     char value_text[16];
-    uint32_t percent = (value * 100u + max_value / 2u) / max_value;
+    uint32_t percent = (uint32_t)(((uint64_t)value * 100u + max_value / 2u) / max_value);
     snprintf(value_text, sizeof(value_text), "%u%%", percent);
     int label_y = y + space_2;
     int value_w = gui_measure_text(gui_font_default(), value_text);
     gui_draw_text_clipped(s, gui_font_default(), x + space_2, label_y, w - value_w - space_2 * 3, label ? label : "",
-                          g_gui_style.text, bg);
+                          g_gui_style.text, 0);
     gui_draw_text_clipped(s, gui_font_default(), x + w - space_2 - value_w, label_y, value_w, value_text,
-                          g_gui_style.text_dim, bg);
+                          g_gui_style.text_muted, 0);
 
     Rect track = gui_app_slider_track_rect(x, y, w, h);
     if (track.w <= 0 || track.h <= 0)
         return;
     int track_r = track.h / 2;
-    gui_fill_rounded_rect(s, track.x, track.y, track.w, track.h, track_r, g_gui_style.chrome_bg_alt);
-    gui_draw_rounded_rect(s, track.x, track.y, track.w, track.h, track_r, g_gui_style.border);
+    gui_fill_rounded_rect(s, track.x, track.y, track.w, track.h, track_r, gui_inset_wash_color());
 
     uint64_t fill_w64 = ((uint64_t)value * track.w + max_value / 2u) / max_value;
     int fill_w = (int)fill_w64;
@@ -2508,9 +2843,9 @@ void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *lab
     if (knob_x + knob_d > track.x + track.w)
         knob_x = track.x + track.w - knob_d;
     int knob_y = track.y + (track.h - knob_d) / 2;
-    gui_fill_rounded_rect(s, knob_x, knob_y + 1, knob_d, knob_d, knob_d / 2, 0x28000000u);
-    gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, 0xFFFFFFFFu);
-    gui_draw_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, g_gui_style.border_hover);
+    gui_fill_rounded_rect(s, knob_x, knob_y + 1, knob_d, knob_d, knob_d / 2, 0x33000000u);
+    gui_fill_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, COLOR_WHITE);
+    gui_draw_rounded_rect(s, knob_x, knob_y, knob_d, knob_d, knob_d / 2, 0x14000000u);
 }
 
 void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const char *const *labels, int count,
@@ -2519,8 +2854,10 @@ void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const
     if (!s || !labels || count <= 0 || w <= 0 || h <= 0)
         return;
     const int pad = gui_scaled_metric(2);
-    gui_fill_rounded_rect(s, x, y, w, h, gui_corner_radius(w, h, h / 2), g_gui_style.app_surface_alt);
-    gui_draw_rounded_rect(s, x, y, w, h, gui_corner_radius(w, h, h / 2), g_gui_style.border);
+    int outer_r = gui_corner_radius(w, h, gui_radius_sm() + pad);
+    // Inset well the segments sit in.
+    gui_fill_rounded_rect(s, x, y, w, h, outer_r, g_gui_style.app_bg);
+    gui_draw_rounded_rect(s, x, y, w, h, outer_r, gui_edge_wash_color());
 
     int seg_w = w / count;
     int pill_y = y + pad;
@@ -2531,27 +2868,24 @@ void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const
         int actual_w = (i == count - 1) ? (x + w - seg_x) : seg_w;
         bool active = i == selected;
         bool hovered = i == hovered_index;
-        uint32_t text_bg = g_gui_style.app_surface_alt;
 
         if (active || hovered) {
             int pill_x = seg_x + pad;
             int pill_w = actual_w - pad * 2;
             if (pill_w > 0 && pill_h > 0) {
-                uint32_t fill = active ? g_gui_style.chrome_bg_alt : g_gui_style.chrome_bg;
-                int pill_r = gui_corner_radius(pill_w, pill_h, pill_h / 2);
-                gui_fill_rounded_rect(s, pill_x, pill_y, pill_w, pill_h, pill_r, fill);
-                if (active)
-                    gui_draw_rounded_rect(s, pill_x, pill_y, pill_w, pill_h, pill_r, g_gui_style.border_hover);
-                text_bg = fill;
+                if (active) {
+                    gui_fill_rounded_rect(s, pill_x, pill_y + 1, pill_w, pill_h, gui_radius_sm(), 0x28000000u);
+                    gui_fill_rounded_rect(s, pill_x, pill_y, pill_w, pill_h, gui_radius_sm(),
+                                          g_gui_style.app_surface_alt);
+                } else {
+                    gui_fill_rounded_rect(s, pill_x, pill_y, pill_w, pill_h, gui_radius_sm(), gui_hover_wash_color());
+                }
             }
-        } else if (i > 0) {
-            int separator_x = seg_x;
-            gui_fill_rect(s, separator_x, y + gui_scaled_metric(5), 1, h - gui_scaled_metric(10), g_gui_style.border);
         }
 
         int text_y = gui_align_text_y(gui_font_default(), y, h);
         gui_draw_text_clipped(s, gui_font_default(), seg_x + gui_space_1(), text_y, actual_w - gui_space_2(), labels[i],
-                              active ? g_gui_style.text : g_gui_style.text_dim, text_bg);
+                              active ? g_gui_style.text : g_gui_style.text_dim, 0);
     }
 }
 
@@ -2561,18 +2895,18 @@ void gui_app_draw_text_field(Surface *s, int x, int y, int w, int h, const char 
         return;
     const int space_1 = gui_space_1();
     const int space_2 = gui_space_2();
-    uint32_t bg = focused ? g_gui_style.app_surface : g_gui_style.app_surface_alt;
-    uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
-    int r = gui_corner_radius(w, h, gui_radius_md());
-
-    // Shadow to match button height/weight
-    gui_fill_rounded_rect(s, x, y + 1, w, h, r, 0x08000000u);
+    uint32_t bg = g_gui_style.app_bg;
+    int r = gui_corner_radius(w, h, gui_radius_sm());
 
     gui_fill_rounded_rect(s, x, y, w, h, r, bg);
-    gui_draw_rounded_rect(s, x, y, w, h, r, border);
-    if (focused && w > 4 && h > 4)
-        gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, gui_corner_radius(w - 2, h - 2, r - 1),
-                              g_gui_style.chrome_bg);
+    if (focused) {
+        gui_draw_rounded_rect(s, x, y, w, h, r, g_gui_style.accent);
+    } else {
+        uint32_t border = gui_edge_wash_color();
+        if (hovered)
+            border = gui_theme_is_light() ? 0x2A000000u : 0x22FFFFFFu;
+        gui_draw_rounded_rect(s, x, y, w, h, r, border);
+    }
     const char *text = value ? value : "";
     int text_y = gui_align_text_y(gui_font_default(), y, h);
     const GuiFont *font = gui_font_default();
@@ -2625,39 +2959,80 @@ void gui_app_draw_button_ex(Surface *s, int x, int y, int w, int h, const char *
         return;
     const int space_1 = gui_space_1();
     const int space_2 = gui_space_2();
-    uint32_t bg = primary ? g_gui_style.accent : g_gui_style.chrome_bg_alt;
-    if (!primary && hovered)
+    uint32_t bg;
+    uint32_t fg;
+    int r = gui_corner_radius(w, h, gui_radius_sm());
+
+    if (primary) {
+        bg = g_gui_style.accent;
+        if (hovered)
+            bg = blend_pixel(bg, COLOR_WHITE, 26);
+        if (pressed)
+            bg = blend_pixel(g_gui_style.accent, 0xFF000000u, 44);
+        fg = COLOR_WHITE;
+        gui_fill_rounded_rect(s, x, y, w, h, r, bg);
+    } else {
         bg = g_gui_style.app_surface_alt;
-    if (primary && hovered)
-        bg = g_gui_style.border_hover;
-    if (pressed)
-        bg = blend_pixel(bg, 0xFF000000u, primary ? 56 : 36);
-    uint32_t border = focused ? g_gui_style.border_hover : (hovered ? g_gui_style.border_hover : g_gui_style.border);
-    if (primary)
-        border = blend_pixel(bg, 0xFF000000u, 48);
-    int r = gui_corner_radius(w, h, gui_radius_md());
-    int ir = r > 0 ? r - 1 : 0;
-
-    // A pressed button sits flush with the surface: no drop shadow.
-    if (!pressed)
-        gui_fill_rounded_rect(s, x, y + 1, w, h, r, primary ? 0x18000000u : 0x10000000u);
-
-    // Border as a solid fill first, then inner fill inset 1px — prevents
-    // the fill's AA edge from bleeding through the border's AA edge when
-    // bg and border differ sharply (e.g. accent buttons in light theme).
-    gui_fill_rounded_rect(s, x, y, w, h, r, border);
-    if (w > 2 && h > 2)
-        gui_fill_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, ir, bg);
-
-    // Inner highlight / polish
-    if (w > 4 && h > 4) {
-        uint32_t highlight = primary ? 0x20FFFFFFu : g_gui_style.chrome_bg;
-        gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, ir, highlight);
+        if (hovered)
+            bg = blend_pixel(bg, COLOR_WHITE, 14);
+        if (pressed)
+            bg = blend_pixel(g_gui_style.app_surface_alt, 0xFF000000u, 30);
+        fg = g_gui_style.text;
+        gui_fill_rounded_rect(s, x, y, w, h, r, bg);
+        uint32_t border = focused
+                              ? g_gui_style.accent
+                              : (hovered ? (gui_theme_is_light() ? 0x2A000000u : 0x22FFFFFFu) : gui_edge_wash_color());
+        gui_draw_rounded_rect(s, x, y, w, h, r, border);
     }
+
     int text_y = gui_align_text_y(gui_font_default(), y, h) + (pressed ? 1 : 0);
     int text_x = gui_align_text_x_center(gui_font_default(), x + space_1, w - space_2, label ? label : "");
-    gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, w - space_2, label ? label : "",
-                          primary ? COLOR_WHITE : g_gui_style.text, bg);
+    gui_draw_text_clipped(s, gui_font_default(), text_x, text_y, w - space_2, label ? label : "", fg, bg);
+}
+
+int gui_app_sidebar_row_h(void)
+{
+    return gui_app_nav_h();
+}
+
+void gui_draw_boxed_container(Surface *s, int x, int y, int w, int h)
+{
+    if (!s || w <= 0 || h <= 0)
+        return;
+    int r = gui_panel_radius(w, h);
+    gui_fill_rounded_rect(s, x, y, w, h, r, g_gui_style.app_surface_alt);
+}
+
+void gui_draw_boxed_divider(Surface *s, int x, int y, int w, int indent)
+{
+    if (!s || w <= 0)
+        return;
+    if (indent > w - gui_space_1())
+        indent = w - gui_space_1();
+    if (indent < 0)
+        indent = 0;
+    int line_w = w - indent - gui_space_1_5();
+    if (line_w <= 0)
+        return;
+    gui_draw_separator_h(s, x + indent, y, line_w, gui_hairline_color());
+}
+
+void gui_app_draw_section_caption(Surface *s, int x, int y, int w, const char *caption)
+{
+    if (!s || !caption || w <= 0)
+        return;
+    char upper[64];
+    size_t i = 0;
+    for (; caption[i] && i + 1 < sizeof(upper); i++) {
+        char c = caption[i];
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        upper[i] = c;
+    }
+    upper[i] = '\0';
+    // Half-opacity uppercase caption segments sections without rules.
+    uint32_t fg = blend_pixel(g_gui_style.app_surface, g_gui_style.text_muted, 200);
+    gui_draw_text_clipped(s, gui_font_default(), x, y, w, upper, fg, 0);
 }
 
 int gui_popup_menu_item_h(void)
@@ -2818,7 +3193,7 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
 
     gui_draw_panel_shadow(s, x, y, w, menu_h, radius);
 
-    gui_draw_chrome_frame(s, x, y, w, menu_h, radius, g_gui_style.app_surface, true);
+    gui_draw_window_frame(s, x, y, w, menu_h, radius, g_gui_style.app_surface);
 
     int check_size = gui_font_line_height(gui_font_default()) * 2 / 3;
     int check_gap = gui_scaled_metric(4);
@@ -2878,99 +3253,93 @@ void gui_draw_panel_shadow(Surface *s, int32_t x, int32_t y, int32_t w, int32_t 
 {
     if (!s || w <= 0 || h <= 0)
         return;
-    gui_fill_rounded_rect(s, x + 1, y + gui_scaled_metric(6), w - 2, h, r, 0x08000000u);
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(3), w, h, r, 0x0C000000u);
-    gui_fill_rounded_rect(s, x, y + gui_scaled_metric(1), w, h, r, 0x10000000u);
-}
+    // Soft, symmetric ambient shadow. It does the heavy lifting for separation so
+    // the 1-px edge stroke can stay a faint hairline. Many 1-px concentric
+    // rounded rects, each a little larger and equally faint, accumulate into a
+    // smooth falloff that spreads equally on all four sides — no hard banding and
+    // no separate corner arcs. The accumulated darkness right at the edge is set
+    // by the total alpha budget (many faint layers compound), so shrinking `pad`
+    // makes the shadow fall off sooner (visually shorter) without weakening the
+    // edge.
+    int pad = gui_scaled_metric(12);
+    if (pad < 1)
+        pad = 1;
+    // A few wide layers, not one per pixel: this runs on every decoration-cache
+    // rebuild (e.g. while an app is launching), so keep it cheap. Each layer
+    // spans several pixels; the equal per-layer alpha still compounds into a
+    // smooth falloff.
+    int layers = pad / 2;
+    if (layers < 3)
+        layers = 3;
+    if (layers > 8)
+        layers = 8;
+    // Alpha budget per theme; divided over the layers so the edge strength stays
+    // constant regardless of how many layers there are.
+    uint32_t per_layer = gui_theme_is_light() ? 0x33u : 0x45u;
+    per_layer = per_layer / (uint32_t)layers;
+    if (per_layer == 0)
+        per_layer = 1;
+    uint32_t alpha = per_layer << 24;
 
-static inline uint32_t chrome_div255(uint32_t x)
-{
-    return (uint32_t)(((uint64_t)x * 0x8081u) >> 23);
-}
-
-// Same channel mix the WM uses for window frames (a weighted toward b by t).
-static inline uint32_t chrome_mix_rgb(uint32_t a, uint32_t b, uint8_t t)
-{
-    uint32_t inv = 255u - t;
-    uint32_t ar = (a >> 16) & 0xFFu, ag = (a >> 8) & 0xFFu, ab = a & 0xFFu;
-    uint32_t br = (b >> 16) & 0xFFu, bg = (b >> 8) & 0xFFu, bb = b & 0xFFu;
-    return 0xFF000000u | (chrome_div255(ar * inv + br * t) << 16) | (chrome_div255(ag * inv + bg * t) << 8) |
-           chrome_div255(ab * inv + bb * t);
-}
-
-int gui_chrome_border(void)
-{
-    int border = gui_scaled_metric(1);
-    return border < 1 ? 1 : border;
-}
-
-int gui_chrome_detail_inset(void)
-{
-    int inset = gui_scaled_metric(1);
-    return inset < 1 ? 1 : inset;
-}
-
-// Rec.709 luma < 128, matching color_luma() in the WM so a surface and the WM
-// agree on whether it is dark.
-static inline bool chrome_is_dark(uint32_t color)
-{
-    int r = (int)((color >> 16) & 0xFFu);
-    int g = (int)((color >> 8) & 0xFFu);
-    int b = (int)(color & 0xFFu);
-    return ((r * 54 + g * 183 + b * 19 + 128) >> 8) < 128;
-}
-
-GuiChromeFrameColors gui_chrome_frame_colors(uint32_t body, bool active)
-{
-    GuiChromeFrameColors colors;
-    // The outline ring is derived from the surface it wraps, not the global
-    // theme border, so every floating edge stays cohesive with its content: a
-    // dark app (the always-dark terminal, a dark image viewer in light mode)
-    // gets a subtle dark edge instead of a stark light ring, and a light
-    // surface gets a light edge. Themed popups pass the theme surface as body,
-    // so their edge is unchanged. Active widens the contrast slightly.
-    bool dark = chrome_is_dark(body);
-    uint8_t t = active ? (dark ? 44u : 52u) : (dark ? 30u : 38u);
-    colors.outline = chrome_mix_rgb(body, dark ? 0xFFFFFFFFu : 0xFF000000u, t);
-    colors.frame_fill = chrome_mix_rgb(colors.outline, body, active ? 236 : 242);
-    colors.inner_stroke = chrome_mix_rgb(body, 0xFFFFFFFFu, active ? 18 : 12);
-    return colors;
-}
-
-void gui_draw_chrome_ring(Surface *s, int x, int y, int w, int h, int radius, uint32_t body_hint, bool active)
-{
-    if (!s || w <= 0 || h <= 0)
-        return;
-    int border = gui_chrome_border();
-    int r = gui_corner_radius(w, h, radius);
-    int frame_r = gui_corner_radius(w - border * 2, h - border * 2, r - border);
-    GuiChromeFrameColors colors = gui_chrome_frame_colors(body_hint, active);
-
-    gui_fill_rounded_rect(s, x, y, w, h, r, colors.outline);
-    if (w > border * 2 && h > border * 2) {
-        gui_fill_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.frame_fill);
-        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.inner_stroke);
+    for (int i = layers; i >= 1; i--) {
+        int spread = pad * i / layers;
+        gui_fill_rounded_rect(s, x - spread, y - spread, w + spread * 2, h + spread * 2, r + spread, alpha);
     }
 }
 
-void gui_draw_chrome_frame(Surface *s, int x, int y, int w, int h, int radius, uint32_t body, bool active)
+uint32_t gui_window_outer_stroke_color(void)
+{
+    // A single semi-transparent hairline rather than an opaque grey: an opaque
+    // mid-grey reads harsh/muddy against wallpapers, whereas a low-alpha stroke
+    // darkens (light theme) or catches light on (dark theme) whatever sits behind
+    // it, staying crisp over any wallpaper. The rich drop shadow does the heavy
+    // lifting for separation, so this can stay faint.
+    return gui_theme_is_light() ? 0x24000000u : 0x26FFFFFFu;
+}
+
+uint32_t gui_window_inner_rim_color(void)
+{
+    // Disabled: a second inner ring read as a 90s bevel/halo. The edge is a
+    // single 1-px hairline; returning fully transparent makes gui_draw_window_rim
+    // a no-op.
+    return 0x00000000u;
+}
+
+void gui_draw_window_rim(Surface *s, int x, int y, int w, int h, int radius)
+{
+    if (!s || w <= 4 || h <= 4)
+        return;
+    uint32_t rim = gui_window_inner_rim_color();
+    if ((rim >> 24) == 0)
+        return; // rim disabled
+    int r = gui_corner_radius(w, h, radius);
+    gui_draw_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, r > 0 ? r - 1 : 0, rim);
+}
+
+void gui_draw_window_ring(Surface *s, int x, int y, int w, int h, int radius)
+{
+    if (!s || w <= 2 || h <= 2)
+        return;
+    int r = gui_corner_radius(w, h, radius);
+    // Outer dark stroke on the silhouette, then a light rim one pixel inside.
+    gui_draw_rounded_rect(s, x, y, w, h, r, gui_window_outer_stroke_color());
+    gui_draw_window_rim(s, x, y, w, h, radius);
+}
+
+void gui_draw_window_frame_no_rim(Surface *s, int x, int y, int w, int h, int radius, uint32_t body)
 {
     if (!s || w <= 0 || h <= 0)
         return;
-    int border = gui_chrome_border();
-    int body_inset = border + gui_chrome_detail_inset();
     int r = gui_corner_radius(w, h, radius);
-    int frame_r = gui_corner_radius(w - border * 2, h - border * 2, r - border);
-    int body_r = gui_corner_radius(w - body_inset * 2, h - body_inset * 2, r - body_inset);
-    GuiChromeFrameColors colors = gui_chrome_frame_colors(body, active);
+    gui_fill_rounded_rect(s, x, y, w, h, r, body);
+    if (w > 2 && h > 2)
+        gui_draw_rounded_rect(s, x, y, w, h, r, gui_window_outer_stroke_color());
+}
 
-    gui_fill_rounded_rect(s, x, y, w, h, r, colors.outline);
-    if (w > border * 2 && h > border * 2)
-        gui_fill_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.frame_fill);
-    if (w > body_inset * 2 && h > body_inset * 2) {
-        gui_fill_rounded_rect(s, x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2, body_r, body);
-        gui_draw_rounded_rect(s, x + border, y + border, w - border * 2, h - border * 2, frame_r, colors.inner_stroke);
-    }
+void gui_draw_window_frame(Surface *s, int x, int y, int w, int h, int radius, uint32_t body)
+{
+    gui_draw_window_frame_no_rim(s, x, y, w, h, radius, body);
+    gui_draw_window_rim(s, x, y, w, h, radius);
 }
 
 static int dialog_panel_radius()
@@ -3047,7 +3416,7 @@ void gui_draw_dialog(Surface *s, int view_w, int view_h, int view_scroll_y, cons
     const Rect &panel = layout->panel;
     int r = gui_corner_radius(panel.w, panel.h, dialog_panel_radius());
     gui_draw_panel_shadow(s, panel.x, panel.y, panel.w, panel.h, r);
-    gui_draw_chrome_frame(s, panel.x, panel.y, panel.w, panel.h, r, g_gui_style.app_surface, true);
+    gui_draw_window_frame(s, panel.x, panel.y, panel.w, panel.h, r, g_gui_style.app_surface);
     gui_draw_card_header_ext(s, panel.x + 1, panel.y + 1, panel.w - 2,
                              gui_corner_radius(panel.w - 2, panel.h - 2, r - 1), title, nullptr);
 
