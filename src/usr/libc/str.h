@@ -126,9 +126,15 @@ public:
         if (!s)
             s = "";
         size_t n = strlen(s);
+        // If s aliases our own storage, remember its offset so we can re-derive
+        // it after ensure() potentially reallocates (which frees the old buffer).
+        ptrdiff_t off = -1;
+        if (m_data && s >= m_data && s <= m_data + m_len)
+            off = s - m_data;
         if (!ensure(n + 1))
             return false;
-        memcpy(m_data, s, n + 1);
+        const char *src = (off >= 0) ? (m_data + off) : s;
+        memmove(m_data, src, n + 1);
         m_len = n;
         return true;
     }
@@ -154,9 +160,15 @@ public:
         size_t n = strlen(s);
         if (n == 0)
             return true;
+        // If s aliases our own storage (e.g. s.append(s)), remember its offset
+        // so we can re-derive it after ensure() potentially reallocates.
+        ptrdiff_t off = -1;
+        if (m_data && s >= m_data && s <= m_data + m_len)
+            off = s - m_data;
         if (!ensure(m_len + n + 1))
             return false;
-        memcpy(m_data + m_len, s, n);
+        const char *src = (off >= 0) ? (m_data + off) : s;
+        memmove(m_data + m_len, src, n);
         m_len += n;
         m_data[m_len] = '\0';
         return true;

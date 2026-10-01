@@ -186,7 +186,8 @@ static int region_is_completely_free(const AllocRegion *region)
     if (!region || !region->first)
         return 0;
     const AllocBlock *block = region->first;
-    return block->free && block->prev == NULL && block->next == NULL && block->size == region_capacity(region->mapped_size);
+    return block->free && block->prev == NULL && block->next == NULL &&
+           block->size == region_capacity(region->mapped_size);
 }
 
 void *malloc(size_t size)
@@ -305,21 +306,87 @@ void *realloc(void *ptr, size_t size)
     return new_ptr;
 }
 
+unsigned long strtoul(const char *nptr, char **endptr, int base)
+{
+    const char *s = nptr ? nptr : "";
+    while (*s == ' ' || *s == '\t')
+        s++;
+    int sign = 1;
+    if (*s == '-') {
+        sign = -1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+    if (base == 0) {
+        if (*s == '0') {
+            if (s[1] == 'x' || s[1] == 'X') {
+                base = 16;
+                s += 2;
+            } else {
+                base = 8;
+                s++;
+            }
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && *s == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+    if (base < 2 || base > 36)
+        base = 10;
+
+    const unsigned long ul_max = (unsigned long)-1;
+    const unsigned long cutoff = ul_max / (unsigned long)base;
+    unsigned long acc = 0;
+    int any = 0;
+    for (; *s; s++) {
+        int d;
+        if (*s >= '0' && *s <= '9')
+            d = *s - '0';
+        else if (*s >= 'a' && *s <= 'z')
+            d = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'Z')
+            d = *s - 'A' + 10;
+        else
+            break;
+        if (d >= base)
+            break;
+        // Saturate instead of wrapping on overflow.
+        if (acc > cutoff || acc * (unsigned long)base > ul_max - (unsigned long)d)
+            acc = ul_max;
+        else
+            acc = acc * (unsigned long)base + (unsigned long)d;
+        any = 1;
+    }
+    if (endptr)
+        *endptr = (char *)(any ? s : (nptr ? nptr : ""));
+    return sign < 0 ? (unsigned long)(-(long)acc) : acc;
+}
+
 int atoi(const char *str)
 {
-    int res = 0;
+    const char *s = str ? str : "";
+    while (*s == ' ' || *s == '\t')
+        s++;
     int sign = 1;
-    int i = 0;
-    if (str[0] == '-') {
+    if (*s == '-') {
         sign = -1;
-        i++;
+        s++;
+    } else if (*s == '+') {
+        s++;
     }
-    for (; str[i] != '\0'; ++i) {
-        if (str[i] < '0' || str[i] > '9')
+    long res = 0;
+    for (; *s >= '0' && *s <= '9'; s++) {
+        res = res * 10 + (*s - '0');
+        // Clamp to the int range; res stays within long because it is clamped
+        // every iteration (the multiply cannot overflow a 64-bit long).
+        if (res > 2147483647L) {
+            res = 2147483647L;
             break;
-        res = res * 10 + (str[i] - '0');
+        }
     }
-    return sign * res;
+    return sign < 0 ? (int)-res : (int)res;
 }
 
 void srand(unsigned int seed)

@@ -2,6 +2,7 @@
 
 #include <uapi/syscalls.h>
 
+#include "string.h"
 #include "syscall.h"
 
 int socket(int domain, int type, int protocol)
@@ -57,12 +58,19 @@ int recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_
                           (uint64_t)&src_port, 0);
 
     if (r >= 0 && src_addr) {
-        struct sockaddr_in *in = (struct sockaddr_in *)src_addr;
-        in->sin_family = AF_INET;
-        in->sin_addr.s_addr = src_ip;
-        in->sin_port = src_port;
+        // Build the address in a zeroed local (clears sin_zero), store the port
+        // in network order to match bind/connect/sendto, then copy only as much
+        // as the caller's buffer allows (POSIX value-result addrlen).
+        struct sockaddr_in filled;
+        memset(&filled, 0, sizeof(filled));
+        filled.sin_family = AF_INET;
+        filled.sin_addr.s_addr = src_ip;
+        filled.sin_port = htons(src_port);
+        socklen_t room = addrlen ? *addrlen : (socklen_t)sizeof(filled);
+        socklen_t copy = room < (socklen_t)sizeof(filled) ? room : (socklen_t)sizeof(filled);
+        memcpy(src_addr, &filled, copy);
         if (addrlen)
-            *addrlen = sizeof(struct sockaddr_in);
+            *addrlen = (socklen_t)sizeof(filled);
     }
 
     return r;

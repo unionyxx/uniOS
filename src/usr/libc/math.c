@@ -22,9 +22,18 @@ double fmod(double x, double y)
 {
     if (y == 0.0)
         return 0.0;
-    double q = x / y;
-    double qi = (q >= 0.0) ? (double)(long long)q : -(double)(long long)(-q);
-    return x - qi * y;
+    double ax = x < 0.0 ? -x : x;
+    double ay = y < 0.0 ? -y : y;
+    // Reduce by subtracting the largest power-of-two multiple of |y| that fits,
+    // which stays correct for arbitrarily large quotients (an int64 cast of the
+    // quotient would be undefined once |x/y| >= 2^63).
+    while (ax >= ay) {
+        double m = ay;
+        while (m * 2.0 <= ax)
+            m *= 2.0;
+        ax -= m;
+    }
+    return x < 0.0 ? -ax : ax;
 }
 
 float fmodf(float x, float y)

@@ -120,6 +120,19 @@ static inline bool cfg_line_value(const char *config, const char *key, char *out
     return false;
 }
 
+// Shared boolean parsing so every config consumer agrees: {0,false,off,no}
+// disable, {1,true,on,yes} enable, anything else falls back to the default.
+static inline bool cfg_value_enabled(const char *value, bool fallback)
+{
+    if (!value || !*value)
+        return fallback;
+    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0)
+        return false;
+    if (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0 || strcmp(value, "yes") == 0)
+        return true;
+    return fallback;
+}
+
 static inline bool cfg_read_text_from_candidates(const char *const *candidates, size_t count, char *out,
                                                  size_t out_size)
 {
@@ -167,12 +180,21 @@ static inline int cfg_load_int(const char *path, const char *key, int fallback)
     }
     if (*p < '0' || *p > '9')
         return fallback;
-    int result = 0;
+    // Accumulate in 64 bits and clamp so a long value cannot overflow.
+    long long result = 0;
     while (*p >= '0' && *p <= '9') {
         result = result * 10 + (*p - '0');
+        if (result > 2147483648LL) {
+            result = 2147483648LL;
+            break;
+        }
         p++;
     }
-    return sign * result;
+    if (sign < 0)
+        return (int)(-result); // result <= 2^31, so -result >= INT_MIN
+    if (result > 2147483647LL)
+        result = 2147483647LL;
+    return (int)result;
 }
 
 // Read-modify-write: preserve every other key, replace (or append) `key=value`.

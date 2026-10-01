@@ -1,10 +1,10 @@
 #include "wav.h"
 
+#include "log.h"
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
 #include "unistd.h"
-#include "log.h"
 
 bool wav_open(const char *filename, uint8_t **data, uint32_t *data_size, uint32_t *sample_rate, uint32_t *channels,
               uint8_t **buffer_out)
@@ -57,7 +57,9 @@ bool wav_open(const char *filename, uint8_t **data, uint32_t *data_size, uint32_
 
     struct WavFmtChunk *fmt_chunk = wav_header.fmt_chunk;
     wav_header.data_chunk = NULL;
-    for (uint32_t i = 0; i < 0xFF && (sizeof(struct WavRiffDescriptor) + i + 4 <= (size_t)file_size); i++) {
+    // Need 8 bytes at each candidate to safely read the 'data' magic plus the
+    // 32-bit size that follows it.
+    for (uint32_t i = 0; i < 0xFF && (sizeof(struct WavRiffDescriptor) + i + 8 <= (size_t)file_size); i++) {
         uint8_t *byte = ((uint8_t *)fmt_chunk) + i;
         if (byte[0] == 'd' && byte[1] == 'a' && byte[2] == 't' && byte[3] == 'a') {
             wav_header.data_chunk = (struct WavDataChunk *)byte;
@@ -69,6 +71,15 @@ bool wav_open(const char *filename, uint8_t **data, uint32_t *data_size, uint32_
     if (!data_chunk) {
         free(file_data);
         LOG_ERROR("wav", "%s: failed to find data chunk", filename);
+        return false;
+    }
+
+    // data_size is attacker-controlled; reject payloads that run past the end of
+    // the file so consumers never read out of bounds.
+    size_t payload_offset = (size_t)((uint8_t *)&data_chunk->data_ - file_data);
+    if (payload_offset > (size_t)file_size || data_chunk->data_size > (size_t)file_size - payload_offset) {
+        free(file_data);
+        LOG_ERROR("wav", "%s: data chunk exceeds file size", filename);
         return false;
     }
 

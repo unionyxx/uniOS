@@ -99,6 +99,9 @@ public:
         }
         if (grown < new_cap)
             grown = new_cap;
+        // Reject sizes that would wrap the byte-count multiplication.
+        if (grown > SIZE_MAX / sizeof(T))
+            return false;
         T *next = static_cast<T *>(realloc(m_data, grown * sizeof(T)));
         if (!next)
             return false;
@@ -118,7 +121,9 @@ public:
         return true;
     }
 
-    bool push(const T &value)
+    // Taken by value so a self-referencing push (v.push(v[0])) copies the
+    // element before a grow reallocates the buffer.
+    bool push(T value)
     {
         if (m_len >= m_cap && !reserve(m_len + 1))
             return false;
@@ -138,8 +143,10 @@ public:
     }
 
     // Inserts value before position (0..size). Returns false if position is
-    // out of range or the grow fails.
-    bool insert(size_t position, const T &value)
+    // out of range or the grow fails. Taken by value so inserting an element
+    // that references this vector's own storage (v.insert(k, v[j])) copies it
+    // before the grow/shift moves the buffer.
+    bool insert(size_t position, T value)
     {
         if (position > m_len)
             return false;
