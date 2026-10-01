@@ -33,6 +33,8 @@ static bool is_leap_year(int year)
 static int days_in_month(int year, int month)
 {
     static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12)
+        return 31;
     if (month == 2 && is_leap_year(year))
         return 29;
     return days[month - 1];
@@ -41,6 +43,8 @@ static int days_in_month(int year, int month)
 static int weekday(int year, int month, int day)
 {
     static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (month < 1 || month > 12)
+        month = 1;
     int y = year;
     int m = month;
     int d = day;
@@ -54,12 +58,21 @@ static void calendar_init(CalendarState *state)
         return;
     SysTime now = {};
     get_time(&now);
-    state->year = (int)now.year;
-    state->month = (int)now.month;
-    state->selected_day = (int)now.day;
-    state->today_year = (int)now.year;
-    state->today_month = (int)now.month;
-    state->today_day = (int)now.day;
+    int year = (int)now.year;
+    int month = (int)now.month;
+    int day = (int)now.day;
+    // The RTC fields come straight from CMOS; clamp them into range so the
+    // month/day tables are never indexed out of bounds.
+    if (month < 1 || month > 12)
+        month = 1;
+    if (day < 1 || day > days_in_month(year, month))
+        day = 1;
+    state->year = year;
+    state->month = month;
+    state->selected_day = day;
+    state->today_year = year;
+    state->today_month = month;
+    state->today_day = day;
 }
 
 static void calendar_prev_month(CalendarState *state)
@@ -131,11 +144,11 @@ struct CalendarApp
 {
     CalendarState state;
     CalendarRects rects;
-    WidgetButton today;
     WidgetHelp help;
     int hover_row;
     int hover_col;
     int hover_arrow; // -1 prev, 1 next, 0 none
+    bool hover_today;
 };
 
 static bool point_in_rect(const Rect &rect, int x, int y)
@@ -181,9 +194,7 @@ static void draw_calendar(Surface *win, CalendarApp *app)
 
     int w = (int)win->width;
     int h = (int)win->height;
-    int pad = gui_app_outer_padding();
-    int top_pad = gui_space_1();
-    int gap = gui_space_0_5();
+    int pad = gui_scaled_metric(12);
 
     const GuiFont *title_font = gui_font_title();
     const GuiFont *def_font = gui_font_default();
@@ -193,44 +204,75 @@ static void draw_calendar(Surface *win, CalendarApp *app)
                                         "July",    "August",   "September", "October", "November", "December"};
     static const char *day_labels[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
+    // Headerbar: prev arrow, month/year title, next arrow, and a small "Today"
+    // text button live in the unified headerbar band, starting clear of the WM
+    // traffic lights. The band blends seamlessly into the grid below.
+    int header_h = gui_headerbar_h();
+    int control_h = gui_scaled_metric(24);
+    int control_y = (header_h - control_h) / 2;
+    int arrow_btn = gui_scaled_metric(20);
+    int nav_x = gui_traffic_lights_w() + gui_scaled_metric(8);
+
     char header[64];
     snprintf(header, sizeof(header), "%s %d", month_names[(state->month - 1) % 12], state->year);
     int header_w = gui_measure_text(title_font, header);
-    int header_x = (w - header_w) / 2;
-    int header_y = top_pad;
-    gui_draw_text_clipped(win, title_font, header_x, header_y, w - pad * 2, header, g_gui_style.text,
+
+    rects->prev_btn = gui_rect_make(nav_x, control_y, arrow_btn, control_h);
+    int title_x = nav_x + arrow_btn + gui_scaled_metric(6);
+    int header_text_y = gui_align_text_y(title_font, control_y, control_h);
+    gui_draw_text_clipped(win, title_font, title_x, header_text_y, header_w, header, g_gui_style.text,
                           g_gui_style.app_bg);
+    rects->next_btn = gui_rect_make(title_x + header_w + gui_scaled_metric(6), control_y, arrow_btn, control_h);
 
-    int arrow_size = gui_scaled_metric(8);
-    int arrow_y = header_y + line_h / 2;
-    int nav_btn = gui_app_control_h();
-    int nav_y = header_y + (line_h - nav_btn) / 2;
-    rects->prev_btn = gui_rect_make(pad, nav_y, nav_btn, nav_btn);
-    rects->next_btn = gui_rect_make(w - pad - nav_btn, nav_y, nav_btn, nav_btn);
+    int arrow_size = gui_scaled_metric(7);
+    uint32_t arrow_color = app->hover_arrow == -1 ? g_gui_style.text : g_gui_style.text_muted;
+    draw_chevron(win, rects->prev_btn.x + rects->prev_btn.w / 2, control_y + control_h / 2, arrow_size, true,
+                 arrow_color);
+    arrow_color = app->hover_arrow == 1 ? g_gui_style.text : g_gui_style.text_muted;
+    draw_chevron(win, rects->next_btn.x + rects->next_btn.w / 2, control_y + control_h / 2, arrow_size, false,
+                 arrow_color);
 
-    uint32_t arrow_color = app->hover_arrow == -1 ? g_gui_style.text : g_gui_style.text_dim;
-    draw_chevron(win, rects->prev_btn.x + rects->prev_btn.w / 2, arrow_y, arrow_size, true, arrow_color);
-    arrow_color = app->hover_arrow == 1 ? g_gui_style.text : g_gui_style.text_dim;
-    draw_chevron(win, rects->next_btn.x + rects->next_btn.w / 2, arrow_y, arrow_size, false, arrow_color);
+    bool viewing_today_month = state->year == state->today_year && state->month == state->today_month;
+    int today_w = gui_measure_text(def_font, "Today") + gui_space_1();
+    rects->today_btn = gui_rect_make(w - pad - today_w, control_y, today_w, control_h);
+    {
+        int r = gui_radius_xs();
+        if (app->hover_today)
+            gui_fill_rounded_rect(win, rects->today_btn.x, rects->today_btn.y, rects->today_btn.w, rects->today_btn.h,
+                                  r, gui_hover_wash_color());
+        uint32_t today_fg = viewing_today_month ? g_gui_style.text_muted : g_gui_style.accent;
+        gui_draw_text_clipped(win, def_font, rects->today_btn.x + gui_space_0_5(),
+                              gui_align_text_y(def_font, control_y, control_h), today_w, "Today", today_fg, 0);
+    }
 
-    int footer_h = gui_app_control_h() + gui_space_1();
-    int grid_y = header_y + line_h + gui_space_2();
-    int day_label_h = line_h + gui_space_1();
-    int cell_w = (w - pad * 2 - gap * 6) / 7;
-    int cell_h = (h - grid_y - day_label_h - pad - gap * 5 - footer_h) / 6;
-    if (cell_h < gui_scaled_metric(32))
-        cell_h = gui_scaled_metric(32);
+    // Keep the month navigation clickable inside the headerbar drag zone.
+    Rect header_input[3] = {rects->prev_btn, rects->next_btn, rects->today_btn};
+    gui_window_set_header_input(header_input, 3);
 
+    // Weekday labels start below the headerbar band.
+    int grid_x = pad;
+    int grid_w = w - pad * 2;
+    int slot_w = grid_w / 7;
+    int labels_y = header_h + gui_scaled_metric(8);
     for (int d = 0; d < 7; d++) {
-        int dx = pad + d * (cell_w + gap);
-        int dw = (d == 6) ? (w - pad - dx) : cell_w;
+        int dx = grid_x + d * slot_w;
+        int dw = (d == 6) ? (grid_x + grid_w - dx) : slot_w;
         int label_w = gui_measure_text(def_font, day_labels[d]);
         int label_x = dx + (dw - label_w) / 2;
-        gui_draw_text_clipped(win, def_font, label_x, grid_y, dw, day_labels[d], g_gui_style.text_muted,
+        gui_draw_text_clipped(win, def_font, label_x, labels_y, dw, day_labels[d], g_gui_style.text_muted,
                               g_gui_style.app_bg);
     }
 
-    int cells_y = grid_y + day_label_h;
+    // Day grid: circular hitboxes, filled circle for today, outlined for the
+    // selected day.
+    int circle_d = gui_scaled_metric(28);
+    int row_pitch = circle_d + gui_scaled_metric(4);
+    int cells_y = labels_y + line_h + gui_scaled_metric(4);
+    int grid_h = 6 * row_pitch;
+    int extra_y = h - (cells_y + grid_h) - gui_scaled_metric(8);
+    if (extra_y > 0)
+        cells_y += extra_y / 2;
+
     int start_wd = weekday(state->year, state->month, 1);
     int dim = days_in_month(state->year, state->month);
 
@@ -258,60 +300,60 @@ static void draw_calendar(Surface *win, CalendarApp *app)
 
     for (int row = 0; row < 6; row++) {
         for (int col = 0; col < 7; col++) {
-            int cx = pad + col * (cell_w + gap);
-            int cy = cells_y + row * (cell_h + gap);
-            int cw = (col == 6) ? (w - pad - cx) : cell_w;
+            int slot_x = grid_x + col * slot_w;
+            int slot_w_actual = (col == 6) ? (grid_x + grid_w - slot_x) : slot_w;
+            int cy = cells_y + row * row_pitch;
 
-            int r_corner = gui_corner_radius(cw, cell_h, gui_radius_sm());
+            rects->day_cells[row][col] = gui_rect_make(slot_x, cy, slot_w_actual, row_pitch);
+
             char day_str[4];
-            uint32_t bg = g_gui_style.app_surface;
-            uint32_t fg = g_gui_style.text_muted;
-            uint32_t border = g_gui_style.border;
-            bool is_hovered = (app->hover_row == row && app->hover_col == col);
-
-            rects->day_cells[row][col] = gui_rect_make(cx, cy, cw, cell_h);
+            bool in_month = true;
+            bool is_today = false;
+            bool is_selected = false;
 
             if (row == 0 && col < start_wd) {
-                int d_num = prev_dim - start_wd + col + 1;
-                format_day_string(d_num, day_str);
-                bg = is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_bg;
-                fg = g_gui_style.text_muted;
+                format_day_string(prev_dim - start_wd + col + 1, day_str);
+                in_month = false;
             } else if (current_month_day > dim) {
                 format_day_string(next_month_day, day_str);
-                bg = is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_bg;
-                fg = g_gui_style.text_muted;
                 next_month_day++;
+                in_month = false;
             } else {
-                bool is_today = state->year == state->today_year && state->month == state->today_month &&
-                                current_month_day == state->today_day;
-                bool is_selected = current_month_day == state->selected_day;
-
-                bg = is_selected ? g_gui_style.accent
-                                 : (is_hovered ? g_gui_style.chrome_bg_alt : g_gui_style.app_surface);
-                fg = is_selected ? COLOR_WHITE : (is_today ? g_gui_style.accent : g_gui_style.text);
-                border = is_today ? g_gui_style.accent : g_gui_style.border;
-
+                is_today = state->year == state->today_year && state->month == state->today_month &&
+                           current_month_day == state->today_day;
+                is_selected = current_month_day == state->selected_day;
                 format_day_string(current_month_day, day_str);
                 current_month_day++;
             }
 
-            gui_fill_rounded_rect(win, cx, cy, cw, cell_h, r_corner, bg);
-            gui_draw_rounded_rect(win, cx, cy, cw, cell_h, r_corner, border);
+            int cx = slot_x + (slot_w_actual - circle_d) / 2;
+            int circle_r = circle_d / 2;
+            int ccx = cx + circle_r;
+            int ccy = cy + row_pitch / 2;
+            bool is_hovered = (app->hover_row == row && app->hover_col == col);
+
+            if (in_month && is_today) {
+                gui_fill_circle(win, ccx, ccy, circle_r, g_gui_style.accent);
+            } else if (in_month && is_selected) {
+                gui_draw_circle_stroke(win, ccx, ccy, circle_r - 1, gui_scaled_metric(1) + 1, g_gui_style.accent);
+            } else if (is_hovered) {
+                gui_fill_circle(win, ccx, ccy, circle_r, gui_hover_wash_color());
+            }
+
+            uint32_t fg;
+            if (in_month && is_today)
+                fg = COLOR_WHITE;
+            else if (in_month)
+                fg = g_gui_style.text;
+            else
+                fg = g_gui_style.text_muted;
 
             int tw = gui_measure_text(def_font, day_str);
-            int tx = cx + (cw - tw) / 2;
-            int text_h = gui_font_ascent(def_font);
-            int ty = cy + (cell_h - text_h) / 2;
-            gui_draw_text_clipped(win, def_font, tx, ty, cw, day_str, fg, bg);
+            int tx = ccx - tw / 2;
+            int ty = gui_align_text_y(def_font, ccy - circle_r, circle_d);
+            gui_draw_text_clipped(win, def_font, tx, ty, tw, day_str, fg, 0);
         }
     }
-
-    // Footer: jump back to today's date.
-    bool viewing_today_month = state->year == state->today_year && state->month == state->today_month;
-    int today_w = gui_scaled_metric(96);
-    rects->today_btn = gui_rect_make((w - today_w) / 2, h - pad - gui_app_control_h(), today_w, gui_app_control_h());
-    app->today.rect = rects->today_btn;
-    widget_button_draw(win, &app->today, viewing_today_month ? "Today" : "Go to Today", false, false);
 
     if (app->help.open)
         calendar_draw_help(win);
@@ -368,11 +410,14 @@ static void calendar_event(App *app, const Event *ev)
         case EVT_MOUSE_LEAVE:
             calendar_clear_hover(cal);
             cal->hover_arrow = 0;
-            widget_button_reset(&cal->today);
+            cal->hover_today = false;
             app_invalidate_all(app);
             break;
 
         case EVT_MOUSE_SCROLL:
+            // Don't change the month while the Help overlay is up.
+            if (cal->help.open)
+                break;
             if (ev->mouse.scroll_y > 0)
                 calendar_prev_month(state);
             else if (ev->mouse.scroll_y < 0)
@@ -392,13 +437,14 @@ static void calendar_event(App *app, const Event *ev)
                 new_hover_arrow = -1;
             else if (point_in_rect(rects->next_btn, ev->mouse.x, ev->mouse.y))
                 new_hover_arrow = 1;
+            bool new_hover_today = point_in_rect(rects->today_btn, ev->mouse.x, ev->mouse.y);
 
-            bool changed = row != cal->hover_row || col != cal->hover_col || new_hover_arrow != cal->hover_arrow;
+            bool changed = row != cal->hover_row || col != cal->hover_col || new_hover_arrow != cal->hover_arrow ||
+                           new_hover_today != cal->hover_today;
             cal->hover_row = row;
             cal->hover_col = col;
             cal->hover_arrow = new_hover_arrow;
-            if (widget_button_event(&cal->today, ev) & WIDGET_CHANGED)
-                changed = true;
+            cal->hover_today = new_hover_today;
             if (changed)
                 app_invalidate_all(app);
             break;
@@ -424,8 +470,12 @@ static void calendar_event(App *app, const Event *ev)
                 app_invalidate_all(app);
                 break;
             }
-            if (widget_button_event(&cal->today, ev) & WIDGET_CHANGED)
+            if (point_in_rect(rects->today_btn, ev->mouse.x, ev->mouse.y)) {
+                calendar_goto_today(state);
+                calendar_clear_hover(cal);
                 app_invalidate_all(app);
+                break;
+            }
             int row = -1, col = -1;
             find_day_at(rects, ev->mouse.x, ev->mouse.y, &row, &col);
             if (row >= 0 && col >= 0) {
@@ -444,19 +494,6 @@ static void calendar_event(App *app, const Event *ev)
                 }
                 app_invalidate_all(app);
             }
-            break;
-        }
-
-        case EVT_MOUSE_UP: {
-            if (ev->mouse.button != 1)
-                break;
-            int rc = widget_button_event(&cal->today, ev);
-            if (rc & WIDGET_CLICKED) {
-                calendar_goto_today(state);
-                calendar_clear_hover(cal);
-            }
-            if (rc & (WIDGET_CLICKED | WIDGET_CHANGED))
-                app_invalidate_all(app);
             break;
         }
 
@@ -538,10 +575,10 @@ extern "C" int main()
 
     AppConfig config = {};
     config.title = "Calendar";
-    config.width = gui_scaled_metric(380);
-    config.height = gui_scaled_metric(400);
-    config.min_width = gui_scaled_metric(300);
-    config.min_height = gui_scaled_metric(320);
+    config.width = gui_scaled_metric(320);
+    config.height = gui_scaled_metric(300);
+    config.min_width = gui_scaled_metric(320);
+    config.min_height = gui_scaled_metric(300);
     config.flags = WIN_FLAG_RESIZABLE;
     config.idle_ms = 16;
     config.on_draw = calendar_draw;

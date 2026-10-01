@@ -51,6 +51,10 @@ struct CalcState
     bool has_decimal;
     bool error;
     uint8_t decimal_places;
+    // Sign of the entry being typed. Mirrors the sign of `current` while an
+    // entry is in progress; when `fresh` is set it pre-negates the NEXT entry
+    // (5, +, +/-, 3 enters -3), matching standard calculator behavior.
+    bool pending_neg;
     char display[32];
 };
 
@@ -105,7 +109,9 @@ static void calc_update_display(CalcState *state)
         snprintf(state->display, sizeof(state->display), "%.*f", state->decimal_places, state->current);
     } else {
         double val = state->current;
-        if (val >= 1e15 || (val != 0.0 && val < 1e-15 && val > -1e-15)) {
+        // Use scientific notation for very large (positive or negative) or very
+        // small magnitudes; the int64 cast below is only valid in between.
+        if (val >= 1e15 || val <= -1e15 || (val != 0.0 && val < 1e-15 && val > -1e-15)) {
             snprintf(state->display, sizeof(state->display), "%.6e", val);
         } else {
             int64_t iv = (int64_t)val;
@@ -141,12 +147,19 @@ static void calc_input_digit(CalcState *state, uint8_t digit)
 
     if (state->has_decimal) {
         if (state->decimal_places < MAX_DECIMAL_PLACES) {
-            state->decimal_places++;
-            double factor = k_pow10[state->decimal_places];
-            state->current = ((double)(int64_t)(state->current * factor) + digit) / factor;
+            double factor = k_pow10[state->decimal_places + 1];
+            double scaled = state->current * factor;
+            // Only append when the scaled value still fits an int64; otherwise
+            // the multiply/cast round-trip would overflow.
+            if (scaled > -9.0e18 && scaled < 9.0e18) {
+                state->decimal_places++;
+                double signed_digit = state->pending_neg ? -(double)digit : (double)digit;
+                state->current = ((double)(int64_t)scaled + signed_digit) / factor;
+            }
         }
     } else {
-        state->current = state->current * 10.0 + digit;
+        if (state->current > -1e15 && state->current < 1e15)
+            state->current = state->current * 10.0 + (state->pending_neg ? -(double)digit : (double)digit);
     }
     calc_update_display(state);
 }
@@ -192,6 +205,7 @@ static void calc_exec_pending(CalcState *state)
     state->fresh = true;
     state->has_decimal = false;
     state->decimal_places = 0;
+    state->pending_neg = false;
     calc_update_display(state);
 }
 
@@ -206,6 +220,7 @@ static void calc_input_op(CalcState *state, CalcOp op)
     state->fresh = true;
     state->has_decimal = false;
     state->decimal_places = 0;
+    state->pending_neg = false;
 }
 
 static void calc_dispatch_action(CalcState *state, const ButtonDef &btn)
@@ -236,12 +251,14 @@ static void calc_dispatch_action(CalcState *state, const ButtonDef &btn)
             calc_exec_pending(state);
             state->accumulator = state->current;
             state->fresh = true;
+            state->pending_neg = false;
             break;
         case BtnAction::Clear:
             state->current = 0.0;
             state->fresh = true;
             state->has_decimal = false;
             state->decimal_places = 0;
+            state->pending_neg = false;
             calc_update_display(state);
             break;
         case BtnAction::ClearAll:
@@ -252,11 +269,19 @@ static void calc_dispatch_action(CalcState *state, const ButtonDef &btn)
             break;
         case BtnAction::Percent:
             state->current /= 100.0;
+            // The result is a computed value, not typed input: drop the
+            // decimal-places bookkeeping so the true value is shown.
+            state->has_decimal = false;
+            state->decimal_places = 0;
             calc_update_display(state);
             break;
         case BtnAction::ToggleSign:
+            // Toggle the entry's sign as a whole: `current` (what the display
+            // shows and what operators consume) and `pending_neg` (how the
+            // next typed digit appends) always flip together, so 5 +/- then 4
+            // yields -54, and 5 + +/- then 3 enters -3.
             state->current = -state->current;
-            state->fresh = false;
+            state->pending_neg = !state->pending_neg;
             calc_update_display(state);
             break;
     }
@@ -346,7 +371,8 @@ struct CalcApp
 static void compute_layout(Surface *win, CalcRects *rects)
 {
     int pad = gui_app_outer_padding();
-    int top_pad = gui_space_1();
+    // Content starts below the unified headerbar band.
+    int top_pad = gui_headerbar_h() + gui_space_1();
     int gap = gui_space_1();
     int display_h = gui_scaled_metric(72);
     int win_w = (int)win->width;
@@ -383,8 +409,13 @@ static void compute_layout(Surface *win, CalcRects *rects)
 
 static void render_display(Surface *win, CalcState *state, const CalcRects *rects)
 {
-    gui_draw_panel(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, g_gui_style.app_surface,
-                   g_gui_style.border);
+    // Flat display field in the shared text-field idiom: canvas-tone fill with
+    // an edge-wash hairline, no framed panel (matches gui_app_draw_text_field).
+    int r = gui_panel_radius(rects->display.w, rects->display.h);
+    gui_fill_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, r,
+                          g_gui_style.app_bg);
+    gui_draw_rounded_rect(win, rects->display.x, rects->display.y, rects->display.w, rects->display.h, r,
+                          gui_edge_wash_color());
 
     const GuiFont *disp_font = gui_font_title();
     int max_w = rects->display.w - gui_space_2() * 2;
@@ -408,7 +439,7 @@ static void render_display(Surface *win, CalcState *state, const CalcRects *rect
     int disp_y = rects->display.y + (rects->display.h - gui_font_line_height(disp_font)) / 2;
 
     gui_draw_text_clipped(win, disp_font, disp_x, disp_y, rects->display.w - gui_space_4(), shown, g_gui_style.text,
-                          g_gui_style.app_surface);
+                          g_gui_style.app_bg);
 }
 
 static bool calc_armed_cell(const CalcState &state, int *row, int *col)
@@ -601,7 +632,9 @@ extern "C" int main()
     config.width = gui_scaled_metric(320);
     config.height = gui_scaled_metric(420);
     config.min_width = gui_scaled_metric(280);
-    config.min_height = gui_scaled_metric(380);
+    // Fits the headerbar band + display + a 5x4 keypad of minimum-height
+    // buttons (44 px) with gaps and padding: 66 + 72 + 8 + 252 + 16.
+    config.min_height = gui_scaled_metric(420);
     config.flags = WIN_FLAG_RESIZABLE;
     config.idle_ms = 16;
     config.on_draw = calc_draw;

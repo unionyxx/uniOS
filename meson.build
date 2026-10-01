@@ -297,7 +297,6 @@ app_sources = {
   'files' : ['src/usr/apps/files'],
   'terminal' : ['src/usr/apps/terminal'],
   'latitude' : ['src/usr/apps/latitude'],
-  'about' : ['src/usr/apps/about'],
   'preferences' : ['src/usr/apps/preferences'],
   'clock' : ['src/usr/apps/clock'],
   'calendar' : ['src/usr/apps/calendar'],

@@ -27,6 +27,9 @@ __pycache__/
 env/
 NUL.exe
 
+# Local agent tooling state
+.serena/
+
 # Generated runtime assets
 rootfs/bin/
 rootfs/usr/share/wallpapers/default.uowp

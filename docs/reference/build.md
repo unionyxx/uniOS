@@ -112,4 +112,4 @@ Nothing reaches the runtime image until it is staged into the build rootfs and `
 - Kernel: `--target=x86_64-unknown-none-elf`, `-mcmodel=kernel`, `-mno-red-zone`, `-mgeneral-regs-only` (the kernel never touches vector registers so interrupts cannot corrupt FPU state), `-fno-pie`, `-fno-exceptions`, `-fno-rtti`, `-fno-omit-frame-pointer`.
 - Meridian: compiled for `x86_64-pc-windows-msvc` and linked with `lld-link` because UEFI applications are PE/COFF, not ELF. It is never linked with `ld.lld`.
 - `toolchains/llvm.ini` sets `host_machine.system = 'none'` and selects `lld` for kernel linking.
-- The kernel build bakes `git rev-parse --short HEAD` in as `GIT_COMMIT`; it is visible in the `about` app and `SYS_GETSYSINFO`.
+- The kernel build bakes `git rev-parse --short HEAD` in as `GIT_COMMIT`; it is visible in the Settings app's About section and `SYS_GETSYSINFO`.

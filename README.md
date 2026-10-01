@@ -37,7 +37,7 @@ uniOS is a freestanding x86-64 operating system written in C++20. It boots throu
 | `src/usr/` | Userspace: libc, GUI library, shell, window manager, desktop services, apps |
 | `include/` | Kernel, driver, boot, and UAPI headers |
 | `rootfs/` | Runtime files and config templates staged into `unifs.img` |
-| `appicons/`, `assets/`, `cursors/` | Source assets consumed by the asset tools |
+| `appicons/`, `glyphs/`, `assets/`, `cursors/` | Source assets consumed by the asset tools |
 | `docs/reference/` | Documentation source (rendered to the wiki) |
 | `tools/` | Image, filesystem, rootfs staging, asset, and QEMU helper scripts |
 | `toolchains/` | Meson cross-file configuration |

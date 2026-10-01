@@ -190,10 +190,15 @@ void draw_viewer(Surface *s, ViewerState *st)
 {
     gui_fill_surface(s, g_gui_style.app_bg);
 
+    // Content is centered in the area below the unified headerbar band.
+    int header_h = gui_headerbar_h();
+    int view_w = static_cast<int>(s->width);
+    int view_h = static_cast<int>(s->height) - header_h;
+
     if (st->status == VIEWER_EMPTY) {
-        int y = (static_cast<int>(s->height) - gui_font_line_height(gui_font_title()) - gui_line_height() * 2) / 2;
-        if (y < 0)
-            y = 0;
+        int y = header_h + (view_h - gui_font_line_height(gui_font_title()) - gui_line_height() * 2) / 2;
+        if (y < header_h)
+            y = header_h;
         draw_centered_text(s, gui_font_title(), y, "No image open", g_gui_style.text);
         draw_centered_text(s, gui_font_default(), y + gui_font_line_height(gui_font_title()) + gui_space_1(),
                            "Open an image from Files.", g_gui_style.text_muted);
@@ -201,17 +206,15 @@ void draw_viewer(Surface *s, ViewerState *st)
     }
 
     if (st->status == VIEWER_ERROR) {
-        int y = (static_cast<int>(s->height) - gui_font_line_height(gui_font_title()) - gui_line_height() * 2) / 2;
-        if (y < 0)
-            y = 0;
+        int y = header_h + (view_h - gui_font_line_height(gui_font_title()) - gui_line_height() * 2) / 2;
+        if (y < header_h)
+            y = header_h;
         draw_centered_text(s, gui_font_title(), y, "Could not load image", g_gui_style.text);
         draw_centered_text(s, gui_font_default(), y + gui_font_line_height(gui_font_title()) + gui_space_1(),
                            base_name(st->path), g_gui_style.text_muted);
         return;
     }
 
-    int view_w = static_cast<int>(s->width);
-    int view_h = static_cast<int>(s->height);
     int dw = 0, dh = 0;
     compute_fit(st->image.width, st->image.height, view_w, view_h, &dw, &dh);
     if (dw <= 0 || dh <= 0)
@@ -220,7 +223,7 @@ void draw_viewer(Surface *s, ViewerState *st)
     viewer_ensure_scaled(st, dw, dh);
     const media_image *show = st->scaled.pixels ? &st->scaled : &st->image;
     int x0 = (view_w - show->width) / 2;
-    int y0 = (view_h - show->height) / 2;
+    int y0 = header_h + (view_h - show->height) / 2;
 
     draw_checkerboard(s, x0, y0, show->width, show->height);
     blend_image_onto(s, x0, y0, show);

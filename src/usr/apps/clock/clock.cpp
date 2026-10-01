@@ -15,11 +15,6 @@ enum
     CLOCK_MENU_HELP = 0x80,
 };
 
-static inline int iabs(int v)
-{
-    return v < 0 ? -v : v;
-}
-
 static inline float fabs_float(float x)
 {
     return x < 0.0f ? -x : x;
@@ -348,6 +343,8 @@ static int weekday(uint16_t year, uint8_t month, uint8_t day)
     int y = (int)year;
     int m = (int)month;
     int d = (int)day;
+    if (m < 1 || m > 12)
+        m = 1;
     y -= m < 3;
     return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
 }
@@ -451,8 +448,11 @@ static void draw_clock_text(Surface *win, int cx, int cy, int face_r, const SysT
     static const char *weekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
     int wd = weekday(time->year, time->month, time->day);
-    snprintf(date_str, sizeof(date_str), "%s, %s %u, %u", weekdays[wd], months[(time->month - 1) % 12],
-             (unsigned)time->day, (unsigned)time->year);
+    int mi = (int)time->month;
+    if (mi < 1 || mi > 12)
+        mi = 1;
+    snprintf(date_str, sizeof(date_str), "%s, %s %u, %u", weekdays[wd], months[mi - 1], (unsigned)time->day,
+             (unsigned)time->year);
 
     int date_w = gui_measure_text(sfont, date_str);
     int date_x = cx - date_w / 2;
@@ -694,12 +694,15 @@ static void clock_draw(App *app, Surface *canvas)
     int h = (int)canvas->height;
     int pad = clock_face_pad();
 
-    int face_r = (w < h - gui_scaled_metric(80)) ? (w / 2 - pad) : (h / 2 - gui_scaled_metric(52));
+    // The face is centered in the content area below the unified headerbar.
+    int header_h = gui_headerbar_h();
+    int content_h = h - header_h;
+    int face_r = (w < content_h - gui_scaled_metric(80)) ? (w / 2 - pad) : (content_h / 2 - gui_scaled_metric(52));
     if (face_r < gui_scaled_metric(60))
         face_r = gui_scaled_metric(60);
 
     int cx = w / 2;
-    int cy = h / 2 - gui_scaled_metric(12);
+    int cy = header_h + content_h / 2 - gui_scaled_metric(12);
 
     bool full_frame = st->needs_full_redraw || st->resized;
     if (full_frame) {

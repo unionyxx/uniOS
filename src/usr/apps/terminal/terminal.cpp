@@ -26,21 +26,16 @@ struct Cell
 // The terminal input/output field is pinned to the dark theme regardless of
 // the active UI theme, so output stays legible and consistent. These mirror
 // k_gui_style_dark in libgui/gui.cpp; keep them in sync if that palette moves.
-static constexpr uint32_t TERM_DARK_FRAME_BG = 0xFF000000u;      // app_bg
-static constexpr uint32_t TERM_DARK_BG = 0xFF0B0C0Eu;            // app_surface
-static constexpr uint32_t TERM_DARK_FG = 0xFFEDEFF2u;            // text
-static constexpr uint32_t TERM_DARK_CURSOR = 0xFF0A84FFu;        // accent (unified)
-static constexpr uint32_t TERM_DARK_BORDER = 0xFF1C2026u;        // border
-static constexpr uint32_t TERM_DARK_CHROME_BG_ALT = 0xFF1A1D22u; // chrome_bg_alt
-static constexpr uint32_t TERM_DARK_TEXT_DIM = 0xFFB0B6C2u;      // text_dim
+static constexpr uint32_t TERM_DARK_BG = 0xFF26262Bu;            // app_surface
+static constexpr uint32_t TERM_DARK_FG = 0xFFFFFFFFu;            // text
+static constexpr uint32_t TERM_DARK_CURSOR = 0xFF3584E4u;        // accent (unified)
+static constexpr uint32_t TERM_DARK_CHROME_BG_ALT = 0xFF2F2F36u; // app_surface_alt (scrollbar track)
+static constexpr uint32_t TERM_DARK_TEXT_DIM = 0xFF9A9996u;      // text_muted (scrollbar thumb)
+static constexpr uint32_t TERM_DARK_TEXT_BRIGHT = 0xFFDEDDDAu;   // text_dim (hovered thumb)
 
 static inline uint32_t term_bg()
 {
     return TERM_DARK_BG;
-}
-static inline uint32_t term_frame_bg()
-{
-    return TERM_DARK_FRAME_BG;
 }
 static inline uint32_t term_fg()
 {
@@ -49,14 +44,6 @@ static inline uint32_t term_fg()
 static inline uint32_t term_cursor()
 {
     return TERM_DARK_CURSOR;
-}
-static inline uint32_t term_border()
-{
-    return TERM_DARK_BORDER;
-}
-static inline uint32_t term_chrome_bg_alt()
-{
-    return TERM_DARK_CHROME_BG_ALT;
 }
 // Selection highlight: accent blended ~45% over the cell background so the
 // tint stays legible in both themes and over ANSI-colored output.
@@ -134,12 +121,12 @@ static inline uint32_t term_cell_h()
 
 static inline int term_pad_x()
 {
-    return gui_space_2();
+    return gui_scaled_metric(12);
 }
 
 static inline int term_pad_y()
 {
-    return gui_space_2();
+    return gui_scaled_metric(8);
 }
 
 static inline int32_t term_content_x()
@@ -149,7 +136,8 @@ static inline int32_t term_content_x()
 
 static inline int32_t term_content_y()
 {
-    return term_pad_y();
+    // The grid starts just below the unified headerbar band.
+    return gui_headerbar_h() + gui_scaled_metric(4);
 }
 
 static int term_ansi_param_at(const char *buf, int wanted, int fallback)
@@ -162,7 +150,10 @@ static int term_ansi_param_at(const char *buf, int wanted, int fallback)
     for (int i = 0;; i++) {
         char c = buf[i];
         if (c >= '0' && c <= '9') {
-            value = value * 10 + (c - '0');
+            // Saturate so a long digit run (arbitrary shell output) cannot
+            // overflow the int accumulator.
+            if (value < 1000000)
+                value = value * 10 + (c - '0');
             have = true;
         } else if (c == ';' || c == '\0') {
             if (index == wanted)
@@ -191,7 +182,7 @@ static uint32_t term_ansi_color(int code)
         case 33:
             return 0xFFFFD60A;
         case 34:
-            return 0xFF0A84FF;
+            return 0xFF3584E4;
         case 35:
             return 0xFFBF5AF2;
         case 36:
@@ -270,6 +261,110 @@ public:
             m_needs_full_redraw = true;
             sel_clear();
         }
+    }
+
+    // Scrollbar geometry, the single source shared by rendering and
+    // hit-testing. Returns false when there is nothing to scroll.
+    bool scrollbar_geometry(int *track_x, int *track_y, int *track_h, int *thumb_y, int *thumb_h) const
+    {
+        uint32_t total_slices = get_total_history_slices();
+        uint32_t max_s = max_scroll();
+        if (total_slices <= m_height || max_s == 0)
+            return false;
+        int sb_w = gui_scrollbar_w();
+        *track_x = (int)m_window.width - term_pad_x() / 2 - sb_w - gui_space_0_5();
+        *track_y = term_content_y();
+        *track_h = (int)(m_height * term_cell_h());
+        int t_h = (*track_h * (int)m_height) / (int)total_slices;
+        if (t_h < gui_scrollbar_min_thumb())
+            t_h = gui_scrollbar_min_thumb();
+        int scrollable = *track_h - t_h;
+        *thumb_y = scrollable - (int)((scrollable * m_scroll_offset) / max_s);
+        *thumb_h = t_h;
+        return true;
+    }
+
+    // Thumb-drag: place the thumb top at mouse_y (centered) and map back to a
+    // scroll offset. scroll offset 0 is the live bottom; the thumb top maps
+    // inversely (top of track = oldest history).
+    void scrollbar_drag_to(int mouse_y)
+    {
+        uint32_t max_s = max_scroll();
+        int tx, ty, th, thumb_y, thumb_h;
+        if (max_s == 0 || !scrollbar_geometry(&tx, &ty, &th, &thumb_y, &thumb_h))
+            return;
+        int scrollable = th - thumb_h;
+        if (scrollable <= 0)
+            return;
+        int desired = mouse_y - thumb_h / 2 - ty;
+        if (desired < 0)
+            desired = 0;
+        if (desired > scrollable)
+            desired = scrollable;
+        int new_offset = (scrollable - desired) * (int)max_s / scrollable;
+        if (new_offset < 0)
+            new_offset = 0;
+        if (new_offset > (int)max_s)
+            new_offset = (int)max_s;
+        if (m_scroll_offset != (uint32_t)new_offset) {
+            m_scroll_offset = (uint32_t)new_offset;
+            m_needs_full_redraw = true;
+            sel_clear();
+        }
+    }
+
+    bool sb_hit(int x, int y) const
+    {
+        int tx, ty, th, thumb_y, thumb_h;
+        if (!scrollbar_geometry(&tx, &ty, &th, &thumb_y, &thumb_h))
+            return false;
+        int sb_w = gui_scrollbar_w();
+        return x >= tx && x < tx + sb_w && y >= ty && y < ty + th;
+    }
+
+    // Press on the track: on the thumb starts a drag; above/below pages by a
+    // viewport of history.
+    void sb_press(int x, int y)
+    {
+        int tx, ty, th, thumb_y, thumb_h;
+        if (!scrollbar_geometry(&tx, &ty, &th, &thumb_y, &thumb_h))
+            return;
+        (void)x;
+        m_sb_hovered = true;
+        if (y >= thumb_y && y < thumb_y + thumb_h) {
+            m_sb_dragging = true;
+            return;
+        }
+        // offset 0 = live bottom; paging toward older history is positive.
+        int page = (int)m_height / 2;
+        if (page < 1)
+            page = 1;
+        scroll_history(y < thumb_y ? page : -page);
+    }
+
+    bool sb_dragging() const
+    {
+        return m_sb_dragging;
+    }
+
+    void sb_release()
+    {
+        m_sb_dragging = false;
+    }
+
+    bool sb_update_hover(int x, int y)
+    {
+        bool now = sb_hit(x, y);
+        if (now != m_sb_hovered) {
+            m_sb_hovered = now;
+            return true;
+        }
+        return false;
+    }
+
+    void sb_set_hovered(bool hovered)
+    {
+        m_sb_hovered = hovered;
     }
 
     uint32_t max_scroll() const
@@ -398,6 +493,12 @@ public:
             m_history_cursor_col = 0;
         } else if (c == '\b' || c == 127) {
             history_backspace();
+        } else if (c == '\t') {
+            // Expand tabs to the next 8-column stop, matching the shell's
+            // column-based output (du & friends).
+            uint32_t next = ((m_history_cursor_col / 8) + 1) * 8;
+            while (m_history_cursor_col < next)
+                append_history_char(' ');
         } else if (c >= 32) {
             append_history_char(c);
         }
@@ -519,24 +620,74 @@ public:
         uint32_t max_s = max_scroll();
         if (total_slices > m_height && max_s > 0) {
             int sb_w = gui_scrollbar_w();
+            int sb_x = 0, sb_y = 0, sb_h = 0, thumb_y = 0, thumb_h = 0;
+            if (scrollbar_geometry(&sb_x, &sb_y, &sb_h, &thumb_y, &thumb_h)) {
+                gui_fill_rect(&m_canvas, sb_x - 1, sb_y, sb_w + 2, sb_h, term_bg());
+                // The scrollbar is drawn with the pinned dark palette, not
+                // the live theme: the field deliberately stays dark in light
+                // mode and a light-theme track would read as a glitch.
+                int r = sb_w / 2;
+                gui_fill_rounded_rect(&m_canvas, sb_x, sb_y, sb_w, sb_h, r, TERM_DARK_CHROME_BG_ALT);
+                if (thumb_y < 0)
+                    thumb_y = 0;
+                if (thumb_y + thumb_h > sb_h)
+                    thumb_y = sb_h - thumb_h;
+                if (thumb_y < 0)
+                    thumb_y = 0;
+                uint32_t thumb_color = m_sb_hovered ? TERM_DARK_TEXT_BRIGHT : TERM_DARK_TEXT_DIM;
+                gui_fill_rounded_rect(&m_canvas, sb_x, sb_y + thumb_y, sb_w, thumb_h, r, thumb_color);
+
+                // The cell diff cannot see the scrollbar: rows of identical
+                // output (repeated prompts) leave the grid unchanged while
+                // the bar appears or the thumb moves. Track the presented
+                // scrollbar state and dirty the track region on any change.
+                if (!m_sb_presented || thumb_y != m_sb_presented_thumb_y || thumb_h != m_sb_presented_thumb_h) {
+                    m_sb_presented = true;
+                    m_sb_presented_thumb_y = thumb_y;
+                    m_sb_presented_thumb_h = thumb_h;
+                    if (!has_dirty) {
+                        dirty_x1 = sb_x - 1;
+                        dirty_y1 = sb_y;
+                        dirty_x2 = sb_x + sb_w + 1;
+                        dirty_y2 = sb_y + sb_h;
+                        has_dirty = true;
+                    } else {
+                        if (dirty_x1 > sb_x - 1)
+                            dirty_x1 = sb_x - 1;
+                        if (dirty_y1 > sb_y)
+                            dirty_y1 = sb_y;
+                        if (dirty_x2 < sb_x + sb_w + 1)
+                            dirty_x2 = sb_x + sb_w + 1;
+                        if (dirty_y2 < sb_y + sb_h)
+                            dirty_y2 = sb_y + sb_h;
+                    }
+                }
+            }
+        } else if (m_sb_presented) {
+            // Scrollback shrank below the viewport: erase the stale bar.
+            int sb_w = gui_scrollbar_w();
             int sb_x = (int)m_window.width - term_pad_x() / 2 - sb_w - gui_space_0_5();
             int sb_y = term_content_y();
             int sb_h = (int)(m_height * term_cell_h());
-
             gui_fill_rect(&m_canvas, sb_x - 1, sb_y, sb_w + 2, sb_h, term_bg());
-
-            int thumb_h = (sb_h * (int)m_height) / (int)total_slices;
-            if (thumb_h < gui_scrollbar_min_thumb())
-                thumb_h = gui_scrollbar_min_thumb();
-
-            int scrollable_dist = sb_h - thumb_h;
-            int thumb_y = scrollable_dist - (int)((scrollable_dist * m_scroll_offset) / max_s);
-            gui_draw_scrollbar(&m_canvas, sb_x, sb_y, sb_w, sb_h, thumb_y, thumb_h, false);
-
-            if (has_dirty) {
-                if (dirty_x2 < (int32_t)m_window.width) {
-                    dirty_x2 = (int32_t)m_window.width;
-                }
+            m_sb_presented = false;
+            m_sb_presented_thumb_y = -1;
+            m_sb_presented_thumb_h = -1;
+            if (!has_dirty) {
+                dirty_x1 = sb_x - 1;
+                dirty_y1 = sb_y;
+                dirty_x2 = sb_x + sb_w + 1;
+                dirty_y2 = sb_y + sb_h;
+                has_dirty = true;
+            } else {
+                if (dirty_x1 > sb_x - 1)
+                    dirty_x1 = sb_x - 1;
+                if (dirty_y1 > sb_y)
+                    dirty_y1 = sb_y;
+                if (dirty_x2 < sb_x + sb_w + 1)
+                    dirty_x2 = sb_x + sb_w + 1;
+                if (dirty_y2 < sb_y + sb_h)
+                    dirty_y2 = sb_y + sb_h;
             }
         }
 
@@ -581,8 +732,9 @@ public:
         uint32_t content_w = (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE))
                                  ? (m_window.width - (uint32_t)(term_pad_x() * 2) - TERM_SCROLLBAR_RESERVE)
                                  : 0;
-        uint32_t content_h =
-            (m_window.height > (uint32_t)(term_pad_y() * 2)) ? (m_window.height - (uint32_t)(term_pad_y() * 2)) : 0;
+        uint32_t content_h = (m_window.height > (uint32_t)((term_content_y() + term_pad_y())))
+                                 ? (m_window.height - (uint32_t)((term_content_y() + term_pad_y())))
+                                 : 0;
         uint32_t new_width = content_w / term_cell_w();
         uint32_t new_height = content_h / term_cell_h();
         if (new_width == 0)
@@ -605,6 +757,9 @@ public:
         if (m_canvas.buffer)
             gui_destroy_surface(&m_canvas);
         m_canvas = gui_create_surface(window.width, window.height);
+        m_sb_presented = false;
+        m_sb_presented_thumb_y = -1;
+        m_sb_presented_thumb_h = -1;
     }
 
     // Re-derive the grid from the current window size after the font (and
@@ -618,8 +773,9 @@ public:
         uint32_t content_w = (m_window.width > (uint32_t)(term_pad_x() * 2 + TERM_SCROLLBAR_RESERVE))
                                  ? (m_window.width - (uint32_t)(term_pad_x() * 2) - TERM_SCROLLBAR_RESERVE)
                                  : 0;
-        uint32_t content_h =
-            (m_window.height > (uint32_t)(term_pad_y() * 2)) ? (m_window.height - (uint32_t)(term_pad_y() * 2)) : 0;
+        uint32_t content_h = (m_window.height > (uint32_t)((term_content_y() + term_pad_y())))
+                                 ? (m_window.height - (uint32_t)((term_content_y() + term_pad_y())))
+                                 : 0;
         uint32_t cw = term_cell_w();
         uint32_t ch = term_cell_h();
         uint32_t new_width = cw > 0 ? content_w / cw : 0;
@@ -762,12 +918,6 @@ public:
         return m_help_visible;
     }
 
-    bool help_close_hit(int x, int y) const
-    {
-        return m_help_visible && x >= m_help_close.x && x < m_help_close.x + m_help_close.w && y >= m_help_close.y &&
-               y < m_help_close.y + m_help_close.h;
-    }
-
 private:
     void cell_from_point(int32_t x, int32_t y, uint32_t *col, uint32_t *row) const
     {
@@ -826,14 +976,22 @@ private:
         GuiDialogLayout layout = gui_dialog_layout(win_w, win_h, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
         gui_draw_dialog(&m_canvas, win_w, win_h, 0, &layout, "Terminal Help", tips,
                         (int)(sizeof(tips) / sizeof(tips[0])), nullptr, "Close", false, false, nullptr, false, false);
-        m_help_close = layout.confirm;
     }
 
     void draw_chrome()
     {
-        gui_fill_surface(&m_canvas, term_frame_bg());
-        gui_draw_panel_inset(&m_canvas, term_pad_x() / 2, term_pad_y() / 2, (int)m_window.width - term_pad_x(),
-                             (int)m_window.height - term_pad_y(), term_bg(), term_border(), term_chrome_bg_alt());
+        int header_h = gui_headerbar_h();
+        // Seamless unified headerbar: the canvas background is continuous with
+        // the grid and there is no divider below the band. The WM overlays
+        // traffic lights on the left and the whole band is draggable (no
+        // interactive header controls are published).
+        gui_fill_surface(&m_canvas, term_bg());
+        const char *title = "Terminal";
+        int title_w = gui_measure_text(gui_font_title(), title);
+        int title_x = ((int)m_window.width - title_w) / 2;
+        int title_y = gui_align_text_y(gui_font_title(), 0, header_h);
+        gui_draw_text_clipped(&m_canvas, gui_font_title(), title_x, title_y, (int)m_window.width, title,
+                              TERM_DARK_TEXT_DIM, 0);
     }
 
     char *history_line(uint32_t index)
@@ -1049,8 +1207,19 @@ private:
         m_presented_grid = new_presented;
         m_width = new_width;
         m_height = new_height;
+        // The reflow changes how many wrap slices exist; keep the scroll offset
+        // within the new range so rebuild_grid_from_history does not skip every
+        // slice and render a blank grid.
+        uint32_t max_s = max_scroll();
+        if (m_scroll_offset > max_s)
+            m_scroll_offset = max_s;
         m_presented_cursor_visible = false;
         m_needs_full_redraw = true;
+        // The canvas was recreated with a different size: the committed
+        // scrollbar state no longer matches it.
+        m_sb_presented = false;
+        m_sb_presented_thumb_y = -1;
+        m_sb_presented_thumb_h = -1;
         sel_clear();
         rebuild_grid_from_history();
         return true;
@@ -1150,6 +1319,12 @@ private:
     }
 
     uint32_t m_scroll_offset = 0;
+    bool m_sb_dragging = false;
+    bool m_sb_hovered = false;
+    // Last scrollbar state committed through the damage path (see render_all).
+    bool m_sb_presented = false;
+    int m_sb_presented_thumb_y = -1;
+    int m_sb_presented_thumb_h = -1;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     uint32_t m_cursor_x = 0;
@@ -1164,8 +1339,8 @@ private:
     uint32_t m_history_count = 0;
     uint32_t m_history_cursor_col = 0;
     uint32_t m_history_start = 0;
-    Surface m_window;
-    Surface m_canvas;
+    Surface m_window = {};
+    Surface m_canvas = {};
     bool m_ready;
     bool m_cursor_visible;
     bool m_presented_cursor_visible = false;
@@ -1184,18 +1359,7 @@ private:
     uint32_t m_sel_caret_col = 0;
     uint32_t m_sel_caret_row = 0;
     bool m_help_visible = false;
-    Rect m_help_close = {0, 0, 0, 0};
 };
-
-static void term_printf(TerminalEmulator &term, const char *fmt, ...)
-{
-    char buf[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    term.write_string(buf);
-}
 
 static bool term_paste_to(int fd)
 {
@@ -1206,7 +1370,8 @@ static bool term_paste_to(int fd)
     size_t written = 0;
     while (written < len) {
         int n = write(fd, text + written, len - written);
-        if (n < 0)
+        // n == 0 would make no progress and spin forever.
+        if (n <= 0)
             return false;
         written += (size_t)n;
     }
@@ -1317,6 +1482,7 @@ struct TermRun
     TerminalEmulator *term;
     bool needs_render;
     bool shell_alive;
+    int shell_pid;
     int pipe_to_shell;
     uint64_t last_activity_ticks;
     bool menu_focus_dirty;
@@ -1355,6 +1521,7 @@ static void term_event(App *app, const Event *ev)
 
         case EVT_MOUSE_LEAVE:
             term.sel_stop_drag();
+            term.sb_set_hovered(false);
             break;
 
         case EVT_MOUSE_DOWN:
@@ -1366,6 +1533,12 @@ static void term_event(App *app, const Event *ev)
                 break;
             }
             if (ev->mouse.button == 1) {
+                // Scrollbar grabs the press: thumb drag or track paging.
+                if (term.sb_hit(ev->mouse.x, ev->mouse.y)) {
+                    term.sb_press(ev->mouse.x, ev->mouse.y);
+                    run->needs_render = true;
+                    break;
+                }
                 term.sel_start(ev->mouse.x, ev->mouse.y);
                 run->needs_render = true;
             } else if (ev->mouse.button == 2) {
@@ -1377,12 +1550,24 @@ static void term_event(App *app, const Event *ev)
             break;
 
         case EVT_MOUSE_MOVE:
+            if (term.sb_dragging()) {
+                term.scrollbar_drag_to(ev->mouse.y);
+                run->needs_render = true;
+                break;
+            }
             if (term.sel_extend(ev->mouse.x, ev->mouse.y))
+                run->needs_render = true;
+            if (term.sb_update_hover(ev->mouse.x, ev->mouse.y))
                 run->needs_render = true;
             break;
 
         case EVT_MOUSE_UP:
             if (ev->mouse.button == 1) {
+                if (term.sb_dragging()) {
+                    term.sb_release();
+                    run->needs_render = true;
+                    break;
+                }
                 term.sel_finish();
                 run->needs_render = true;
             }
@@ -1468,9 +1653,9 @@ extern "C" int main(int argc, char **argv)
     AppConfig config = {};
     config.title = "Terminal";
     config.width = (int)(80 * term_cell_w() + (uint32_t)term_pad_x() * 2u + TERM_SCROLLBAR_RESERVE);
-    config.height = (int)(25 * term_cell_h() + (uint32_t)term_pad_y() * 2u);
+    config.height = (int)(25 * term_cell_h() + (uint32_t)(term_content_y() + term_pad_y()));
     config.min_width = (int)(term_cell_w() * 48u + (uint32_t)term_pad_x() * 2u + TERM_SCROLLBAR_RESERVE);
-    config.min_height = (int)(term_cell_h() * 14u + (uint32_t)term_pad_y() * 2u);
+    config.min_height = (int)(term_cell_h() * 14u + (uint32_t)(term_content_y() + term_pad_y()));
     config.flags = WIN_FLAG_RESIZABLE;
     config.on_event = term_event;
     config.on_menu = term_menu;
@@ -1535,6 +1720,7 @@ extern "C" int main(int argc, char **argv)
     close(pipe_to_shell[0]);
     close(pipe_from_shell[1]);
     run.pipe_to_shell = pipe_to_shell[1];
+    run.shell_pid = shell_pid;
 
     int epfd = epoll_create(1);
     if (epfd < 0) {
@@ -1584,8 +1770,13 @@ extern "C" int main(int argc, char **argv)
                     n = epoll_wait(epfd, events, 1, 0);
                     continue;
                 }
-                if (bytes_read == 0) {
+                // 0 = EOF; <0 = read error. Either way the shell is gone — do
+                // not leave shell_alive set or the loop busy-spins on the pipe.
+                if (bytes_read <= 0) {
                     run.shell_alive = false;
+                    // Reap the child so it does not linger as a zombie for
+                    // the terminal's remaining lifetime.
+                    waitpid(run.shell_pid, nullptr);
                     term.write_string("\r\n[Process completed]\r\n");
                     run.needs_render = true;
                     saw_event = true;

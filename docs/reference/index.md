@@ -66,7 +66,7 @@ No libc in the kernel, no exceptions, no RTTI. Memory management, PCI, ACPI, USB
 | `src/usr/` | Userspace runtime, libc subset, GUI library, shell, window manager, desktop services, apps |
 | `include/` | Kernel, driver, boot, and UAPI headers |
 | `rootfs/` | Authored runtime files staged into `unifs.img` |
-| `appicons/`, `assets/`, `cursors/` | Sources for generated runtime assets |
+| `appicons/`, `glyphs/`, `assets/`, `cursors/` | Sources for generated runtime assets |
 | `tools/` | Image, filesystem, rootfs staging, asset conversion, and QEMU helper scripts |
 | `toolchains/` | Meson cross-file configuration |
 | `docs/` | Project site and this reference documentation |

@@ -150,7 +150,6 @@ struct LatitudeRects
     Rect editor_rect;
     Rect sidebar_rect;
     Rect editor_panel;
-    Rect help_close;
 };
 
 namespace {
@@ -161,6 +160,7 @@ struct AppState
     int project_selected;
     int project_hovered;
     int project_first_row;
+    int project_visible_rows;
     char project_path[512];
 
     Vec<OutlineRow> outline_rows;
@@ -202,8 +202,6 @@ struct AppState
 
     uint64_t last_project_click_ticks;
     int last_project_click_row;
-    uint64_t last_editor_click_ticks;
-    int last_editor_click_line;
 
     // Transient interaction state: brief pressed flash for the toolbar
     // buttons and a two-step confirm before discarding unsaved changes.
@@ -530,30 +528,30 @@ static bool file_kind_opens_as_text(FileKind kind)
     return kind == FILE_KIND_TEXT || kind == FILE_KIND_CODE || kind == FILE_KIND_CONFIG || kind == FILE_KIND_UNKNOWN;
 }
 
-static const char *file_kind_badge(FileKind kind)
+static GuiGlyphKind file_kind_glyph(FileKind kind)
 {
     switch (kind) {
         case FILE_KIND_CODE:
-            return "CODE";
+            return GUI_GLYPH_FILE_CODE;
         case FILE_KIND_CONFIG:
-            return "CFG";
+            return GUI_GLYPH_FILE_CONFIG;
         case FILE_KIND_EXECUTABLE:
-            return "APP";
+            return GUI_GLYPH_APP;
         case FILE_KIND_DISK_IMAGE:
-            return "IMG";
+            return GUI_GLYPH_DRIVE;
         case FILE_KIND_IMAGE:
-            return "PIC";
+            return GUI_GLYPH_FILE_IMAGE;
         case FILE_KIND_ARCHIVE:
-            return "ZIP";
+            return GUI_GLYPH_FILE_ARCHIVE;
         case FILE_KIND_LARGE:
-            return "BIG";
+            return GUI_GLYPH_FILE_BINARY;
         case FILE_KIND_BINARY:
-            return "BIN";
+            return GUI_GLYPH_FILE_BINARY;
         case FILE_KIND_TEXT:
-            return "TXT";
+            return GUI_GLYPH_FILE_TEXT;
         case FILE_KIND_UNKNOWN:
         default:
-            return "FILE";
+            return GUI_GLYPH_FILE;
     }
 }
 
@@ -757,7 +755,7 @@ static int latitude_gutter_w(const AppState *state)
 {
     if (!state || !state->gutter_enabled)
         return 0;
-    return gui_scaled_metric(56);
+    return gui_scaled_metric(40);
 }
 
 // Number of visual rows a buffer line occupies when word wrap is enabled.
@@ -1008,7 +1006,10 @@ static void insert_newline(AppState *state)
     if (!state || !state->buffer)
         return;
     TextBuffer *buffer = state->buffer;
-    TextLine &line = buffer->lines[state->cursor_line];
+    TextLine *cur = current_line(state);
+    if (!cur)
+        return;
+    TextLine &line = *cur;
     int indent = leading_indent(line);
     bool opener_before = state->cursor_col > 0 && matching_close(line.text[state->cursor_col - 1]) != 0;
     bool closer_after = state->cursor_col < line.len && matching_open(line.text[state->cursor_col]) != 0;
@@ -1517,24 +1518,28 @@ static void paste_clipboard(AppState *state)
         return;
     }
 
-    // Segment table: pointers/lengths of the '\n'-split chunks.
-    const char *seg_start[MENU_CLIPBOARD_CAP + 2];
-    int seg_len[MENU_CLIPBOARD_CAP + 2];
+    // Segment scan ('\n'-split chunks), validated before any mutation. The
+    // scan stays index-free on purpose: a full segment table would need
+    // ~48 KB, far past the 32 KB user stack.
     int nseg = 0;
-    size_t i = 0;
-    size_t max_segment = 0;
-    while (i <= len && nseg < (int)(sizeof(seg_start) / sizeof(seg_start[0]))) {
-        size_t start = i;
-        while (i < len && text[i] != '\n')
-            i++;
-        seg_start[nseg] = text + start;
-        seg_len[nseg] = (int)(i - start);
-        if ((size_t)seg_len[nseg] > max_segment)
-            max_segment = (size_t)seg_len[nseg];
-        nseg++;
-        if (i >= len)
-            break;
-        i++; // skip '\n'
+    int first_len = 0, last_len = 0, max_seg = 0;
+    {
+        size_t i = 0;
+        while (i <= len) {
+            size_t start = i;
+            while (i < len && text[i] != '\n')
+                i++;
+            size_t slen = i - start;
+            if (nseg == 0)
+                first_len = (int)slen;
+            last_len = (int)slen;
+            if ((int)slen > max_seg)
+                max_seg = (int)slen;
+            nseg++;
+            if (i >= len)
+                break;
+            i++; // skip '\n'
+        }
     }
     if (nseg <= 0)
         return;
@@ -1546,7 +1551,14 @@ static void paste_clipboard(AppState *state)
     int col = state->cursor_col;
     TextLine &cur = b->lines[line];
     int tail_len = cur.len - col;
-    if ((int)max_segment + max_int(col, tail_len) > MAX_LINE_LEN - 1 || b->line_count + (nseg - 1) > MAX_LINES) {
+    // Exact post-paste lengths: the first line gains the first segment (plus the
+    // tail when it is a single-line paste), and the last line is the final
+    // segment plus the tail. The old max_segment + max(col, tail) heuristic
+    // under-estimated the single-line case and silently dropped the tail.
+    int first_line_len = col + first_len + (nseg == 1 ? tail_len : 0);
+    int last_line_len = (nseg > 1) ? last_len + tail_len : 0;
+    if (first_line_len > MAX_LINE_LEN - 1 || last_line_len > MAX_LINE_LEN - 1 || max_seg > MAX_LINE_LEN - 1 ||
+        b->line_count + (nseg - 1) > MAX_LINES) {
         set_status(state, "Clipboard too large to paste");
         state->needs_redraw = true;
         return;
@@ -1560,26 +1572,36 @@ static void paste_clipboard(AppState *state)
     cur.text[col] = '\0';
 
     if (nseg == 1) {
-        line_insert_chars(&cur, col, seg_start[0], seg_len[0]);
-        line_insert_chars(&cur, col + seg_len[0], tail, tail_len);
-        state->cursor_col = col + seg_len[0];
+        line_insert_chars(&cur, col, text, first_len);
+        line_insert_chars(&cur, col + first_len, tail, tail_len);
+        state->cursor_col = col + first_len;
     } else {
-        line_insert_chars(&cur, col, seg_start[0], seg_len[0]);
+        line_insert_chars(&cur, col, text, first_len);
+        // Walk segments 1..nseg-1 in order: they start right after the first
+        // segment's newline.
+        const char *p = text + first_len + 1;
+        const char *end = text + len;
         for (int s = 1; s < nseg; s++) {
+            const char *seg = p;
+            while (p < end && *p != '\n')
+                p++;
+            int slen = (int)(p - seg);
             if (!insert_line(state, line + s))
                 break;
             TextLine &added = b->lines[line + s];
-            memcpy(added.text, seg_start[s], (size_t)seg_len[s]);
-            int at = seg_len[s];
+            memcpy(added.text, seg, (size_t)slen);
+            int at = slen;
             if (s == nseg - 1 && tail_len > 0) {
                 memcpy(added.text + at, tail, (size_t)tail_len);
                 at += tail_len;
             }
             added.text[at] = '\0';
             added.len = (uint16_t)at;
+            if (p < end)
+                p++; // skip '\n'
         }
         state->cursor_line = line + nseg - 1;
-        state->cursor_col = seg_len[nseg - 1];
+        state->cursor_col = last_len;
     }
 
     record_edit_end(state, e, nseg);
@@ -1831,6 +1853,11 @@ static bool load_file(AppState *state, const char *path)
     }
     close(fd);
 
+    // The loop also ends on a read error (n < 0); surface it as a partial load
+    // instead of silently keeping whatever was read so far.
+    if (n < 0)
+        state->buffer->truncated = true;
+
     state->buffer->modified = false;
     state->buffer->language = detect_language(path);
     copy_cstr(state->buffer->title, sizeof(state->buffer->title), path_basename(path));
@@ -2013,33 +2040,36 @@ static uint32_t syntax_muted()
 {
     return g_gui_style.text_muted;
 }
+// Palette pairs: pastel on the dark editor well (#1A1A1E), deeper GitHub-light
+// tones on the white light-mode editor. Both stay in the same hue family so
+// syntax identity reads the same in either theme.
 static uint32_t syntax_keyword()
 {
-    return 0xFF7FB7FFu;
+    return gui_theme_is_light() ? 0xFF0550AEu : 0xFF7FB7FFu;
 }
 static uint32_t syntax_string()
 {
-    return 0xFF7AD99Au;
+    return gui_theme_is_light() ? 0xFF116629u : 0xFF7AD99Au;
 }
 static uint32_t syntax_number()
 {
-    return 0xFFFFB86Cu;
+    return gui_theme_is_light() ? 0xFFA15000u : 0xFFFFB86Cu;
 }
 static uint32_t syntax_comment()
 {
-    return 0xFF6E8797u;
+    return gui_theme_is_light() ? 0xFF6E7781u : 0xFF6E8797u;
 }
 static uint32_t syntax_function()
 {
-    return 0xFFD7A8FFu;
+    return gui_theme_is_light() ? 0xFF8250DFu : 0xFFD7A8FFu;
 }
 static uint32_t syntax_punct()
 {
-    return 0xFF99A4B3u;
+    return gui_theme_is_light() ? 0xFF57606Au : 0xFF99A4B3u;
 }
 static uint32_t syntax_tag()
 {
-    return 0xFFFF8A8Au;
+    return gui_theme_is_light() ? 0xFFCF222Eu : 0xFFFF8A8Au;
 }
 
 static bool search_covers_col(const AppState *state, const TextLine &line, int col)
@@ -2440,7 +2470,14 @@ static void find_next(AppState *state)
 
 static uint32_t editor_bg()
 {
-    return g_gui_style.app_surface;
+    // Continuous editor canvas: a deep neutral well in dark mode, pure white in
+    // light mode — never the same tone as the surrounding chrome.
+    uint32_t bg = g_gui_style.app_bg;
+    int r = (int)((bg >> 16) & 0xFFu);
+    int g = (int)((bg >> 8) & 0xFFu);
+    int b = (int)(bg & 0xFFu);
+    bool dark = ((r * 54 + g * 183 + b * 19) >> 8) < 128;
+    return dark ? 0xFF1A1A1Eu : 0xFFFFFFFFu;
 }
 
 // Translucent accent wash for the editor text selection.
@@ -2465,23 +2502,13 @@ static int latitude_view_height(Surface *win)
     return max_int(1, h);
 }
 
-static int draw_status_pill(Surface *win, int x, int y, const char *label, bool active)
-{
-    if (!win || !label)
-        return 0;
-    uint32_t bg = active ? g_gui_style.accent_soft : g_gui_style.chrome_bg;
-    uint32_t fg = active ? g_gui_style.text : g_gui_style.text_dim;
-    gui_draw_badge(win, x, y, label, bg, fg);
-    return gui_measure_text(gui_font_default(), label) + gui_badge_pad_x() * 2;
-}
-
 static void draw_minimap(Surface *win, const AppState *state, Rect rect, int first_line, int visible_lines)
 {
     if (!win || !state || !state->buffer || rect.w <= 0 || rect.h <= 0)
         return;
 
     gui_fill_rect(win, rect.x, rect.y, rect.w, rect.h, g_gui_style.app_surface_alt);
-    gui_fill_rect(win, rect.x, rect.y, 1, rect.h, g_gui_style.chrome_edge);
+    gui_draw_separator_v(win, rect.x, rect.y, rect.h, gui_hairline_color());
 
     int max_rows = max_int(1, rect.h / 2);
     int count = max_int(max_rows, state->buffer->line_count);
@@ -2515,8 +2542,8 @@ static void draw_minimap(Surface *win, const AppState *state, Rect rect, int fir
 
 static int latitude_project_area_bottom(const AppState *state, Rect sidebar)
 {
-    int side_header_h = gui_card_header_h();
-    int sy = sidebar.y + side_header_h + gui_space_1() + gui_line_height() + gui_space_1();
+    // Top area: caption + project path line above the first row.
+    int sy = sidebar.y + gui_space_1() + gui_line_height() + gui_space_0_5() + gui_line_height() + gui_space_0_5();
     int needed_project_h = (sy - sidebar.y) + project_count_of(state) * (gui_app_row_h() + gui_app_row_gap());
     int max_project_area = max_int(gui_scaled_metric(150), (sidebar.h * 58) / 100);
     int project_area_bottom = sidebar.y + min_int(max_project_area, needed_project_h);
@@ -2546,180 +2573,24 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     rects->editor_rect = empty_rect;
     rects->sidebar_rect = empty_rect;
     rects->editor_panel = empty_rect;
-    rects->help_close = empty_rect;
 
     int view_w = latitude_view_width(win);
     int view_h = latitude_view_height(win);
     gui_fill_rect(win, 0, 0, view_w, view_h, g_gui_style.app_bg);
 
     const int margin = gui_app_outer_padding();
-    const int gap = gui_app_section_gap();
-    const int topbar_h = gui_title_bar_h() + gui_space_1();
-    const int min_bottom = gui_space_1();
+    const int header_h = gui_headerbar_h();
+    const int min_bottom = 0;
 
-    Rect topbar = gui_rect_make(margin, margin, max_int(0, view_w - margin * 2), topbar_h);
-    gui_draw_panel_inset(win, topbar.x, topbar.y, topbar.w, topbar.h, g_gui_style.app_surface_alt, g_gui_style.border,
-                         g_gui_style.chrome_bg_alt);
+    // Unified headerbar: [New][Save][Reload] on the left (clear of the WM
+    // traffic lights), the buffer tab pill (or the path field while editing it)
+    // in the center, search on the right — all vertically centered in the
+    // headerband and published as header input so they stay clickable.
+    int left_x = gui_traffic_lights_w() + gui_space_1();
+    int right_pad = gui_space_1_5();
+    int button_y = (header_h - gui_app_control_h()) / 2;
 
-    char title_detail[160];
-    snprintf(title_detail, sizeof(title_detail), "%s  Ln %d, Col %d", language_label(state->buffer->language),
-             state->cursor_line + 1, state->cursor_col + 1);
-
-    int top_text_y = gui_align_text_y(gui_font_title(), topbar.y, topbar.h);
-    int title_text_w = gui_measure_text(gui_font_title(), "Latitude");
-    gui_draw_text_clipped(win, gui_font_title(), topbar.x + gui_space_2(), top_text_y, title_text_w, "Latitude",
-                          g_gui_style.text, g_gui_style.app_surface_alt);
-
-    const char *path_text = state->buffer->path[0] ? state->buffer->path : "Untitled";
-    int path_x = topbar.x + max_int(gui_scaled_metric(118), gui_space_2() + title_text_w + gui_space_3());
-    int right_w = gui_measure_text(gui_font_default(), title_detail) + gui_space_3();
-
-    int pills_w = 0;
-    pills_w += gui_measure_text(gui_font_default(), "Ctrl+S Save") + gui_space_1() * 3;
-    pills_w += gui_measure_text(gui_font_default(), "Ctrl+F Search") + gui_space_1() * 3;
-    pills_w += gui_measure_text(gui_font_default(), "Ctrl+L Path") + gui_space_1() * 2;
-
-    int pill_x = topbar.x + topbar.w - right_w - pills_w - gui_space_2();
-    int path_w = topbar.w - (path_x - topbar.x) - right_w - gui_space_2();
-
-    if (path_w < gui_scaled_metric(80)) {
-        path_w = gui_scaled_metric(80);
-    }
-
-    if (pill_x <= path_x + path_w) {
-        pill_x = -1;
-    } else {
-        path_w = pill_x - path_x - gui_space_2();
-    }
-
-    gui_draw_text_clipped(win, gui_font_default(), path_x, gui_align_text_y(gui_font_default(), topbar.y, topbar.h),
-                          path_w, path_text, g_gui_style.text_dim, g_gui_style.app_surface_alt);
-    gui_draw_text_clipped(win, gui_font_default(), topbar.x + topbar.w - right_w,
-                          gui_align_text_y(gui_font_default(), topbar.y, topbar.h), right_w - gui_space_2(),
-                          state->buffer->modified ? "Modified" : title_detail, g_gui_style.text_dim,
-                          g_gui_style.app_surface_alt);
-
-    if (pill_x >= 0) {
-        int pill_y = topbar.y + (topbar.h - gui_badge_h()) / 2;
-        pill_x += draw_status_pill(win, pill_x, pill_y, "Ctrl+S Save", false) + gui_space_1();
-        pill_x += draw_status_pill(win, pill_x, pill_y, "Ctrl+F Search", state->search_focused) + gui_space_1();
-        draw_status_pill(win, pill_x, pill_y, "Ctrl+L Path", state->path_focused);
-    }
-
-    int body_x = margin;
-    int body_y = topbar.y + topbar.h + gap;
-    int body_w = max_int(0, view_w - margin * 2);
-    int body_h = max_int(0, view_h - body_y - min_bottom);
-
-    int min_sidebar = gui_scaled_metric(188);
-    int max_sidebar = gui_scaled_metric(330);
-    int sidebar_w = (body_w * 23) / 100;
-    sidebar_w = clamp_int(sidebar_w, min_sidebar, max_sidebar);
-    if (body_w < gui_scaled_metric(820))
-        sidebar_w = clamp_int(body_w / 3, gui_scaled_metric(156), gui_scaled_metric(220));
-    if (body_w - sidebar_w - gap < gui_scaled_metric(380))
-        sidebar_w = max_int(0, body_w - gap - gui_scaled_metric(380));
-
-    int editor_x = body_x + sidebar_w + gap;
-    int editor_w = body_w - sidebar_w - gap;
-    if (sidebar_w <= 0 || editor_w < gui_scaled_metric(280)) {
-        sidebar_w = 0;
-        editor_x = body_x;
-        editor_w = body_w;
-    }
-
-    rects->sidebar_rect = gui_rect_make(body_x, body_y, sidebar_w, body_h);
-    rects->editor_panel = gui_rect_make(editor_x, body_y, editor_w, body_h);
-
-    if (sidebar_w > 0) {
-        gui_draw_panel_inset(win, rects->sidebar_rect.x, rects->sidebar_rect.y, rects->sidebar_rect.w,
-                             rects->sidebar_rect.h, g_gui_style.app_surface, g_gui_style.border,
-                             g_gui_style.chrome_bg_alt);
-
-        int side_header_h = gui_card_header_h();
-        gui_draw_card_header_ext(win, rects->sidebar_rect.x + 1, rects->sidebar_rect.y + 1, rects->sidebar_rect.w - 2,
-                                 gui_corner_radius(rects->sidebar_rect.w - 2, side_header_h, gui_radius_md() - 1),
-                                 "Explorer", nullptr);
-
-        int sy = rects->sidebar_rect.y + side_header_h + gui_space_1();
-        gui_draw_text_clipped(win, gui_font_default(), rects->sidebar_rect.x + gui_space_2(), sy,
-                              rects->sidebar_rect.w - gui_space_4(), state->project_path, g_gui_style.text_dim,
-                              g_gui_style.app_surface);
-        sy += gui_line_height() + gui_space_1();
-
-        int outline_header_h = gui_card_header_h();
-        int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
-
-        for (int i = state->project_first_row;
-             i < project_count_of(state) && sy + gui_app_row_h() <= project_area_bottom; i++) {
-            rects->project_rows[i] =
-                gui_rect_make(rects->sidebar_rect.x + 1, sy, rects->sidebar_rect.w - 2, gui_app_row_h());
-            FileKind kind = state->project_rows[i].kind;
-            const char *badge =
-                state->project_rows[i].is_dir ? (state->project_rows[i].parent ? "UP" : "DIR") : file_kind_badge(kind);
-            const char *detail_text =
-                state->project_rows[i].is_dir ? "Folder" : file_kind_label(state->project_rows[i].path, kind);
-            bool muted = !state->project_rows[i].is_dir && !file_kind_opens_as_text(kind);
-            gui_app_draw_list_row(win, rects->project_rows[i].x, rects->project_rows[i].y, rects->project_rows[i].w,
-                                  rects->project_rows[i].h, badge, state->project_rows[i].name, detail_text,
-                                  i == state->project_selected, i == state->project_hovered, muted);
-            sy += gui_app_row_h() + gui_app_row_gap();
-        }
-
-        int outline_y = project_area_bottom + gui_space_1();
-        gui_draw_separator_h(win, rects->sidebar_rect.x + gui_space_2(), outline_y - gui_space_1(),
-                             rects->sidebar_rect.w - gui_space_4(), g_gui_style.chrome_edge);
-        gui_draw_card_header_ext(win, rects->sidebar_rect.x + 1, outline_y, rects->sidebar_rect.w - 2, 0, "Outline",
-                                 nullptr);
-
-        sy = outline_y + outline_header_h + gui_space_1();
-        for (int i = state->outline_first_row;
-             i < outline_count_of(state) && sy + gui_app_row_h() < rects->sidebar_rect.y + rects->sidebar_rect.h; i++) {
-            rects->outline_rows[i] =
-                gui_rect_make(rects->sidebar_rect.x + 1, sy, rects->sidebar_rect.w - 2, gui_app_row_h());
-            char detail_line[32];
-            snprintf(detail_line, sizeof(detail_line), "Line %d", state->outline_rows[i].line + 1);
-            gui_app_draw_list_row(win, rects->outline_rows[i].x, rects->outline_rows[i].y, rects->outline_rows[i].w,
-                                  rects->outline_rows[i].h, state->outline_rows[i].badge, state->outline_rows[i].label,
-                                  detail_line, state->cursor_line == state->outline_rows[i].line,
-                                  i == state->outline_hovered, false);
-            sy += gui_app_row_h() + gui_app_row_gap();
-        }
-    }
-
-    gui_draw_panel_inset(win, rects->editor_panel.x, rects->editor_panel.y, rects->editor_panel.w,
-                         rects->editor_panel.h, editor_bg(), g_gui_style.border, g_gui_style.chrome_bg_alt);
-
-    int panel_x = rects->editor_panel.x;
-    int panel_y = rects->editor_panel.y;
-    int panel_w = rects->editor_panel.w;
-    int panel_h = rects->editor_panel.h;
-    int tab_h = gui_app_row_h();
-    int toolbar_h = gui_app_control_h() + gui_scaled_metric(12);
-    int status_h = gui_scaled_metric(24);
-
-    gui_fill_rect(win, panel_x + 1, panel_y + 1, panel_w - 2, tab_h, g_gui_style.chrome_bg);
-    gui_draw_separator_h(win, panel_x + 1, panel_y + tab_h, panel_w - 2, g_gui_style.chrome_edge);
-
-    int tab_x = panel_x + gui_space_1();
-    int tab_w = min_int(gui_scaled_metric(260), max_int(gui_scaled_metric(130), panel_w / 3));
-    int tab_radius = gui_radius_sm();
-    int tab_inset = gui_space_0_5();
-    gui_fill_rounded_rect(win, tab_x, panel_y + tab_inset, tab_w, tab_h - tab_inset, tab_radius,
-                          g_gui_style.app_surface);
-    gui_fill_rect(win, tab_x, panel_y + tab_h - tab_radius, tab_w, tab_radius, g_gui_style.app_surface);
-
-    char tab_label[160];
-    snprintf(tab_label, sizeof(tab_label), "%s%s", state->buffer->title, state->buffer->modified ? " *" : "");
-    gui_draw_text_clipped(win, gui_font_default(), tab_x + gui_space_1(),
-                          gui_align_text_y(gui_font_default(), panel_y, tab_h), tab_w - gui_space_2(), tab_label,
-                          g_gui_style.text, g_gui_style.app_surface);
-
-    int toolbar_y = panel_y + tab_h;
-    gui_fill_rect(win, panel_x + 1, toolbar_y + 1, panel_w - 2, toolbar_h - 1, g_gui_style.app_surface_alt);
-    int button_y = toolbar_y + (toolbar_h - gui_app_control_h()) / 2;
-
-    rects->new_button = gui_rect_make(panel_x + gui_space_1(), button_y, gui_scaled_metric(58), gui_app_control_h());
+    rects->new_button = gui_rect_make(left_x, button_y, gui_scaled_metric(58), gui_app_control_h());
     rects->save_button = gui_rect_make(rects->new_button.x + rects->new_button.w + gui_space_1(), button_y,
                                        gui_scaled_metric(58), gui_app_control_h());
     rects->reload_button = gui_rect_make(rects->save_button.x + rects->save_button.w + gui_space_1(), button_y,
@@ -2733,40 +2604,155 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                            rects->reload_button.h, "Reload", false, false, state->hovered == HOVER_RELOAD,
                            state->button_pressed == 3);
 
-    int search_w = min_int(gui_scaled_metric(210), max_int(gui_scaled_metric(120), panel_w / 5));
-    if (state->search_focused) {
-        search_w = max_int(search_w, gui_scaled_metric(160));
-    } else if (state->path_focused) {
-        search_w = gui_scaled_metric(80);
-    }
-
-    rects->search_field =
-        gui_rect_make(panel_x + panel_w - search_w - gui_space_1(), button_y, search_w, gui_app_control_h());
-    int path_field_x = rects->reload_button.x + rects->reload_button.w + gui_space_1();
-    int path_field_w = rects->search_field.x - path_field_x - gui_space_1();
-
-    if (path_field_w < gui_scaled_metric(64) && !state->path_focused) {
-        search_w = min_int(gui_scaled_metric(160), max_int(gui_scaled_metric(96), panel_w / 6));
-        rects->search_field =
-            gui_rect_make(panel_x + panel_w - search_w - gui_space_1(), button_y, search_w, gui_app_control_h());
-        path_field_w = rects->search_field.x - path_field_x - gui_space_1();
-    }
-
-    if (path_field_w > gui_scaled_metric(32)) {
-        rects->path_field = gui_rect_make(path_field_x, button_y, path_field_w, gui_app_control_h());
-        const char *path_value = (state->path_input[0] || state->path_focused) ? state->path_input : "File path";
-        gui_app_draw_text_field(win, rects->path_field.x, rects->path_field.y, rects->path_field.w, rects->path_field.h,
-                                path_value, state->path_focused, state->hovered == HOVER_PATH);
-    } else {
-        rects->path_field = gui_rect_make(0, 0, 0, 0);
-    }
-
+    int header_span = view_w - left_x;
+    int search_w = min_int(gui_scaled_metric(210), max_int(gui_scaled_metric(120), header_span / 5));
+    if (state->search_focused)
+        search_w = max_int(search_w, gui_scaled_metric(240));
+    rects->search_field = gui_rect_make(view_w - right_pad - search_w, button_y, search_w, gui_app_control_h());
     const char *search_value = (state->search[0] || state->search_focused) ? state->search : "Search";
     gui_app_draw_text_field(win, rects->search_field.x, rects->search_field.y, rects->search_field.w,
                             rects->search_field.h, search_value, state->search_focused, state->hovered == HOVER_SEARCH);
 
+    // Center slot: the tab pill, or the path field while it is focused.
+    int center_left = rects->reload_button.x + rects->reload_button.w + gui_space_2();
+    int center_right = rects->search_field.x - gui_space_2();
+    int center_w = center_right - center_left;
+    if (center_w > gui_scaled_metric(64)) {
+        if (state->path_focused || state->path_input[0]) {
+            rects->path_field = gui_rect_make(center_left, button_y, center_w, gui_app_control_h());
+            const char *path_value = (state->path_input[0] || state->path_focused) ? state->path_input : "File path";
+            gui_app_draw_text_field(win, rects->path_field.x, rects->path_field.y, rects->path_field.w,
+                                    rects->path_field.h, path_value, state->path_focused, state->hovered == HOVER_PATH);
+        } else {
+            rects->path_field = gui_rect_make(0, 0, 0, 0);
+            int tab_w = min_int(gui_scaled_metric(260), max_int(gui_scaled_metric(130), center_w));
+            if (tab_w > center_w)
+                tab_w = center_w;
+            int tab_x = center_left + (center_w - tab_w) / 2;
+            int tab_h = gui_app_control_h() + gui_scaled_metric(2);
+            int tab_y = (header_h - tab_h) / 2;
+            gui_fill_rounded_rect(win, tab_x, tab_y, tab_w, tab_h, gui_radius_sm(), g_gui_style.app_surface_alt);
+            char tab_label[160];
+            snprintf(tab_label, sizeof(tab_label), "%s%s", state->buffer->title, state->buffer->modified ? " *" : "");
+            gui_draw_text_clipped(win, gui_font_default(), tab_x + gui_space_1(),
+                                  gui_align_text_y(gui_font_default(), tab_y, tab_h), tab_w - gui_space_2(), tab_label,
+                                  g_gui_style.text, g_gui_style.app_surface_alt);
+        }
+    } else {
+        rects->path_field = gui_rect_make(0, 0, 0, 0);
+    }
+
+    // Publish the interactive headerbar controls so the WM forwards clicks to
+    // them instead of treating the band as a window-drag zone.
+    Rect header_input[5];
+    int header_input_count = 0;
+    header_input[header_input_count++] = rects->new_button;
+    header_input[header_input_count++] = rects->save_button;
+    header_input[header_input_count++] = rects->reload_button;
+    header_input[header_input_count++] = rects->search_field;
+    if (!gui_rect_is_empty(rects->path_field))
+        header_input[header_input_count++] = rects->path_field;
+    gui_window_set_header_input(header_input, header_input_count);
+
+    int body_x = margin;
+    int body_y = header_h;
+    int body_w = max_int(0, view_w - margin * 2);
+    int body_h = max_int(0, view_h - body_y - min_bottom);
+
+    int sidebar_w = gui_scaled_metric(160);
+    if (body_w - sidebar_w < gui_scaled_metric(380))
+        sidebar_w = max_int(0, body_w - gui_scaled_metric(380));
+
+    int editor_x = body_x + sidebar_w;
+    int editor_w = body_w - sidebar_w;
+    if (sidebar_w <= 0 || editor_w < gui_scaled_metric(280)) {
+        sidebar_w = 0;
+        editor_x = body_x;
+        editor_w = body_w;
+    }
+
+    rects->sidebar_rect = gui_rect_make(body_x, body_y, sidebar_w, body_h);
+    rects->editor_panel = gui_rect_make(editor_x, body_y, editor_w, body_h);
+
+    if (sidebar_w > 0) {
+        gui_fill_rounded_rect(win, rects->sidebar_rect.x, rects->sidebar_rect.y, rects->sidebar_rect.w,
+                              rects->sidebar_rect.h, gui_panel_radius(rects->sidebar_rect.w, rects->sidebar_rect.h),
+                              g_gui_style.app_surface);
+        gui_draw_separator_v(win, rects->sidebar_rect.x + rects->sidebar_rect.w - 1, rects->sidebar_rect.y + 1,
+                             rects->sidebar_rect.h - 2, gui_hairline_color());
+
+        int sy = rects->sidebar_rect.y + gui_space_1();
+        gui_app_draw_section_caption(win, rects->sidebar_rect.x + gui_space_1_5(), sy,
+                                     rects->sidebar_rect.w - gui_space_3(), "Explorer");
+        sy += gui_line_height() + gui_space_0_5();
+        gui_draw_text_clipped(win, gui_font_default(), rects->sidebar_rect.x + gui_space_1_5(), sy,
+                              rects->sidebar_rect.w - gui_space_3(), state->project_path, g_gui_style.text_muted, 0);
+        sy += gui_line_height() + gui_space_0_5();
+
+        int outline_header_h = gui_line_height() + gui_space_0_5();
+        int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
+        int row_inset = gui_scaled_metric(6);
+
+        // Record how many project rows actually fit so keyboard paging uses the
+        // real page size instead of an editor-derived estimate.
+        {
+            int pitch = gui_app_row_h() + gui_app_row_gap();
+            int fits = 0;
+            for (int yy = sy; yy + gui_app_row_h() <= project_area_bottom; yy += pitch)
+                fits++;
+            state->project_visible_rows = fits > 0 ? fits : 1;
+        }
+
+        for (int i = state->project_first_row;
+             i < project_count_of(state) && sy + gui_app_row_h() <= project_area_bottom; i++) {
+            rects->project_rows[i] = gui_rect_make(rects->sidebar_rect.x + row_inset, sy,
+                                                   rects->sidebar_rect.w - row_inset * 2, gui_app_row_h());
+            FileKind kind = state->project_rows[i].kind;
+            GuiGlyphKind glyph = state->project_rows[i].is_dir
+                                     ? (state->project_rows[i].parent ? GUI_GLYPH_ARROW_UP : GUI_GLYPH_FOLDER)
+                                     : file_kind_glyph(kind);
+            const char *detail_text =
+                state->project_rows[i].is_dir ? "Folder" : file_kind_label(state->project_rows[i].path, kind);
+            bool muted = !state->project_rows[i].is_dir && !file_kind_opens_as_text(kind);
+            gui_app_draw_list_row(win, rects->project_rows[i].x, rects->project_rows[i].y, rects->project_rows[i].w,
+                                  rects->project_rows[i].h, glyph, state->project_rows[i].name, detail_text,
+                                  i == state->project_selected, i == state->project_hovered, muted);
+            sy += gui_app_row_h() + gui_app_row_gap();
+        }
+
+        int outline_y = project_area_bottom + gui_space_1();
+        gui_draw_separator_h(win, rects->sidebar_rect.x + gui_space_2(), outline_y - gui_space_1(),
+                             rects->sidebar_rect.w - gui_space_4(), gui_hairline_color());
+        gui_app_draw_section_caption(win, rects->sidebar_rect.x + gui_space_1_5(), outline_y,
+                                     rects->sidebar_rect.w - gui_space_3(), "Outline");
+
+        sy = outline_y + outline_header_h;
+        for (int i = state->outline_first_row;
+             i < outline_count_of(state) && sy + gui_app_row_h() < rects->sidebar_rect.y + rects->sidebar_rect.h; i++) {
+            rects->outline_rows[i] = gui_rect_make(rects->sidebar_rect.x + row_inset, sy,
+                                                   rects->sidebar_rect.w - row_inset * 2, gui_app_row_h());
+            char detail_line[32];
+            snprintf(detail_line, sizeof(detail_line), "Line %d", state->outline_rows[i].line + 1);
+            gui_app_draw_badged_row(
+                win, rects->outline_rows[i].x, rects->outline_rows[i].y, rects->outline_rows[i].w,
+                rects->outline_rows[i].h, state->outline_rows[i].badge, state->outline_rows[i].label, detail_line,
+                state->cursor_line == state->outline_rows[i].line, i == state->outline_hovered, false);
+            sy += gui_app_row_h() + gui_app_row_gap();
+        }
+    }
+
+    gui_fill_rounded_rect(win, rects->editor_panel.x, rects->editor_panel.y, rects->editor_panel.w,
+                          rects->editor_panel.h, gui_panel_radius(rects->editor_panel.w, rects->editor_panel.h),
+                          editor_bg());
+
+    int panel_x = rects->editor_panel.x;
+    int panel_y = rects->editor_panel.y;
+    int panel_w = rects->editor_panel.w;
+    int panel_h = rects->editor_panel.h;
+    int status_h = gui_scaled_metric(22);
+
     int status_y = panel_y + panel_h - status_h;
-    int edit_y = panel_y + tab_h + toolbar_h + 1;
+    int edit_y = panel_y + 1;
     int edit_h = status_y - edit_y;
     if (edit_h < gui_scaled_metric(24))
         edit_h = gui_scaled_metric(24);
@@ -2778,14 +2764,10 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     rects->editor_rect = edit_area;
 
     gui_fill_rect(win, edit_area.x, edit_area.y, edit_area.w, edit_area.h, editor_bg());
-    // Separators and gutter fill
-    if (gutter_w > 0) {
-        gui_fill_rect(win, edit_area.x, edit_area.y, min_int(gutter_w, edit_area.w), edit_area.h,
-                      g_gui_style.app_surface_alt);
-    }
-    gui_draw_separator_h(win, panel_x + 1, edit_area.y - 1, panel_w - 2, g_gui_style.chrome_edge);
+    // Gutter separator: the gutter shares the editor canvas and is split off by
+    // a single hairline.
     if (gutter_w > 0 && edit_area.w > gutter_w)
-        gui_fill_rect(win, edit_area.x + gutter_w - 1, edit_area.y - 1, 1, edit_area.h + 1, g_gui_style.chrome_edge);
+        gui_draw_separator_v(win, edit_area.x + gutter_w - 1, edit_area.y, edit_area.h, gui_hairline_color());
 
     const GuiFont *mono = gui_font_mono();
     int cell_w = gui_font_mono_cell_width(mono);
@@ -2823,7 +2805,7 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
                 gui_draw_text_clipped(win, gui_font_default(), edit_area.x + gutter_w - gui_space_1() - number_w,
                                       gui_align_text_y(gui_font_default(), row_y, cell_h), number_w, line_no,
                                       line_index == state->cursor_line ? g_gui_style.text : syntax_muted(),
-                                      g_gui_style.app_surface_alt);
+                                      editor_bg());
             }
 
             draw_code_line(win, state, line_index, text_x, row_y, state->visible_cols, row_bg, seg_start);
@@ -2890,27 +2872,27 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
     if (minimap_w > 0)
         draw_minimap(win, state, minimap_rect, state->first_line, state->visible_lines);
 
-    gui_fill_rect(win, panel_x + 1, status_y, panel_w - 2, status_h - 1, g_gui_style.chrome_bg);
-    gui_draw_separator_h(win, panel_x + 1, status_y, panel_w - 2, g_gui_style.chrome_edge);
+    gui_draw_separator_h(win, panel_x + 1, status_y, panel_w - 2, gui_hairline_color());
 
     char left_status[224];
-    snprintf(left_status, sizeof(left_status), "%s%s", state->status, state->buffer->modified ? "  Unsaved" : "");
+    snprintf(left_status, sizeof(left_status), "%s%s%s", state->status, state->buffer->modified ? "  -  " : "",
+             state->buffer->modified ? "Unsaved" : "");
 
     char right_status[128];
-    snprintf(right_status, sizeof(right_status), "%s  Spaces:%d  %d lines", language_label(state->buffer->language),
-             DEFAULT_TAB_SPACES, state->buffer->line_count);
+    snprintf(right_status, sizeof(right_status), "Spaces: %d  |  Ln %d, Col %d  |  UTF-8", DEFAULT_TAB_SPACES,
+             state->cursor_line + 1, state->cursor_col + 1);
 
     int rw = gui_measure_text(gui_font_default(), right_status);
-    int right_status_x = panel_x + panel_w - gui_space_1() - rw;
-    int max_left_w = max_int(40, right_status_x - (panel_x + gui_space_1()) - gui_space_2());
+    int right_status_x = panel_x + panel_w - gui_space_1_5() - rw;
+    int max_left_w = max_int(40, right_status_x - (panel_x + gui_space_1_5()) - gui_space_2());
 
-    gui_draw_text_clipped(win, gui_font_default(), panel_x + gui_space_1(),
+    gui_draw_text_clipped(win, gui_font_default(), panel_x + gui_space_1_5(),
                           gui_align_text_y(gui_font_default(), status_y, status_h), max_left_w, left_status,
-                          g_gui_style.text_dim, g_gui_style.chrome_bg);
+                          g_gui_style.text_muted, 0);
 
     gui_draw_text_clipped(win, gui_font_default(), right_status_x,
                           gui_align_text_y(gui_font_default(), status_y, status_h), rw, right_status,
-                          g_gui_style.text_dim, g_gui_style.chrome_bg);
+                          g_gui_style.text_muted, 0);
 
     if (state->show_help) {
         static const char *tips[] = {
@@ -2925,7 +2907,6 @@ static void draw_latitude(Surface *win, AppState *state, LatitudeRects *rects)
             gui_dialog_layout((int)win->width, (int)win->height, 0, tips, (int)(sizeof(tips) / sizeof(tips[0])), false);
         gui_draw_dialog(win, (int)win->width, (int)win->height, 0, &layout, "Latitude Help", tips,
                         (int)(sizeof(tips) / sizeof(tips[0])), nullptr, "Close", false, false, nullptr, false, false);
-        rects->help_close = layout.confirm;
     }
 }
 
@@ -2935,13 +2916,22 @@ static HoverTarget update_hover(AppState *state, LatitudeRects *rects, int x, in
         return HOVER_NONE;
     state->project_hovered = -1;
     state->outline_hovered = -1;
-    for (int i = 0; i < project_count_of(state); i++) {
+    // The rect Vecs reflect the last draw; the row lists may have grown inside
+    // this same event batch (project load, outline rebuild), so bound every
+    // scan by the cached geometry, never by the live list count.
+    int project_count = project_count_of(state);
+    if (project_count > (int)rects->project_rows.size())
+        project_count = (int)rects->project_rows.size();
+    for (int i = 0; i < project_count; i++) {
         if (!gui_rect_is_empty(rects->project_rows[i]) && point_in_rect(rects->project_rows[i], x, y)) {
             state->project_hovered = i;
             return HOVER_PROJECT_ROW;
         }
     }
-    for (int i = 0; i < outline_count_of(state); i++) {
+    int outline_count = outline_count_of(state);
+    if (outline_count > (int)rects->outline_rows.size())
+        outline_count = (int)rects->outline_rows.size();
+    for (int i = 0; i < outline_count; i++) {
         if (!gui_rect_is_empty(rects->outline_rows[i]) && point_in_rect(rects->outline_rows[i], x, y)) {
             state->outline_hovered = i;
             return HOVER_OUTLINE_ROW;
@@ -3050,11 +3040,14 @@ static void drag_editor(AppState *state, LatitudeRects *rects, int x, int y)
     int cell_h = gui_font_line_height(mono);
     if (cell_h <= 0)
         cell_h = 16;
-    if (y < rects->editor_rect.y && state->first_line > 0)
+    if (y < rects->editor_rect.y && state->first_line > 0) {
         state->first_line--;
-    else if (y >= rects->editor_rect.y + rects->editor_rect.h &&
-             state->first_line < max_int(0, state->buffer->line_count - state->visible_lines))
+        state->first_seg = 0; // keep the wrap row<->line mapping in sync
+    } else if (y >= rects->editor_rect.y + rects->editor_rect.h &&
+               state->first_line < max_int(0, state->buffer->line_count - state->visible_lines)) {
         state->first_line++;
+        state->first_seg = 0;
+    }
     int cx = clamp_int(x, rects->editor_rect.x, rects->editor_rect.x + rects->editor_rect.w - 1);
     int cy = clamp_int(y, rects->editor_rect.y, rects->editor_rect.y + rects->editor_rect.h - 1);
     int line, col;
@@ -3140,9 +3133,7 @@ static void move_project_selection(AppState *state, int delta)
     state->project_hovered = -1;
     state->focus = FOCUS_PROJECT;
 
-    int visible_rows = 1;
-    if (state->visible_lines > 0)
-        visible_rows = max_int(1, state->visible_lines / 2);
+    int visible_rows = state->project_visible_rows > 0 ? state->project_visible_rows : 1;
     if (state->project_selected < state->project_first_row)
         state->project_first_row = state->project_selected;
     if (state->project_selected >= state->project_first_row + visible_rows)
@@ -3638,6 +3629,11 @@ static void latitude_event(App *app, const Event *ev)
                 int max_first = state->visible_lines > 1 ? max_int(0, state->buffer->line_count - state->visible_lines)
                                                          : max_int(0, state->buffer->line_count - 1);
                 state->first_line = clamp_int(state->first_line, 0, max_first);
+                // In wrap mode the top visual row must start at a line start:
+                // reset the segment offset so the view does not open on a
+                // continuation fragment (drag_editor keeps the same invariant).
+                if (state->wrap_enabled)
+                    state->first_seg = 0;
                 state->needs_redraw = true;
             } else if (point_in_rect(rects->sidebar_rect, ev->mouse.x, ev->mouse.y)) {
                 int project_area_bottom = latitude_project_area_bottom(state, rects->sidebar_rect);
@@ -3713,7 +3709,11 @@ static void latitude_event(App *app, const Event *ev)
                         load_file(state, state->buffer->path);
                 }
             } else if (target == HOVER_PATH) {
-                sync_path_input(state);
+                // Clicking the already-focused path field must keep the
+                // user's in-progress edits (place the caret, do not re-copy
+                // the buffer path over the field).
+                if (!state->path_focused)
+                    sync_path_input(state);
                 state->path_focused = true;
                 state->search_focused = false;
                 state->focus = FOCUS_PATH;
@@ -3768,7 +3768,6 @@ extern "C" int main()
     state->project_hovered = -1;
     state->outline_hovered = -1;
     state->last_project_click_row = -1;
-    state->last_editor_click_line = -1;
     state->focus = FOCUS_EDITOR;
     state->needs_redraw = true;
     state->gutter_enabled = app_setting_load_int("latitude_gutter", 1) != 0;
