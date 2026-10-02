@@ -951,14 +951,14 @@ static int fat32_vfs_truncate(VNode *node, uint64_t size)
         return -1;
     FAT32Filesystem *fs = node_data->fs;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     fat32_free_chain(fs, (uint32_t)node->inode_id);
     node->inode_id = 0;
     node->size = 0;
     uint32_t zero = 0;
     dir_update_short_entry(fs, node_data, set_entry_cluster, &zero);
     dir_update_short_entry(fs, node_data, set_entry_size, &zero);
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return 0;
 }
 
@@ -979,9 +979,9 @@ static int fat32_vfs_sync(VNode *node)
         return -1;
     FAT32Filesystem *fs = node_data->fs;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     fat32_flush_fsinfo(fs);
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return 0;
 }
 
@@ -995,7 +995,7 @@ static int64_t fat32_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t of
     if (!fs || offset >= node->size || node->inode_id == 0)
         return 0;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     uint64_t to_read = (size < node->size - offset) ? size : (node->size - offset);
     uint32_t cluster_size = fs->bytes_per_sector * fs->sectors_per_cluster;
     uint32_t cluster = (uint32_t)node->inode_id;
@@ -1007,14 +1007,14 @@ static int64_t fat32_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t of
     for (uint64_t i = 0; i < skip; i++) {
         cluster = fat_next_cluster(fs, cluster);
         if (cluster >= FAT_CLUSTER_EOF || ++hops > fs->cluster_count) {
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
     }
 
     uint8_t *cluster_buf = static_cast<uint8_t *>(malloc(cluster_size));
     if (!cluster_buf) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     uint8_t *out = static_cast<uint8_t *>(buf);
@@ -1037,7 +1037,7 @@ static int64_t fat32_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t of
     }
 
     free(cluster_buf);
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return (int64_t)bytes_read;
 }
 
@@ -1051,7 +1051,7 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
     if (!fs || size == 0)
         return 0;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     const uint32_t sector_size = fs->bytes_per_sector;
     const uint32_t cluster_size = sector_size * fs->sectors_per_cluster;
     uint32_t cluster = (uint32_t)node->inode_id;
@@ -1059,7 +1059,7 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
     if (cluster == 0) {
         cluster = fat32_allocate_cluster(fs, 0);
         if (cluster >= FAT_CLUSTER_EOF) {
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         node->inode_id = cluster;
@@ -1087,7 +1087,7 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         }
     }
     if (walk_failed) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
@@ -1190,7 +1190,7 @@ static int64_t fat32_vfs_write(VNode *node, const void *buf, uint64_t size, uint
             DEBUG_WARN("fat32: failed to persist new size for %s", node_data->fs->volume_label);
     }
 
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return (int64_t)bytes_written;
 }
 
@@ -1356,22 +1356,22 @@ static int fat32_vfs_mkdir(VNode *dir, const char *name)
     if (!fs)
         return -1;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     DirChain chain;
     if (!dir_chain_load(fs, (uint32_t)dir->inode_id, &chain)) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     if (dir_find_record(&chain, name, nullptr)) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
     uint32_t new_cluster = fat32_allocate_cluster(fs, 0);
     if (new_cluster >= FAT_CLUSTER_EOF) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
@@ -1379,42 +1379,42 @@ static int fat32_vfs_mkdir(VNode *dir, const char *name)
     int entry_count = build_dir_entries(&chain, name, FAT_ATTR_DIRECTORY, new_cluster, 0, entries, 21);
     if (entry_count <= 0) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
     uint32_t start_index = 0;
     if (!dir_find_free_range(&chain, (uint32_t)entry_count, &start_index)) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     for (int i = 0; i < entry_count; i++) {
         FAT32DirEntry *slot = dir_chain_entry(&chain, start_index + (uint32_t)i);
         if (!slot) {
             dir_chain_free(&chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         *slot = entries[i];
     }
     if (!dir_chain_save(&chain)) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     dir_chain_free(&chain);
 
     DirChain new_dir_chain;
     if (!dir_chain_load(fs, new_cluster, &new_dir_chain)) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     FAT32DirEntry *dot = dir_chain_entry(&new_dir_chain, 0);
     FAT32DirEntry *dotdot = dir_chain_entry(&new_dir_chain, 1);
     if (!dot || !dotdot) {
         dir_chain_free(&new_dir_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     kstring::zero_memory(dot, sizeof(FAT32DirEntry));
@@ -1432,7 +1432,7 @@ static int fat32_vfs_mkdir(VNode *dir, const char *name)
     dotdot->cluster_high = (uint16_t)((parent_cluster >> 16) & 0xFFFF);
     bool ok = dir_chain_save(&new_dir_chain);
     dir_chain_free(&new_dir_chain);
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return ok ? 0 : -1;
 }
 
@@ -1464,39 +1464,39 @@ static int fat32_vfs_unlink(VNode *dir, const char *name)
     if (!fs)
         return -1;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     DirChain chain;
     if (!dir_chain_load(fs, (uint32_t)dir->inode_id, &chain)) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     DirRecord record = {};
     if (!dir_find_record(&chain, name, &record)) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     if (record.is_dir && !fat32_dir_is_empty(fs, record.cluster)) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
     if (!dir_mark_deleted(&chain, record.entry_start_index, record.entry_count)) {
         dir_chain_free(&chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     bool ok = dir_chain_save(&chain);
     dir_chain_free(&chain);
     if (!ok) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
     if (record.cluster >= 2)
         fat32_free_chain(fs, record.cluster);
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return 0;
 }
 
@@ -1531,16 +1531,16 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
     if (!fs)
         return -1;
 
-    const uint64_t fs_flags = spinlock_acquire_irqsave(&fs->lock);
+    spinlock_acquire(&fs->lock);
     DirChain old_chain;
     if (!dir_chain_load(fs, (uint32_t)old_dir->inode_id, &old_chain)) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     DirRecord record = {};
     if (!dir_find_record(&old_chain, old_name, &record)) {
         dir_chain_free(&old_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
@@ -1548,17 +1548,17 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
         bool case_only_rename = name_equal_ci(old_name, new_name) && kstring::strcmp(old_name, new_name) != 0;
         if (!case_only_rename && name_equal_ci(old_name, new_name)) {
             dir_chain_free(&old_chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return 0;
         }
         if (!case_only_rename && dir_find_record(&old_chain, new_name, nullptr)) {
             dir_chain_free(&old_chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         if (!dir_mark_deleted(&old_chain, record.entry_start_index, record.entry_count)) {
             dir_chain_free(&old_chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         FAT32DirEntry entries[21];
@@ -1566,40 +1566,40 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
             build_dir_entries(&old_chain, new_name, record.attr, record.cluster, record.size, entries, 21);
         if (entry_count <= 0) {
             dir_chain_free(&old_chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         uint32_t start = 0;
         if (!dir_find_free_range(&old_chain, (uint32_t)entry_count, &start)) {
             dir_chain_free(&old_chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         for (int i = 0; i < entry_count; i++) {
             FAT32DirEntry *slot = dir_chain_entry(&old_chain, start + (uint32_t)i);
             if (!slot) {
                 dir_chain_free(&old_chain);
-                spinlock_release_irqrestore(&fs->lock, fs_flags);
+                spinlock_release(&fs->lock);
                 return -1;
             }
             *slot = entries[i];
         }
         bool ok = dir_chain_save(&old_chain);
         dir_chain_free(&old_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return ok ? 0 : -1;
     }
 
     DirChain new_chain;
     if (!dir_chain_load(fs, (uint32_t)new_dir->inode_id, &new_chain)) {
         dir_chain_free(&old_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     if (dir_find_record(&new_chain, new_name, nullptr)) {
         dir_chain_free(&old_chain);
         dir_chain_free(&new_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
@@ -1608,14 +1608,14 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
     if (entry_count <= 0) {
         dir_chain_free(&old_chain);
         dir_chain_free(&new_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     uint32_t new_start = 0;
     if (!dir_find_free_range(&new_chain, (uint32_t)entry_count, &new_start)) {
         dir_chain_free(&old_chain);
         dir_chain_free(&new_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     for (int i = 0; i < entry_count; i++) {
@@ -1623,7 +1623,7 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
         if (!slot) {
             dir_chain_free(&old_chain);
             dir_chain_free(&new_chain);
-            spinlock_release_irqrestore(&fs->lock, fs_flags);
+            spinlock_release(&fs->lock);
             return -1;
         }
         *slot = entries[i];
@@ -1631,26 +1631,26 @@ static int fat32_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
     if (!dir_chain_save(&new_chain)) {
         dir_chain_free(&old_chain);
         dir_chain_free(&new_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     dir_chain_free(&new_chain);
 
     if (!dir_mark_deleted(&old_chain, record.entry_start_index, record.entry_count)) {
         dir_chain_free(&old_chain);
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
     bool old_ok = dir_chain_save(&old_chain);
     dir_chain_free(&old_chain);
     if (!old_ok) {
-        spinlock_release_irqrestore(&fs->lock, fs_flags);
+        spinlock_release(&fs->lock);
         return -1;
     }
 
     if (record.is_dir)
         update_directory_parent(fs, record.cluster, (uint32_t)new_dir->inode_id);
-    spinlock_release_irqrestore(&fs->lock, fs_flags);
+    spinlock_release(&fs->lock);
     return 0;
 }
 
