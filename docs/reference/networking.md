@@ -38,11 +38,12 @@ There is no mbuf abstraction: each layer owns static 1600-byte staging buffers u
 
 ## DHCP
 
-`dhcp_request()` runs once at boot when the link is up: DISCOVER, wait up to 5 s for OFFER, REQUEST (option 50 + server id), wait up to 5 s for ACK, then configure IP/netmask/gateway/DNS.
+`dhcp_request()` runs at boot when the link is up: DISCOVER, wait for OFFER, REQUEST (option 50 + server id), wait for ACK, then configure IP/netmask/gateway/DNS. DISCOVER and REQUEST are each retried so a single lost frame does not leave the host unconfigured.
 
-- Parsed options: subnet mask (1), router (3), DNS (6), server identifier (54).
-- No lease management: option 51 is never parsed, there are no renew/rebind timers, and no RELEASE/DECLINE. Configuration persists until reboot.
-- One attempt, no retries; NAK is not handled. Packets are hand-built Ethernet broadcasts (source 0.0.0.0) since no address exists yet.
+- Parsed options: subnet mask (1), router (3), DNS (6), server identifier (54), lease time (51; 86400 s default).
+- Lease management: `dhcp_tick()` (called from `net_poll()`) arms T1 at half the lease, unicasts a renewal REQUEST with 5-second retries, and drops the address when the lease expires. No RELEASE/DECLINE is sent on shutdown.
+- `SYS_NET_RENEW` (extended, 296) forces a full `dhcp_request()` exchange on demand — the shell `dhcp` command and the Settings Network "Renew DHCP Lease" button call it. Renewals are gated on `net_init()` completion and serialize through an in-flight guard (`-11` EAGAIN, `-19` ENODEV, `-16` EBUSY, `-100` ENETDOWN).
+- Packets are hand-built Ethernet broadcasts (source 0.0.0.0) since no address exists yet.
 
 ## DNS
 
