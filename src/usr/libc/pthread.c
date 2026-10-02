@@ -185,8 +185,12 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, uint64_
         return lock_err;
     /* Only the kernel deadline walker reports -110. EAGAIN and EINTR both
      * end as a successful (possibly spurious) wait - the caller re-checks
-     * its predicate. */
-    return err == -110 ? -110 : 0;
+     * its predicate. -28 means the timed-wait table was full and the wait
+     * never started: propagate it, or a saturated table silently turns
+     * the caller's deadline loop into a busy spin. */
+    if (err == -110 || err == -28)
+        return err;
+    return 0;
 }
 
 int pthread_cond_signal(pthread_cond_t *cond)
