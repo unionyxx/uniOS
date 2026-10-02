@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <uapi/syscalls_ext.h>
 #include <unistd.h>
 
 #ifdef __cplusplus
@@ -41,6 +42,7 @@ int sendto(int sockfd, const void *buf, size_t len, int flags, const struct sock
 int recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
 int closesocket(int sockfd);
 int resolve_host(const char *hostname, struct in_addr *out_addr);
+int net_status(NetStatus *out);
 
 // Helpers
 uint16_t htons(uint16_t hostshort);

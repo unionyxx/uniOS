@@ -128,6 +128,7 @@ static const CommandEntry commands[] = {
 
     {"resolve", "resolve <host>", "resolve a DNS name", CMD_ARGS, nullptr, cmd_resolve, nullptr},
     {"ping", "ping <host>", "resolve or probe a host", CMD_ARGS, nullptr, cmd_ping, nullptr},
+    {"ifconfig", "ifconfig", "show network interface status", CMD_NONE, cmd_ifconfig, nullptr, nullptr},
     {"sound", "sound <file>", "play audio through kernel parser", CMD_ARGS, nullptr, cmd_sound, nullptr},
     {"play", "play <file>", "play WAV audio through user parser", CMD_ARGS, nullptr, cmd_play, nullptr},
 };
@@ -226,7 +227,7 @@ void expand_aliases(char *cmd, int max_size)
     bool expanded_any = true;
     while (expanded_any && iterations < 5) {
         expanded_any = false;
-        
+
         char *start = cmd;
         while (*start == ' ') {
             start++;

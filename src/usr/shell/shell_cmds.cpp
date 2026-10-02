@@ -869,7 +869,8 @@ void cmd_wc(const char *filename, const char *piped_input)
     }
     if (data_len > 0 && data[data_len - 1] != '\n')
         lines++;
-    printf("  Lines: %llu\n  Words: %llu\n  Chars: %llu\n", (unsigned long long)lines, (unsigned long long)words, (unsigned long long)chars);
+    printf("  Lines: %llu\n  Words: %llu\n  Chars: %llu\n", (unsigned long long)lines, (unsigned long long)words,
+           (unsigned long long)chars);
     free(data);
 }
 
@@ -1366,7 +1367,8 @@ void cmd_kheap()
         set_status(1);
         return;
     }
-    printf("Kernel heap: %llu KB used / %llu KB total\n", (unsigned long long)info.heap_used_kb, (unsigned long long)info.heap_total_kb);
+    printf("Kernel heap: %llu KB used / %llu KB total\n", (unsigned long long)info.heap_used_kb,
+           (unsigned long long)info.heap_total_kb);
 }
 
 void cmd_sysinfo()
@@ -1480,8 +1482,27 @@ void cmd_lspci()
 
 void cmd_ifconfig()
 {
-    printf("ifconfig: network interface status is not exposed to userland yet\n");
-    set_status(1);
+    NetStatus st;
+    if (net_status(&st) != 0) {
+        printf("ifconfig: net status unavailable\n");
+        set_status(1);
+        return;
+    }
+
+    const char *nic = "none";
+    if (st.nic == NET_NIC_E1000)
+        nic = "e1000";
+    else if (st.nic == NET_NIC_RTL8139)
+        nic = "rtl8139";
+
+    printf("nic %s %s\n", nic, st.link_up ? "up" : "down");
+    printf("ip %u.%u.%u.%u netmask %u.%u.%u.%u\n", st.ip & 0xFF, (st.ip >> 8) & 0xFF, (st.ip >> 16) & 0xFF,
+           (st.ip >> 24) & 0xFF, st.netmask & 0xFF, (st.netmask >> 8) & 0xFF, (st.netmask >> 16) & 0xFF,
+           (st.netmask >> 24) & 0xFF);
+    printf("gateway %u.%u.%u.%u dns %u.%u.%u.%u\n", st.gateway & 0xFF, (st.gateway >> 8) & 0xFF,
+           (st.gateway >> 16) & 0xFF, (st.gateway >> 24) & 0xFF, st.dns & 0xFF, (st.dns >> 8) & 0xFF,
+           (st.dns >> 16) & 0xFF, (st.dns >> 24) & 0xFF);
+    printf("configured %s\n", st.configured ? "yes" : "no");
 }
 
 void cmd_dhcp_request()
@@ -1548,14 +1569,15 @@ void cmd_alias(const char *args)
     if (!eq) {
         char name[32];
         size_t len = strlen(args);
-        if (len >= 32) len = 31;
+        if (len >= 32)
+            len = 31;
         strncpy(name, args, len);
         name[len] = '\0';
         while (len > 0 && name[len - 1] == ' ') {
             name[len - 1] = '\0';
             len--;
         }
-        
+
         bool found = false;
         for (int i = 0; i < 32; i++) {
             if (g_current_shell->aliases[i].in_use && strcmp(g_current_shell->aliases[i].name, name) == 0) {
@@ -1653,7 +1675,8 @@ void cmd_unalias(const char *name)
 
     char target[32];
     size_t len = strlen(name);
-    if (len >= 32) len = 31;
+    if (len >= 32)
+        len = 31;
     strncpy(target, name, len);
     target[len] = '\0';
     while (len > 0 && target[len - 1] == ' ') {
@@ -1673,4 +1696,3 @@ void cmd_unalias(const char *name)
     printf("unalias: %s: not found\n", target);
     set_status(1);
 }
-

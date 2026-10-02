@@ -88,6 +88,13 @@ int resolve_host(const char *hostname, struct in_addr *out_addr)
     return (int)syscall2(SYS_RESOLVE, (uint64_t)hostname, (uint64_t)out_addr);
 }
 
+int net_status(NetStatus *out)
+{
+    if (!out)
+        return -14;
+    return (int)syscall1(SYS_NET_STATUS, (uint64_t)out);
+}
+
 uint16_t htons(uint16_t v)
 {
     return (uint16_t)((v << 8) | (v >> 8));
