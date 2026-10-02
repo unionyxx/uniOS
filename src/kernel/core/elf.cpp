@@ -95,6 +95,68 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
     return entry_covered;
 }
 
+[[nodiscard]] bool elf_tls_info(const uint8_t *data, uint64_t size, uint64_t *template_offset, uint64_t *memsz,
+                                uint64_t *align, uint64_t *template_vaddr, uint64_t *filesz)
+{
+    if (template_offset)
+        *template_offset = 0;
+    if (memsz)
+        *memsz = 0;
+    if (align)
+        *align = 0;
+    if (template_vaddr)
+        *template_vaddr = 0;
+    if (filesz)
+        *filesz = 0;
+    if (!data || !template_offset || !memsz || !align)
+        return false;
+
+    if (size < sizeof(Elf64_Ehdr))
+        return false;
+    const auto *ehdr = reinterpret_cast<const Elf64_Ehdr *>(data);
+    if (*reinterpret_cast<const uint32_t *>(ehdr->e_ident) != ELF_MAGIC)
+        return false;
+    if (ehdr->e_ident[4] != ELFCLASS64)
+        return false;
+    if (ehdr->e_ident[5] != ELFDATA2LSB)
+        return false;
+    if (ehdr->e_phentsize != sizeof(Elf64_Phdr) || ehdr->e_phnum == 0)
+        return false;
+
+    uint64_t phdr_bytes = 0;
+    if (mul_overflow_u64(ehdr->e_phnum, sizeof(Elf64_Phdr), &phdr_bytes))
+        return false;
+    uint64_t phdr_end = 0;
+    if (add_overflow_u64(ehdr->e_phoff, phdr_bytes, &phdr_end))
+        return false;
+    if (ehdr->e_phoff > size || phdr_end > size)
+        return false;
+
+    const auto *phdr = reinterpret_cast<const Elf64_Phdr *>(data + ehdr->e_phoff);
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_TLS)
+            continue;
+        // Same sanity rules elf_validate applies to PT_LOAD: the file bytes
+        // must stay inside the image and filesz must not exceed memsz —
+        // the exec path memcpy's filesz bytes out of the image and sizes
+        // its bounce buffer by memsz.
+        if (phdr[i].p_filesz > phdr[i].p_memsz)
+            return false;
+        uint64_t file_end = 0;
+        if (add_overflow_u64(phdr[i].p_offset, phdr[i].p_filesz, &file_end) || file_end > size)
+            return false;
+        *template_offset = phdr[i].p_offset;
+        *memsz = phdr[i].p_memsz;
+        *align = phdr[i].p_align;
+        if (template_vaddr)
+            *template_vaddr = phdr[i].p_vaddr;
+        if (filesz)
+            *filesz = phdr[i].p_filesz;
+        return true;
+    }
+    return false;
+}
+
 [[nodiscard]] static bool ensure_segment_vma(Process *proc, uint64_t start, uint64_t end, uint64_t flags, VMAType type)
 {
     if (!proc)
@@ -286,6 +348,26 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == PT_LOAD && !load_segment(data, size, phdr[i], target_pml4, proc, true))
             return 0;
+    }
+
+    // Record the image's TLS facts for the exec / boot-launch install that
+    // follows. The PT_TLS template lands inside a PT_LOAD (the linker
+    // places .tdata/.tbss within the writable segment), so p_vaddr is
+    // already mapped and its .tbss tail zero-filled by the loop above; the
+    // exec path copies the template from the image buffer instead. No
+    // PT_TLS -> all zero, matching an absent template. Set unconditionally:
+    // a loader copied from a live process carries the OLD image's values.
+    if (proc) {
+        uint64_t t_offset = 0, t_memsz = 0, t_align = 0, t_vaddr = 0, t_filesz = 0;
+        if (elf_tls_info(data, size, &t_offset, &t_memsz, &t_align, &t_vaddr, &t_filesz)) {
+            proc->tls_template_va = t_vaddr;
+            proc->tls_template_size = t_memsz;
+            proc->tls_align = t_align;
+        } else {
+            proc->tls_template_va = 0;
+            proc->tls_template_size = 0;
+            proc->tls_align = 0;
+        }
     }
 
     constexpr int USER_STACK_PAGES = 8; // 32 KB default stack

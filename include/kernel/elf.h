@@ -12,6 +12,7 @@ constexpr uint32_t PT_NULL = 0;
 constexpr uint32_t PT_LOAD = 1;
 constexpr uint32_t PT_DYNAMIC = 2;
 constexpr uint32_t PT_INTERP = 3;
+constexpr uint32_t PT_TLS = 7;
 
 constexpr uint32_t PF_X = 0x1;
 constexpr uint32_t PF_W = 0x2;
@@ -51,3 +52,14 @@ struct Process;
 [[nodiscard]] bool elf_validate(const uint8_t *data, uint64_t size);
 [[nodiscard]] uint64_t elf_load(const uint8_t *data, uint64_t size, Process *proc);
 [[nodiscard]] uint64_t elf_load_user(const uint8_t *data, uint64_t size, Process *proc);
+
+/* Walk a 64-bit little-endian ELF image's program headers for PT_TLS. On a
+ * hit whose file bytes ([p_offset, p_offset + p_filesz)) stay inside the
+ * image, return true with the segment's p_offset/p_memsz/p_align; the two
+ * optional outs additionally yield p_vaddr (the template's landing address
+ * inside a mapped PT_LOAD) and p_filesz (the file-carried prefix of the
+ * block; [filesz, memsz) is the zero-filled .tbss tail). Return false —
+ * with every output zeroed — when the image has no PT_TLS or is truncated
+ * or malformed (same identity and phdr-table rules as elf_validate). */
+[[nodiscard]] bool elf_tls_info(const uint8_t *image, uint64_t size, uint64_t *template_offset, uint64_t *memsz,
+                                uint64_t *align, uint64_t *template_vaddr = nullptr, uint64_t *filesz = nullptr);
