@@ -2367,6 +2367,15 @@ int64_t sys_thread_detach(uint64_t tid)
         return -10; // -ESRCH: not a live child thread
     }
 
+    // Only threads of the caller's group: a forked child is its own group
+    // leader (leader_pid == pid). Orphaning it into the auto-reap would
+    // discard its exit status where the parent can never collect it.
+    if (target->leader_pid == target->pid) {
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        return -10; // -ESRCH: not a child thread
+    }
+
     // Orphan the thread: the kernel-zombie reaper collects parent_pid == 0
     // zombies without any waitpid, which is exactly the detached contract.
     if (prev_sibling)
