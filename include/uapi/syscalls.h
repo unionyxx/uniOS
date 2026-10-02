@@ -93,7 +93,11 @@
  * wake or a signal, any other value returns -ETIMEDOUT (-110) on expiry.
  * Sub-tick timeouts round up to one timer tick. The kernel tracks at
  * most 16 concurrent timed waiters: beyond that the call returns
- * -ENOSPC (-28) instead of silently waiting forever. */
+ * -ENOSPC (-28) instead of silently waiting forever.
+ * WAKE args: uaddr, count — wakes up to `count` waiters parked on that
+ * exact 32-bit word (matched by its physical address, so the same page
+ * shared through different virtual addresses still matches); waiters
+ * parked on other words of the same page are not woken. */
 #define SYS_FUTEX 270
 /* args: entry, arg, stack_top, flags (arg4), stack_lo (arg5),
  * stack_size (arg6). flags: THREAD_DETACHED (syscalls_ext.h) creates the

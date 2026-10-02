@@ -59,7 +59,7 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 | --- | --- | --- |
 | 9 | `SYS_MMAP` | Anonymous or memfd-backed mapping |
 | 10 | `SYS_MUNMAP` | Unmap a range |
-| 270 | `SYS_FUTEX` | FUTEX_WAIT / FUTEX_WAKE (keyed by physical page) |
+| 270 | `SYS_FUTEX` | FUTEX_WAIT / FUTEX_WAKE (wakes are matched by the physical address of the 32-bit word; buckets hash its page) |
 | 272-274 | `SYS_EPOLL_CREATE/CTL/WAIT` | Epoll instances over fds |
 | 275 | `SYS_MPROTECT` | Change protections on mapped pages |
 | 276 | `SYS_MEMFD_CREATE` | Anonymous memory-file fd (max 16 MiB) |

@@ -124,6 +124,12 @@ struct Process
     bool thread_detached; // detached at exit: routes to the kernel-zombie auto-reap
     bool timed_wake;      // woken by the deadline walker (futex timeouts)
 
+    // Physical address of the 32-bit futex word this process is parked on
+    // (page + word offset). Valid only while queued on a futex bucket's
+    // wait_queue: set under the bucket lock before the park, read by
+    // FUTEX_WAKE's word-matched walk under the same bucket lock.
+    uint64_t futex_word_phys;
+
     SignalControl signals;
 
     struct Process *children_list;

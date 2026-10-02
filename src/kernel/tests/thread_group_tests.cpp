@@ -18,6 +18,9 @@ void signal_send(Process *p, int sig);
 namespace {
 
 constexpr uint64_t TEST_VADDR = 0x10000000ULL;
+// Second mapping of a shared frame: distinct virtual page, same physical
+// word when the same frame is mapped at both addresses.
+constexpr uint64_t TEST_VADDR_ALIAS = 0x10010000ULL;
 
 } // namespace
 
@@ -591,6 +594,387 @@ KTEST(futex_untimed_wait_returns_eintr_on_fatal_signal)
     pmm_free_frame(page);
     free(vma);
     leader->signals.pending = 0;
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+// ---- futex wake word matching ----
+
+// Waiter threads park on one 32-bit futex word each and record their
+// sys_futex return; 999 marks "still parked" (every real return is 0 or a
+// negative errno).
+static volatile uint32_t *g_word_wait_a;
+static volatile uint32_t *g_word_wait_b;
+static volatile int64_t g_word_ret_a;
+static volatile int64_t g_word_ret_b;
+
+static void futex_word_waiter_a()
+{
+    g_word_ret_a = sys_futex(g_word_wait_a, FUTEX_WAIT, 0);
+    sys_thread_exit(0);
+}
+
+static void futex_word_waiter_b()
+{
+    g_word_ret_b = sys_futex(g_word_wait_b, FUTEX_WAIT, 0);
+    sys_thread_exit(0);
+}
+
+// True once the thread reached its futex park (queue waits park in
+// Waiting, not Blocked).
+static bool word_waiter_parked(int64_t tid)
+{
+    Process *t = process_find_by_pid(static_cast<uint64_t>(tid));
+    return t && (t->state == ProcessState_Waiting || t->state == ProcessState_Blocked);
+}
+
+// B parks on a different word of the SAME page as A, and parks FIRST (it
+// owns the bucket queue head, exactly the interleaving where a page-granular
+// wake(A) steals B's queue slot). A word-matched wake must reach A only.
+KTEST(futex_wake_matches_only_the_addressed_word)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    g_word_wait_a = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    g_word_wait_b = reinterpret_cast<volatile uint32_t *>(TEST_VADDR + 0x800);
+    *g_word_wait_a = 0;
+    *g_word_wait_b = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack_a = malloc(4096);
+    void *stack_b = malloc(4096);
+    KTEST_EXPECT(stack_a != nullptr);
+    KTEST_EXPECT(stack_b != nullptr);
+    void *top_a = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_a) + 4096);
+    void *top_b = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_b) + 4096);
+    g_word_ret_a = 999;
+    g_word_ret_b = 999;
+
+    // Park B first so it owns the queue head, then A.
+    const int64_t tid_b = sys_thread_create(futex_word_waiter_b, nullptr, top_b, &mock_frame);
+    KTEST_EXPECT(tid_b > 0);
+    bool b_parked = false;
+    for (int i = 0; i < 200 && !b_parked; i++) {
+        scheduler_yield();
+        b_parked = word_waiter_parked(tid_b);
+    }
+    KTEST_EXPECT(b_parked);
+
+    const int64_t tid_a = sys_thread_create(futex_word_waiter_a, nullptr, top_a, &mock_frame);
+    KTEST_EXPECT(tid_a > 0);
+    bool a_parked = false;
+    for (int i = 0; i < 200 && !a_parked; i++) {
+        scheduler_yield();
+        a_parked = word_waiter_parked(tid_a);
+    }
+    KTEST_EXPECT(a_parked);
+
+    // Waking word A must spend its single wake on A's waiter: B shares the
+    // bucket (same page) but not the word.
+    KTEST_EXPECT_EQ(sys_futex(g_word_wait_a, FUTEX_WAKE, 1), 1);
+    bool a_done = false;
+    for (int i = 0; i < 200 && !a_done; i++) {
+        scheduler_yield();
+        a_done = g_word_ret_a != 999;
+    }
+    KTEST_EXPECT(a_done);
+    KTEST_EXPECT_EQ(g_word_ret_a, 0);
+
+    // Give B every chance to run: it must still be parked on word B.
+    for (int i = 0; i < 200; i++)
+        scheduler_yield();
+    KTEST_EXPECT_EQ(g_word_ret_b, 999);
+    KTEST_EXPECT(word_waiter_parked(tid_b));
+
+    // No waiter is left on word A: a further wake must report zero even
+    // though B still sleeps in the same bucket.
+    KTEST_EXPECT_EQ(sys_futex(g_word_wait_a, FUTEX_WAKE, 1), 0);
+
+    // Drain B through its own word.
+    KTEST_EXPECT_EQ(sys_futex(g_word_wait_b, FUTEX_WAKE, 1), 1);
+    bool b_done = false;
+    for (int i = 0; i < 200 && !b_done; i++) {
+        scheduler_yield();
+        b_done = g_word_ret_b != 999;
+    }
+    KTEST_EXPECT(b_done);
+    KTEST_EXPECT_EQ(g_word_ret_b, 0);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid_a, &status, 0);
+    (void)process_waitpid(tid_b, &status, 0);
+
+    free(stack_a);
+    free(stack_b);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+// The wake count must be spent per word: wake(1) reaches one of the
+// waiters parked on that word, never more, and the word keeps its queue.
+static volatile uint32_t *g_count_word;
+static volatile int64_t g_count_rets[2];
+static volatile int g_count_next_slot;
+
+static void futex_count_waiter()
+{
+    const int slot = __sync_fetch_and_add(&g_count_next_slot, 1);
+    g_count_rets[slot] = sys_futex(g_count_word, FUTEX_WAIT, 0);
+    sys_thread_exit(0);
+}
+
+KTEST(futex_wake_count_spends_one_wake_per_word)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    g_count_word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *g_count_word = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack_one = malloc(4096);
+    void *stack_two = malloc(4096);
+    KTEST_EXPECT(stack_one != nullptr);
+    KTEST_EXPECT(stack_two != nullptr);
+    void *top_one = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_one) + 4096);
+    void *top_two = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_two) + 4096);
+    g_count_rets[0] = 999;
+    g_count_rets[1] = 999;
+    g_count_next_slot = 0;
+
+    const int64_t tid_one = sys_thread_create(futex_count_waiter, nullptr, top_one, &mock_frame);
+    const int64_t tid_two = sys_thread_create(futex_count_waiter, nullptr, top_two, &mock_frame);
+    KTEST_EXPECT(tid_one > 0);
+    KTEST_EXPECT(tid_two > 0);
+
+    bool both_parked = false;
+    for (int i = 0; i < 200 && !both_parked; i++) {
+        scheduler_yield();
+        both_parked = word_waiter_parked(tid_one) && word_waiter_parked(tid_two);
+    }
+    KTEST_EXPECT(both_parked);
+
+    KTEST_EXPECT_EQ(sys_futex(g_count_word, FUTEX_WAKE, 1), 1);
+
+    bool one_done = false;
+    for (int i = 0; i < 200 && !one_done; i++) {
+        scheduler_yield();
+        one_done = g_count_rets[0] != 999 || g_count_rets[1] != 999;
+    }
+    KTEST_EXPECT(one_done);
+
+    const int first = (g_count_rets[0] != 999) ? 0 : 1;
+    const int second = 1 - first;
+    KTEST_EXPECT_EQ(g_count_rets[first], 0);
+    KTEST_EXPECT_EQ(g_count_rets[second], 999);
+
+    // The second waiter still owns the word: the next wake reaches it.
+    KTEST_EXPECT_EQ(sys_futex(g_count_word, FUTEX_WAKE, 1), 1);
+    bool all_done = false;
+    for (int i = 0; i < 200 && !all_done; i++) {
+        scheduler_yield();
+        all_done = g_count_rets[0] != 999 && g_count_rets[1] != 999;
+    }
+    KTEST_EXPECT(all_done);
+    KTEST_EXPECT_EQ(g_count_rets[0], 0);
+    KTEST_EXPECT_EQ(g_count_rets[1], 0);
+
+    // Fully drained: a further wake reports zero.
+    KTEST_EXPECT_EQ(sys_futex(g_count_word, FUTEX_WAKE, 1), 0);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid_one, &status, 0);
+    (void)process_waitpid(tid_two, &status, 0);
+
+    free(stack_one);
+    free(stack_two);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+// The futex key is the PHYSICAL word: one frame mapped at two virtual
+// addresses (the in-ktest stand-in for two processes sharing a memfd page)
+// must match through either mapping, while a different word of the same
+// frame sharing the bucket must not.
+KTEST(futex_wake_matches_across_virtual_aliases)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    Result<void> map_alias = vmm_replace_page_in(leader->page_table, TEST_VADDR_ALIAS, reinterpret_cast<uint64_t>(page),
+                                                 PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map_alias.ok());
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    VMA *vma_alias = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    KTEST_EXPECT(vma_alias != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = vma_alias;
+    vma_alias->start = TEST_VADDR_ALIAS;
+    vma_alias->end = TEST_VADDR_ALIAS + 4096;
+    vma_alias->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma_alias->type = VMAType::Anonymous;
+    vma_alias->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 2;
+
+    // A parks on word 0 of the frame THROUGH THE ALIAS; B parks on word 8
+    // of the same frame through the first mapping.
+    g_word_wait_a = reinterpret_cast<volatile uint32_t *>(TEST_VADDR_ALIAS);
+    g_word_wait_b = reinterpret_cast<volatile uint32_t *>(TEST_VADDR + 8);
+    *g_word_wait_a = 0;
+    *g_word_wait_b = 0;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack_a = malloc(4096);
+    void *stack_b = malloc(4096);
+    KTEST_EXPECT(stack_a != nullptr);
+    KTEST_EXPECT(stack_b != nullptr);
+    void *top_a = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_a) + 4096);
+    void *top_b = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_b) + 4096);
+    g_word_ret_a = 999;
+    g_word_ret_b = 999;
+
+    // Park B first so it owns the bucket queue head.
+    const int64_t tid_b = sys_thread_create(futex_word_waiter_b, nullptr, top_b, &mock_frame);
+    KTEST_EXPECT(tid_b > 0);
+    bool b_parked = false;
+    for (int i = 0; i < 200 && !b_parked; i++) {
+        scheduler_yield();
+        b_parked = word_waiter_parked(tid_b);
+    }
+    KTEST_EXPECT(b_parked);
+
+    const int64_t tid_a = sys_thread_create(futex_word_waiter_a, nullptr, top_a, &mock_frame);
+    KTEST_EXPECT(tid_a > 0);
+    bool a_parked = false;
+    for (int i = 0; i < 200 && !a_parked; i++) {
+        scheduler_yield();
+        a_parked = word_waiter_parked(tid_a);
+    }
+    KTEST_EXPECT(a_parked);
+
+    // Wake word 0 through the FIRST mapping while the waiter parked through
+    // the alias: same physical word, so the wake must reach it.
+    KTEST_EXPECT_EQ(sys_futex(reinterpret_cast<volatile uint32_t *>(TEST_VADDR), FUTEX_WAKE, 1), 1);
+    bool a_done = false;
+    for (int i = 0; i < 200 && !a_done; i++) {
+        scheduler_yield();
+        a_done = g_word_ret_a != 999;
+    }
+    KTEST_EXPECT(a_done);
+    KTEST_EXPECT_EQ(g_word_ret_a, 0);
+
+    // B parks on a different word of the same frame: it must stay parked,
+    // and no further waiter exists on word 0 through either mapping.
+    for (int i = 0; i < 200; i++)
+        scheduler_yield();
+    KTEST_EXPECT_EQ(g_word_ret_b, 999);
+    KTEST_EXPECT(word_waiter_parked(tid_b));
+    KTEST_EXPECT_EQ(sys_futex(reinterpret_cast<volatile uint32_t *>(TEST_VADDR), FUTEX_WAKE, 1), 0);
+    KTEST_EXPECT_EQ(sys_futex(reinterpret_cast<volatile uint32_t *>(TEST_VADDR_ALIAS), FUTEX_WAKE, 1), 0);
+
+    // Drain B through the ALIAS mapping of its own word: same physical
+    // word reached through a different virtual address.
+    KTEST_EXPECT_EQ(sys_futex(reinterpret_cast<volatile uint32_t *>(TEST_VADDR_ALIAS + 8), FUTEX_WAKE, 1), 1);
+    bool b_done = false;
+    for (int i = 0; i < 200 && !b_done; i++) {
+        scheduler_yield();
+        b_done = g_word_ret_b != 999;
+    }
+    KTEST_EXPECT(b_done);
+    KTEST_EXPECT_EQ(g_word_ret_b, 0);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid_a, &status, 0);
+    (void)process_waitpid(tid_b, &status, 0);
+
+    free(stack_a);
+    free(stack_b);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR_ALIAS);
+    pmm_free_frame(page);
+    free(vma);
+    free(vma_alias);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
     leader->vmalist->count = orig_vma_count;

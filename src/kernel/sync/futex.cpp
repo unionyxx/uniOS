@@ -118,6 +118,16 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
             return -4; // -EINTR: do not sleep through a fatal signal
         }
 
+        // Key the park on the physical address of this 32-bit word (page +
+        // word offset), written under the bucket lock before the park.
+        // WAKE walks the same bucket but matches this key, so a wake aimed
+        // at one word of a page cannot be consumed by a waiter parked on
+        // another word sharing the bucket (a mutex and a condvar colocated
+        // in one struct is the canonical case). Physical, not virtual: the
+        // same shared frame mapped at different virtual addresses in
+        // different processes must keep matching.
+        current->futex_word_phys = phys_addr;
+
         if (timeout_ms != 0) {
             // Wait queues have no native timeout: arm the tick-driven
             // deadline walker. Round UP to whole ticks and saturate: a
@@ -181,7 +191,16 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
         return 0;
     } else if (op == FUTEX_WAKE) {
         uint64_t flags = spinlock_acquire_irqsave(&bucket->lock);
-        int woken = scheduler_wake_waiters_under_leaf(&bucket->wait_queue, val);
+        // Word-matched wake: the count is spent on waiters parked on this
+        // exact physical word, not on bucket neighbours parked on other
+        // words of the same (or a colliding) page.
+        uint64_t word_phys = phys_addr;
+        int woken = scheduler_wake_waiters_under_leaf(
+            &bucket->wait_queue, val,
+            [](const Process *p, void *ctx) -> bool {
+                return p->futex_word_phys == *static_cast<const uint64_t *>(ctx);
+            },
+            &word_phys);
         spinlock_release_irqrestore(&bucket->lock, flags);
         return woken;
     }

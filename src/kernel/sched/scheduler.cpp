@@ -1022,7 +1022,7 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
     interrupts_restore(flags);
 }
 
-int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count)
+int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count, scheduler_wait_match_fn match, void *ctx)
 {
     if (!q || !q->head)
         return 0;
@@ -1036,6 +1036,10 @@ int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count)
     Process *curr = q->head;
     while (curr && (count == 0 || (uint32_t)woken < count)) {
         Process *next = curr->queue_next;
+        if (match && !match(curr, ctx)) {
+            curr = next;
+            continue;
+        }
         scheduler_wake_process_locked(curr);
         woken++;
         curr = next;

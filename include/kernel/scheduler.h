@@ -80,8 +80,13 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
 // Wake up to `count` waiters from q (count == 0 wakes all), taking g_sched_lock
 // around the whole traversal so signal-driven queue removals cannot interleave.
 // For callers that hold the queue's own leaf lock (futex buckets); the lock
-// order is leaf -> scheduler, matching scheduler_wait.
-int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count);
+// order is leaf -> scheduler, matching scheduler_wait. When `match` is given,
+// only queued waiters it accepts count towards `count` (the walk still skips
+// the rest without waking them) — the futex WAKE path uses this to spend its
+// wake count on the addressed word only.
+typedef bool (*scheduler_wait_match_fn)(const struct Process *p, void *ctx);
+int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count, scheduler_wait_match_fn match = nullptr,
+                                      void *ctx = nullptr);
 void scheduler_wake_all(WaitQueue *q);
 void scheduler_wake_all_locked(WaitQueue *q);
 void scheduler_wake_one(WaitQueue *q);
