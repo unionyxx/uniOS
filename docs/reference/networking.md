@@ -66,6 +66,6 @@ Consequences of sockets not being fds:
 
 ## Configuration
 
-DHCP is the only configuration source; there is no static IP path. `ethernet_enabled` / `ethernet_use_dhcp` in `SYSTEM.CFG` are control-center toggles only — nothing in the kernel or stack reads them, and `net_init()` always runs and always attempts DHCP.
+DHCP is the only configuration source; there is no static IP path. `SYS_NET_STATUS` (extended, `uapi/syscalls_ext.h`) snapshots the live state — ip/netmask/gateway/dns in host order, link state, DHCP-configured flag, and the active NIC kind — for `ifconfig` and the Settings Network tab. `ethernet_enabled` / `ethernet_use_dhcp` in `SYSTEM.CFG` are control-center toggles only — nothing in the kernel or stack reads them, and `net_init()` always runs and always attempts DHCP.
 
 QEMU networking: `run-qemu-net` and `run-qemu-full` attach `-netdev user` with an e1000 device; default run targets have no NIC.
