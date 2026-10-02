@@ -32,10 +32,9 @@ struct RetiredWindowBuffer
 };
 static RetiredWindowBuffer g_retired_window_buffers[GUI_RETIRED_WINDOW_BUFFER_SLOTS] = {};
 static int g_ui_scale_pct = 0;
-static constexpr int k_system_menu_gap_px = 6;
+static constexpr int k_system_menu_gap_px = 0; // dropdown attaches flush to the bar
 static constexpr int k_system_menu_item_h_px = 24;
 static constexpr int k_system_menu_item_count = 8;
-static constexpr int k_system_menu_extra_h_px = 6;
 // Worst-case dropdown: an app menu (MENU_MAX_ITEMS) plus a separator and the
 // menubar-composed Window list. Drives the shared menubar canvas height.
 static constexpr int k_menubar_canvas_max_rows = MENU_MAX_ITEMS + 1 + 8;
@@ -517,9 +516,9 @@ Surface gui_create_surface(uint32_t width, uint32_t height)
         return s;
 
     s.width = width;
+    s.height = height;
     s.capacity_w = width;
     s.capacity_h = height;
-    s.height = height;
     s.buffer = static_cast<uint32_t *>(malloc(size));
     s.owns_buffer = (s.buffer != nullptr);
     if (s.buffer)
@@ -538,9 +537,9 @@ void gui_destroy_surface(Surface *s)
     s->height = 0;
     s->pitch = 0;
     s->owns_buffer = false;
+    s->display_handle = 0;
     s->capacity_w = 0;
     s->capacity_h = 0;
-    s->display_handle = 0;
 }
 
 void gui_draw_pixel(Surface *s, int32_t x, int32_t y, uint32_t color)
@@ -2297,10 +2296,12 @@ int gui_system_menubar_canvas_h(void)
 {
     int menu_item_h = scaled_metric_floor(k_system_menu_item_h_px);
     int menu_gap = scaled_metric_floor(k_system_menu_gap_px);
-    int menu_extra_h = scaled_metric_floor(k_system_menu_extra_h_px);
     int rows =
         k_system_menu_item_count > k_menubar_canvas_max_rows ? k_system_menu_item_count : k_menubar_canvas_max_rows;
-    int total_h = gui_menubar_h() + menu_gap + (menu_item_h * rows) + menu_extra_h;
+    // The space below the menu must hold the whole drop shadow: the canvas
+    // is the dropdown's window, and a shadow clipped at its edge looks cut
+    // off on screen.
+    int total_h = gui_menubar_h() + menu_gap + (menu_item_h * rows) + gui_panel_shadow_pad();
     return total_h;
 }
 
@@ -3179,8 +3180,16 @@ static void draw_popup_checkmark(Surface *s, int x, int y, int size, uint32_t fg
     }
 }
 
-void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
-                             const char *const *accel_labels, const bool *checked_flags)
+void gui_draw_popup_menu_clipped(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count,
+                                 int hovered_index, int32_t clip_x, int32_t clip_y, int32_t clip_w, int32_t clip_h)
+{
+    gui_draw_popup_menu_ext_clipped(s, x, y, w, items, count, hovered_index, nullptr, nullptr, clip_x, clip_y, clip_w,
+                                    clip_h);
+}
+
+void gui_draw_popup_menu_ext_clipped(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count,
+                                     int hovered_index, const char *const *accel_labels, const bool *checked_flags,
+                                     int32_t clip_x, int32_t clip_y, int32_t clip_w, int32_t clip_h)
 {
     if (!s || !items || count <= 0 || w <= 0)
         return;
@@ -3195,7 +3204,7 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
 
     int radius = gui_corner_radius(w, menu_h, gui_radius_xl());
 
-    gui_draw_panel_shadow(s, x, y, w, menu_h, radius);
+    gui_draw_panel_shadow_clipped(s, x, y, w, menu_h, radius, clip_x, clip_y, clip_w, clip_h);
 
     gui_draw_window_frame(s, x, y, w, menu_h, radius, g_gui_style.app_surface);
 
@@ -3248,47 +3257,121 @@ void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem 
     }
 }
 
+void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
+                             const char *const *accel_labels, const bool *checked_flags)
+{
+    gui_draw_popup_menu_ext_clipped(s, x, y, w, items, count, hovered_index, accel_labels, checked_flags, 0, 0, 0, 0);
+}
+
 void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index)
 {
     gui_draw_popup_menu_ext(s, x, y, w, items, count, hovered_index, nullptr, nullptr);
 }
 
+int gui_panel_shadow_pad(void)
+{
+    // Single source of truth for the soft-shadow spread. The WM's damage
+    // math (wm_frame_shadow_offset_*), popup clamping and the shadow itself
+    // must agree on it or moves/resize leave shadow trails.
+    return gui_scaled_metric(16);
+}
+
+void gui_draw_panel_shadow_clipped(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, int32_t clip_x,
+                                   int32_t clip_y, int32_t clip_w, int32_t clip_h)
+{
+    if (!s || !s->buffer || w <= 0 || h <= 0)
+        return;
+    // Soft, symmetric ambient shadow via a rounded-rect distance field.
+    // Only the rim between the silhouette and the padded outer bounds is
+    // touched (the body drawn afterwards covers the interior), and the
+    // falloff is continuous rather than stacked quantized layers — no
+    // banding, and an order of magnitude fewer blend operations than
+    // filling whole translucent rects per layer.
+    const int pad = gui_panel_shadow_pad();
+    if (pad < 1)
+        return;
+    if (r < 0)
+        r = 0;
+    if (r > w / 2)
+        r = w / 2;
+    if (r > h / 2)
+        r = h / 2;
+
+    const int32_t ox = x - pad, oy = y - pad;
+    const int32_t ow = w + pad * 2, oh = h + pad * 2;
+    int32_t ix = ox, iy = oy, iw = ow, ih = oh;
+    if (clip_w > 0 && clip_h > 0) {
+        int32_t cx, cy, cw, ch;
+        if (!gui_intersect_rect(ox, oy, ow, oh, clip_x, clip_y, clip_w, clip_h, &cx, &cy, &cw, &ch))
+            return;
+        ix = cx;
+        iy = cy;
+        iw = cw;
+        ih = ch;
+    }
+    if (ix < 0) {
+        iw += ix;
+        ix = 0;
+    }
+    if (iy < 0) {
+        ih += iy;
+        iy = 0;
+    }
+    if (ix + iw > (int32_t)s->width)
+        iw = (int32_t)s->width - ix;
+    if (iy + ih > (int32_t)s->height)
+        ih = (int32_t)s->height - iy;
+    if (iw <= 0 || ih <= 0)
+        return;
+
+    // macOS-like presence: a visible contact edge that eases into a long
+    // ambient tail — subtle, not obvious. Opaque black as the blend source;
+    // the per-pixel coverage carries the alpha (gui_blend_pixel scales
+    // src_a by coverage, so a zero-alpha src would be a no-op).
+    const uint32_t max_alpha = gui_theme_is_light() ? 0x48u : 0x55u;
+    const float half_w = (float)w * 0.5f;
+    const float half_h = (float)h * 0.5f;
+    const float cxr = (float)x + half_w;
+    const float cyr = (float)y + half_h;
+    const float fr = (float)r;
+    const float fpad = (float)pad;
+    const uint32_t stride = s->pitch / 4;
+
+    for (int32_t py = iy; py < iy + ih; py++) {
+        uint32_t *row = &s->buffer[(size_t)py * stride];
+        // Sample at pixel CENTERS: the rect boundary sits at x+w (exclusive),
+        // so integer sampling classifies the first outside pixel on
+        // right/bottom as interior (dist==0) and clips its shadow, while
+        // left/top keep theirs — an asymmetric 1-px transparent band.
+        const float qy = fabsf((float)py + 0.5f - cyr) - (half_h - fr);
+        for (int32_t px = ix; px < ix + iw; px++) {
+            const float qx = fabsf((float)px + 0.5f - cxr) - (half_w - fr);
+            // Rounded-rect signed distance (negative inside the silhouette):
+            // length(max(q,0)) + min(max(qx,qy),0) - radius. The clamped
+            // form used here yields identical outside distances.
+            const float ax = qx > 0.0f ? qx : 0.0f;
+            const float ay = qy > 0.0f ? qy : 0.0f;
+            const float out = (ax > ay ? ax : ay);
+            const float dist = sqrtf(ax * ax + ay * ay) + (out < 0.0f ? out : 0.0f) - fr;
+            if (dist <= 0.0f)
+                continue; // interior: the body covers it
+            if (dist >= fpad)
+                continue; // beyond the spread
+            const float t = dist / fpad;
+            // (1-t)^1.5: keeps a modest contact band for the first few
+            // pixels, then a gradual tail to the spread edge.
+            const float f = 1.0f - t;
+            const uint32_t a = (uint32_t)((float)max_alpha * f * sqrtf(f) + 0.5f);
+            if (a == 0)
+                continue;
+            row[px] = gui_blend_pixel(row[px], 0xFF000000u, (uint8_t)a);
+        }
+    }
+}
+
 void gui_draw_panel_shadow(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r)
 {
-    if (!s || w <= 0 || h <= 0)
-        return;
-    // Soft, symmetric ambient shadow. It does the heavy lifting for separation so
-    // the 1-px edge stroke can stay a faint hairline. Many 1-px concentric
-    // rounded rects, each a little larger and equally faint, accumulate into a
-    // smooth falloff that spreads equally on all four sides — no hard banding and
-    // no separate corner arcs. The accumulated darkness right at the edge is set
-    // by the total alpha budget (many faint layers compound), so shrinking `pad`
-    // makes the shadow fall off sooner (visually shorter) without weakening the
-    // edge.
-    int pad = gui_scaled_metric(12);
-    if (pad < 1)
-        pad = 1;
-    // A few wide layers, not one per pixel: this runs on every decoration-cache
-    // rebuild (e.g. while an app is launching), so keep it cheap. Each layer
-    // spans several pixels; the equal per-layer alpha still compounds into a
-    // smooth falloff.
-    int layers = pad / 2;
-    if (layers < 3)
-        layers = 3;
-    if (layers > 8)
-        layers = 8;
-    // Alpha budget per theme; divided over the layers so the edge strength stays
-    // constant regardless of how many layers there are.
-    uint32_t per_layer = gui_theme_is_light() ? 0x33u : 0x45u;
-    per_layer = per_layer / (uint32_t)layers;
-    if (per_layer == 0)
-        per_layer = 1;
-    uint32_t alpha = per_layer << 24;
-
-    for (int i = layers; i >= 1; i--) {
-        int spread = pad * i / layers;
-        gui_fill_rounded_rect(s, x - spread, y - spread, w + spread * 2, h + spread * 2, r + spread, alpha);
-    }
+    gui_draw_panel_shadow_clipped(s, x, y, w, h, r, 0, 0, 0, 0);
 }
 
 uint32_t gui_window_outer_stroke_color(void)

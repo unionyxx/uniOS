@@ -406,11 +406,26 @@ int gui_popup_menu_hit_test(const GuiMenuItem *items, int count, int x, int y, i
 void gui_draw_popup_menu(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index);
 void gui_draw_popup_menu_ext(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count, int hovered_index,
                              const char *const *accel_labels, const bool *checked_flags);
+// Compositor-safe variant: the translucent shadow is blended only inside the
+// clip rect. Overlay redraws run once per damage rect; an unclipped shadow
+// re-blends over pixels a previous rect already shadowed and darkens further
+// with every extra rect (cursor movement, hover). Menu body and items are
+// opaque and therefore safe unclipped.
+void gui_draw_popup_menu_clipped(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count,
+                                 int hovered_index, int32_t clip_x, int32_t clip_y, int32_t clip_w, int32_t clip_h);
+void gui_draw_popup_menu_ext_clipped(Surface *s, int x, int y, int w, const GuiMenuItem *items, int count,
+                                     int hovered_index, const char *const *accel_labels, const bool *checked_flags,
+                                     int32_t clip_x, int32_t clip_y, int32_t clip_w, int32_t clip_h);
 
 // Canonical drop shadow for floating panels (popups, dialogs, shell
-// overlays): three stacked rounded fills below the panel. Draw it before the
-// panel itself.
+// overlays): a rounded-rect distance-field falloff below/around the panel.
+// Draw it before the panel itself. Compositors redrawing into a dirty rect
+// must use the _clipped variant — the shadow is translucent, so an unclipped
+// redraw accumulates.
+int gui_panel_shadow_pad(void);
 void gui_draw_panel_shadow(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r);
+void gui_draw_panel_shadow_clipped(Surface *s, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, int32_t clip_x,
+                                   int32_t clip_y, int32_t clip_w, int32_t clip_h);
 
 // Modal dialog: scrim + shadow + panel + card header + body lines (or a text
 // field) + footer buttons. gui_dialog_layout computes every rect (panel width

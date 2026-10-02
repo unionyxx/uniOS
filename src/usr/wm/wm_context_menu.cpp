@@ -104,7 +104,7 @@ void open_context_menu(const Registry *registry, ContextMenuKind kind, int targe
     // Clamp inside the visible screen, keeping the symmetric popup shadow
     // (gui_draw_panel_shadow pad) inside bounds and the menu below the
     // menubar so it never covers shell chrome.
-    int shadow = gui_scaled_metric(12);
+    int shadow = gui_panel_shadow_pad();
     if (g_context_menu.x + g_context_menu.w + shadow > (int)g_screen.width)
         g_context_menu.x = g_screen.width - g_context_menu.w - shadow;
     if (g_context_menu.y + g_context_menu.h + shadow > (int)g_screen.height)
@@ -208,9 +208,9 @@ DirtyRect context_menu_bounds()
 {
     if (!g_context_menu.open)
         return {0, 0, 0, 0};
-    // Symmetric: gui_draw_panel_shadow spreads gui_scaled_metric(12) on all
+    // Symmetric: gui_draw_panel_shadow spreads gui_panel_shadow_pad() on all
     // four sides of the popup, so the damage/menubar-bounds rect must too.
-    int pad = gui_scaled_metric(12);
+    int pad = gui_panel_shadow_pad();
     return {g_context_menu.x - pad, g_context_menu.y - pad, g_context_menu.w + pad * 2, g_context_menu.h + pad * 2};
 }
 
@@ -235,6 +235,6 @@ void draw_context_menu_overlay_clipped(const DirtyRect &clip, const Registry *re
     GuiMenuItem items[8];
     int count = build_context_menu_items(registry, items, 8);
     if (count > 0)
-        gui_draw_popup_menu(&g_backbuffer, g_context_menu.x, g_context_menu.y, g_context_menu.w, items, count,
-                            g_context_menu.hovered_index);
+        gui_draw_popup_menu_clipped(&g_backbuffer, g_context_menu.x, g_context_menu.y, g_context_menu.w, items, count,
+                                    g_context_menu.hovered_index, clip.x, clip.y, clip.w, clip.h);
 }

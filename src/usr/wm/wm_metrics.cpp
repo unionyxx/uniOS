@@ -21,7 +21,9 @@ void refresh_wm_metrics()
     // the outline is one razor-thin semi-transparent stroke (no inner rim).
     g_metrics.frame_body_inset = g_metrics.frame_border;
     // Symmetric shadow pad: the soft shadow spreads equally on all four sides.
-    int shadow_pad = gui_scaled_metric(12);
+    // Must match gui_panel_shadow_pad() (libgui) exactly — the WM's damage
+    // math is derived from this value.
+    int shadow_pad = gui_panel_shadow_pad();
     if (shadow_pad < 1)
         shadow_pad = 1;
     g_metrics.frame_shadow_offset_x = shadow_pad;

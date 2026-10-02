@@ -143,7 +143,9 @@ static inline int menu_x()
 }
 static inline int menu_gap()
 {
-    return gui_space_1();
+    // Flush attachment: the dropdown hangs directly off the bar, so the
+    // shadow wraps sides and bottom only — no gap, no top shadow.
+    return 0;
 }
 static inline int menu_y()
 {
@@ -690,13 +692,35 @@ static void request_system_power_action(Registry *reg, int syscall_number)
     syscall0(syscall_number);
 }
 
+// A dropdown's damage must cover the shadow rim (left/right/bottom) or the
+// partial-redraw clear/copy paths leave the rim stale on the shared canvas.
+static Rect menubar_menu_shadow_rect(const Rect &menu_rect)
+{
+    int pad = gui_panel_shadow_pad();
+    return Rect{menu_rect.x - pad, menu_rect.y, menu_rect.w + pad * 2, menu_rect.h + pad};
+}
+
+// A menubar dropdown hangs directly off the bar: the shadow starts at the
+// menu's top edge (clip_y = menu top), not above it, so it never darkens the
+// bar itself — the macOS attached-menu look.
+static void menubar_menu_clip(int menu_y0, int32_t *cx, int32_t *cy, int32_t *cw, int32_t *ch, const Surface *canvas)
+{
+    *cx = 0;
+    *cy = menu_y0;
+    *cw = (int32_t)canvas->width;
+    *ch = (int32_t)canvas->height - menu_y0;
+}
+
 void draw_menu(Surface *canvas, Registry *reg, int mx, int my)
 {
     SystemMenuModel model = build_system_menu_model(reg);
     int menu_x0 = menu_x();
     int menu_y0 = menu_y();
     int hovered_index = gui_popup_menu_hit_test(model.items, model.count, menu_x0, menu_y0, model.width, mx, my);
-    gui_draw_popup_menu(canvas, menu_x0, menu_y0, model.width, model.items, model.count, hovered_index);
+    int32_t cx, cy, cw, ch;
+    menubar_menu_clip(menu_y0, &cx, &cy, &cw, &ch, canvas);
+    gui_draw_popup_menu_clipped(canvas, menu_x0, menu_y0, model.width, model.items, model.count, hovered_index, cx, cy,
+                                cw, ch);
 }
 
 void draw_menubar(Surface *canvas, Registry *reg)
@@ -807,7 +831,10 @@ void draw_menubar(Surface *canvas, Registry *reg)
             int bx = g_app_menu_btn_x[g_open_app_menu];
             int hovered = gui_popup_menu_hit_test(d.items, d.count, bx, menu_y(), d.width, pointer_local_x(reg),
                                                   pointer_local_y(reg));
-            gui_draw_popup_menu_ext(canvas, bx, menu_y(), d.width, d.items, d.count, hovered, d.accel_ptrs, d.checked);
+            int32_t cx, cy, cw, ch;
+            menubar_menu_clip(menu_y(), &cx, &cy, &cw, &ch, canvas);
+            gui_draw_popup_menu_ext_clipped(canvas, bx, menu_y(), d.width, d.items, d.count, hovered, d.accel_ptrs,
+                                            d.checked, cx, cy, cw, ch);
         }
     }
 }
@@ -1048,14 +1075,14 @@ extern "C" int main(int argc, char **argv)
                 Rect hover_rect;
                 if (g_menu_open) {
                     SystemMenuModel model = build_system_menu_model(registry);
-                    hover_rect = Rect{menu_x(), menu_y(), model.width, model.height};
+                    hover_rect = menubar_menu_shadow_rect(Rect{menu_x(), menu_y(), model.width, model.height});
                 } else if (g_open_app_menu >= 0) {
                     hover_rect = {0, 0, (int)screen_w, menubar_h()};
                     ComposedAppMenus &cm = compose_app_menus(registry);
                     if (cm.valid && g_open_app_menu < cm.count) {
                         AppMenuDropdown &d = cm.menus[g_open_app_menu];
                         Rect dd = {g_app_menu_btn_x[g_open_app_menu], menu_y(), d.width, d.height};
-                        hover_rect = gui_rect_union(hover_rect, dd);
+                        hover_rect = gui_rect_union(hover_rect, menubar_menu_shadow_rect(dd));
                     }
                 } else {
                     // Damage both the old and new hover targets; the logo and
@@ -1082,8 +1109,9 @@ extern "C" int main(int argc, char **argv)
             }
             if (clicked || menu_state_changed) {
                 SystemMenuModel model = build_system_menu_model(registry);
-                Rect menu_rect = gui_rect_union({logo_x(), logo_y(), logo_w(), logo_h()},
-                                                {menu_x(), menu_y(), model.width, model.height});
+                Rect menu_rect =
+                    gui_rect_union({logo_x(), logo_y(), logo_w(), logo_h()},
+                                   menubar_menu_shadow_rect({menu_x(), menu_y(), model.width, model.height}));
                 dirty = has_dirty ? gui_rect_union(dirty, menu_rect) : menu_rect;
                 has_dirty = true;
             }
@@ -1095,7 +1123,7 @@ extern "C" int main(int argc, char **argv)
                 if (cm.valid) {
                     for (int j = 0; j < cm.count; j++) {
                         Rect dd = {g_app_menu_btn_x[j], menu_y(), cm.menus[j].width, cm.menus[j].height};
-                        dirty = gui_rect_union(dirty, dd);
+                        dirty = gui_rect_union(dirty, menubar_menu_shadow_rect(dd));
                     }
                 }
             }
@@ -1111,14 +1139,14 @@ extern "C" int main(int argc, char **argv)
                 if (g_menu_open) {
                     SystemMenuModel model = build_system_menu_model(registry);
                     Rect menu_rect = {menu_x(), menu_y(), model.width, model.height};
-                    dirty = gui_rect_union(dirty, menu_rect);
+                    dirty = gui_rect_union(dirty, menubar_menu_shadow_rect(menu_rect));
                 }
                 if (g_open_app_menu >= 0) {
                     ComposedAppMenus &cm = compose_app_menus(registry);
                     if (cm.valid && g_open_app_menu < cm.count) {
                         AppMenuDropdown &d = cm.menus[g_open_app_menu];
                         Rect dd = {g_app_menu_btn_x[g_open_app_menu], menu_y(), d.width, d.height};
-                        dirty = gui_rect_union(dirty, dd);
+                        dirty = gui_rect_union(dirty, menubar_menu_shadow_rect(dd));
                     }
                 }
             }

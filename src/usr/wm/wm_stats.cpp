@@ -208,7 +208,7 @@ void draw_stats_overlay_clipped(const DirtyRect &clip)
     display_get_status(&status);
 
     int radius = gui_radius_xl();
-    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
+    gui_draw_panel_shadow_clipped(&g_backbuffer, box.x, box.y, box.w, box.h, radius, clip.x, clip.y, clip.w, clip.h);
     gui_draw_window_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface);
 
     const GuiFont *mono = gui_font_mono();

@@ -216,7 +216,8 @@ void draw_storage_prompt_overlay_clipped(const DirtyRect &clip)
 
     int box_r = gui_radius_xl();
 
-    gui_draw_panel_shadow(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r);
+    gui_draw_panel_shadow_clipped(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r, clip.x,
+                                  clip.y, clip.w, clip.h);
 
     gui_draw_window_frame(&g_backbuffer, layout.box.x, layout.box.y, layout.box.w, layout.box.h, box_r,
                           g_gui_style.app_surface);

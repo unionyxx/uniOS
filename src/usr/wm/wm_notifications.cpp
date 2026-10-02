@@ -46,7 +46,8 @@ void wm_push_notification(const char *title, const char *message)
     int toast_x = g_screen.width - toast_w - margin;
     int toast_y = wm_menubar_h() + margin;
 
-    enqueue_damage_rect(toast_x - 16, toast_y - 16, toast_w + 32, toast_h + 32);
+    int shadow_pad = gui_panel_shadow_pad();
+    enqueue_damage_rect(toast_x - shadow_pad, toast_y - shadow_pad, toast_w + shadow_pad * 2, toast_h + shadow_pad * 2);
 }
 
 void wm_pump_notification_expiry(void)
@@ -72,7 +73,7 @@ void wm_pump_notification_expiry(void)
                                toast_w, toast_h};
         // Match the expansion used when the toast is drawn so the whole
         // shadow region is repainted at any UI scale.
-        DirtyRect expired_rect = rect_expand(toast_box, gui_scaled_metric(14));
+        DirtyRect expired_rect = rect_expand(toast_box, gui_panel_shadow_pad());
         enqueue_damage_rect(expired_rect.x, expired_rect.y, expired_rect.w, expired_rect.h);
     }
 }
@@ -134,7 +135,7 @@ void draw_toast_overlay_clipped(const DirtyRect &clip)
     int toast_y = wm_menubar_h() + margin;
 
     DirtyRect toast_box = {toast_x, toast_y, toast_w, toast_h};
-    DirtyRect damage = rect_expand(toast_box, gui_scaled_metric(14));
+    DirtyRect damage = rect_expand(toast_box, gui_panel_shadow_pad());
 
     if (!rect_intersection(clip, damage, nullptr))
         return;
@@ -166,7 +167,8 @@ void draw_toast_overlay_clipped(const DirtyRect &clip)
 
     int radius = gui_radius_xl();
 
-    gui_draw_panel_shadow(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius);
+    gui_draw_panel_shadow_clipped(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius, clip.x,
+                                  clip.y, clip.w, clip.h);
 
     gui_draw_window_frame(&g_backbuffer, toast_box.x, toast_box.y, toast_box.w, toast_box.h, radius,
                           g_gui_style.app_surface);
@@ -189,7 +191,7 @@ void draw_notification_center_clipped(const DirtyRect &clip, int start_y)
 
     int radius = gui_radius_xl();
 
-    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
+    gui_draw_panel_shadow_clipped(&g_backbuffer, box.x, box.y, box.w, box.h, radius, clip.x, clip.y, clip.w, clip.h);
     // Draw the frame without the light rim, then the header, then the rim on top,
     // so the rim stays visible along the top edge instead of being buried under
     // the header fill.

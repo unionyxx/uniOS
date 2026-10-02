@@ -433,7 +433,7 @@ void draw_control_center_overlay_clipped(const DirtyRect &clip)
 
     int radius = cc_radius();
 
-    gui_draw_panel_shadow(&g_backbuffer, box.x, box.y, box.w, box.h, radius);
+    gui_draw_panel_shadow_clipped(&g_backbuffer, box.x, box.y, box.w, box.h, radius, clip.x, clip.y, clip.w, clip.h);
 
     // Panel surface: the window outline recipe (opaque body + 1 px hairline).
     gui_draw_window_frame(&g_backbuffer, box.x, box.y, box.w, box.h, radius, g_gui_style.app_surface);
