@@ -1950,6 +1950,34 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     // the whole user range everywhere before the child becomes runnable.
     vmm_invalidate_tlb_range(0, 0x0000800000000000ULL / 4096ULL);
 
+    // The child keeps the parent's COW'd TLS block (thread-local values must
+    // survive fork), but the inherited control block still names the forking
+    // thread's pid. Break that page private for the child and write the
+    // child's own tid, mirroring the COW fault handler's refcount idiom.
+    // Under the parent's vma lock like the clone: a concurrent fault on the
+    // same frame would race the refcount. A failed patch degrades the
+    // child's pthread_self until exec, it does not crash.
+    if (child->fs_base != 0) {
+        const uint64_t tcb_lock = spinlock_acquire_irqsave(current_proc()->vma_lock_ptr);
+        const uint64_t tcb_page = child->fs_base & ~0xFFFULL;
+        const uint64_t shared_frame = vmm_virt_to_phys_in(child->page_table, tcb_page);
+        void *fresh_frame = shared_frame != 0 ? pmm_alloc_frame() : nullptr;
+        if (fresh_frame) {
+            kstring::copy_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(fresh_frame))),
+                                 reinterpret_cast<void *>(vmm_phys_to_virt(shared_frame)), 4096);
+            const uint64_t tcb_flags = vmm_get_page_flags_in(child->page_table, tcb_page) | PTE_WRITABLE;
+            if (vmm_replace_page_in(child->page_table, tcb_page, reinterpret_cast<uint64_t>(fresh_frame), tcb_flags).ok()) {
+                pmm_refcount_dec(reinterpret_cast<void *>(shared_frame));
+                UniTcb *tcb = reinterpret_cast<UniTcb *>(
+                    vmm_phys_to_virt(reinterpret_cast<uint64_t>(fresh_frame)) + (child->fs_base & 0xFFFULL));
+                tcb->tid = child->pid;
+            } else {
+                pmm_free_frame(fresh_frame);
+            }
+        }
+        spinlock_release_irqrestore(current_proc()->vma_lock_ptr, tcb_lock);
+    }
+
     spinlock_init(&child->vma_lock);
     child->vma_lock_ptr = &child->vma_lock;
     uint64_t vma_clone_flags = spinlock_acquire_irqsave(current_proc()->vma_lock_ptr);
