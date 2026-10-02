@@ -32,10 +32,17 @@ void net_set_dns(uint32_t dns);
 bool net_is_configured();
 bool net_link_up();
 uint8_t net_get_nic(); // NET_NIC_* from the uapi
+bool net_init_done();
 
-// Extended syscall implementation (user pointer validated inside):
+// Renew guard: test-and-set pair around the blocking dhcp_request() call.
+// No lock is held across the call itself (it polls and yields).
+bool net_renew_begin();
+void net_renew_end();
+
+// Extended syscall implementations (user pointers validated inside):
 // fills *out from the live configuration; returns 0 or -errno.
 int64_t sys_net_status(NetStatus *out);
+int64_t sys_net_renew(void);
 
 // Unified NIC access (for lower layers)
 bool net_send_raw(const void *data, uint16_t length);

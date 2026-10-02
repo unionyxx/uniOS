@@ -3218,6 +3218,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_PING:
             return static_cast<uint64_t>(
                 sys_ping(static_cast<uint32_t>(arg1), static_cast<uint32_t>(arg2), reinterpret_cast<uint32_t *>(arg3)));
+        case SYS_NET_RENEW:
+            return static_cast<uint64_t>(sys_net_renew());
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

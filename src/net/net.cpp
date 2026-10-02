@@ -18,6 +18,14 @@
 // Global network configuration
 static NetConfig g_net_config = {0, 0, 0, 0, false};
 
+// Set when the deferred net_init() task has run (even if no NIC was found).
+static bool g_net_init_done = false;
+
+// Renew-in-flight guard for SYS_NET_RENEW. dhcp_request() blocks and polls,
+// so no spinlock may be held across it; the irq.cpp stop-initiated idiom
+// (atomic test-and-set) serializes concurrent callers instead.
+static bool g_renew_in_progress = false;
+
 // Active NIC type
 enum NicType
 {
@@ -120,6 +128,7 @@ bool net_init()
         DEBUG_INFO("net: using Realtek RTL8139 driver");
     } else {
         DEBUG_WARN("net: no supported NIC found, network disabled");
+        g_net_init_done = true;
         return false;
     }
 
@@ -148,6 +157,7 @@ bool net_init()
         }
     }
 
+    g_net_init_done = true;
     return true;
 }
 
@@ -269,6 +279,37 @@ int64_t sys_net_status(NetStatus *out)
     const bool ok = safe_copy_to_user(out, &status, sizeof(status));
     KCLAC();
     return ok ? 0 : -14; // -EFAULT
+}
+
+bool net_init_done()
+{
+    return g_net_init_done;
+}
+
+bool net_renew_begin()
+{
+    bool expected = false;
+    return __atomic_compare_exchange_n(&g_renew_in_progress, &expected, true, false, __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE);
+}
+
+void net_renew_end()
+{
+    __atomic_store_n(&g_renew_in_progress, false, __ATOMIC_RELEASE);
+}
+
+int64_t sys_net_renew(void)
+{
+    if (!g_net_init_done)
+        return -11; // -EAGAIN: net_init() has not completed
+    if (g_active_nic == NIC_NONE)
+        return -19; // -ENODEV
+    if (!net_renew_begin())
+        return -16; // -EBUSY: a renew is already in flight
+
+    const bool ok = dhcp_request();
+    net_renew_end();
+    return ok ? 0 : -100; // -ENETDOWN: DHCP exchange failed
 }
 
 // Export unified NIC functions for use by other modules

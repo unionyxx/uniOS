@@ -98,3 +98,18 @@ KTEST(net_syscall_socket_state_reports_closed_tcp)
     // After close the slot is reset; the handle decodes to an unused slot.
     KTEST_EXPECT_EQ(sys_socket_state(handle), static_cast<int64_t>(-9));
 }
+
+KTEST(net_syscall_renew_gated_before_init)
+{
+    // ktest context: deferred services (net_init) have not run yet.
+    KTEST_EXPECT_EQ(sys_net_renew(), static_cast<int64_t>(-11)); // -EAGAIN
+}
+
+KTEST(net_renew_guard_rejects_double_entry)
+{
+    KTEST_EXPECT(net_renew_begin());
+    KTEST_EXPECT(!net_renew_begin()); // second entry while in flight
+    net_renew_end();
+    KTEST_EXPECT(net_renew_begin()); // guard released, entry works again
+    net_renew_end();
+}
