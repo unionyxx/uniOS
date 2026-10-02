@@ -135,8 +135,22 @@ static void process_release_reaped_fds(Process *target)
 // table, VMA list object or embedded vma lock is still referenced by a
 // live process is parked on the deferred list and returns false; the
 // caller may only free the target once true.
+//
+// Threads borrow the leader's page table, VMA list object and vma lock:
+// the leader (vma_lock_ptr aimed at its own embedded lock) owns those
+// resources and is the only member that may free them. A reaped thread
+// is classified freeable unconditionally - process_free_now releases
+// only its kernel stack and struct for it. Deferring a thread would hide
+// it from the owner's share scan (deferred entries have already left
+// g_proc_list), so the owner would tear the shared address space down
+// while the deferred entry still holds - and later re-frees - those very
+// pointers.
 static bool process_reap_classify_locked(Process *target)
 {
+    const bool owns_address_space = target->vma_lock_ptr == &target->vma_lock;
+    if (!owns_address_space)
+        return true;
+
     bool share_page_table = false;
     bool share_vma_list = false;
     bool share_vma_lock = false;
@@ -177,8 +191,12 @@ static bool process_reap_classify_locked(Process *target)
 }
 
 // Free a classified-unshared reaped target. Runs with no scheduler lock.
+// Non-owners (threads) release only their kernel stack and struct: the
+// page table and VMA list object belong to the group leader.
 static void process_free_now(Process *target)
 {
+    const bool owns_address_space = target->vma_lock_ptr == &target->vma_lock;
+
     if (target->stack_phys) {
         uintptr_t stack_ptr = target->stack_phys;
         size_t num_pages = KERNEL_STACK_SIZE / 4096;
@@ -189,12 +207,14 @@ static void process_free_now(Process *target)
         }
     }
 
-    if (target->page_table)
-        vmm_free_address_space(target->page_table);
-    if (target->vmalist) {
-        vma_free_all(target->vmalist->head);
-        vma_list_free(target->vmalist);
-        target->vmalist = nullptr;
+    if (owns_address_space) {
+        if (target->page_table)
+            vmm_free_address_space(target->page_table);
+        if (target->vmalist) {
+            vma_free_all(target->vmalist->head);
+            vma_list_free(target->vmalist);
+            target->vmalist = nullptr;
+        }
     }
 
     aligned_free(target);
@@ -1390,6 +1410,8 @@ void scheduler_init()
     kproc->priority = 2;
     kproc->fdtab = fd_table_alloc();
     kproc->vmalist = vma_list_alloc();
+    spinlock_init(&kproc->vma_lock);
+    kproc->vma_lock_ptr = &kproc->vma_lock;
 
     init_fpu_state(kproc->fpu_state);
     kproc->fpu_initialized = true;
