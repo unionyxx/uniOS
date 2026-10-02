@@ -49,9 +49,10 @@ All run targets boot `boot.img` in QEMU unless noted. The QEMU machine is `q35` 
 
 | Target | Description |
 | --- | --- |
-| `run` | Standard graphical run |
-| `run-serial` | Serial console on stdio |
-| `run-headless` | No VGA output, serial on stdio |
+| `run` | Standard graphical run, with slirp user networking + e1000 |
+| `run-serial` | Serial console on stdio, networked |
+| `run-headless` | No VGA output, serial on stdio, no NIC (the smoke suite's target) |
+| `run-qemu` | NIC-free graphical run |
 | `run-usb` | xHCI controller with USB keyboard and mouse |
 | `run-qemu-net` | User-mode networking with an e1000 NIC |
 | `run-qemu-full` | USB devices + network + serial |

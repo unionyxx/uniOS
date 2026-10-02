@@ -31,15 +31,24 @@ meson test -C build/debug --suite smoke-smp4    # 4 cores; also requires "SMP sc
 meson compile -C build/debug smp-soak           # repeated 4-core boots, sessions held briefly
 ```
 
+The network suite boots with slirp user networking and is a real E2E exercise of the stack:
+
+```sh
+meson test -C build/debug --suite smoke-net
+```
+
+`tools/smoke_net.py` starts a host-side `http.server` on `127.0.0.1:8931` (slirp maps the guest's `10.0.2.2` to host loopback), boots the debug image with an e1000 NIC, and asserts the debug net self-test summary line printed after `net_init()`: `arp=PASS` (slirp answers ARP for the gateway), `ping=PASS` (slirp answers ICMP echo), and `http=PASS` (the self-test downloads `/hello.txt` over TCP and checks the marker bytes). The DNS leg is informational — host-resolver dependent — and never gates. Net markers exist only in debug builds, so in a release tree the suite reduces to the desktop-frame marker.
+
 Timeouts scale with the machine: Linux without KVM access runs under TCG with much larger budgets (CI grants the runner KVM access and falls back to TCG when `/dev/kvm` is unusable).
 
 ## What to Run When
 
 - **Boot / kernel start / display / init changes**: must boot in QEMU (serial + graphical) and pass the smoke suite.
 - **Storage / `/data` changes**: exercise a path that mounts the FAT32 `UNI_DATA` volume (the default `boot.img` run does this).
+- **Network stack changes**: `--suite smoke-net` (DHCP, ARP, ICMP, TCP download E2E).
 - **Scheduler / SMP changes**: the SMP suites, plus `smp-soak` for scheduling work.
 - **Anything touching docs build**: `meson compile -C build/debug wiki` (strict link checking fails on broken references).
 
 ## CI
 
-`.github/workflows/ci.yml` builds debug and release, runs the smoke suite on the debug image, then lint (cppcheck) and a format check (`git diff --exit-code` after `format`). Lint and format are continue-on-error; keep the tree format-clean locally.
+`.github/workflows/ci.yml` builds debug and release, runs the smoke suite and the smoke-net suite on the debug image, then lint (cppcheck) and a format check (`git diff --exit-code` after `format`). Lint and format are continue-on-error; keep the tree format-clean locally.

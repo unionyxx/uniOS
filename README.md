@@ -69,8 +69,8 @@ meson test -C build/debug --suite smoke --print-errorlogs
 ## Running
 
 ```bash
-meson compile -C build/release run             # standard QEMU run
-meson compile -C build/release run-serial      # with serial console
+meson compile -C build/release run             # standard QEMU run (networked)
+meson compile -C build/release run-serial      # with serial console (networked)
 meson compile -C build/release run-headless    # without VGA output
 meson compile -C build/release run-usb         # USB storage boot
 meson compile -C build/release run-qemu-net    # with network devices
