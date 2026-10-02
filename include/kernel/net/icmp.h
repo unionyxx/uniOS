@@ -20,8 +20,15 @@ struct IcmpHeader
 // ICMP functions
 void icmp_init();
 void icmp_receive(const void *data, uint16_t length, uint32_t src_ip);
-bool icmp_send_echo_request(uint32_t dst_ip, uint16_t id, uint16_t seq);
 
-// Ping callback
-typedef void (*ping_callback_t)(uint32_t src_ip, uint16_t seq, uint16_t rtt_ms, bool success);
-void icmp_set_ping_callback(ping_callback_t callback);
+// Ping ring backing SYS_PING. The ring holds up to 8 outstanding echo
+// probes matched by (identifier, sequence); sys_ping claims a slot, sends
+// the echo, and polls icmp_ping_result while pumping net_poll().
+bool icmp_ping_claim(uint16_t *id, uint16_t *seq);                  // false: ring full
+bool icmp_ping_result(uint16_t id, uint16_t seq, uint32_t *rtt_ms); // true: REPLIED
+void icmp_ping_release(uint16_t id, uint16_t seq);                  // slot back to UNUSED
+uint32_t icmp_rtt_ms(uint64_t sent_ticks, uint64_t now_ticks);
+
+// Extended syscall implementation (user pointer validated inside):
+// one blocking echo probe; 0 + *rtt_ms, or -errno.
+int64_t sys_ping(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms);

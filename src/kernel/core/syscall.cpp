@@ -19,7 +19,9 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/net/dhcp.h>
 #include <kernel/net/dns.h>
+#include <kernel/net/icmp.h>
 #include <kernel/net/net.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
@@ -3213,6 +3215,9 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return static_cast<uint64_t>(sys_net_status(reinterpret_cast<NetStatus *>(arg1)));
         case SYS_SOCKET_STATE:
             return static_cast<uint64_t>(sys_socket_state(arg1));
+        case SYS_PING:
+            return static_cast<uint64_t>(
+                sys_ping(static_cast<uint32_t>(arg1), static_cast<uint32_t>(arg2), reinterpret_cast<uint32_t *>(arg3)));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

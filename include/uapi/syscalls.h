@@ -118,6 +118,7 @@
 /* Network status (extended: return negative errno). */
 #define SYS_NET_STATUS 293
 #define SYS_SOCKET_STATE 294
+#define SYS_PING 295
 
 /* Futex Opcodes */
 #define FUTEX_WAIT 0
