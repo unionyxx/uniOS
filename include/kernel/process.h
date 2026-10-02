@@ -33,8 +33,8 @@ constexpr size_t FPU_STATE_SIZE = 4096; // Increased to 4K for safety
 // Shared, refcounted-by-lifetime VMA list. Threads share the leader's list
 // object live (the head field is shared, so unlinking the first node is
 // visible to every member); fork clones the list into a fresh object (COW).
-// Lifetime follows the existing deferred-free rules in the scheduler
-// (compare vmalist pointers), like page tables.
+// Lifetime: the leader owns the list and frees it once no live member
+// shares it (the scheduler's deferred-free rules); threads never free it.
 struct VmaList
 {
     VMA *head;
