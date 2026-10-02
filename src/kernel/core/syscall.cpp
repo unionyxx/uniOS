@@ -2068,11 +2068,14 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             Process *p = process_get_current();
             if (!p)
                 return static_cast<uint64_t>(-1);
+            if (!munmap_process_range(p, arg1, static_cast<size_t>(arg2))) {
 #ifdef DEBUG
-            DEBUG_WARN("munmap: pid=%llu addr=0x%llx len=0x%llx", (unsigned long long)p->pid, (unsigned long long)arg1,
-                       (unsigned long long)arg2);
+                DEBUG_WARN("munmap failed: pid=%llu(%s) addr=0x%llx len=0x%llx", (unsigned long long)p->pid, p->name,
+                           (unsigned long long)arg1, (unsigned long long)arg2);
 #endif
-            return munmap_process_range(p, arg1, static_cast<size_t>(arg2)) ? 0 : static_cast<uint64_t>(-1);
+                return static_cast<uint64_t>(-1);
+            }
+            return 0;
         }
         case SYS_DISPLAY_GET_CAPS: {
             if (!validate_user_ptr(reinterpret_cast<void *>(arg1), sizeof(DisplayCaps), true))
