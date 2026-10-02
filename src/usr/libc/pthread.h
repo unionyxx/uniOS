@@ -29,6 +29,7 @@ void pthread_exit(void *retval) __attribute__((noreturn));
 int pthread_detach(pthread_t thread);
 
 pthread_t pthread_self(void);
+
 /* ---- Mutex: one word. 0 = unlocked, 1 = locked, 2 = locked with waiters.
  * The all-zero encoding makes a zero-initialized object a valid unlocked
  * mutex. attr is ignored in this sprint. */
@@ -43,6 +44,7 @@ int pthread_mutex_init(pthread_mutex_t *mutex, const void *attr);
 int pthread_mutex_lock(pthread_mutex_t *mutex);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
 int pthread_mutex_trylock(pthread_mutex_t *mutex);
+
 /* ---- Condvar: a sequence counter. Waiters record the counter, release the
  * mutex and futex-wait on the recorded value; every signal bumps the
  * counter, so a waiter that has not parked yet re-validates instead of
@@ -62,6 +64,7 @@ int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
 int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, uint64_t timeout_ms);
 int pthread_cond_signal(pthread_cond_t *cond);
 int pthread_cond_broadcast(pthread_cond_t *cond);
+
 /* ---- Once: 0 = not run, 1 = initializer running, 2 = done. init runs
  * exactly once no matter how many threads race here. */
 typedef volatile uint32_t pthread_once_t;
@@ -69,3 +72,24 @@ typedef volatile uint32_t pthread_once_t;
 #define PTHREAD_ONCE_INIT 0
 
 int pthread_once(pthread_once_t *once, void (*fn)(void));
+
+/* ---- Rwlock: one word - active reader count in the low bits, writer flags
+ * above. A waiting writer blocks new readers, so a reader stream cannot
+ * starve it. attr is ignored in this sprint. */
+typedef struct
+{
+    volatile uint32_t state;
+} pthread_rwlock_t;
+
+#define PTHREAD_RWLOCK_INITIALIZER {0}
+
+int pthread_rwlock_init(pthread_rwlock_t *rwlock, const void *attr);
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock);
+
+#ifdef __cplusplus
+}
+#endif

@@ -85,6 +85,7 @@ pthread_t pthread_self(void)
 {
     return (pthread_t)syscall1(SYS_GETPID, 0);
 }
+
 /* ---- Synchronization primitives --------------------------------------- */
 
 /* Kernel futex contract (src/kernel/sync/futex.cpp), which these algorithms
@@ -149,6 +150,7 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
         return 0;
     return -16; // EBUSY
 }
+
 int pthread_cond_init(pthread_cond_t *cond, const void *attr)
 {
     (void)attr;
@@ -203,6 +205,7 @@ int pthread_cond_broadcast(pthread_cond_t *cond)
     futex(&cond->seq, FUTEX_WAKE, 0x7FFFFFFFu);
     return 0;
 }
+
 int pthread_once(pthread_once_t *once, void (*fn)(void))
 {
     if (!once || !fn)
@@ -224,5 +227,105 @@ int pthread_once(pthread_once_t *once, void (*fn)(void))
     while (*once != 2u)
         futex(once, FUTEX_WAIT, 1u);
     __sync_synchronize();
+    return 0;
+}
+
+/* Rwlock word: bits 0-29 = active readers, bit 30 = a writer holds the
+ * lock, bit 31 = a writer wants it. The wanting bit makes arriving readers
+ * queue behind the waiter instead of starving it. Sleepers only ever park
+ * on values where the lock is held (readers > 0 or writer set), so every
+ * release-to-idle invalidates or wakes them; a waiter parked on a stale
+ * value re-runs its loop when woken. */
+#define RWLOCK_RD_MASK 0x3FFFFFFFu
+#define RWLOCK_WRITER 0x40000000u
+#define RWLOCK_WWAIT 0x80000000u
+#define RWLOCK_WAKE_ALL 0x7FFFFFFFu
+
+int pthread_rwlock_init(pthread_rwlock_t *rwlock, const void *attr)
+{
+    (void)attr;
+    if (!rwlock)
+        return -22; // EINVAL
+    rwlock->state = 0;
+    return 0;
+}
+
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
+{
+    for (;;) {
+        uint32_t state = rwlock->state;
+        if ((state & (RWLOCK_WRITER | RWLOCK_WWAIT)) == 0u) {
+            if (__sync_val_compare_and_swap(&rwlock->state, state, state + 1u) == state)
+                return 0;
+            continue; // a writer arrived: re-evaluate before queueing
+        }
+        futex(&rwlock->state, FUTEX_WAIT, state);
+    }
+}
+
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)
+{
+    for (;;) {
+        uint32_t state = rwlock->state;
+        if ((state & (RWLOCK_RD_MASK | RWLOCK_WRITER)) == 0u) {
+            /* Acquiring clears the wanting bit: we are the writer now. */
+            if (__sync_val_compare_and_swap(&rwlock->state, state, RWLOCK_WRITER) == state)
+                return 0;
+            continue;
+        }
+        if ((state & RWLOCK_WWAIT) == 0u) {
+            if (__sync_val_compare_and_swap(&rwlock->state, state, state | RWLOCK_WWAIT) != state)
+                continue; // state moved: re-evaluate
+            state |= RWLOCK_WWAIT;
+        }
+        futex(&rwlock->state, FUTEX_WAIT, state);
+    }
+}
+
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock)
+{
+    for (;;) {
+        uint32_t state = rwlock->state;
+        if (state & (RWLOCK_WRITER | RWLOCK_WWAIT))
+            return -16; // EBUSY
+        if (__sync_val_compare_and_swap(&rwlock->state, state, state + 1u) == state)
+            return 0;
+    }
+}
+
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock)
+{
+    for (;;) {
+        uint32_t state = rwlock->state;
+        if (state & (RWLOCK_RD_MASK | RWLOCK_WRITER))
+            return -16; // EBUSY
+        if (__sync_val_compare_and_swap(&rwlock->state, state, RWLOCK_WRITER) == state)
+            return 0;
+    }
+}
+
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
+{
+    uint32_t state = rwlock->state;
+    if (state & RWLOCK_WRITER) {
+        /* Drop the writer bit, keep the wanting-writer hint (other writers
+         * may be queued). The CAS can only race a waiter setting the hint
+         * - the writer bit itself is ours until we clear it. */
+        for (;;) {
+            uint32_t cur = rwlock->state;
+            if (__sync_val_compare_and_swap(&rwlock->state, cur, cur & ~RWLOCK_WRITER) == cur)
+                break;
+        }
+        futex(&rwlock->state, FUTEX_WAKE, RWLOCK_WAKE_ALL);
+        return 0;
+    }
+    if ((state & RWLOCK_RD_MASK) == 0u)
+        return -1; // EPERM: not read-held (no owner tracking to say more)
+    /* The subtraction cannot borrow into the writer bits: read-held means
+     * the low field is nonzero, and the high bits only change under their
+     * own CAS rules. */
+    uint32_t prev = __sync_fetch_and_sub(&rwlock->state, 1u);
+    if ((prev & RWLOCK_RD_MASK) == 1u)
+        futex(&rwlock->state, FUTEX_WAKE, RWLOCK_WAKE_ALL); // last reader out
     return 0;
 }
