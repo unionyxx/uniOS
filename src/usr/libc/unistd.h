@@ -89,6 +89,9 @@ int64_t sound_volume(uint32_t level);
 int64_t lseek(int fd, int64_t offset, int whence);
 
 int futex(volatile uint32_t *uaddr, int op, uint32_t val);
+/* Timed FUTEX_WAIT: parks unless *uaddr != expected; timeout_ms of 0 waits
+ * forever, expiry returns -110 (ETIMEDOUT). */
+int futex_wait_timeout(volatile uint32_t *uaddr, uint32_t expected, uint64_t timeout_ms);
 int thread_create(void (*fn)(void), void *arg, void *stack_addr);
 int ftruncate(int fd, uint64_t size);
 int fd_transfer(uint64_t target_pid, int fd);
