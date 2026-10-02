@@ -1622,7 +1622,29 @@ void scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
                 break;
             cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
         }
+    } else {
+        // No free slot: the timeout is dropped, the wait stays bounded only
+        // by a wake or a signal. Loud in debug so exhaustion is diagnosable.
+        DEBUG_WARN("timed wait table full: pid %lu timeout dropped", p->pid);
     }
+}
+
+// Caller MUST hold g_sched_lock: membership in the circular process list
+// proves the struct is still live — reaping unlinks a zombie under this same
+// lock before process_free_reaped can free the memory. A timed waiter that
+// died or was reaped before its deadline leaves its registration behind, and
+// dereferencing that stale pointer was a use-after-free.
+static bool timed_wait_target_live(Process *target)
+{
+    Process *curr = g_proc_list;
+    if (!curr)
+        return false;
+    do {
+        if (curr == target)
+            return true;
+        curr = curr->next;
+    } while (curr != g_proc_list);
+    return false;
 }
 
 // Caller MUST hold g_sched_lock: this runs from scheduler_schedule_internal
@@ -1641,7 +1663,8 @@ static void wake_expired_timed_waits(uint64_t now)
         if (now >= e.deadline) {
             Process *target = e.proc;
             e.proc = nullptr;
-            if (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting) {
+            if (timed_wait_target_live(target) &&
+                (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting)) {
                 target->timed_wake = true;
                 scheduler_wake_process_locked(target);
             }
