@@ -739,6 +739,31 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--success',
       'ktest suite passed',
     ]
+    # The boot-launched /bin/threadtest.elf prints one summary line; its
+    # field tokens appear only there (per-scenario log lines use spaces,
+    # never =), so they make unambiguous markers without line anchoring.
+    qemu_smoke_success_args += [
+      '--success', 'create=PASS',
+      '--success', 'mutex=PASS',
+      '--success', 'cond=PASS',
+      '--success', 'join=PASS',
+      '--success', 'detach=PASS',
+    ]
+  endif
+  qemu_smoke_fail_args = [
+    '--fail',
+    'ktest suite failed',
+    '--fail',
+    'KERNEL PANIC',
+  ]
+  if build_is_debug
+    qemu_smoke_fail_args += [
+      '--fail', 'create=FAIL',
+      '--fail', 'mutex=FAIL',
+      '--fail', 'cond=FAIL',
+      '--fail', 'join=FAIL',
+      '--fail', 'detach=FAIL',
+    ]
   endif
 
   test(
@@ -748,11 +773,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       qemu_smoke,
       '--timeout',
       smoke_qemu_timeout,
-    ] + qemu_smoke_success_args + [
-      '--fail',
-      'ktest suite failed',
-      '--fail',
-      'KERNEL PANIC',
+    ] + qemu_smoke_success_args + qemu_smoke_fail_args + [
       '--',
     ] + qemu_base_command + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
@@ -768,11 +789,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       qemu_smoke,
       '--timeout',
       smoke_smp_qemu_timeout,
-    ] + qemu_smoke_success_args + [
-      '--fail',
-      'ktest suite failed',
-      '--fail',
-      'KERNEL PANIC',
+    ] + qemu_smoke_success_args + qemu_smoke_fail_args + [
       '--',
     ] + qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
@@ -817,11 +834,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       qemu_smoke,
       '--timeout',
       smoke_smp_qemu_timeout,
-    ] + qemu_smoke_net_args + [
-      '--fail',
-      'ktest suite failed',
-      '--fail',
-      'KERNEL PANIC',
+    ] + qemu_smoke_net_args + qemu_smoke_fail_args + [
       '--',
     ] + qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
@@ -838,11 +851,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       smoke_smp4_qemu_timeout,
       '--success',
       'SMP scheduler ready on 4 CPUs',
-    ] + qemu_smoke_success_args + [
-      '--fail',
-      'ktest suite failed',
-      '--fail',
-      'KERNEL PANIC',
+    ] + qemu_smoke_success_args + qemu_smoke_fail_args + [
       '--',
     ] + qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
