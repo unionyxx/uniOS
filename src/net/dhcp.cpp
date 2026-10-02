@@ -64,8 +64,8 @@ static bool dhcp_put_option(uint8_t *opt, int *idx, int opt_capacity, uint8_t co
 
 static bool dhcp_put_u32_le_wire(uint8_t *opt, int *idx, int opt_capacity, uint8_t code, uint32_t value)
 {
-    uint8_t bytes[4] = {(uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF),
-                        (uint8_t)((value >> 16) & 0xFF), (uint8_t)((value >> 24) & 0xFF)};
+    uint8_t bytes[4] = {(uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF), (uint8_t)((value >> 16) & 0xFF),
+                        (uint8_t)((value >> 24) & 0xFF)};
     return dhcp_put_option(opt, idx, opt_capacity, code, bytes, 4);
 }
 
@@ -106,8 +106,7 @@ static uint16_t dhcp_build_packet(DhcpPacket *pkt, uint8_t msg_type)
     if (msg_type == DHCP_REQUEST) {
         if (!dhcp_put_u32_le_wire(opt, &idx, opt_capacity, DHCP_OPT_REQUESTED_IP, dhcp_offered_ip))
             return 0;
-        if (dhcp_server_ip != 0 &&
-            !dhcp_put_u32_le_wire(opt, &idx, opt_capacity, DHCP_OPT_SERVER_ID, dhcp_server_ip))
+        if (dhcp_server_ip != 0 && !dhcp_put_u32_le_wire(opt, &idx, opt_capacity, DHCP_OPT_SERVER_ID, dhcp_server_ip))
             return 0;
     }
 
@@ -367,6 +366,13 @@ static bool dhcp_send_renew()
 void dhcp_tick()
 {
     if (!dhcp_active)
+        return;
+
+    // A manual SYS_NET_RENEW exchange resets and drives the same DORA state
+    // (xid, offer/ack flags, server ip) that the tick's own T1 renewal
+    // touches. Never run both at once: the tick's xid rewrite would reject
+    // the manual exchange's OFFER/ACK mid-flight (and vice versa).
+    if (net_renew_in_progress())
         return;
 
     uint32_t freq = timer_get_frequency();

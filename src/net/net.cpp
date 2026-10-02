@@ -298,6 +298,11 @@ void net_renew_end()
     __atomic_store_n(&g_renew_in_progress, false, __ATOMIC_RELEASE);
 }
 
+bool net_renew_in_progress()
+{
+    return __atomic_load_n(&g_renew_in_progress, __ATOMIC_ACQUIRE);
+}
+
 int64_t sys_net_renew(void)
 {
     if (!g_net_init_done)

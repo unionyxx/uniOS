@@ -113,3 +113,16 @@ KTEST(net_renew_guard_rejects_double_entry)
     KTEST_EXPECT(net_renew_begin()); // guard released, entry works again
     net_renew_end();
 }
+
+KTEST(net_renew_guard_visible_to_dhcp_tick)
+{
+    // dhcp_tick() (called from net_poll()) must be able to see the renew
+    // guard so it does not drive its own T1 renewal while a manual renew
+    // exchange is mid-flight. The gate itself is only live with a bound
+    // lease, which ktest context never has; this pins the observable half.
+    KTEST_EXPECT(!net_renew_in_progress());
+    KTEST_EXPECT(net_renew_begin());
+    KTEST_EXPECT(net_renew_in_progress());
+    net_renew_end();
+    KTEST_EXPECT(!net_renew_in_progress());
+}

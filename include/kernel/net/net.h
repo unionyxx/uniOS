@@ -35,9 +35,12 @@ uint8_t net_get_nic(); // NET_NIC_* from the uapi
 bool net_init_done();
 
 // Renew guard: test-and-set pair around the blocking dhcp_request() call.
-// No lock is held across the call itself (it polls and yields).
+// No lock is held across the call itself (it polls and yields). dhcp_tick()
+// reads net_renew_in_progress() so the poll-driven T1 renewal never runs
+// while a manual renew exchange is mid-flight.
 bool net_renew_begin();
 void net_renew_end();
+bool net_renew_in_progress();
 
 // Extended syscall implementations (user pointers validated inside):
 // fills *out from the live configuration; returns 0 or -errno.
