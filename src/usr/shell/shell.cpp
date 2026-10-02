@@ -128,6 +128,7 @@ static const CommandEntry commands[] = {
 
     {"resolve", "resolve <host>", "resolve a DNS name", CMD_ARGS, nullptr, cmd_resolve, nullptr},
     {"ping", "ping <host>", "resolve or probe a host", CMD_ARGS, nullptr, cmd_ping, nullptr},
+    {"fetch", "fetch <url> [outfile|-]", "download a file over HTTP", CMD_ARGS, nullptr, cmd_fetch, nullptr},
     {"ifconfig", "ifconfig", "show network interface status", CMD_NONE, cmd_ifconfig, nullptr, nullptr},
     {"sound", "sound <file>", "play audio through kernel parser", CMD_ARGS, nullptr, cmd_sound, nullptr},
     {"play", "play <file>", "play WAV audio through user parser", CMD_ARGS, nullptr, cmd_play, nullptr},

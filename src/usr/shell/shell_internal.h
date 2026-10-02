@@ -152,6 +152,7 @@ void cmd_run(const char *filename);
 void cmd_set(const char *args);
 void cmd_unset(const char *name);
 void cmd_ping(const char *target);
+void cmd_fetch(const char *args);
 void cmd_sleep(const char *args);
 void cmd_read(const char *varname);
 void cmd_test(const char *args);

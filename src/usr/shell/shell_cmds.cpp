@@ -1474,6 +1474,315 @@ void cmd_ping(const char *target)
     cmd_resolve(target);
 }
 
+// Case-insensitive prefix compare for HTTP header names ("Content-Length"
+// etc. arrive in any casing).
+static bool fetch_header_is(const char *line, const char *name)
+{
+    for (size_t i = 0; name[i]; i++) {
+        char c = line[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + 32);
+        if (c != name[i])
+            return false;
+    }
+    return true;
+}
+
+void cmd_fetch(const char *args)
+{
+    char url[384], outfile[256];
+    const char *p = parse_token(skip_spaces(args), url, sizeof(url));
+    if (url[0] == '\0') {
+        printf("Usage: fetch <url> [outfile|-]\n");
+        set_status(1);
+        return;
+    }
+    parse_token(p, outfile, sizeof(outfile));
+
+    const char *u = url;
+    if (strncmp(u, "http://", 7) != 0) {
+        printf("fetch: only http:// URLs are supported (no TLS)\n");
+        set_status(1);
+        return;
+    }
+    u += 7;
+
+    char host[128];
+    char path[256] = "/";
+    long port = 80;
+    size_t hlen = 0;
+    while (u[hlen] && u[hlen] != ':' && u[hlen] != '/' && hlen < sizeof(host) - 1) {
+        host[hlen] = u[hlen];
+        hlen++;
+    }
+    host[hlen] = '\0';
+    if (host[0] == '\0') {
+        printf("fetch: malformed URL (empty host)\n");
+        set_status(1);
+        return;
+    }
+    if (u[hlen] == ':') {
+        const char *digits = u + hlen + 1;
+        long v = 0;
+        int ndigits = 0;
+        while (*digits >= '0' && *digits <= '9') {
+            v = v * 10 + (*digits - '0');
+            digits++;
+            ndigits++;
+            if (v > 65535)
+                break;
+        }
+        if (ndigits == 0 || v < 1 || v > 65535 || (*digits != '/' && *digits != '\0')) {
+            printf("fetch: malformed URL (bad port)\n");
+            set_status(1);
+            return;
+        }
+        port = v;
+        if (*digits == '/')
+            strncpy(path, digits, sizeof(path) - 1);
+    } else if (u[hlen] == '/') {
+        strncpy(path, u + hlen, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+
+    struct in_addr addr;
+    if (resolve_host(host, &addr) != 0) {
+        printf("fetch: resolve failed for %s\n", host);
+        set_status(1);
+        return;
+    }
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        printf("fetch: no free socket\n");
+        set_status(1);
+        return;
+    }
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    sa.sin_addr = addr;
+    if (connect(sock, (const struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        printf("fetch: connect to %s:%ld failed\n", host, port);
+        closesocket(sock);
+        set_status(1);
+        return;
+    }
+
+    char host_header[160];
+    if (port != 80)
+        snprintf(host_header, sizeof(host_header), "%s:%ld", host, port);
+    else
+        strncpy(host_header, host, sizeof(host_header) - 1);
+    char request[512];
+    int request_len = snprintf(request, sizeof(request),
+                               "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: uniOS-fetch/1.0\r\n\r\n", path, host_header);
+    if (request_len <= 0 || send(sock, request, (size_t)request_len, 0) != request_len) {
+        printf("fetch: send failed\n");
+        closesocket(sock);
+        set_status(1);
+        return;
+    }
+
+    // Phase 1: accumulate the header block until \r\n\r\n. Body bytes that
+    // arrive in the same read stay in `chunk`/`carry_len` for phase 2.
+    char header[2048];
+    char chunk[1500];
+    size_t header_len = 0;
+    size_t carry_len = 0;
+    bool header_done = false;
+    while (!header_done) {
+        int n = recv(sock, chunk, sizeof(chunk), 0);
+        if (n < 0) {
+            printf("fetch: receive error\n");
+            closesocket(sock);
+            set_status(1);
+            return;
+        }
+        if (n == 0) {
+            int st = socket_state(sock);
+            if (st == NET_TCP_CLOSED || (st >= NET_TCP_FIN_WAIT_1 && st <= NET_TCP_TIME_WAIT)) {
+                printf("fetch: connection closed before headers\n");
+                closesocket(sock);
+                set_status(1);
+                return;
+            }
+            sleep_ms(20);
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            if (header_len + 1 >= sizeof(header)) {
+                printf("fetch: response headers too large\n");
+                closesocket(sock);
+                set_status(1);
+                return;
+            }
+            header[header_len++] = chunk[i];
+            if (header_len >= 4 && header[header_len - 4] == '\r' && header[header_len - 3] == '\n' &&
+                header[header_len - 2] == '\r' && header[header_len - 1] == '\n') {
+                header_done = true;
+                carry_len = (size_t)(n - i - 1);
+                memmove(chunk, chunk + i + 1, carry_len);
+                break;
+            }
+        }
+    }
+    header[header_len] = '\0';
+
+    // Status line: "HTTP/1.x NNN ...".
+    if (header_len < 12 || strncmp(header, "HTTP/1.", 7) != 0 || header[7] < '0' || header[7] > '9' ||
+        header[8] != ' ') {
+        printf("fetch: malformed status line\n");
+        closesocket(sock);
+        set_status(1);
+        return;
+    }
+    int http_status = atoi(header + 9);
+    if (http_status < 200 || http_status > 299) {
+        printf("fetch: HTTP status %d for %s\n", http_status, url);
+        closesocket(sock);
+        set_status(1);
+        return;
+    }
+
+    // Scan header lines for the two fields fetch understands.
+    bool have_length = false;
+    bool chunked = false;
+    uint64_t content_length = 0;
+    const char *line = strchr(header, '\n');
+    while (line && line[1]) {
+        line++;
+        const char *eol = strchr(line, '\n');
+        if (!eol)
+            break;
+        size_t len = (size_t)(eol - line);
+        if (len > 0 && eol[-1] == '\r')
+            len--;
+        char probe[64];
+        if (len >= sizeof(probe))
+            len = sizeof(probe) - 1;
+        memcpy(probe, line, len);
+        probe[len] = '\0';
+        if (fetch_header_is(probe, "content-length:")) {
+            long v = atoi(probe + 15);
+            if (v >= 0) {
+                content_length = (uint64_t)v;
+                have_length = true;
+            }
+        } else if (fetch_header_is(probe, "transfer-encoding:")) {
+            chunked = true;
+        }
+        line = eol;
+    }
+    if (chunked) {
+        printf("fetch: chunked responses are not supported\n");
+        closesocket(sock);
+        set_status(1);
+        return;
+    }
+
+    // Resolve the output destination.
+    char out_path[320];
+    int out_fd = 1;
+    bool to_stdout = strcmp(outfile, "-") == 0;
+    if (to_stdout) {
+        out_path[0] = '\0';
+    } else if (outfile[0] != '\0') {
+        char resolved[320];
+        shell_resolve_path(outfile, resolved);
+        strncpy(out_path, resolved, sizeof(out_path) - 1);
+        out_path[sizeof(out_path) - 1] = '\0';
+    } else {
+        const char *slash = strrchr(path, '/');
+        const char *base = slash ? slash + 1 : path;
+        char name[128];
+        if (base[0] == '\0') {
+            strncpy(name, "index", sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+        } else {
+            strncpy(name, base, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+        }
+        struct VNodeStat data_st;
+        if (stat("/data", &data_st) == 0 && data_st.is_dir) {
+            mkdir("/data/Downloads");
+            join_path("/data/Downloads", name, out_path, sizeof(out_path));
+        } else {
+            printf("fetch: /data unavailable, writing to current directory\n");
+            join_path(g_current_shell ? g_current_shell->cwd : "/", name, out_path, sizeof(out_path));
+        }
+    }
+    if (!to_stdout) {
+        out_fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (out_fd < 0) {
+            printf("fetch: cannot create '%s'\n", out_path);
+            closesocket(sock);
+            set_status(1);
+            return;
+        }
+    }
+
+    // Phase 2: stream the body (carry bytes first, then fresh reads).
+    uint64_t total = 0;
+    uint64_t next_progress = 64 * 1024;
+    if (carry_len > 0) {
+        if (write(out_fd, chunk, carry_len) != (int)carry_len) {
+            printf("fetch: write to '%s' failed\n", to_stdout ? "<stdout>" : out_path);
+            if (!to_stdout)
+                close(out_fd);
+            closesocket(sock);
+            set_status(1);
+            return;
+        }
+        total += carry_len;
+    }
+    for (;;) {
+        if (have_length && total >= content_length)
+            break;
+        int n = recv(sock, chunk, sizeof(chunk), 0);
+        if (n < 0) {
+            printf("fetch: receive error\n");
+            break;
+        }
+        if (n > 0) {
+            if (write(out_fd, chunk, (size_t)n) != n) {
+                printf("fetch: write to '%s' failed\n", to_stdout ? "<stdout>" : out_path);
+                if (!to_stdout)
+                    close(out_fd);
+                closesocket(sock);
+                set_status(1);
+                return;
+            }
+            total += (uint64_t)n;
+            if (total >= next_progress) {
+                printf("fetch: %llu bytes\n", (unsigned long long)total);
+                next_progress += 64 * 1024;
+            }
+            continue;
+        }
+        int st = socket_state(sock);
+        if (st == NET_TCP_CLOSED || (st >= NET_TCP_FIN_WAIT_1 && st <= NET_TCP_TIME_WAIT))
+            break;
+        sleep_ms(20);
+    }
+
+    closesocket(sock);
+    if (!to_stdout)
+        close(out_fd);
+
+    if (have_length && total < content_length) {
+        printf("fetch: short body: %llu of %llu bytes\n", (unsigned long long)total,
+               (unsigned long long)content_length);
+        set_status(1);
+        return;
+    }
+    if (to_stdout)
+        printf("fetch: %llu bytes\n", (unsigned long long)total);
+    else
+        printf("saved %llu bytes to %s\n", (unsigned long long)total, out_path);
+}
+
 void cmd_lspci()
 {
     printf("lspci: PCI enumeration is not exposed to userland yet\n");
