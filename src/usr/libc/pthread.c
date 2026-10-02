@@ -149,3 +149,57 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
         return 0;
     return -16; // EBUSY
 }
+int pthread_cond_init(pthread_cond_t *cond, const void *attr)
+{
+    (void)attr;
+    if (!cond)
+        return -22; // EINVAL
+    cond->seq = 0;
+    return 0;
+}
+
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
+{
+    uint32_t seq = cond->seq;
+    pthread_mutex_unlock(mutex);
+    /* Any return is a valid outcome: a real wake, EAGAIN (a signal bumped
+     * seq after we recorded it - it was meant for us), or a spurious wake.
+     * The caller's predicate loop is the actual synchronization. */
+    futex(&cond->seq, FUTEX_WAIT, seq);
+    return pthread_mutex_lock(mutex);
+}
+
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, uint64_t timeout_ms)
+{
+    uint32_t seq = cond->seq;
+    pthread_mutex_unlock(mutex);
+    int err = futex_wait_timeout(&cond->seq, seq, timeout_ms);
+    int lock_err = pthread_mutex_lock(mutex);
+    if (lock_err != 0)
+        return lock_err;
+    /* Only the kernel deadline walker reports -110. EAGAIN and EINTR both
+     * end as a successful (possibly spurious) wait - the caller re-checks
+     * its predicate. */
+    return err == -110 ? -110 : 0;
+}
+
+int pthread_cond_signal(pthread_cond_t *cond)
+{
+    /* Bump before waking: the bump invalidates every recorded wait value,
+     * so an in-flight waiter that has not parked yet returns EAGAIN rather
+     * than sleeping through this signal. */
+    __sync_fetch_and_add(&cond->seq, 1u);
+    futex(&cond->seq, FUTEX_WAKE, 1u);
+    return 0;
+}
+
+int pthread_cond_broadcast(pthread_cond_t *cond)
+{
+    __sync_fetch_and_add(&cond->seq, 1u);
+    /* The kernel futex has no REQUEUE (the uapi constant exists but
+     * sys_futex implements WAIT/WAKE only), so wake every waiter here and
+     * let each re-acquire the mutex through its own contended path - the
+     * end state a requeue would produce, at thundering-herd cost. */
+    futex(&cond->seq, FUTEX_WAKE, 0x7FFFFFFFu);
+    return 0;
+}

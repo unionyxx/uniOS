@@ -43,3 +43,22 @@ int pthread_mutex_init(pthread_mutex_t *mutex, const void *attr);
 int pthread_mutex_lock(pthread_mutex_t *mutex);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
 int pthread_mutex_trylock(pthread_mutex_t *mutex);
+/* ---- Condvar: a sequence counter. Waiters record the counter, release the
+ * mutex and futex-wait on the recorded value; every signal bumps the
+ * counter, so a waiter that has not parked yet re-validates instead of
+ * sleeping through it. Spurious wakeups are possible (and allowed). */
+typedef struct
+{
+    volatile uint32_t seq;
+} pthread_cond_t;
+
+#define PTHREAD_COND_INITIALIZER {0}
+
+int pthread_cond_init(pthread_cond_t *cond, const void *attr);
+/* Returns 0 after re-acquiring the mutex; the caller owns the predicate. */
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+/* Relative timeout in milliseconds (0 = wait forever); returns -110
+ * (ETIMEDOUT) when the deadline fires. */
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, uint64_t timeout_ms);
+int pthread_cond_signal(pthread_cond_t *cond);
+int pthread_cond_broadcast(pthread_cond_t *cond);
