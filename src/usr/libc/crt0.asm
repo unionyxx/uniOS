@@ -43,3 +43,13 @@ __sigret:
     mov rax, 15 ; SYS_SIGRETURN
     syscall
     ret
+
+; pthread_create enters the thread's fn with this address as the return
+; address, so a plain return lands here with fn's return value in RAX.
+; Route it into pthread_exit(RAX), which unmaps the stack and ends only
+; this thread.
+global __thread_exit_shim
+extern pthread_exit
+__thread_exit_shim:
+    mov rdi, rax
+    jmp pthread_exit
