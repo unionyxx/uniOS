@@ -1935,7 +1935,7 @@ void process_group_kill_siblings(Process *self)
     interrupts_restore(flags);
 }
 
-static void process_exit_common(int32_t status, bool group_kill);
+[[noreturn]] static void process_exit_common(int32_t status, bool group_kill);
 
 void process_exit(int32_t status)
 {
@@ -1950,7 +1950,13 @@ void sys_thread_exit(int64_t status)
         // Strictly on the kernel stack here: the caller never returns to the
         // user stack, so the unmap (VMA nodes, PTEs, frames, futex waiters)
         // cannot pull memory out from under running code.
-        munmap_process_range(self, self->user_stack_lo, self->user_stack_size);
+        if (!munmap_process_range(self, self->user_stack_lo, self->user_stack_size)) {
+            // A refused unmap leaks the mapping until the group's address
+            // space is torn down: loud at Error level (kept in release) so
+            // the leak is diagnosable, never silent.
+            KLOG(LogModule::Sched, LogLevel::Error, "thread exit: stack unmap refused for pid %llu (%s); mapping leaks",
+                 (unsigned long long)self->pid, self->name);
+        }
         self->user_stack_lo = 0;
         self->user_stack_size = 0;
     }
@@ -1958,7 +1964,7 @@ void sys_thread_exit(int64_t status)
     process_exit_common(static_cast<int32_t>(status), false);
 }
 
-static void process_exit_common(int32_t status, bool group_kill)
+[[noreturn]] static void process_exit_common(int32_t status, bool group_kill)
 {
     DEBUG_INFO("Process %d (%s) exiting with status %d on cpu%u", current_proc()->pid, current_proc()->name, status,
                cpu_get_local()->cpu_id);
