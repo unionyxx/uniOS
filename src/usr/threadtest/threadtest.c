@@ -1,5 +1,5 @@
 // threadtest.elf - boot-launched userspace pthread self-test (debug builds).
-// The five scenarios map 1:1 onto the summary line the smoke suite greps, and
+// The six scenarios map 1:1 onto the summary line the smoke suite greps, and
 // that summary is the ONLY log line containing '=': its field tokens are the
 // unambiguous serial markers. Every scenario is deterministic - the timedwait
 // cycles anchor each producer delay to the consumer's announced park instead
@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <uapi/fs.h>
+#include <uapi/tcb.h>
 
 #include "log.h"
 #include "pthread.h"
@@ -21,6 +22,9 @@
 #define COND_CYCLES 6
 #define BCAST_CONSUMERS 3
 #define JOIN_WORKERS 4
+#define TLS_THREADS 4
+#define TLS_INCS 5000
+#define TLS_CANARY 0x1CC0FFEEu
 #define HANDSHAKE_TIMEOUT_MS 2000
 
 /* ---- create: plain return through the exit shim, join collects the return
@@ -429,6 +433,134 @@ static bool scenario_detach(void)
     return true;
 }
 
+/* ---- tls: every thread owns its static TLS block. Workers run 5000
+ * increments on a __thread counter and return the total through the exit
+ * channel: a shared block would split the 20000 increments across the
+ * returns instead of giving each thread its own 5000, and the leader's own
+ * counter must still read zero. A __thread canary with a nonzero initial
+ * value pins the block's placement against the link-time TPOFF - a block
+ * shifted even a few bytes corrupts initialized variables. The control
+ * block at fs:0 must self-identify, and pthread_self must read this
+ * thread's tid out of it. Workers announce completion through the condvar
+ * before returning, so a worker stuck on a broken fs base surfaces as a
+ * timed-out handshake instead of a hang. */
+
+static __thread uint32_t tls_counter;             /* zero in every thread */
+static __thread uint32_t tls_canary = TLS_CANARY; /* nonzero template image */
+
+static pthread_mutex_t g_tls_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_tls_cond = PTHREAD_COND_INITIALIZER;
+static volatile int g_tls_completed;
+/* Slot i is written only by worker i before its completion handshake and
+ * read by the leader after the join, so no slot is ever shared. */
+static pthread_t g_tls_self_seen[TLS_THREADS];
+static int g_tls_tcb_bad[TLS_THREADS];
+static int g_tls_canary_bad[TLS_THREADS];
+
+static void *tls_worker(void *arg)
+{
+    uintptr_t idx = (uintptr_t)arg;
+
+    UniTcb *tcb;
+    __asm__ __volatile__("movq %%fs:0x0, %0" : "=r"(tcb));
+    g_tls_self_seen[idx] = pthread_self();
+    g_tls_tcb_bad[idx] = (tcb->self != (uint64_t)(uintptr_t)tcb) || (tcb->tid != pthread_self());
+    g_tls_canary_bad[idx] = (tls_canary != TLS_CANARY);
+
+    for (uint32_t i = 0; i < TLS_INCS; i++)
+        tls_counter++;
+
+    pthread_mutex_lock(&g_tls_mutex);
+    g_tls_completed++;
+    pthread_cond_signal(&g_tls_cond);
+    pthread_mutex_unlock(&g_tls_mutex);
+
+    return (void *)(intptr_t)tls_counter;
+}
+
+static bool scenario_tls(void)
+{
+    g_tls_completed = 0;
+    for (int i = 0; i < TLS_THREADS; i++) {
+        g_tls_self_seen[i] = 0;
+        g_tls_tcb_bad[i] = 0;
+        g_tls_canary_bad[i] = 0;
+    }
+
+    UniTcb *tcb;
+    __asm__ __volatile__("movq %%fs:0x0, %0" : "=r"(tcb));
+    if (tcb->self != (uint64_t)(uintptr_t)tcb) {
+        LOG_ERROR(LOG_SCOPE, "scenario tls: the control block at fs:0 does not self-identify (self %llu, fs %llu)",
+                  (unsigned long long)tcb->self, (unsigned long long)(uintptr_t)tcb);
+        return false;
+    }
+    if (tcb->tid != pthread_self()) {
+        LOG_ERROR(LOG_SCOPE, "scenario tls: control block tid %llu disagrees with pthread_self %llu",
+                  (unsigned long long)tcb->tid, (unsigned long long)pthread_self());
+        return false;
+    }
+
+    pthread_t tids[TLS_THREADS];
+    for (int i = 0; i < TLS_THREADS; i++) {
+        int rc = pthread_create(&tids[i], NULL, tls_worker, (void *)(uintptr_t)i);
+        if (rc != 0) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: pthread_create %d failed: %d", i, rc);
+            return false;
+        }
+    }
+
+    pthread_mutex_lock(&g_tls_mutex);
+    while (g_tls_completed < TLS_THREADS) {
+        int err = pthread_cond_timedwait(&g_tls_cond, &g_tls_mutex, HANDSHAKE_TIMEOUT_MS);
+        if (err == -110)
+            break; /* a full handshake deadline passed with no completion */
+    }
+    const bool completed = (g_tls_completed == TLS_THREADS);
+    pthread_mutex_unlock(&g_tls_mutex);
+    if (!completed) {
+        LOG_ERROR(LOG_SCOPE, "scenario tls: only %d of %d workers completed their tls work", g_tls_completed,
+                  TLS_THREADS);
+        return false;
+    }
+
+    for (int i = 0; i < TLS_THREADS; i++) {
+        void *retval = NULL;
+        int rc = pthread_join(tids[i], &retval);
+        if (rc != 0) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d join failed: %d", i, rc);
+            return false;
+        }
+        if ((intptr_t)retval != TLS_INCS) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d counted %lu, expected %d (its own 5000 increments)", i,
+                      (unsigned long)(intptr_t)retval, TLS_INCS);
+            return false;
+        }
+        if (g_tls_self_seen[i] != tids[i]) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d saw pthread_self %llu, expected the created tid %llu", i,
+                      (unsigned long long)g_tls_self_seen[i], (unsigned long long)tids[i]);
+            return false;
+        }
+        if (g_tls_tcb_bad[i] != 0) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d's control block failed the self-identity contract", i);
+            return false;
+        }
+        if (g_tls_canary_bad[i] != 0) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d's tls canary was not its initial value", i);
+            return false;
+        }
+    }
+
+    if (tls_canary != TLS_CANARY) {
+        LOG_ERROR(LOG_SCOPE, "scenario tls: the main thread's canary is 0x%x, expected 0x%x", tls_canary, TLS_CANARY);
+        return false;
+    }
+    if (tls_counter != 0) {
+        LOG_ERROR(LOG_SCOPE, "scenario tls: the main thread's counter moved: %u", tls_counter);
+        return false;
+    }
+    return true;
+}
+
 int main(void)
 {
     const bool create_ok = scenario_create();
@@ -436,10 +568,11 @@ int main(void)
     const bool cond_ok = scenario_cond();
     const bool join_ok = scenario_join();
     const bool detach_ok = scenario_detach();
+    const bool tls_ok = scenario_tls();
 
-    LOG_INFO(LOG_SCOPE, "thread self-test summary: create=%s mutex=%s cond=%s join=%s detach=%s",
+    LOG_INFO(LOG_SCOPE, "thread self-test summary: create=%s mutex=%s cond=%s join=%s detach=%s tls=%s",
              create_ok ? "PASS" : "FAIL", mutex_ok ? "PASS" : "FAIL", cond_ok ? "PASS" : "FAIL",
-             join_ok ? "PASS" : "FAIL", detach_ok ? "PASS" : "FAIL");
+             join_ok ? "PASS" : "FAIL", detach_ok ? "PASS" : "FAIL", tls_ok ? "PASS" : "FAIL");
 
-    return (create_ok && mutex_ok && cond_ok && join_ok && detach_ok) ? 0 : 1;
+    return (create_ok && mutex_ok && cond_ok && join_ok && detach_ok && tls_ok) ? 0 : 1;
 }
