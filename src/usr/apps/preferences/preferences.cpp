@@ -1390,6 +1390,10 @@ static void preferences_event(App *app, const Event *ev)
                 }
                 case PREF_SECTION_NETWORK: {
                     if (widget_button_event(&st->renew, ev) & WIDGET_CLICKED) {
+                        snprintf(state->status, sizeof(state->status), "Renewing DHCP lease...");
+                        app_invalidate_all(app);
+                        app_commit(app);
+
                         const int r = net_renew();
                         refresh_network_status(state);
                         if (r == 0)
