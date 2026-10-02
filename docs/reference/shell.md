@@ -11,7 +11,7 @@ External programs are resolved as `/bin/<name>.elf` (falling back to `/bin/<name
 - **File system**: `ls`, `cd`, `pwd`, `cat`, `stat`, `touch`, `rm`, `rmdir`, `mkdir`, `cp`, `mv`, `tree`, `find`, `du`, `df`, `mount`, `write`, `append`, `hexdump`.
 - **Text / pipes**: `echo`, `wc`, `head`, `tail`, `grep`, `sort`, `uniq`, `rev`, `tac`, `nl`, `tr`.
 - **System info**: `mem`, `kheap`, `ps`, `uptime`, `date`, `version`, `uname`, `sysinfo`, `cpuinfo`, `dmesg`, `storage`.
-- **Networking**: `resolve`, `ifconfig` (live NIC/IP/gateway/DNS via `SYS_NET_STATUS`). `ping` resolves the target only — ICMP echo is not yet exposed to userland.
+- **Networking**: `resolve`, `ifconfig` (live NIC/IP/gateway/DNS via `SYS_NET_STATUS`), `fetch <url> [outfile|-]` (HTTP/1.0 GET over TCP; saves to `/data/Downloads/<basename>` by default, `-` streams to stdout; only `Content-Length` framing is honored — chunked responses are rejected; no TLS). `ping` resolves the target only — ICMP echo is not yet exposed to userland.
 - **Audio**: `sound` (kernel parser), `play` (userspace WAV parser).
 - **Scripting / session**: `run`, `source`, `set`, `unset`, `alias`, `unalias`, `read`, `test`, `expr`, `time`, `sleep`, `env`, `history`, `which`, `type`, `random`, `true`, `false`, `quiet`.
 - **Process / power**: `kill`, `reboot`, `poweroff`, `help`, `clear`, `exit`.

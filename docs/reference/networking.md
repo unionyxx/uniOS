@@ -1,6 +1,6 @@
 # Networking
 
-The network stack (`src/net/`) is a freestanding, fully polled IPv4 stack in the kernel. Userspace reaches it through nine dedicated syscalls — sockets are not file descriptors.
+The network stack (`src/net/`) is a freestanding, fully polled IPv4 stack in the kernel. Userspace reaches it through ten dedicated syscalls — sockets are not file descriptors — and consumes it today through the shell: `resolve`, `ifconfig`, and the `fetch` HTTP client.
 
 ## NIC Selection and Polling
 
