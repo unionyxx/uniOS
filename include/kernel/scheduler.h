@@ -88,7 +88,7 @@ void scheduler_wake_one(WaitQueue *q);
 
 struct SyscallFrame;
 [[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, struct SyscallFrame *frame,
-                                        uint64_t stack_lo = 0, uint64_t stack_size = 0);
+                                        uint64_t stack_lo = 0, uint64_t stack_size = 0, uint64_t flags = 0);
 // Deadline machinery for timed waits on leaf wait queues (futex timeouts):
 // register the earliest wake deadline; the scheduler walker wakes waiters
 // still parked on their queue and marks them timed_wake. Returns false

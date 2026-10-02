@@ -3142,7 +3142,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                              static_cast<uint32_t>(arg3), frame->arg4);
         case SYS_THREAD_CREATE:
             return sys_thread_create(reinterpret_cast<void (*)()>(arg1), reinterpret_cast<void *>(arg2),
-                                     reinterpret_cast<void *>(arg3), frame, frame->arg5, frame->arg6);
+                                     reinterpret_cast<void *>(arg3), frame, frame->arg5, frame->arg6, frame->arg4);
         case SYS_THREAD_EXIT:
             sys_thread_exit(static_cast<int64_t>(arg1));
             return 0; // unreachable: the thread never returns

@@ -16,6 +16,7 @@
 #include <kernel/time/timer.h>
 #include <libk/kstring.h>
 #include <uapi/syscalls.h>
+#include <uapi/syscalls_ext.h>
 
 extern "C" void load_idt(void *);
 extern "C" void init_fpu_state(uint8_t *fpu_buffer);
@@ -2234,7 +2235,7 @@ void scheduler_sleep_ms(uint64_t ms)
 extern "C" void thread_ret();
 
 [[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame,
-                                        uint64_t stack_lo, uint64_t stack_size)
+                                        uint64_t stack_lo, uint64_t stack_size, uint64_t flags)
 {
     if (!entry || !stack_top || !frame) {
         return -22;
@@ -2244,6 +2245,11 @@ extern "C" void thread_ret();
     if (!parent) {
         return -1;
     }
+
+    // Only the reserved bit is honored; unknown bits are ignored so a
+    // caller that passes garbage in the flags register cannot fail or
+    // silently detach.
+    const bool create_detached = (flags & THREAD_DETACHED) != 0;
 
     Process *thread = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
     if (!thread) {
@@ -2255,7 +2261,8 @@ extern "C" void thread_ret();
 
     thread->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     thread->leader_pid = parent->leader_pid;
-    thread->parent_pid = parent->pid;
+    thread->parent_pid = create_detached ? 0 : parent->pid;
+    thread->thread_detached = create_detached;
     thread->user_stack_lo = stack_lo;
     thread->user_stack_size = stack_size;
     thread->uid = parent->uid;
@@ -2325,19 +2332,26 @@ extern "C" void thread_ret();
     // exit on another core before this function returns.
     const int64_t thread_pid = static_cast<int64_t>(thread->pid);
 
-    const uint64_t flags = interrupts_save_disable();
+    const uint64_t pub_flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     g_proc_tail->next = thread;
     g_proc_tail = thread;
     thread->next = g_proc_list;
 
     thread->children_list = nullptr;
-    thread->sibling_next = parent->children_list;
-    parent->children_list = thread;
+    if (create_detached) {
+        // Created detached: never waitable. Keep it out of every children
+        // list — the kernel-zombie auto-reap (parent_pid == 0) owns its
+        // zombie, exactly like sys_thread_detach's routing.
+        thread->sibling_next = nullptr;
+    } else {
+        thread->sibling_next = parent->children_list;
+        parent->children_list = thread;
+    }
 
     ready_queue_push(thread);
     spinlock_release(&g_sched_lock);
-    interrupts_restore(flags);
+    interrupts_restore(pub_flags);
     scheduler_notify_idle_cpus();
 
     return thread_pid;
