@@ -218,8 +218,12 @@ int pthread_once(pthread_once_t *once, void (*fn)(void))
 {
     if (!once || !fn)
         return -22; // EINVAL
-    if (*once == 2u)
+    if (*once == 2u) {
+        /* Acquire pair for the initializer's release, so fn's writes are
+         * visible before anything this thread does after the call. */
+        __sync_synchronize();
         return 0;
+    }
     if (__sync_val_compare_and_swap(once, 0u, 1u) == 0u) {
         fn();
         /* A locked op publishes the done state: full barrier, so every
