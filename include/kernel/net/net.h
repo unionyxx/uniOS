@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+struct NetStatus;
+
 // Network configuration
 struct NetConfig
 {
@@ -29,6 +31,11 @@ void net_set_dns(uint32_t dns);
 // Status
 bool net_is_configured();
 bool net_link_up();
+uint8_t net_get_nic(); // NET_NIC_* from the uapi
+
+// Extended syscall implementation (user pointer validated inside):
+// fills *out from the live configuration; returns 0 or -errno.
+int64_t sys_net_status(NetStatus *out);
 
 // Unified NIC access (for lower layers)
 bool net_send_raw(const void *data, uint16_t length);

@@ -20,6 +20,7 @@
 #include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/net/dns.h>
+#include <kernel/net/net.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/panic.h>
@@ -142,17 +143,9 @@ static uint64_t g_random_state = 0x7F4A7C15D39E2B41ULL;
     return x * 0x2545F4914F6CDD1DULL;
 }
 
-#define STAC()                                                                                                         \
-    if (g_cpu_features.has_smap)                                                                                       \
-    asm volatile("stac" ::: "memory")
-#define CLAC()                                                                                                         \
-    if (g_cpu_features.has_smap)                                                                                       \
-    asm volatile("clac" ::: "memory")
-
-extern "C" {
-bool safe_copy_from_user(void *dest, const void *src, size_t n);
-bool safe_copy_to_user(void *dest, const void *src, size_t n);
-}
+// Historical names for the shared SMAP guards in <kernel/user_ptr.h>.
+#define STAC() KSTAC()
+#define CLAC() KCLAC()
 
 [[nodiscard]] static bool checked_mul_size(size_t a, size_t b, size_t *out)
 {
@@ -3202,6 +3195,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             input_set_device_enabled(id, arg2 != 0);
             return 0;
         }
+        case SYS_NET_STATUS:
+            return static_cast<uint64_t>(sys_net_status(reinterpret_cast<NetStatus *>(arg1)));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

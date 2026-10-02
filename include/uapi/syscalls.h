@@ -115,6 +115,9 @@
 #define SYS_INPUT_SET_REPEAT_RATE 291
 #define SYS_INPUT_SET_DEVICE_ENABLED 292
 
+/* Network status (extended: return negative errno). */
+#define SYS_NET_STATUS 293
+
 /* Futex Opcodes */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1

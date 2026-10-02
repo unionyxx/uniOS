@@ -11,6 +11,9 @@
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/sync/spinlock.h>
+#include <kernel/user_ptr.h>
+#include <libk/kstring.h>
+#include <uapi/syscalls_ext.h>
 
 // Global network configuration
 static NetConfig g_net_config = {0, 0, 0, 0, false};
@@ -232,6 +235,40 @@ bool net_is_configured()
 bool net_link_up()
 {
     return nic_link_up();
+}
+
+uint8_t net_get_nic()
+{
+    switch (g_active_nic) {
+        case NIC_E1000:
+            return NET_NIC_E1000;
+        case NIC_RTL8139:
+            return NET_NIC_RTL8139;
+        default:
+            return NET_NIC_NONE;
+    }
+}
+
+int64_t sys_net_status(NetStatus *out)
+{
+    if (!validate_user_ptr(out, sizeof(NetStatus), true))
+        return -14; // -EFAULT
+
+    // Best-effort snapshot: a concurrent DHCP renew may change fields
+    // mid-read (each getter reads a single aligned word).
+    NetStatus status = {};
+    status.ip = g_net_config.ip;
+    status.netmask = g_net_config.netmask;
+    status.gateway = g_net_config.gateway;
+    status.dns = g_net_config.dns;
+    status.link_up = net_link_up() ? 1 : 0;
+    status.configured = g_net_config.configured ? 1 : 0;
+    status.nic = net_get_nic();
+
+    KSTAC();
+    const bool ok = safe_copy_to_user(out, &status, sizeof(status));
+    KCLAC();
+    return ok ? 0 : -14; // -EFAULT
 }
 
 // Export unified NIC functions for use by other modules
