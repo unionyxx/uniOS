@@ -27,6 +27,7 @@ enum : uint32_t
     kMsrLstar = 0xC0000082,
     kMsrSfmask = 0xC0000084,
     kMsrEfer = 0xC0000080,
+    kMsrFsBase = 0xC0000100,
     kMsrGsBase = 0xC0000101,
     kMsrKernelGsBase = 0xC0000102,
 };
@@ -78,6 +79,17 @@ enum : uint64_t
     asm volatile("wrmsr" ::"a"(static_cast<uint32_t>(value)), "d"(static_cast<uint32_t>(value >> 32)), "c"(msr));
 }
 } // namespace
+
+void cpu_set_user_fs_base(uint64_t base)
+{
+    // wrfsbase at CPL0 needs no CR4.FSGSBASE, but the instruction still
+    // requires CPUID support, so fall back to the FS_BASE MSR.
+    if (g_cpu_features.has_fsgsbase) {
+        asm volatile("wrfsbase %0" ::"r"(base) : "memory");
+    } else {
+        wrmsr64(kMsrFsBase, base);
+    }
+}
 
 PerCpu *cpu_by_apic_id(uint32_t apic_id)
 {
