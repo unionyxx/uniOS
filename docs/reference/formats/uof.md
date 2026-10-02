@@ -64,7 +64,7 @@ The atlas is 8-bit coverage, RLE-compressed as `(run_length-1, value)` byte pair
 - Runtime subpixel positioning: the pen accumulates in 26.6 fixed point; each glyph's phase (fractional pen position, quantized to 1/16 px) selects a 5-tap FIR filter over the subcolumns of its output pixels. Mono fonts skip this (integer grid, single sample per pixel).
 - Kerning comes from GPOS pair positioning, flattened into the class matrix plus additive exception pairs; the runtime looks up `matrix[left->kern_left][right->kern_right] + exception(left_cp, right_cp)` between adjacent glyphs.
 - Advances and kerning are 26.6, so spacing matches the scalable font metrics instead of rounded integers.
-- The 8-bit coverage is linear pixel area. The runtime blitter blends in linear light with a polarity-aware coverage gamma (light-on-dark text gets shaped coverage, dark-on-light is blended unshaped); see `src/usr/libgui/font.cpp`.
+- The 8-bit coverage is linear pixel area. The runtime blitter blends in linear light with polarity-aware coverage shaping that is symmetric by construction: light-on-dark coverage is shaped with gamma 2.0, and dark-on-light coverage is shaped so the stored pixel is the mirror of the light-on-dark ramp (for pure black/white pairs, `v_dark + v_light = 255` at every coverage level). Transparent-background draws resolve polarity per pixel from the destination under the glyph; see `src/usr/libgui/font.cpp`.
 
 ## Runtime Use
 

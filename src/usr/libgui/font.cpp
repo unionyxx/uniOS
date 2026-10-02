@@ -569,13 +569,17 @@ static const uint8_t s_linear_to_srgb[256] = {
     239, 239, 240, 240, 241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246, 246, 246, 247, 247, 248, 248, 249,
     249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254, 255, 255};
 
-// Polarity-aware coverage gamma. Edges are linear-blended for perceptual
-// correctness, but a light glyph on a dark backdrop leaves bright fringes that
-// read as a bold/blurry halo, while a dark glyph on a light backdrop only
-// wants slight extra sharpening. So the linear coverage ramp is shaped per
-// polarity before blending: a strong gamma (2.0) pulls light-on-dark fringes
-// toward black, a mild gamma (1.3) gives dark-on-light a stricter edge.
-// Derived as round(pow(c/255, g) * 255); exact at the 0/255 endpoints.
+// Polarity-aware coverage shaping, unified by mirror symmetry. Linear-light
+// blending alone biases edges toward the lighter color: light text on a dark
+// backdrop gains a bold/blurry halo while dark text on a light backdrop
+// renders faint and thin. The fix is one shaping ramp applied in both
+// directions: light-on-dark coverage is shaped with gamma 2.0
+// (round(pow(c/255, 2.0) * 255), pulling bright fringes toward the
+// background), and dark-on-light coverage is shaped so the resulting stored
+// pixel is the exact mirror of the light-on-dark ramp: for pure black/white
+// foreground/background pairs, rendered values satisfy v_dark + v_light = 255
+// at every coverage level, so both themes show the same glyph shape and
+// weight. Both tables are exact at the 0/255 endpoints.
 static const uint8_t s_gamma_light_on_dark[256] = {
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1,   1,   1,   1,   1,   2,   2,
     2,   2,   2,   2,   3,   3,   3,   3,   4,   4,   4,   4,   5,   5,   5,   5,   6,   6,   6,   7,   7,   7,
@@ -590,6 +594,24 @@ static const uint8_t s_gamma_light_on_dark[256] = {
     190, 192, 193, 195, 197, 199, 200, 202, 204, 206, 207, 209, 211, 213, 215, 217, 218, 220, 222, 224, 226, 228,
     230, 232, 233, 235, 237, 239, 241, 243, 245, 247, 249, 251, 253, 255};
 
+// Dark-on-light shaping: the pixel-mirror of the ramp above. Derived by
+// pushing the light-on-dark ramp through the same linear->sRGB encode the
+// blitter applies and inverting it, so a black-on-white glyph stores exactly
+// 255 minus what the white-on-black glyph stores at the same coverage.
+static const uint8_t s_gamma_dark_on_light[256] = {
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   28,  28,  28,  28,  28,  28,  28,  28,  47,  47,
+    47,  47,  47,  47,  59,  59,  59,  59,  70,  70,  70,  70,  78,  78,  78,  78,  85,  85,  85,  92,  92,  92,
+    99,  99,  99,  104, 104, 104, 109, 109, 114, 114, 114, 117, 117, 122, 122, 125, 125, 130, 130, 133, 133, 135,
+    135, 138, 138, 141, 141, 144, 144, 147, 147, 150, 152, 152, 154, 154, 156, 159, 159, 161, 163, 163, 165, 166,
+    166, 169, 170, 170, 173, 174, 176, 176, 177, 178, 181, 181, 182, 183, 185, 186, 186, 187, 188, 190, 191, 192,
+    192, 193, 194, 195, 197, 198, 199, 200, 201, 202, 202, 203, 204, 205, 205, 206, 207, 208, 209, 210, 211, 211,
+    212, 213, 214, 215, 216, 217, 218, 218, 218, 219, 220, 221, 221, 222, 223, 223, 224, 225, 225, 225, 227, 227,
+    228, 228, 229, 230, 230, 230, 231, 232, 232, 233, 233, 234, 234, 235, 235, 236, 236, 237, 237, 237, 238, 238,
+    239, 240, 240, 241, 241, 241, 241, 242, 242, 243, 243, 243, 244, 244, 245, 245, 245, 245, 246, 246, 246, 247,
+    247, 247, 248, 248, 248, 248, 248, 249, 249, 249, 249, 250, 250, 250, 250, 251, 251, 251, 251, 251, 252, 252,
+    252, 252, 252, 252, 253, 253, 253, 253, 253, 253, 253, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255};
+
 static inline uint32_t color_luma(uint32_t c)
 {
     uint32_t r = (c >> 16) & 0xFFu;
@@ -598,16 +620,18 @@ static inline uint32_t color_luma(uint32_t c)
     return (r * 54u + g * 183u + b * 19u + 128u) >> 8;
 }
 
-// Apply coverage shaping only to light text on a dark backdrop: the bright AA
-// fringes of a light glyph read as a bold/blurry halo, so gamma 2.0 pulls them
-// toward the background. Dark text on a light backdrop is left unshaped (pure
-// linear blend) -- any coverage gamma crushes thin strokes disproportionately
-// and makes weight uneven, and dark-on-light already composites correctly in
-// linear light. A transparent backdrop has unknown polarity -> no shaping.
-static inline const uint8_t *select_gamma_lut(uint32_t fg, uint32_t bg, bool opaque_bg)
+// Pick the shaping ramp by polarity. Equal luminance has no direction to
+// shape toward, so it stays unshaped. Callers pass an explicit background
+// color (opaque fast path) or a destination pixel read at draw time
+// (transparent-background draws: glass canvases, WM overlays), which is what
+// finally lets menubar and dock text share the same ramp as everything else.
+static inline const uint8_t *select_gamma_lut(uint32_t fg_luma, uint32_t bg)
 {
-    if (opaque_bg && color_luma(fg) > color_luma(bg))
+    uint32_t bg_luma = color_luma(bg);
+    if (fg_luma > bg_luma)
         return s_gamma_light_on_dark;
+    if (fg_luma < bg_luma)
+        return s_gamma_dark_on_light;
     return nullptr;
 }
 
@@ -682,7 +706,7 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin26,
     uint32_t atlas_stride = (uint32_t)font->atlas_width * font->oversample_x;
 
     // Linear-light alpha blending. fg/bg are sRGB-encoded; lift channels to
-    // linear via LUT, blend by the (linear) coverage fraction, encode back.
+    // linear via LUT, blend by the shaped coverage fraction, encode back.
     // When bg is fully opaque the destination is assumed to already equal bg
     // (callers pre-fill), so the blend is write-only -- no dst read, no cache
     // pollution. This is the fast path for terminal cells and filled labels.
@@ -697,7 +721,11 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin26,
         bb = s_srgb_to_linear[bg & 0xFFu];
     }
     uint32_t fg_opaque = 0xFF000000u | (fg & 0x00FFFFFFu);
-    const uint8_t *gamma = select_gamma_lut(fg, bg, opaque_bg);
+    // The opaque fast path knows the backdrop up front; the transparent path
+    // reads each destination pixel anyway, so its polarity is resolved per
+    // pixel from the actual color under the glyph.
+    uint32_t fg_luma = color_luma(fg);
+    const uint8_t *gamma = opaque_bg ? select_gamma_lut(fg_luma, bg) : nullptr;
     const uint8_t *weights = s_fir_weights[phase];
     int32_t tap0 = -((int32_t)(phase >> 2) + 1); // first tap subcolumn offset within the glyph slot
     bool oversampled = (font->oversample_x > 1u);
@@ -712,7 +740,7 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin26,
                 // 5-tap FIR over the subcolumns of this output pixel,
                 // shifted by the phase; the taps stay inside the glyph slot
                 // (baked 1 px pad + packer's 2 px gap).
-                const uint8_t *taps = atlas + (col - start_col) * 4 + tap0;
+                const uint8_t *taps = atlas + (ptrdiff_t)(col - start_col) * 4 + tap0;
                 uint32_t acc = (uint32_t)weights[0] * taps[0] + (uint32_t)weights[1] * taps[1] +
                                (uint32_t)weights[2] * taps[2] + (uint32_t)weights[3] * taps[3] +
                                (uint32_t)weights[4] * taps[4];
@@ -720,7 +748,20 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin26,
             } else {
                 raw_coverage = atlas[col - start_col];
             }
-            uint8_t coverage = gamma ? gamma[raw_coverage] : raw_coverage;
+            if (raw_coverage == 0) {
+                dst++;
+                continue;
+            }
+            uint8_t coverage = raw_coverage;
+            uint32_t d = 0;
+            if (gamma) {
+                coverage = gamma[raw_coverage];
+            } else if (!opaque_bg) {
+                d = *dst;
+                const uint8_t *px_gamma = select_gamma_lut(fg_luma, d);
+                if (px_gamma)
+                    coverage = px_gamma[raw_coverage];
+            }
             if (coverage == 0) {
                 dst++;
                 continue;
@@ -741,7 +782,6 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin26,
                 og_l = (fg_g * alpha + bg_g * inv + 127u) / 255u;
                 ob_l = (fb * alpha + bb * inv + 127u) / 255u;
             } else {
-                uint32_t d = *dst;
                 uint32_t dr = s_srgb_to_linear[(d >> 16) & 0xFFu];
                 uint32_t dg = s_srgb_to_linear[(d >> 8) & 0xFFu];
                 uint32_t db = s_srgb_to_linear[d & 0xFFu];

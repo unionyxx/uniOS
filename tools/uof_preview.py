@@ -40,6 +40,18 @@ for v in range(256):
     s = u * 12.92 if u <= 0.0031308 else 1.055 * u ** (1 / 2.4) - 0.055
     LINEAR_TO_SRGB.append(round(s * 255))
 GAMMA_LIGHT_ON_DARK = [round((c / 255) ** 2.0 * 255) for c in range(256)]
+# Dark-on-light ramp: the pixel-mirror of the light-on-dark ramp, derived by
+# pushing it through the same linear->sRGB encode the runtime blitter applies
+# and inverting, so black-on-white stores exactly 255 - white-on-black stored.
+_LIN_TO_SRGB = [round(((v / 255) * 12.92 if v / 255 <= 0.0031308 else 1.055 * (v / 255) ** (1 / 2.4) - 0.055) * 255)
+                for v in range(256)]
+_INV_SRGB = {}
+_last = 0
+for _v in range(256):
+    if _v in set(_LIN_TO_SRGB):
+        _last = _LIN_TO_SRGB.index(_v)
+    _INV_SRGB[_v] = _last
+GAMMA_DARK_ON_LIGHT = [255 - _INV_SRGB[255 - _LIN_TO_SRGB[GAMMA_LIGHT_ON_DARK[c]]] for c in range(256)]
 
 
 class UofFont:
@@ -97,7 +109,8 @@ def render_text(font, text, px, py, fg, bg, out_w, out_h, enable_kern=True, enab
     pixels = img.load()
     srgb_l = SRGB_TO_LINEAR
     lin_s = LINEAR_TO_SRGB
-    gamma = GAMMA_LIGHT_ON_DARK if luma(fg) > luma(bg) else None
+    fg_l, bg_l = luma(fg), luma(bg)
+    gamma = GAMMA_LIGHT_ON_DARK if fg_l > bg_l else (GAMMA_DARK_ON_LIGHT if fg_l < bg_l else None)
 
     pen26 = px * 64
     prev_cp = None
