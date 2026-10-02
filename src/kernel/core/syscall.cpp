@@ -1700,6 +1700,15 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
         return -3; // -ESRCH
     }
 
+    // An exited-but-unreaped zombie holds no fd table (its descriptors
+    // were released at exit): transferring into it must fail cleanly, not
+    // dereference the null table. Same guard class as the vfs open-file
+    // scans.
+    if (!target->fdtab) {
+        scheduler_big_unlock_irqrestore(sched_flags);
+        return -3; // -ESRCH
+    }
+
     uint64_t sl_flags = 0;
     if (current == target) {
         sl_flags = spinlock_acquire_irqsave(&current->fdtab->lock);
