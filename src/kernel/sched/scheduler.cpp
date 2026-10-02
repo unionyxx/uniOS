@@ -1920,6 +1920,18 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
 
+    // The child is a new leader in a COW'd copy of this space: the COW
+    // keeps the same VAs, so the inherited fs_base stays valid and the
+    // group-wide template facts carry over unchanged (a later thread
+    // create in the child clones from the child's own space). The
+    // thread-owned mapping range does NOT carry over: the child's block
+    // dies with the address space it just inherited, so tls_lo/tls_len
+    // stay at their zeroed values.
+    child->fs_base = current_proc()->fs_base;
+    child->tls_template_va = current_proc()->tls_template_va;
+    child->tls_template_size = current_proc()->tls_template_size;
+    child->tls_align = current_proc()->tls_align;
+
     // Clone under the address-space lock: sibling threads may mmap/munmap or
     // fault concurrently, and the clone downgrades writable PTEs for COW. A
     // concurrent munmap between the clone's read and its refcount bump would
