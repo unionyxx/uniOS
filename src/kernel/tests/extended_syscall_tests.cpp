@@ -844,11 +844,16 @@ KTEST(extended_syscalls_signal_context)
     // The signal should no longer be pending
     KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
 
-    // Verify the data pushed to the user stack:
-    // The trampoline is pushed at RSP
+    // Verify the data pushed to the user stack. Read through the virtual
+    // mapping: the mapping's pages are independently allocated frames, so
+    // reconstructing field addresses from one translated physical base
+    // would assume the mapping is physically contiguous. The ktest runs in
+    // kernel context on the mapping's own page tables (page_table surgery
+    // above), and SMAP stays disabled, so a direct read sees exactly what
+    // the interrupted user thread would see.
     uint64_t tramp_phys = vmm_virt_to_phys(tf.frame.rsp);
     KTEST_EXPECT(tramp_phys != 0);
-    uint64_t *tramp_val = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(tramp_phys));
+    uint64_t *tramp_val = reinterpret_cast<uint64_t *>(tf.frame.rsp);
     KTEST_EXPECT_EQ(*tramp_val, 0x7890ULL);
 
     // The SignalContext starts at RSP + 8
@@ -856,7 +861,7 @@ KTEST(extended_syscalls_signal_context)
     uint64_t ctx_phys = vmm_virt_to_phys(ctx_user_addr);
     KTEST_EXPECT(ctx_phys != 0);
 
-    TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(vmm_phys_to_virt(ctx_phys));
+    TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(ctx_user_addr);
     KTEST_EXPECT_EQ(u_ctx->frame.rax, 0xAAABBBULL);
     KTEST_EXPECT_EQ(u_ctx->old_mask, 0x112233ULL);
     KTEST_EXPECT_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
