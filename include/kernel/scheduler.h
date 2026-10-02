@@ -41,7 +41,7 @@ struct Process *process_find_by_pid_locked(uint64_t pid);
 void scheduler_wake_for_signal_locked(Process *p);
 
 // Direct access to the scheduler big lock for those find-and-act sequences.
-// Interrupts are disabled while held. Leaf locks (fd_lock, pipe, epoll) may
+// Interrupts are disabled while held. Leaf locks (the shared fd table lock, pipe, epoll) may
 // be taken underneath; the reverse order is forbidden.
 uint64_t scheduler_big_lock_irqsave();
 void scheduler_big_unlock_irqrestore(uint64_t flags);
@@ -49,6 +49,12 @@ void scheduler_big_unlock_irqrestore(uint64_t flags);
 // True when a pending signal would take its default-fatal action; blocking
 // loops use this to bail out with -EINTR instead of sleeping through kill.
 bool scheduler_fatal_signal_pending(const Process *p);
+
+// Exec support: sever the dead thread group's references to the address
+// space the exec'ing member just swapped away from, so their later frees
+// cannot re-free it. The caller holds g_sched_lock across both the swap
+// and this call; see scheduler.cpp for the full ordering contract.
+void scheduler_sever_dead_group_references(uint64_t *old_pml4);
 
 [[nodiscard]] Process *scheduler_get_process_list();
 
@@ -75,20 +81,36 @@ void scheduler_note_epoll_deadline(uint64_t deadline_ticks);
 // the producer's later wake finding this task queued, false positives just
 // re-run the caller's scan loop.
 typedef bool (*scheduler_wait_recheck_fn)(void *ctx);
-void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck,
-                               void *ctx);
+void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck, void *ctx);
 
 // Wake up to `count` waiters from q (count == 0 wakes all), taking g_sched_lock
 // around the whole traversal so signal-driven queue removals cannot interleave.
 // For callers that hold the queue's own leaf lock (futex buckets); the lock
-// order is leaf -> scheduler, matching scheduler_wait.
-int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count);
+// order is leaf -> scheduler, matching scheduler_wait. When `match` is given,
+// only queued waiters it accepts count towards `count` (the walk still skips
+// the rest without waking them) — the futex WAKE path uses this to spend its
+// wake count on the addressed word only.
+typedef bool (*scheduler_wait_match_fn)(const struct Process *p, void *ctx);
+int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count, scheduler_wait_match_fn match = nullptr,
+                                      void *ctx = nullptr);
 void scheduler_wake_all(WaitQueue *q);
 void scheduler_wake_all_locked(WaitQueue *q);
 void scheduler_wake_one(WaitQueue *q);
 
 struct SyscallFrame;
-[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, struct SyscallFrame *frame);
+[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, struct SyscallFrame *frame,
+                                        uint64_t stack_lo = 0, uint64_t stack_size = 0, uint64_t flags = 0);
+// Deadline machinery for timed waits on leaf wait queues (futex timeouts):
+// register the earliest wake deadline; the scheduler walker wakes waiters
+// still parked on their queue and marks them timed_wake. Returns false
+// (and arms nothing) when the fixed timed-wait table is full — the caller
+// must fail the wait rather than degrade it to an infinite sleep.
+bool scheduler_note_wake_deadline(struct Process *p, uint64_t deadline_ticks);
+// Drop every timed-wait registration for `p`: the wait that armed it has
+// ended (wake, signal, expiry or thread exit). Registrations must never
+// outlive their wait, or the walker marks an unrelated later wait of the
+// same (or a recycled) Process as timed out.
+void scheduler_clear_wake_deadline(struct Process *p);
 void scheduler_remove_from_ready_queue(Process *p);
 void scheduler_boost_process_priority(Process *p, uint8_t new_priority);
 void scheduler_boost_process_priority_under_lock(Process *p, uint8_t new_priority);

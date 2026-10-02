@@ -1,37 +1,39 @@
-#include <kernel/sync/epoll.h>
-#include <kernel/fs/vfs.h>
+#include <kernel/cpu.h>
+#include <kernel/debug.h>
+#include <kernel/event.h>
 #include <kernel/fs/pipe.h>
+#include <kernel/fs/vfs.h>
+#include <kernel/mm/heap.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
-#include <kernel/event.h>
+#include <kernel/sync/epoll.h>
 #include <kernel/sync/spinlock.h>
-#include <kernel/mm/heap.h>
-#include <kernel/debug.h>
-#include <kernel/cpu.h>
 #include <kernel/time/timer.h>
 #include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 
-#define STAC() \
-    do { \
-        if (g_cpu_features.has_smap) \
-            asm volatile("stac" ::: "memory"); \
+#define STAC()                                                                                                         \
+    do {                                                                                                               \
+        if (g_cpu_features.has_smap)                                                                                   \
+            asm volatile("stac" ::: "memory");                                                                         \
     } while (0)
 
-#define CLAC() \
-    do { \
-        if (g_cpu_features.has_smap) \
-            asm volatile("clac" ::: "memory"); \
+#define CLAC()                                                                                                         \
+    do {                                                                                                               \
+        if (g_cpu_features.has_smap)                                                                                   \
+            asm volatile("clac" ::: "memory");                                                                         \
     } while (0)
 
-struct EpollItem {
+struct EpollItem
+{
     int fd;
     uint32_t events;
     epoll_data_t data;
     EpollItem *next;
 };
 
-struct EpollInstance {
+struct EpollInstance
+{
     Spinlock lock;
     EpollItem *items;
 };
@@ -56,19 +58,17 @@ static void epoll_vnode_close(VNode *node)
     node->fs_data = nullptr;
 }
 
-static VNodeOps epoll_ops = {
-    .read = nullptr,
-    .write = nullptr,
-    .readdir = nullptr,
-    .lookup = nullptr,
-    .create = nullptr,
-    .mkdir = nullptr,
-    .unlink = nullptr,
-    .rename = nullptr,
-    .truncate = nullptr,
-    .sync = nullptr,
-    .close = epoll_vnode_close
-};
+static VNodeOps epoll_ops = {.read = nullptr,
+                             .write = nullptr,
+                             .readdir = nullptr,
+                             .lookup = nullptr,
+                             .create = nullptr,
+                             .mkdir = nullptr,
+                             .unlink = nullptr,
+                             .rename = nullptr,
+                             .truncate = nullptr,
+                             .sync = nullptr,
+                             .close = epoll_vnode_close};
 
 int64_t sys_epoll_create(int size)
 {
@@ -93,20 +93,20 @@ int64_t sys_epoll_create(int size)
         return -12; // ENOMEM
     }
 
-    uint64_t flags = spinlock_acquire_irqsave(&p->fd_lock);
+    uint64_t flags = spinlock_acquire_irqsave(&p->fdtab->lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used) {
-            p->fd_table[i].used = true;
-            p->fd_table[i].flags = 0;
-            kstring::zero_memory(p->fd_table[i].reserved, sizeof(p->fd_table[i].reserved));
-            p->fd_table[i].vnode = node;
-            p->fd_table[i].offset = 0;
-            p->fd_table[i].dir_pos = 0;
-            spinlock_release_irqrestore(&p->fd_lock, flags);
+        if (!p->fdtab->fds[i].used) {
+            p->fdtab->fds[i].used = true;
+            p->fdtab->fds[i].flags = 0;
+            kstring::zero_memory(p->fdtab->fds[i].reserved, sizeof(p->fdtab->fds[i].reserved));
+            p->fdtab->fds[i].vnode = node;
+            p->fdtab->fds[i].offset = 0;
+            p->fdtab->fds[i].dir_pos = 0;
+            spinlock_release_irqrestore(&p->fdtab->lock, flags);
             return i;
         }
     }
-    spinlock_release_irqrestore(&p->fd_lock, flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, flags);
 
     vfs_close_vnode(node);
     return -24; // EMFILE
@@ -118,14 +118,14 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
     if (!p)
         return -1;
 
-    uint64_t flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (epfd < 0 || epfd >= MAX_OPEN_FILES || !p->fd_table[epfd].used) {
-        spinlock_release_irqrestore(&p->fd_lock, flags);
+    uint64_t flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (epfd < 0 || epfd >= MAX_OPEN_FILES || !p->fdtab->fds[epfd].used) {
+        spinlock_release_irqrestore(&p->fdtab->lock, flags);
         return -9; // EBADF
     }
-    VNode *ep_vnode = p->fd_table[epfd].vnode;
+    VNode *ep_vnode = p->fdtab->fds[epfd].vnode;
     if (!ep_vnode || ep_vnode->ops != &epoll_ops) {
-        spinlock_release_irqrestore(&p->fd_lock, flags);
+        spinlock_release_irqrestore(&p->fdtab->lock, flags);
         return -22; // EINVAL: Not an epoll file descriptor
     }
     // Pin the instance's vnode for the whole syscall: a concurrent close of
@@ -133,12 +133,12 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
     __sync_fetch_and_add(&ep_vnode->ref_count, 1);
     EpollInstance *inst = static_cast<EpollInstance *>(ep_vnode->fs_data);
 
-    if (fd < 0 || fd >= MAX_OPEN_FILES || !p->fd_table[fd].used) {
-        spinlock_release_irqrestore(&p->fd_lock, flags);
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !p->fdtab->fds[fd].used) {
+        spinlock_release_irqrestore(&p->fdtab->lock, flags);
         vfs_close_vnode(ep_vnode);
         return -9; // EBADF
     }
-    spinlock_release_irqrestore(&p->fd_lock, flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, flags);
 
     struct epoll_event local_event = {0, {0}};
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
@@ -182,8 +182,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
         item->next = inst->items;
         inst->items = item;
         result = 0;
-    }
-    else if (op == EPOLL_CTL_MOD) {
+    } else if (op == EPOLL_CTL_MOD) {
         result = -2; // ENOENT
         for (EpollItem *curr = inst->items; curr; curr = curr->next) {
             if (curr->fd == fd) {
@@ -193,8 +192,7 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
                 break;
             }
         }
-    }
-    else if (op == EPOLL_CTL_DEL) {
+    } else if (op == EPOLL_CTL_DEL) {
         result = -2; // ENOENT
         EpollItem **link = &inst->items;
         while (*link) {
@@ -228,14 +226,14 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         return -1;
 
     // Validate epfd
-    uint64_t flags = spinlock_acquire_irqsave(&current->fd_lock);
-    if (epfd < 0 || epfd >= MAX_OPEN_FILES || !current->fd_table[epfd].used) {
-        spinlock_release_irqrestore(&current->fd_lock, flags);
+    uint64_t flags = spinlock_acquire_irqsave(&current->fdtab->lock);
+    if (epfd < 0 || epfd >= MAX_OPEN_FILES || !current->fdtab->fds[epfd].used) {
+        spinlock_release_irqrestore(&current->fdtab->lock, flags);
         return -9; // EBADF
     }
-    VNode *ep_vnode = current->fd_table[epfd].vnode;
+    VNode *ep_vnode = current->fdtab->fds[epfd].vnode;
     if (!ep_vnode || ep_vnode->ops != &epoll_ops) {
-        spinlock_release_irqrestore(&current->fd_lock, flags);
+        spinlock_release_irqrestore(&current->fdtab->lock, flags);
         return -22; // EINVAL
     }
     // Pin the instance's vnode for the whole (possibly blocking) syscall: a
@@ -243,7 +241,7 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
     // EpollInstance while we are queued on it.
     __sync_fetch_and_add(&ep_vnode->ref_count, 1);
     EpollInstance *inst = static_cast<EpollInstance *>(ep_vnode->fs_data);
-    spinlock_release_irqrestore(&current->fd_lock, flags);
+    spinlock_release_irqrestore(&current->fdtab->lock, flags);
 
     uint64_t start_ticks = timer_get_ticks();
     int num_ready = 0;
@@ -256,9 +254,9 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
             uint32_t occurred = 0;
             bool ready = false;
 
-            uint64_t fd_flags = spinlock_acquire_irqsave(&current->fd_lock);
-            if (curr->fd >= 0 && curr->fd < MAX_OPEN_FILES && current->fd_table[curr->fd].used) {
-                VNode *vnode = current->fd_table[curr->fd].vnode;
+            uint64_t fd_flags = spinlock_acquire_irqsave(&current->fdtab->lock);
+            if (curr->fd >= 0 && curr->fd < MAX_OPEN_FILES && current->fdtab->fds[curr->fd].used) {
+                VNode *vnode = current->fdtab->fds[curr->fd].vnode;
                 if (pipe_is_pipe(vnode)) {
                     ready = pipe_is_ready(vnode, curr->events, &occurred);
                 } else {
@@ -266,7 +264,7 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
                     ready = (occurred != 0);
                 }
             }
-            spinlock_release_irqrestore(&current->fd_lock, fd_flags);
+            spinlock_release_irqrestore(&current->fdtab->lock, fd_flags);
 
             if (ready) {
                 STAC();
@@ -306,19 +304,21 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         // state (or an event arrived) between the scan above and the queue
         // push, the recheck sees it and we never sleep. Recheck reads are
         // lockless atomics by design; see scheduler_wait_rechecked().
-        struct EpollRecheckCtx {
+        struct EpollRecheckCtx
+        {
             Process *proc;
             uint64_t pipe_gen;
         } recheck_ctx = {current, pipe_gen};
         uint64_t inst_flags2 = spinlock_acquire_irqsave(&inst->lock);
-        scheduler_wait_rechecked(&g_epoll_wait_queue, &inst->lock,
-                                  [](void *raw) -> bool {
-                                      EpollRecheckCtx *ctx = static_cast<EpollRecheckCtx *>(raw);
-                                      if (!event_empty(ctx->proc->event_queue))
-                                          return true;
-                                      return pipe_state_generation() != ctx->pipe_gen;
-                                  },
-                                  &recheck_ctx);
+        scheduler_wait_rechecked(
+            &g_epoll_wait_queue, &inst->lock,
+            [](void *raw) -> bool {
+                EpollRecheckCtx *ctx = static_cast<EpollRecheckCtx *>(raw);
+                if (!event_empty(ctx->proc->event_queue))
+                    return true;
+                return pipe_state_generation() != ctx->pipe_gen;
+            },
+            &recheck_ctx);
         // scheduler_wait re-acquires the lock raw before returning, so we must release it raw
         // so that the next loop iteration's spinlock_acquire_irqsave succeeds.
         spinlock_release(&inst->lock);

@@ -29,6 +29,11 @@ struct VMA
 
 void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end);
 [[nodiscard]] bool vma_unmap(VMA **list_ptr, uint64_t start, uint64_t end);
+// Cut the list at the range boundaries so that afterwards every VMA
+// overlapping [start, end) lies fully inside it (sub-range mprotect needs
+// this to reprotect only the covered pages). Returns false only when an
+// allocation fails; the list is then left semantically unchanged.
+[[nodiscard]] bool vma_split_range(VMA **list_ptr, uint64_t start, uint64_t end);
 [[nodiscard]] VMA *vma_clone(const VMA *src_list);
 void vma_free_all(VMA *list);
 void vma_dump_list(VMA *list);

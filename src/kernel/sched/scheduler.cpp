@@ -16,6 +16,7 @@
 #include <kernel/time/timer.h>
 #include <libk/kstring.h>
 #include <uapi/syscalls.h>
+#include <uapi/syscalls_ext.h>
 
 extern "C" void load_idt(void *);
 extern "C" void init_fpu_state(uint8_t *fpu_buffer);
@@ -43,6 +44,22 @@ WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
 // UINT64_MAX when none is armed. Updated lock-free (monotonic min); fired
 // from the tick path under g_sched_lock.
 static volatile uint64_t g_epoll_wake_deadline = UINT64_MAX;
+
+// Timed waits on leaf wait queues (futex timeouts): unlike epoll's single
+// global queue there is no one queue to wake, so each waiter registers
+// itself. The walker wakes entries whose deadline passed AND that are still
+// parked (Blocked/Waiting): a waiter woken by its leaf (futex WAKE) is
+// already Running/Ready and is skipped, so a genuine wake is never misread
+// as a timeout.
+struct TimedWaitEntry
+{
+    Process *proc;
+    uint64_t deadline;
+};
+static TimedWaitEntry g_timed_waits[16];
+static volatile uint64_t g_timed_wake_deadline = UINT64_MAX;
+static void wake_expired_timed_waits(uint64_t now);
+
 extern "C" void scheduler_unlock_after_switch();
 
 // Zombies whose resources are still shared with live threads cannot be freed
@@ -95,30 +112,62 @@ static inline void proc_list_check_locked(const char *)
 }
 #endif
 
-// Returns true when `target` was fully destroyed, false when it had to be
-// deferred because live threads still share its address space or its
-// embedded vma lock.
-static bool process_free_reaped(Process *target)
+// Drop the fd-table reference a reaped target still holds: normal exits
+// already released it in process_release_private_fds (fdtab is null), but
+// manually-zombified tasks (ktest surgery) reach the reaper with the
+// reference still attached. The table is independently refcounted, so
+// this is safe regardless of the shared-address-space state. Runs with
+// no scheduler lock: the release can reach the VFS.
+static void process_release_reaped_fds(Process *target)
 {
-    if (!target)
+    if (target->fdtab) {
+        fd_table_release(target->fdtab);
+        target->fdtab = nullptr;
+    }
+}
+
+// Classify a reaped target. The caller must hold g_sched_lock and must
+// have already unlinked the target from the process list (or popped it
+// from the deferred list) in the SAME critical section: a target that is
+// in no list is invisible to every other scan, and a classify racing an
+// exec address-space swap in that window would read stale pointers and
+// free an address space the exec already freed. A target whose page
+// table, VMA list object or embedded vma lock is still referenced by a
+// live process is parked on the deferred list and returns false; the
+// caller may only free the target once true.
+//
+// Threads borrow the leader's page table, VMA list object and vma lock:
+// the leader (vma_lock_ptr aimed at its own embedded lock) owns those
+// resources and is the only member that may free them. A reaped thread
+// is classified freeable unconditionally - process_free_now releases
+// only its kernel stack and struct for it. Deferring a thread would hide
+// it from the owner's share scan (deferred entries have already left
+// g_proc_list), so the owner would tear the shared address space down
+// while the deferred entry still holds - and later re-frees - those very
+// pointers.
+static bool process_reap_classify_locked(Process *target)
+{
+    const bool owns_address_space = target->vma_lock_ptr == &target->vma_lock;
+    if (!owns_address_space)
         return true;
 
     bool share_page_table = false;
     bool share_vma_list = false;
     bool share_vma_lock = false;
 
-    const uint64_t flags = interrupts_save_disable();
-    spinlock_acquire(&g_sched_lock);
-
-    proc_list_check_locked("free_reaped");
+    proc_list_check_locked("reap_classify");
 
     Process *curr = g_proc_list;
     if (curr) {
         do {
             if (curr != target) {
-                if (curr->page_table == target->page_table)
+                // Null never counts as sharing: an address-space-less
+                // zombie would otherwise match the null page table of
+                // every kernel-mode task and defer forever, leaking its
+                // struct and kernel stack.
+                if (target->page_table && curr->page_table == target->page_table)
                     share_page_table = true;
-                if (curr->vma_list == target->vma_list)
+                if (target->vmalist && curr->vmalist == target->vmalist)
                     share_vma_list = true;
                 // Threads lock VMAs through the leader's EMBEDDED spinlock;
                 // freeing the struct while they do is a use-after-free of
@@ -135,13 +184,18 @@ static bool process_free_reaped(Process *target)
     if (share_page_table || share_vma_list || share_vma_lock) {
         target->queue_next = g_deferred_frees;
         g_deferred_frees = target;
-        spinlock_release(&g_sched_lock);
-        interrupts_restore(flags);
         return false;
     }
 
-    spinlock_release(&g_sched_lock);
-    interrupts_restore(flags);
+    return true;
+}
+
+// Free a classified-unshared reaped target. Runs with no scheduler lock.
+// Non-owners (threads) release only their kernel stack and struct: the
+// page table and VMA list object belong to the group leader.
+static void process_free_now(Process *target)
+{
+    const bool owns_address_space = target->vma_lock_ptr == &target->vma_lock;
 
     if (target->stack_phys) {
         uintptr_t stack_ptr = target->stack_phys;
@@ -153,13 +207,17 @@ static bool process_free_reaped(Process *target)
         }
     }
 
-    if (target->page_table)
-        vmm_free_address_space(target->page_table);
-    if (target->vma_list)
-        vma_free_all(target->vma_list);
+    if (owns_address_space) {
+        if (target->page_table)
+            vmm_free_address_space(target->page_table);
+        if (target->vmalist) {
+            vma_free_all(target->vmalist->head);
+            vma_list_free(target->vmalist);
+            target->vmalist = nullptr;
+        }
+    }
 
     aligned_free(target);
-    return true;
 }
 
 static void retry_deferred_frees()
@@ -176,11 +234,16 @@ static void retry_deferred_frees()
         }
         g_deferred_frees = target->queue_next;
         target->queue_next = nullptr;
+        // Pop and classify in one hold: a popped-but-unclassified entry
+        // is in no list, invisible to the exec sever walk, and its stale
+        // page-table pointer would re-free a swapped-out address space.
+        const bool freeable = process_reap_classify_locked(target);
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
 
-        if (!process_free_reaped(target))
+        if (!freeable)
             return; // still shared; re-queued — try the rest next pass
+        process_free_now(target);
     }
 }
 
@@ -245,6 +308,39 @@ static Process *detach_kernel_zombie_locked()
     return target;
 }
 
+// Exec support: after the exec'ing member swapped its page table and VMA
+// list head, no LIVE process references the old address space — but the
+// group's dead members (zombies still in the list and deferred reap
+// entries) hold pointers their later frees would follow, re-freeing the
+// address space the exec already freed (and, through the still-shared
+// VmaList object, the LIVE new list). Sever those references under the
+// same scheduler-lock hold as the swap so no reap can classify a member
+// in between. Caller holds g_sched_lock. A null old_pml4 severs nothing:
+// matching on null would hit every kernel-mode task.
+void scheduler_sever_dead_group_references(uint64_t *old_pml4)
+{
+    if (!old_pml4)
+        return;
+
+    Process *curr = g_proc_list;
+    if (curr) {
+        do {
+            if (curr->page_table == old_pml4) {
+                curr->page_table = nullptr;
+                curr->vmalist = nullptr;
+            }
+            curr = curr->next;
+        } while (curr != g_proc_list);
+    }
+
+    for (Process *d = g_deferred_frees; d; d = d->queue_next) {
+        if (d->page_table == old_pml4) {
+            d->page_table = nullptr;
+            d->vmalist = nullptr;
+        }
+    }
+}
+
 static void reap_kernel_zombies()
 {
     retry_deferred_frees();
@@ -252,39 +348,130 @@ static void reap_kernel_zombies()
         const uint64_t flags = interrupts_save_disable();
         spinlock_acquire(&g_sched_lock);
         Process *target = detach_kernel_zombie_locked();
+        // Classify inside the same hold as the detach: a zombie detached
+        // but not yet classified is in no list, invisible to the exec
+        // sever walk, and its stale page-table pointer would re-free an
+        // address space the exec already freed.
+        const bool freeable = target ? process_reap_classify_locked(target) : false;
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
         if (!target)
             return;
+        process_release_reaped_fds(target);
         DEBUG_INFO("Reaped detached zombie PID %d", target->pid);
-        process_free_reaped(target);
+        if (freeable)
+            process_free_now(target);
     }
+}
+
+VmaList *vma_list_alloc()
+{
+    auto *l = static_cast<VmaList *>(aligned_alloc(64, sizeof(VmaList)));
+    if (!l)
+        return nullptr;
+    l->head = nullptr;
+    return l;
+}
+
+void vma_list_free(VmaList *list)
+{
+    if (list)
+        aligned_free(list);
+}
+
+FdTable *fd_table_alloc(bool stdio_marks)
+{
+    auto *t = static_cast<FdTable *>(aligned_alloc(64, sizeof(FdTable)));
+    if (!t)
+        return nullptr;
+    kstring::zero_memory(t, sizeof(FdTable));
+    spinlock_init(&t->lock);
+    t->refs = 1;
+    if (stdio_marks) {
+        // Slots 0/1/2 are the stdin/stdout/stderr placeholders handled by
+        // the sys_read/sys_write special cases.
+        t->fds[0].used = true;
+        t->fds[1].used = true;
+        t->fds[2].used = true;
+    }
+    return t;
+}
+
+FdTable *fd_table_copy(FdTable *src)
+{
+    if (!src)
+        return nullptr;
+    auto *t = fd_table_alloc(false);
+    if (!t)
+        return nullptr;
+
+    // irqsave: the table lock is an IRQ-touched leaf, and a raw acquire here
+    // let the resched IPI (and any future IRQ path taking it) preempt
+    // mid-copy.
+    uint64_t flags = spinlock_acquire_irqsave(&src->lock);
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        t->fds[i] = src->fds[i];
+        if (t->fds[i].used && t->fds[i].vnode)
+            __sync_fetch_and_add(&t->fds[i].vnode->ref_count, 1);
+    }
+    spinlock_release_irqrestore(&src->lock, flags);
+    return t;
+}
+
+FdTable *fd_table_share(FdTable *t)
+{
+    if (!t)
+        return nullptr;
+    uint64_t flags = spinlock_acquire_irqsave(&t->lock);
+    t->refs++;
+    spinlock_release_irqrestore(&t->lock, flags);
+    return t;
+}
+
+void fd_table_release(FdTable *t)
+{
+    if (!t)
+        return;
+
+    // A concurrent sys_fd_transfer from another process may still be
+    // installing fds into this table while it dies; detach under the table
+    // lock and drop the vnode references outside of it (fs close can do
+    // real work).
+    VNode *nodes[MAX_OPEN_FILES];
+    int node_count = 0;
+    bool final = false;
+
+    uint64_t flags = spinlock_acquire_irqsave(&t->lock);
+    if (t->refs > 0)
+        t->refs--;
+    final = (t->refs == 0);
+    if (final) {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (!t->fds[i].used)
+                continue;
+            if (t->fds[i].vnode && node_count < MAX_OPEN_FILES)
+                nodes[node_count++] = t->fds[i].vnode;
+            t->fds[i].used = false;
+            t->fds[i].vnode = nullptr;
+        }
+    }
+    spinlock_release_irqrestore(&t->lock, flags);
+
+    if (!final)
+        return;
+
+    for (int i = 0; i < node_count; i++)
+        vfs_close_vnode(nodes[i]);
+    aligned_free(t);
 }
 
 static void process_release_private_fds(Process *proc)
 {
     if (!proc)
         return;
-
-    // A concurrent sys_fd_transfer from another process may still be
-    // installing fds into this table while it dies; detach under fd_lock and
-    // drop the vnode references outside of it (fs close can do real work).
-    VNode *nodes[MAX_OPEN_FILES];
-    int node_count = 0;
-
-    uint64_t sl_flags = spinlock_acquire_irqsave(&proc->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!proc->fd_table[i].used)
-            continue;
-        if (proc->fd_table[i].vnode && node_count < MAX_OPEN_FILES)
-            nodes[node_count++] = proc->fd_table[i].vnode;
-        proc->fd_table[i].used = false;
-        proc->fd_table[i].vnode = nullptr;
-    }
-    spinlock_release_irqrestore(&proc->fd_lock, sl_flags);
-
-    for (int i = 0; i < node_count; i++)
-        vfs_close_vnode(nodes[i]);
+    FdTable *t = proc->fdtab;
+    proc->fdtab = nullptr;
+    fd_table_release(t);
 }
 
 #define NUM_PRIORITY_LEVELS 3
@@ -701,6 +888,7 @@ static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 1)
         g_epoll_wake_deadline = UINT64_MAX;
         wait_queue_wake_all(&g_epoll_wait_queue);
     }
+    wake_expired_timed_waits(now);
 
     if (cur->state == ProcessState_Running) {
         uint32_t max_slice = (cur->priority == 0) ? 5 : (cur->priority == 1) ? 20 : 50;
@@ -872,6 +1060,17 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
     if (lock)
         spinlock_release_no_restore(lock);
 
+    // Order the push before the recheck's condition read. Without this
+    // fence, store-load reordering can leave the queued state (p->state,
+    // p->waiting_queue) in this core's store buffer while the recheck
+    // already reads the condition; a producer that set the condition in
+    // that gap and read the stale un-queued state skips its wake, and the
+    // task sleeps through the condition it was promised to catch. With
+    // the fence, either the recheck sees the condition, or the producer's
+    // own post-store read sees the queued task and its wake (which
+    // serializes on g_sched_lock) is already on its way.
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
     if (recheck && recheck(ctx)) {
         // The condition turned true between the caller's last scan and this
         // push. Whoever set it finished their wake before we queued (both
@@ -895,7 +1094,7 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
     interrupts_restore(flags);
 }
 
-int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count)
+int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count, scheduler_wait_match_fn match, void *ctx)
 {
     if (!q || !q->head)
         return 0;
@@ -909,6 +1108,10 @@ int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count)
     Process *curr = q->head;
     while (curr && (count == 0 || (uint32_t)woken < count)) {
         Process *next = curr->queue_next;
+        if (match && !match(curr, ctx)) {
+            curr = next;
+            continue;
+        }
         scheduler_wake_process_locked(curr);
         woken++;
         curr = next;
@@ -1194,6 +1397,7 @@ void scheduler_init()
     proc_canary_stamp(kproc);
 
     kproc->pid = 0;
+    kproc->leader_pid = 0;
     kproc->uid = 0;
     kstring::strncpy(kproc->name, "Kernel", 31);
     kproc->state = ProcessState_Running;
@@ -1204,11 +1408,10 @@ void scheduler_init()
     kproc->stack_base = nullptr;
 
     kproc->priority = 2;
-    spinlock_init(&kproc->fd_lock);
-
-    for (auto &fd : kproc->fd_table)
-        fd.used = false;
-    kproc->fd_table[0].used = kproc->fd_table[1].used = kproc->fd_table[2].used = true;
+    kproc->fdtab = fd_table_alloc();
+    kproc->vmalist = vma_list_alloc();
+    spinlock_init(&kproc->vma_lock);
+    kproc->vma_lock_ptr = &kproc->vma_lock;
 
     init_fpu_state(kproc->fpu_state);
     kproc->fpu_initialized = true;
@@ -1249,6 +1452,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     event_init(proc->event_queue);
     proc_canary_stamp(proc);
     proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    proc->leader_pid = proc->pid;
     proc->uid = current_proc() ? current_proc()->uid : 0;
     proc->parent_pid = current_proc() ? current_proc()->pid : 0;
     if (name)
@@ -1259,13 +1463,10 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     proc->last_run_time = timer_get_ticks();
     proc->cwd[0] = '/';
     proc->cwd[1] = '\0';
-    spinlock_init(&proc->fd_lock);
+    proc->fdtab = fd_table_alloc();
+    proc->vmalist = vma_list_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
-
-    for (auto &fd : proc->fd_table)
-        fd.used = false;
-    proc->fd_table[0].used = proc->fd_table[1].used = proc->fd_table[2].used = true;
 
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
@@ -1336,6 +1537,7 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     event_init(proc->event_queue);
     proc_canary_stamp(proc);
     proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    proc->leader_pid = proc->pid;
     proc->uid = current_proc() ? current_proc()->uid : 0;
     proc->parent_pid = current_proc() ? current_proc()->pid : 0;
     if (name)
@@ -1346,13 +1548,10 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     proc->last_run_time = timer_get_ticks();
     proc->cwd[0] = '/';
     proc->cwd[1] = '\0';
-    spinlock_init(&proc->fd_lock);
+    proc->fdtab = fd_table_alloc();
+    proc->vmalist = vma_list_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
-
-    for (auto &fd : proc->fd_table)
-        fd.used = false;
-    proc->fd_table[0].used = proc->fd_table[1].used = proc->fd_table[2].used = true;
 
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
@@ -1433,6 +1632,7 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     event_init(proc->event_queue);
     proc_canary_stamp(proc);
     proc->pid = 0;
+    proc->leader_pid = 0;
     proc->uid = 0;
     proc->parent_pid = 0;
     if (name)
@@ -1440,11 +1640,10 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     proc->state = ProcessState_Ready;
     proc->priority = NUM_PRIORITY_LEVELS - 1; // IDLE class: never preempts real work
     proc->time_slice = 0;
-    spinlock_init(&proc->fd_lock);
+    proc->fdtab = fd_table_alloc(false);
+    proc->vmalist = vma_list_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
-    for (auto &fd : proc->fd_table)
-        fd.used = false;
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
     proc->next = proc;
@@ -1483,6 +1682,143 @@ void scheduler_note_epoll_deadline(uint64_t deadline_ticks)
         if (__sync_bool_compare_and_swap(&g_epoll_wake_deadline, cur, deadline_ticks))
             return;
         cur = __atomic_load_n(&g_epoll_wake_deadline, __ATOMIC_RELAXED);
+    }
+}
+
+bool scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
+{
+    if (!p)
+        return true;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    bool placed = false;
+    uint64_t earliest = UINT64_MAX;
+    for (auto &e : g_timed_waits) {
+        if (!placed && e.proc == nullptr) {
+            e.proc = p;
+            e.deadline = deadline_ticks;
+            placed = true;
+        }
+        if (e.proc)
+            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+    }
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    if (placed) {
+        uint64_t cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        while (earliest < cur) {
+            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, earliest))
+                break;
+            cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        }
+        return true;
+    }
+
+    // No free slot: report it so the caller can fail the wait instead of
+    // silently degrading to an infinite sleep. Loud in debug as well.
+    DEBUG_WARN("timed wait table full: pid %lu timeout dropped", p->pid);
+    return false;
+}
+
+// Caller MUST hold g_sched_lock. Removing entries can only raise the
+// table's true minimum, so the global deadline (<= that minimum by
+// construction) stays valid: it may fire early and re-arm from the
+// survivors.
+static void clear_timed_wait_entries_locked(Process *p)
+{
+    for (auto &e : g_timed_waits) {
+        if (e.proc == p)
+            e.proc = nullptr;
+    }
+}
+
+// A timed-wait registration must never outlive the wait that armed it:
+// when the wait ends by wake, signal or expiry, drop the entry. A
+// lingering entry makes the walker mark the process's next (unrelated)
+// blocked wait as timed out, and a freed-then-recycled Process at the
+// same address turns the liveness check into a false positive.
+void scheduler_clear_wake_deadline(Process *p)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    clear_timed_wait_entries_locked(p);
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+}
+
+// Caller MUST hold g_sched_lock: membership in the circular process list
+// proves the struct is still live — reaping unlinks a zombie under this same
+// lock before process_free_reaped can free the memory. A timed waiter that
+// died or was reaped before its deadline leaves its registration behind, and
+// dereferencing that stale pointer was a use-after-free.
+static bool timed_wait_target_live(Process *target)
+{
+    Process *curr = g_proc_list;
+    if (!curr)
+        return false;
+    do {
+        if (curr == target)
+            return true;
+        curr = curr->next;
+    } while (curr != g_proc_list);
+    return false;
+}
+
+// Caller MUST hold g_sched_lock: this runs from scheduler_schedule_internal
+// (the tick path that also drives the epoll deadline). The wake path is
+// scheduler_wake_process_locked, which requires exactly that.
+static void wake_expired_timed_waits(uint64_t now)
+{
+    if (g_timed_wake_deadline == UINT64_MAX || now < g_timed_wake_deadline)
+        return;
+
+    g_timed_wake_deadline = UINT64_MAX;
+    uint64_t earliest = UINT64_MAX;
+    bool unparked = false;
+    for (auto &e : g_timed_waits) {
+        if (!e.proc)
+            continue;
+        if (now < e.deadline) {
+            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+            continue;
+        }
+        Process *target = e.proc;
+        if (timed_wait_target_live(target)) {
+            if (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting) {
+                e.proc = nullptr;
+                target->timed_wake = true;
+                scheduler_wake_process_locked(target);
+            } else {
+                // Live but not parked: either still between registration
+                // and its scheduler_wait push, or already woken by its
+                // futex wake and returning (it deregisters itself).
+                // Dropping the entry here would lose a not-yet-parked
+                // waiter's timeout — an unbounded hang. Keep it and look
+                // again next tick.
+                unparked = true;
+            }
+        } else {
+            // The waiter died before its deadline; exit deregisters it,
+            // so this is a backstop for a missed path.
+            e.proc = nullptr;
+        }
+    }
+
+    uint64_t rearm = earliest;
+    if (unparked) {
+        const uint64_t next_tick = now + 1;
+        rearm = (next_tick < rearm) ? next_tick : rearm;
+    }
+    if (rearm != UINT64_MAX) {
+        uint64_t cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        while (rearm < cur) {
+            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, rearm))
+                break;
+            cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        }
     }
 }
 
@@ -1554,6 +1890,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     proc_canary_stamp(child);
 
     child->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    child->leader_pid = child->pid;
     child->parent_pid = current_proc()->pid;
     child->uid = current_proc()->uid;
     child->state = ProcessState_Ready;
@@ -1564,18 +1901,12 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     save_fpu_state(current_proc()->fpu_state);
     kstring::memcpy(child->fpu_state, current_proc()->fpu_state, FPU_STATE_SIZE);
     child->fpu_initialized = true;
-    spinlock_init(&child->fd_lock);
 
-    // irqsave: fd_lock is an IRQ-touched leaf, and a raw acquire here let the
-    // resched IPI (and any future IRQ path taking fd_lock) preempt mid-copy.
-    uint64_t fd_flags = spinlock_acquire_irqsave(&current_proc()->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        child->fd_table[i] = current_proc()->fd_table[i];
-        if (child->fd_table[i].used && child->fd_table[i].vnode) {
-            __sync_fetch_and_add(&child->fd_table[i].vnode->ref_count, 1);
-        }
-    }
-    spinlock_release_irqrestore(&current_proc()->fd_lock, fd_flags);
+    // Fork semantics: the child gets its own table (entries copied, per-vnode
+    // refs bumped under the table's irqsave leaf lock).
+    child->fdtab = fd_table_copy(current_proc()->fdtab);
+    child->vmalist = vma_list_alloc();
+
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
 
@@ -1600,10 +1931,11 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     spinlock_init(&child->vma_lock);
     child->vma_lock_ptr = &child->vma_lock;
     uint64_t vma_clone_flags = spinlock_acquire_irqsave(current_proc()->vma_lock_ptr);
-    child->vma_list = vma_clone(current_proc()->vma_list);
+    VMA *cloned_head = vma_clone(current_proc()->vmalist->head);
     spinlock_release_irqrestore(current_proc()->vma_lock_ptr, vma_clone_flags);
+    child->vmalist->head = cloned_head;
 
-    if (current_proc()->vma_list && !child->vma_list) {
+    if (current_proc()->vmalist->head && !child->vmalist->head) {
         process_release_private_fds(child);
         vmm_free_address_space(child->page_table);
         aligned_free(child);
@@ -1614,8 +1946,8 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     void *stack_phys = pmm_alloc_frames(stack_pages);
     if (!stack_phys) {
         process_release_private_fds(child);
-        if (child->vma_list)
-            vma_free_all(child->vma_list);
+        if (child->vmalist->head)
+            vma_free_all(child->vmalist->head);
         vmm_free_address_space(child->page_table);
         aligned_free(child);
         return static_cast<uint64_t>(-1);
@@ -1667,10 +1999,70 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     return child_pid;
 }
 
+void process_group_kill_siblings(Process *self)
+{
+    if (!self)
+        return;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    // exit() ends the whole thread group. The locked signal variant wakes
+    // blocked members atomically under the scheduler lock (an unlocked state
+    // read can race scheduler_wait and lose the wakeup, leaving the sibling
+    // unkillable). Zombies are skipped: their teardown already happened.
+    Process *p = g_proc_list;
+    if (p) {
+        do {
+            if (p != self && p->leader_pid == self->leader_pid && p->state != ProcessState_Zombie)
+                signal_send_locked(p, SIGKILL);
+            p = p->next;
+        } while (p != g_proc_list);
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+}
+
+[[noreturn]] static void process_exit_common(int32_t status, bool group_kill);
+
 void process_exit(int32_t status)
+{
+    // exit() from any thread terminates the whole group.
+    process_exit_common(status, true);
+}
+
+void sys_thread_exit(int64_t status)
+{
+    Process *self = process_get_current();
+    if (self && self->user_stack_lo != 0 && self->user_stack_size != 0) {
+        // Strictly on the kernel stack here: the caller never returns to the
+        // user stack, so the unmap (VMA nodes, PTEs, frames, futex waiters)
+        // cannot pull memory out from under running code.
+        if (!munmap_process_range(self, self->user_stack_lo, self->user_stack_size)) {
+            // A refused unmap leaks the mapping until the group's address
+            // space is torn down: loud at Error level (kept in release) so
+            // the leak is diagnosable, never silent.
+            KLOG(LogModule::Sched, LogLevel::Error, "thread exit: stack unmap refused for pid %llu (%s); mapping leaks",
+                 (unsigned long long)self->pid, self->name);
+        }
+        self->user_stack_lo = 0;
+        self->user_stack_size = 0;
+    }
+    // pthread_exit: this member only, the group stays alive.
+    process_exit_common(static_cast<int32_t>(status), false);
+}
+
+[[noreturn]] static void process_exit_common(int32_t status, bool group_kill)
 {
     DEBUG_INFO("Process %d (%s) exiting with status %d on cpu%u", current_proc()->pid, current_proc()->name, status,
                cpu_get_local()->cpu_id);
+
+    // exit() from any thread terminates the whole group: signal the siblings
+    // before releasing this member's resources so dying members cannot race
+    // the shared fd-table teardown.
+    if (group_kill)
+        process_group_kill_siblings(current_proc());
 
     process_release_private_fds(current_proc());
     shm_cleanup_process(current_proc());
@@ -1678,6 +2070,11 @@ void process_exit(int32_t status)
     const uint64_t flags = interrupts_save_disable();
     (void)flags;
     spinlock_acquire(&g_sched_lock);
+
+    // A timed futex wait this thread abandoned by exiting must not leave
+    // its registration behind: the walker would otherwise mark a recycled
+    // Process at this address.
+    clear_timed_wait_entries_locked(current_proc());
 
     current_proc()->state = ProcessState_Zombie;
     current_proc()->exit_status = status;
@@ -1817,10 +2214,17 @@ void process_exit(int32_t status)
             }
             proc_list_check_locked("waitpid");
 
+            // Classify inside the same hold that unlinked it: a zombie
+            // unlinked but not yet classified is in no list, invisible to
+            // the exec sever walk, and its stale page-table pointer would
+            // re-free an address space the exec already freed.
+            const bool freeable = process_reap_classify_locked(target);
             spinlock_release(&g_sched_lock);
             interrupts_restore(flags);
 
-            process_free_reaped(target);
+            process_release_reaped_fds(target);
+            if (freeable)
+                process_free_now(target);
             DEBUG_INFO("Reaped zombie PID %d", child_pid);
             return static_cast<int64_t>(child_pid);
         }
@@ -1850,6 +2254,17 @@ void process_exit(int32_t status)
             spinlock_release(&g_sched_lock);
             interrupts_restore(flags);
             return 0;
+        }
+
+        // A pending fatal signal must break the block: a thread parked
+        // here is otherwise unkillable, which hangs both the exit-group
+        // teardown and a sibling's exec group-kill wait (the signal wake
+        // would just re-park it). The caller is dying anyway; the return
+        // value never reaches user mode.
+        if (scheduler_fatal_signal_pending(current_proc())) {
+            spinlock_release(&g_sched_lock);
+            interrupts_restore(flags);
+            return -1;
         }
 
         if (pid == -1) {
@@ -1925,7 +2340,8 @@ void scheduler_sleep_ms(uint64_t ms)
 
 extern "C" void thread_ret();
 
-[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame)
+[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame,
+                                        uint64_t stack_lo, uint64_t stack_size, uint64_t flags)
 {
     if (!entry || !stack_top || !frame) {
         return -22;
@@ -1936,6 +2352,11 @@ extern "C" void thread_ret();
         return -1;
     }
 
+    // Only the reserved bit is honored; unknown bits are ignored so a
+    // caller that passes garbage in the flags register cannot fail or
+    // silently detach.
+    const bool create_detached = (flags & THREAD_DETACHED) != 0;
+
     Process *thread = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
     if (!thread) {
         return -1;
@@ -1945,7 +2366,11 @@ extern "C" void thread_ret();
     proc_canary_stamp(thread);
 
     thread->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
-    thread->parent_pid = parent->pid;
+    thread->leader_pid = parent->leader_pid;
+    thread->parent_pid = create_detached ? 0 : parent->pid;
+    thread->thread_detached = create_detached;
+    thread->user_stack_lo = stack_lo;
+    thread->user_stack_size = stack_size;
     thread->uid = parent->uid;
     thread->state = ProcessState_Ready;
     thread->priority = parent->priority;
@@ -1956,22 +2381,16 @@ extern "C" void thread_ret();
     kstring::memcpy(thread->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
     thread->fpu_initialized = true;
 
-    spinlock_init(&thread->fd_lock);
-    spinlock_acquire(&parent->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        thread->fd_table[i] = parent->fd_table[i];
-        if (thread->fd_table[i].used && thread->fd_table[i].vnode) {
-            __sync_fetch_and_add(&thread->fd_table[i].vnode->ref_count, 1);
-        }
-    }
-    spinlock_release(&parent->fd_lock);
+    // Thread semantics: share the leader's table live (open/close in this
+    // thread is visible to all siblings), no entry copying.
+    thread->fdtab = fd_table_share(parent->fdtab);
 
     thread->cursor_x = parent->cursor_x;
     thread->cursor_y = parent->cursor_y;
     kstring::strncpy(thread->cwd, parent->cwd, sizeof(thread->cwd));
 
     thread->page_table = parent->page_table;
-    thread->vma_list = parent->vma_list;
+    thread->vmalist = parent->vmalist; // shared live
     spinlock_init(&thread->vma_lock);
     thread->vma_lock_ptr = parent->vma_lock_ptr;
 
@@ -2019,22 +2438,77 @@ extern "C" void thread_ret();
     // exit on another core before this function returns.
     const int64_t thread_pid = static_cast<int64_t>(thread->pid);
 
-    const uint64_t flags = interrupts_save_disable();
+    const uint64_t pub_flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     g_proc_tail->next = thread;
     g_proc_tail = thread;
     thread->next = g_proc_list;
 
     thread->children_list = nullptr;
-    thread->sibling_next = parent->children_list;
-    parent->children_list = thread;
+    if (create_detached) {
+        // Created detached: never waitable. Keep it out of every children
+        // list — the kernel-zombie auto-reap (parent_pid == 0) owns its
+        // zombie, exactly like sys_thread_detach's routing.
+        thread->sibling_next = nullptr;
+    } else {
+        thread->sibling_next = parent->children_list;
+        parent->children_list = thread;
+    }
 
     ready_queue_push(thread);
     spinlock_release(&g_sched_lock);
-    interrupts_restore(flags);
+    interrupts_restore(pub_flags);
     scheduler_notify_idle_cpus();
 
     return thread_pid;
+}
+
+int64_t sys_thread_detach(uint64_t tid)
+{
+    Process *cur = process_get_current();
+    if (!cur)
+        return -1;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    Process *prev_sibling = nullptr;
+    Process *target = cur->children_list;
+    while (target) {
+        if (target->pid == tid)
+            break;
+        prev_sibling = target;
+        target = target->sibling_next;
+    }
+
+    if (!target || target->state == ProcessState_Zombie) {
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        return -10; // -ECHILD: not a live child thread
+    }
+
+    // Only threads of the caller's group: a forked child is its own group
+    // leader (leader_pid == pid). Orphaning it into the auto-reap would
+    // discard its exit status where the parent can never collect it.
+    if (target->leader_pid == target->pid) {
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        return -10; // -ECHILD: not a child thread
+    }
+
+    // Orphan the thread: the kernel-zombie reaper collects parent_pid == 0
+    // zombies without any waitpid, which is exactly the detached contract.
+    if (prev_sibling)
+        prev_sibling->sibling_next = target->sibling_next;
+    else
+        cur->children_list = target->sibling_next;
+    target->sibling_next = nullptr;
+    target->parent_pid = 0;
+    target->thread_detached = true;
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+    return 0;
 }
 
 void preempt_disable()

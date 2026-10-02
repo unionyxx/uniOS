@@ -25,7 +25,7 @@ static int test_find_free_fd(Process *p)
     if (!p)
         return -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used)
+        if (!p->fdtab->fds[i].used)
             return i;
     }
     return -1;
@@ -53,8 +53,7 @@ KTEST(extended_syscalls_futex)
     KTEST_EXPECT(current != nullptr);
 
     uint64_t *orig_page_table = current->page_table;
-    VMA *orig_vma_list = current->vma_list;
-    uint32_t orig_vma_count = current->vma_count;
+    VMA *orig_vma_list = current->vmalist->head;
 
     if (!current->page_table)
         current->page_table = vmm_get_kernel_pml4();
@@ -77,8 +76,7 @@ KTEST(extended_syscalls_futex)
     futex_vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
     futex_vma->type = VMAType::Anonymous;
     futex_vma->next = nullptr;
-    current->vma_list = futex_vma;
-    current->vma_count = 1;
+    current->vmalist->head = futex_vma;
 
     volatile uint32_t val = 42;
 
@@ -141,7 +139,7 @@ KTEST(extended_syscalls_futex)
     // create time (it ran during the surgery window). Clear both so the
     // deferred reaper never frees them out from under the test's own
     // cleanup below.
-    child->vma_list = nullptr;
+    child->vmalist->head = nullptr;
     child->page_table = nullptr;
 
     int32_t status = 0;
@@ -155,8 +153,7 @@ KTEST(extended_syscalls_futex)
     free(futex_vma);
 
     current->page_table = orig_page_table;
-    current->vma_list = orig_vma_list;
-    current->vma_count = orig_vma_count;
+    current->vmalist->head = orig_vma_list;
 }
 
 KTEST(extended_syscalls_thread_create)
@@ -203,8 +200,7 @@ KTEST(extended_syscalls_mprotect)
     KTEST_EXPECT(current != nullptr);
 
     uint64_t *orig_page_table = current->page_table;
-    VMA *orig_vma_list = current->vma_list;
-    uint32_t orig_vma_count = current->vma_count;
+    VMA *orig_vma_list = current->vmalist->head;
 
     if (!current->page_table)
         current->page_table = vmm_get_kernel_pml4();
@@ -228,8 +224,7 @@ KTEST(extended_syscalls_mprotect)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
 
-    current->vma_list = vma;
-    current->vma_count = 1;
+    current->vmalist->head = vma;
 
     // unaligned addr
     int64_t res = sys_mprotect(reinterpret_cast<void *>(test_vaddr | 1), 4096, PROT_READ | PROT_WRITE);
@@ -257,8 +252,7 @@ KTEST(extended_syscalls_mprotect)
     free(vma);
 
     current->page_table = orig_page_table;
-    current->vma_list = orig_vma_list;
-    current->vma_count = orig_vma_count;
+    current->vmalist->head = orig_vma_list;
 }
 
 KTEST(extended_syscalls_epoll)
@@ -269,8 +263,7 @@ KTEST(extended_syscalls_epoll)
     // sys_epoll_ctl/wait validate their user pointers now, so the test needs
     // a real user mapping for the epoll_event structures.
     uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    VMA *orig_vma_list = p->vmalist->head;
 
     if (!p->page_table)
         p->page_table = vmm_get_kernel_pml4();
@@ -290,8 +283,7 @@ KTEST(extended_syscalls_epoll)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
 
-    p->vma_list = vma;
-    p->vma_count = 1;
+    p->vmalist->head = vma;
 
     struct epoll_event *user_ev = reinterpret_cast<struct epoll_event *>(test_vaddr);
     struct epoll_event *user_events = reinterpret_cast<struct epoll_event *>(test_vaddr + 64);
@@ -307,15 +299,15 @@ KTEST(extended_syscalls_epoll)
 
     int read_fd = test_find_free_fd(p);
     KTEST_EXPECT(read_fd >= 0);
-    p->fd_table[read_fd].used = true;
-    p->fd_table[read_fd].vnode = pipe_get_vnode(pipe_id, false);
-    p->fd_table[read_fd].flags = 0;
+    p->fdtab->fds[read_fd].used = true;
+    p->fdtab->fds[read_fd].vnode = pipe_get_vnode(pipe_id, false);
+    p->fdtab->fds[read_fd].flags = 0;
 
     int write_fd = test_find_free_fd(p);
     KTEST_EXPECT(write_fd >= 0);
-    p->fd_table[write_fd].used = true;
-    p->fd_table[write_fd].vnode = pipe_get_vnode(pipe_id, true);
-    p->fd_table[write_fd].flags = 0;
+    p->fdtab->fds[write_fd].used = true;
+    p->fdtab->fds[write_fd].vnode = pipe_get_vnode(pipe_id, true);
+    p->fdtab->fds[write_fd].flags = 0;
 
     user_ev->events = EPOLLIN;
     user_ev->data.fd = read_fd;
@@ -359,8 +351,7 @@ KTEST(extended_syscalls_epoll)
     free(vma);
 
     p->page_table = orig_page_table;
-    p->vma_list = orig_vma_list;
-    p->vma_count = orig_vma_count;
+    p->vmalist->head = orig_vma_list;
 }
 
 // Writer thread for the epoll wake test: yields for a while, then writes to
@@ -404,8 +395,7 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
     f.vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
     f.vma->type = VMAType::Anonymous;
     f.vma->next = nullptr;
-    p->vma_list = f.vma;
-    p->vma_count = 1;
+    p->vmalist->head = f.vma;
 
     f.user_ev = reinterpret_cast<struct epoll_event *>(test_vaddr);
     f.user_events = f.user_ev;
@@ -416,9 +406,9 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
     if (f.epfd < 3 || f.pipe_id < 0 || f.read_fd < 0)
         return false;
 
-    p->fd_table[f.read_fd].used = true;
-    p->fd_table[f.read_fd].vnode = pipe_get_vnode(f.pipe_id, false);
-    p->fd_table[f.read_fd].flags = 0;
+    p->fdtab->fds[f.read_fd].used = true;
+    p->fdtab->fds[f.read_fd].vnode = pipe_get_vnode(f.pipe_id, false);
+    p->fdtab->fds[f.read_fd].flags = 0;
 
     f.user_ev->events = EPOLLIN;
     f.user_ev->data.fd = f.read_fd;
@@ -426,7 +416,7 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
 }
 
 static void epoll_block_fixture_teardown(Process *p, EpollBlockFixture &f, uint64_t *orig_page_table,
-                                         VMA *orig_vma_list, uint32_t orig_vma_count)
+                                         VMA *orig_vma_list)
 {
     vfs_close(f.read_fd);
     vfs_close(static_cast<int>(f.epfd));
@@ -436,8 +426,7 @@ static void epoll_block_fixture_teardown(Process *p, EpollBlockFixture &f, uint6
     pmm_free_frame(f.phys);
     free(f.vma);
     p->page_table = orig_page_table;
-    p->vma_list = orig_vma_list;
-    p->vma_count = orig_vma_count;
+    p->vmalist->head = orig_vma_list;
 }
 
 KTEST(extended_syscalls_epoll_timeout)
@@ -446,8 +435,7 @@ KTEST(extended_syscalls_epoll_timeout)
     KTEST_EXPECT(p != nullptr);
 
     uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    VMA *orig_vma_list = p->vmalist->head;
     if (!p->page_table)
         p->page_table = vmm_get_kernel_pml4();
 
@@ -465,7 +453,7 @@ KTEST(extended_syscalls_epoll_timeout)
     KTEST_EXPECT_EQ(r, 0);
     KTEST_EXPECT(elapsed >= 200); // ~300ms budget with a generous margin
 
-    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list);
 }
 
 KTEST(extended_syscalls_epoll_wake)
@@ -474,8 +462,7 @@ KTEST(extended_syscalls_epoll_wake)
     KTEST_EXPECT(p != nullptr);
 
     uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    VMA *orig_vma_list = p->vmalist->head;
     if (!p->page_table)
         p->page_table = vmm_get_kernel_pml4();
 
@@ -487,7 +474,7 @@ KTEST(extended_syscalls_epoll_wake)
     void *stack = malloc(4096);
     KTEST_EXPECT(stack != nullptr);
     if (!stack) {
-        epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+        epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list);
         return;
     }
     void *stack_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
@@ -520,7 +507,7 @@ KTEST(extended_syscalls_epoll_wake)
     if (child) {
         scheduler_remove_from_ready_queue(child);
         child->state = ProcessState_Zombie;
-        child->vma_list = nullptr;
+        child->vmalist->head = nullptr;
         child->page_table = nullptr;
         int32_t status = 0;
         int64_t reaped = process_waitpid(thread_pid, &status, 0);
@@ -528,7 +515,7 @@ KTEST(extended_syscalls_epoll_wake)
     }
 
     free(stack);
-    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list);
 }
 
 #ifndef SEEK_SET
@@ -543,8 +530,7 @@ KTEST(extended_syscalls_memfd)
     KTEST_EXPECT(p != nullptr);
 
     uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    VMA *orig_vma_list = p->vmalist->head;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -618,8 +604,7 @@ KTEST(extended_syscalls_memfd)
     KTEST_EXPECT_EQ(close_res, 0);
 
     p->page_table = orig_page_table;
-    p->vma_list = orig_vma_list;
-    p->vma_count = orig_vma_count;
+    p->vmalist->head = orig_vma_list;
 }
 
 extern "C" int64_t sys_ftruncate(int fd, uint64_t size);
@@ -637,7 +622,7 @@ KTEST(extended_syscalls_fd_transfer)
     int64_t trunc_res = sys_ftruncate(static_cast<int>(fd), 8192);
     KTEST_EXPECT_EQ(trunc_res, 0);
 
-    VNode *node = p->fd_table[fd].vnode;
+    VNode *node = p->fdtab->fds[fd].vnode;
     KTEST_EXPECT(node != nullptr);
     KTEST_EXPECT_EQ(node->size, 8192ULL);
 
@@ -645,8 +630,8 @@ KTEST(extended_syscalls_fd_transfer)
     int64_t transferred_fd = sys_fd_transfer(p->pid, static_cast<int>(fd));
     KTEST_EXPECT(transferred_fd >= 3);
     KTEST_EXPECT(transferred_fd != fd);
-    KTEST_EXPECT(p->fd_table[transferred_fd].used);
-    KTEST_EXPECT_EQ(p->fd_table[transferred_fd].vnode, node);
+    KTEST_EXPECT(p->fdtab->fds[transferred_fd].used);
+    KTEST_EXPECT_EQ(p->fdtab->fds[transferred_fd].vnode, node);
 
     // Clean up both FDs
     int close_res1 = vfs_close(static_cast<int>(fd));
@@ -662,8 +647,7 @@ KTEST(extended_syscalls_vma_split_unmap)
     KTEST_EXPECT(p != nullptr);
 
     uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    VMA *orig_vma_list = p->vmalist->head;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -718,8 +702,7 @@ KTEST(extended_syscalls_vma_split_unmap)
     KTEST_EXPECT_EQ(close_res, 0);
 
     p->page_table = orig_page_table;
-    p->vma_list = orig_vma_list;
-    p->vma_count = orig_vma_count;
+    p->vmalist->head = orig_vma_list;
 }
 
 KTEST(extended_syscalls_mmap_offset)
@@ -728,8 +711,7 @@ KTEST(extended_syscalls_mmap_offset)
     KTEST_EXPECT(p != nullptr);
 
     uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    VMA *orig_vma_list = p->vmalist->head;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -782,8 +764,7 @@ KTEST(extended_syscalls_mmap_offset)
     KTEST_EXPECT_EQ(close_res, 0);
 
     p->page_table = orig_page_table;
-    p->vma_list = orig_vma_list;
-    p->vma_count = orig_vma_count;
+    p->vmalist->head = orig_vma_list;
 }
 
 struct TestStackFrame
@@ -806,14 +787,37 @@ constexpr uint32_t TEST_SIG_CONTEXT_MAGIC = 0x51644374; // 'SigC'
 extern "C" void signal_check_interrupt(InterruptFrame *frame);
 bool g_in_ktest_signal = false;
 
+// A failed expectation jumps to the cleanup label instead of returning
+// mid-test: the surgery this test performs (page table, VMA list, signal
+// handlers, a user mapping) must be undone even on failure, or the next
+// ktest inherits a poisoned pid-0 task — a stale SIGUSR1 handler pointing
+// into nowhere, which a later signal delivery follows straight into
+// process_exit.
+#define SIG_CTX_CHECK(cond)                                                                                            \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ktest_record_failure(#cond, __FILE__, __LINE__);                                                           \
+            goto cleanup;                                                                                              \
+        }                                                                                                              \
+    } while (0)
+#define SIG_CTX_CHECK_EQ(a, b) SIG_CTX_CHECK((a) == (b))
+
 KTEST(extended_syscalls_signal_context)
 {
     Process *p = process_get_current();
-    KTEST_EXPECT(p != nullptr);
+    if (!p) {
+        ktest_record_failure("p != nullptr", __FILE__, __LINE__);
+        return;
+    }
 
-    uint64_t *orig_page_table = p->page_table;
-    VMA *orig_vma_list = p->vma_list;
-    uint32_t orig_vma_count = p->vma_count;
+    const uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vmalist->head;
+    const SignalControl orig_signals = p->signals;
+    uint64_t mmap_res = static_cast<uint64_t>(-1);
+    SyscallFrame mmap_frame = {};
+    mmap_frame.arg4 = MAP_PRIVATE | MAP_ANONYMOUS;
+    mmap_frame.arg5 = static_cast<uint64_t>(-1);
+    mmap_frame.arg6 = 0;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -822,117 +826,119 @@ KTEST(extended_syscalls_signal_context)
     // Allocate user memory to use as the user stack. The kernel signal frame
     // carries the full FPU_STATE_SIZE xsave area now, so one page is not
     // enough for the frame + red zone.
-    SyscallFrame mmap_frame = {};
-    mmap_frame.arg4 = MAP_PRIVATE | MAP_ANONYMOUS;
-    mmap_frame.arg5 = static_cast<uint64_t>(-1);
-    mmap_frame.arg6 = 0;
-    uint64_t mmap_res = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &mmap_frame);
-    KTEST_EXPECT(mmap_res != static_cast<uint64_t>(-1));
+    {
+        mmap_res = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &mmap_frame);
+        SIG_CTX_CHECK(mmap_res != static_cast<uint64_t>(-1));
 
-    // Save current signal state
-    SignalControl orig_signals = p->signals;
+        // Set up signal handler and restorer
+        p->signals.handlers[SIGUSR1] = reinterpret_cast<sighandler_t>(0x123456ULL);
+        p->signals.restorer = 0x7890ULL;
+        p->signals.pending = (1ULL << SIGUSR1);
+        p->signals.blocked = 0x112233ULL;
 
-    // Set up signal handler and restorer
-    p->signals.handlers[SIGUSR1] = reinterpret_cast<sighandler_t>(0x123456ULL);
-    p->signals.restorer = 0x7890ULL;
-    p->signals.pending = (1ULL << SIGUSR1);
-    p->signals.blocked = 0x112233ULL;
+        // Set up mock register state
+        TestStackFrame tf = {};
+        tf.original_rax = 0xAAABBBULL;
+        tf.frame.rip = 0x9999ULL;
+        tf.frame.rsp = mmap_res + 12288; // Top of the mapped region
+        tf.frame.cs = 0x23ULL;
+        tf.frame.ss = 0x1BULL;
+        tf.frame.rflags = 0x202ULL;
+        tf.frame.rbx = 0x11ULL;
+        tf.frame.rbp = 0x22ULL;
+        tf.frame.r12 = 0x33ULL;
+        tf.frame.r13 = 0x44ULL;
+        tf.frame.r14 = 0x55ULL;
+        tf.frame.r15 = 0x66ULL;
 
-    // Set up mock register state
-    TestStackFrame tf = {};
-    tf.original_rax = 0xAAABBBULL;
-    tf.frame.rip = 0x9999ULL;
-    tf.frame.rsp = mmap_res + 12288; // Top of the mapped region
-    tf.frame.cs = 0x23ULL;
-    tf.frame.ss = 0x1BULL;
-    tf.frame.rflags = 0x202ULL;
-    tf.frame.rbx = 0x11ULL;
-    tf.frame.rbp = 0x22ULL;
-    tf.frame.r12 = 0x33ULL;
-    tf.frame.r13 = 0x44ULL;
-    tf.frame.r14 = 0x55ULL;
-    tf.frame.r15 = 0x66ULL;
+        // Run signal check (this should deliver SIGUSR1)
+        signal_check(&tf.frame);
 
-    // Run signal check (this should deliver SIGUSR1)
-    signal_check(&tf.frame);
+        // Verify signal check side effects:
+        // RIP should point to the signal handler
+        SIG_CTX_CHECK_EQ(tf.frame.rip, 0x123456ULL);
+        // RSP should have decreased
+        SIG_CTX_CHECK(tf.frame.rsp < mmap_res + 12288);
+        // The signal should no longer be pending
+        SIG_CTX_CHECK_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
 
-    // Verify signal check side effects:
-    // RIP should point to the signal handler
-    KTEST_EXPECT_EQ(tf.frame.rip, 0x123456ULL);
-    // RSP should have decreased
-    KTEST_EXPECT(tf.frame.rsp < mmap_res + 12288);
-    // The signal should no longer be pending
-    KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
+        // Verify the data pushed to the user stack. Read through the
+        // virtual mapping: the mapping's pages are independently allocated
+        // frames, so reconstructing field addresses from one translated
+        // physical base would assume the mapping is physically contiguous.
+        // The ktest runs in kernel context on the mapping's own page tables
+        // (page_table surgery above), and SMAP stays disabled, so a direct
+        // read sees exactly what the interrupted user thread would see. The
+        // trampoline is pushed at RSP; the SignalContext starts at RSP + 8.
+        uint64_t tramp_phys = vmm_virt_to_phys(tf.frame.rsp);
+        SIG_CTX_CHECK(tramp_phys != 0);
+        uint64_t *tramp_val = reinterpret_cast<uint64_t *>(tf.frame.rsp);
+        SIG_CTX_CHECK_EQ(*tramp_val, 0x7890ULL);
 
-    // Verify the data pushed to the user stack:
-    // The trampoline is pushed at RSP
-    uint64_t tramp_phys = vmm_virt_to_phys(tf.frame.rsp);
-    KTEST_EXPECT(tramp_phys != 0);
-    uint64_t *tramp_val = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(tramp_phys));
-    KTEST_EXPECT_EQ(*tramp_val, 0x7890ULL);
+        uint64_t ctx_phys = vmm_virt_to_phys(tf.frame.rsp + 8);
+        SIG_CTX_CHECK(ctx_phys != 0);
 
-    // The SignalContext starts at RSP + 8
-    uint64_t ctx_user_addr = tf.frame.rsp + 8;
-    uint64_t ctx_phys = vmm_virt_to_phys(ctx_user_addr);
-    KTEST_EXPECT(ctx_phys != 0);
+        TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(tf.frame.rsp + 8);
+        SIG_CTX_CHECK_EQ(u_ctx->frame.rax, 0xAAABBBULL);
+        SIG_CTX_CHECK_EQ(u_ctx->old_mask, 0x112233ULL);
+        SIG_CTX_CHECK_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
 
-    TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(vmm_phys_to_virt(ctx_phys));
-    KTEST_EXPECT_EQ(u_ctx->frame.rax, 0xAAABBBULL);
-    KTEST_EXPECT_EQ(u_ctx->old_mask, 0x112233ULL);
-    KTEST_EXPECT_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
+        // Now simulate userspace returning from the signal handler:
+        // The trampoline would execute SYS_SIGRETURN.
+        // The user stack pointer would point to the SignalContext (i.e. tramp address is popped)
+        tf.frame.rsp += 8;
 
-    // Now simulate userspace returning from the signal handler:
-    // The trampoline would execute SYS_SIGRETURN.
-    // The user stack pointer would point to the SignalContext (i.e. tramp address is popped)
-    tf.frame.rsp += 8;
+        // Set g_in_ktest_signal to true to prevent sys_sigreturn from executing iretq and crashing
+        g_in_ktest_signal = true;
+        uint64_t returned_rax = syscall_handler(SYS_SIGRETURN, 0, 0, 0, &tf.frame);
+        g_in_ktest_signal = false;
 
-    // Set g_in_ktest_signal to true to prevent sys_sigreturn from executing iretq and crashing
-    g_in_ktest_signal = true;
-    uint64_t returned_rax = syscall_handler(SYS_SIGRETURN, 0, 0, 0, &tf.frame);
+        // Verify context restoration:
+        // Returned value should be the original RAX (restored into RAX in InterruptFrame)
+        SIG_CTX_CHECK_EQ(returned_rax, 0xAAABBBULL);
+        // RIP and RSP should be restored
+        SIG_CTX_CHECK_EQ(tf.frame.rip, 0x9999ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.rsp, mmap_res + 12288);
+        // Callee-saved registers should be restored
+        SIG_CTX_CHECK_EQ(tf.frame.rbx, 0x11ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.rbp, 0x22ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r12, 0x33ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r13, 0x44ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r14, 0x55ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r15, 0x66ULL);
+        // Signal mask should be restored
+        SIG_CTX_CHECK_EQ(p->signals.blocked, 0x112233ULL);
+
+        // --- Test signal_check_interrupt ---
+        p->signals.pending = (1ULL << SIGUSR1);
+
+        InterruptFrame int_frame = {};
+        int_frame.rip = 0xaaaaULL;
+        int_frame.rsp = mmap_res + 12288;
+        int_frame.cs = 0x23ULL; // Ring 3
+        int_frame.ss = 0x1BULL;
+        int_frame.rflags = 0x202ULL;
+        int_frame.rax = 0x5555ULL;
+
+        signal_check_interrupt(&int_frame);
+
+        // Verify it delivered the signal
+        SIG_CTX_CHECK_EQ(int_frame.rip, 0x123456ULL);
+        SIG_CTX_CHECK_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
+    }
+
+cleanup:
     g_in_ktest_signal = false;
-
-    // Verify context restoration:
-    // Returned value should be the original RAX (restored into RAX in InterruptFrame)
-    KTEST_EXPECT_EQ(returned_rax, 0xAAABBBULL);
-    // RIP and RSP should be restored
-    KTEST_EXPECT_EQ(tf.frame.rip, 0x9999ULL);
-    KTEST_EXPECT_EQ(tf.frame.rsp, mmap_res + 12288);
-    // Callee-saved registers should be restored
-    KTEST_EXPECT_EQ(tf.frame.rbx, 0x11ULL);
-    KTEST_EXPECT_EQ(tf.frame.rbp, 0x22ULL);
-    KTEST_EXPECT_EQ(tf.frame.r12, 0x33ULL);
-    KTEST_EXPECT_EQ(tf.frame.r13, 0x44ULL);
-    KTEST_EXPECT_EQ(tf.frame.r14, 0x55ULL);
-    KTEST_EXPECT_EQ(tf.frame.r15, 0x66ULL);
-    // Signal mask should be restored
-    KTEST_EXPECT_EQ(p->signals.blocked, 0x112233ULL);
-
-    // --- Test signal_check_interrupt ---
-    p->signals.pending = (1ULL << SIGUSR1);
-
-    InterruptFrame int_frame = {};
-    int_frame.rip = 0xaaaaULL;
-    int_frame.rsp = mmap_res + 12288;
-    int_frame.cs = 0x23ULL; // Ring 3
-    int_frame.ss = 0x1BULL;
-    int_frame.rflags = 0x202ULL;
-    int_frame.rax = 0x5555ULL;
-
-    signal_check_interrupt(&int_frame);
-
-    // Verify it delivered the signal
-    KTEST_EXPECT_EQ(int_frame.rip, 0x123456ULL);
-    KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
-
-    // Clean up
-    uint64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 12288, 0, &mmap_frame);
-    KTEST_EXPECT_EQ(munmap_res, 0);
-
+    if (mmap_res != static_cast<uint64_t>(-1)) {
+        (void)syscall_handler(SYS_MUNMAP, mmap_res, 12288, 0, &mmap_frame);
+    }
     p->signals = orig_signals;
-    p->page_table = orig_page_table;
-    p->vma_list = orig_vma_list;
-    p->vma_count = orig_vma_count;
+    p->page_table = const_cast<uint64_t *>(orig_page_table);
+    p->vmalist->head = orig_vma_list;
 }
+
+#undef SIG_CTX_CHECK
+#undef SIG_CTX_CHECK_EQ
 
 KTEST(extended_vfs_page_cache)
 {

@@ -30,6 +30,35 @@ struct Context
 
 constexpr size_t FPU_STATE_SIZE = 4096; // Increased to 4K for safety
 
+// Shared, refcounted-by-lifetime VMA list. Threads share the leader's list
+// object live (the head field is shared, so unlinking the first node is
+// visible to every member); fork clones the list into a fresh object (COW).
+// Lifetime: the leader owns the list and frees it once no live member
+// shares it (the scheduler's deferred-free rules); threads never free it.
+struct VmaList
+{
+    VMA *head;
+};
+
+[[nodiscard]] VmaList *vma_list_alloc();
+void vma_list_free(VmaList *list);
+
+// Shared, refcounted file-descriptor table. Fork deep-copies the entries
+// (per-vnode refs bumped); threads created by sys_thread_create share the
+// leader's table live, so fd operations in one thread are visible to all
+// siblings. The table is freed when its last holder exits.
+struct FdTable
+{
+    alignas(64) Spinlock lock;
+    uint64_t refs;
+    FileDescriptor fds[MAX_OPEN_FILES];
+};
+
+[[nodiscard]] FdTable *fd_table_alloc(bool stdio_marks = true);
+[[nodiscard]] FdTable *fd_table_copy(FdTable *src);
+[[nodiscard]] FdTable *fd_table_share(FdTable *t);
+void fd_table_release(FdTable *t);
+
 struct Process
 {
     // === Fields accessed by assembly (PROC_* in process.asm) ===
@@ -69,12 +98,10 @@ struct Process
     uint8_t priority;
     uint8_t _pad_priority[7]; // Explicit padding to force 8-byte alignment
 
-    alignas(64) Spinlock fd_lock;
-    FileDescriptor fd_table[MAX_OPEN_FILES];
+    FdTable *fdtab;
 
     alignas(64) Spinlock vma_lock;
-    VMA *vma_list;
-    uint32_t vma_count;
+    VmaList *vmalist; // shared with threads, cloned on fork
     Spinlock *vma_lock_ptr;
     uint32_t _pad_vma[5]; // Maintain 64-byte alignment or at least clear padding
 
@@ -86,6 +113,21 @@ struct Process
     uint32_t time_slice;
     uint64_t last_run_time;
     uint64_t block_start_time;
+
+    // Thread-group state: leader_pid is the process's own pid for leaders
+    // and plain processes, the leader's pid for threads created by
+    // sys_thread_create. exit() group-kills every live member.
+    uint64_t leader_pid;
+    uint64_t user_stack_lo; // recorded thread stack (0 = none)
+    uint64_t user_stack_size;
+    bool thread_detached; // detached at exit: routes to the kernel-zombie auto-reap
+    bool timed_wake;      // woken by the deadline walker (futex timeouts)
+
+    // Physical address of the 32-bit futex word this process is parked on
+    // (page + word offset). Valid only while queued on a futex bucket's
+    // wait_queue: set under the bucket lock before the park, read by
+    // FUTEX_WAKE's word-matched walk under the same bucket lock.
+    uint64_t futex_word_phys;
 
     SignalControl signals;
 
@@ -119,6 +161,19 @@ extern "C" void switch_to_task(Process *current, Process *next);
 void process_init();
 void process_exit(int32_t status);
 [[nodiscard]] int64_t process_waitpid(int64_t pid, int32_t *status, int options);
+
+// SIGKILL every live member of the caller's thread group (caller excluded,
+// zombies skipped). Wakes blocked members through the signal path; called by
+// process_exit before the caller zombifies.
+void process_group_kill_siblings(Process *self);
+
+// Terminate only the calling thread: unmap the recorded user stack while on
+// the kernel stack, then exit without group-kill. Never returns.
+[[noreturn]] void sys_thread_exit(int64_t status);
+
+// Mark a child thread detached (ESRH/-10 if not a live child): it leaves the
+// caller's children list and the kernel-zombie reaper takes it on exit.
+int64_t sys_thread_detach(uint64_t tid);
 
 void system_reboot();
 void system_poweroff();

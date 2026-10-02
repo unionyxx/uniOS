@@ -34,6 +34,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 extern "C" void signal_check(SyscallFrame *frame);
 extern "C" void signal_send_current(int sig);
 
+struct Process;
+// Signal delivery under the caller-held scheduler lock (group-kill path):
+// wakes Blocked/Waiting targets so a fatal signal cannot be slept through.
+void signal_send_locked(Process *p, int sig);
+
+// Unmap a user range (VMA nodes, PTEs, frames, futex-waiter notification).
+// Returns false on protected/invalid ranges.
+[[nodiscard]] bool munmap_process_range(Process *p, uint64_t addr, size_t length);
+
 [[nodiscard]] int64_t sys_socket_state(uint64_t handle);
 
 [[nodiscard]] int64_t kernel_exec(const char *path);

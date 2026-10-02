@@ -43,3 +43,17 @@ __sigret:
     mov rax, 15 ; SYS_SIGRETURN
     syscall
     ret
+
+; pthread_create enters the thread's fn with this address as the return
+; address, so a plain return lands here with fn's return value in RAX.
+; Route it into pthread_exit(RAX), which unmaps the stack and ends only
+; this thread. fn's ret leaves rsp at the page-aligned stack top (0 mod
+; 16); a tail jump would enter pthread_exit misaligned, so bias rsp back
+; to the SysV function-entry value (8 mod 16) first. pthread_exit never
+; returns, so the dead slot below rsp is harmless.
+global __thread_exit_shim
+extern pthread_exit
+__thread_exit_shim:
+    mov rdi, rax
+    sub rsp, 8
+    jmp pthread_exit

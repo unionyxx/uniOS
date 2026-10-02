@@ -311,7 +311,7 @@ static bool shm_unmap_from_process(Process *p, int id)
     const uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-    VMA *mapping = vma_find(p->vma_list, virt_start);
+    VMA *mapping = vma_find(p->vmalist->head, virt_start);
     if (!mapping || mapping->start != virt_start || mapping->type != VMAType::Shared) {
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
@@ -319,7 +319,7 @@ static bool shm_unmap_from_process(Process *p, int id)
 
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
-    vma_remove(&p->vma_list, mapping_start, mapping_end);
+    vma_remove(&p->vmalist->head, mapping_start, mapping_end);
 
     // Clear the PTEs under the SAME hold that removed the metadata (fork's
     // clone serializes here and does check-free refcount incs on present
@@ -349,7 +349,7 @@ static bool shm_unmap_from_process(Process *p, int id)
     return true;
 }
 
-static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
+bool munmap_process_range(Process *p, uint64_t addr, size_t length)
 {
     if (!p || !p->page_table || addr == 0 || length == 0 || (addr & 0xFFFULL) != 0)
         return false;
@@ -364,7 +364,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     uint64_t end_addr = addr + length;
 
     // Check for overlap with protected Text or Stack VMAs
-    for (VMA *curr = p->vma_list; curr; curr = curr->next) {
+    for (VMA *curr = p->vmalist->head; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > addr) {
             if (curr->type == VMAType::Text || curr->type == VMAType::Stack) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
@@ -374,7 +374,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     }
 
     // Apply the unmap logic to the VMA list
-    if (!vma_unmap(&p->vma_list, addr, end_addr)) {
+    if (!vma_unmap(&p->vmalist->head, addr, end_addr)) {
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
     }
@@ -486,7 +486,7 @@ void shm_cleanup_process(Process *proc)
     if (!p)
         return -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used)
+        if (!p->fdtab->fds[i].used)
             return i;
     }
     return -1;
@@ -519,7 +519,7 @@ void signal_send(Process *p, int sig)
 // the target cannot be reaped between lookup and wake, and the state check +
 // wake happen atomically (an unlocked state read raced scheduler_wait and
 // lost the wakeup, leaving blocked processes unkillable).
-static void signal_send_locked(Process *p, int sig)
+void signal_send_locked(Process *p, int sig)
 {
     if (!p || sig <= 0 || sig > 31)
         return;
@@ -912,7 +912,7 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     // Respect redirected FDs (e.g. pipes) even for stdin
-    if (p->fd_table[fd].used && p->fd_table[fd].vnode) {
+    if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode) {
         char stack_buf[1024];
         char *kbuf = stack_buf;
         if (count > 1024) {
@@ -988,7 +988,7 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     // Respect redirected FDs (e.g. pipes) even for stdout/stderr
-    if (p->fd_table[fd].used && p->fd_table[fd].vnode) {
+    if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode) {
         char stack_buf[1024];
         char *kbuf = stack_buf;
         if (count > 1024) {
@@ -1113,32 +1113,32 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     if (oldfd == newfd) {
-        uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-        bool used = p->fd_table[oldfd].used;
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+        uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+        bool used = p->fdtab->fds[oldfd].used;
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return used ? static_cast<uint64_t>(newfd) : static_cast<uint64_t>(-1);
     }
 
     VNode *to_close = nullptr;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[oldfd].used) {
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[oldfd].used) {
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return static_cast<uint64_t>(-1);
     }
 
-    if (p->fd_table[newfd].used) {
-        to_close = p->fd_table[newfd].vnode;
-        p->fd_table[newfd].used = false;
-        p->fd_table[newfd].flags = 0;
-        p->fd_table[newfd].vnode = nullptr;
+    if (p->fdtab->fds[newfd].used) {
+        to_close = p->fdtab->fds[newfd].vnode;
+        p->fdtab->fds[newfd].used = false;
+        p->fdtab->fds[newfd].flags = 0;
+        p->fdtab->fds[newfd].vnode = nullptr;
     }
 
-    p->fd_table[newfd] = p->fd_table[oldfd];
-    if (p->fd_table[newfd].vnode) {
-        p->fd_table[newfd].vnode->ref_count++;
+    p->fdtab->fds[newfd] = p->fdtab->fds[oldfd];
+    if (p->fdtab->fds[newfd].vnode) {
+        p->fdtab->fds[newfd].vnode->ref_count++;
     }
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     if (to_close) {
         vfs_close_vnode(to_close);
@@ -1167,36 +1167,72 @@ static void user_task_wrapper()
     process_exit(-1);
 }
 
-[[nodiscard]] int64_t do_exec(const char *path, SyscallFrame *frame)
+// Terminate the caller's thread group for exec, mirroring exit-group:
+// SIGKILL every live member through the locked signal path, wait for the
+// deaths, then reap the joinable zombies so the deferred-free paths own
+// their stacks and structs. Every kernel wait loop breaks on a pending
+// fatal signal, so parked members reach their deaths on their own.
+// Returns false only when a member wedged past the deadline: the caller
+// must then NOT touch the address space (a live sibling would keep
+// running on freed page tables); the stragglers still die at their next
+// signal delivery.
+static bool exec_terminate_thread_group(Process *leader)
 {
-    Process *p = process_get_current();
-    if (!p)
-        return -1;
+    process_group_kill_siblings(leader);
 
-    {
-        // POSIX semantics: exec terminates all other threads of the process.
-        // Until thread teardown under a live address space is implemented,
-        // refuse instead: swapping the page tables here would leave sibling
-        // threads running on freed page tables (wild faults / cross-process
-        // writes into reused frames).
-        const uint64_t chk_flags = scheduler_big_lock_irqsave();
-        bool has_threads = false;
+    // 1 s wall-clock bound; yielding lets the members run to their deaths
+    // (on UP it is the only thing that does).
+    constexpr uint64_t k_member_death_deadline_ms = 1000;
+    const uint32_t freq = timer_get_frequency();
+    const uint64_t deadline = timer_get_ticks() + (freq != 0 ? (k_member_death_deadline_ms * freq + 999) / 1000
+                                                             : k_member_death_deadline_ms * 1000);
+
+    while (true) {
+        uint64_t zombie_tids[16];
+        size_t zombie_count = 0;
+        bool live_member = false;
+
+        const uint64_t flags = scheduler_big_lock_irqsave();
         Process *scan = scheduler_get_process_list();
         if (scan) {
             do {
-                if (scan != p && scan->page_table == p->page_table) {
-                    has_threads = true;
-                    break;
+                if (scan != leader && scan->leader_pid == leader->leader_pid) {
+                    if (scan->state == ProcessState_Zombie) {
+                        if (zombie_count < sizeof(zombie_tids) / sizeof(zombie_tids[0]))
+                            zombie_tids[zombie_count++] = scan->pid;
+                    } else {
+                        live_member = true;
+                    }
                 }
                 scan = scan->next;
             } while (scan != scheduler_get_process_list());
         }
-        scheduler_big_unlock_irqrestore(chk_flags);
-        if (has_threads) {
-            DEBUG_WARN("exec: refused for pid %lu (shared address space with other threads)", p->pid);
-            return -1;
+        scheduler_big_unlock_irqrestore(flags);
+
+        if (!live_member && zombie_count == 0)
+            return true; // the group is the caller alone
+
+        // Reap the dead members now: the exec'ed image never learns their
+        // tids, so nobody else would collect them. Detached members are
+        // parented to pid 0 — not the caller's children — and belong to
+        // the kernel-zombie reaper, whose passes run on every schedule.
+        for (size_t i = 0; i < zombie_count; i++) {
+            int32_t status = 0;
+            (void)process_waitpid(static_cast<int64_t>(zombie_tids[i]), &status, WNOHANG);
         }
+
+        if (timer_get_ticks() >= deadline)
+            return false;
+
+        scheduler_yield();
     }
+}
+
+[[nodiscard]] static int64_t do_exec(const char *path, SyscallFrame *frame)
+{
+    Process *p = process_get_current();
+    if (!p)
+        return -1;
 
     char k_path[512];
     if (!copy_string_from_user(path, k_path, 511)) {
@@ -1246,35 +1282,85 @@ static void user_task_wrapper()
 
     kstring::memcpy(loader_proc, p, sizeof(Process));
     loader_proc->page_table = new_pml4;
-    loader_proc->vma_list = nullptr;
+    // The loader MUST NOT alias the live process's VmaList object: resetting
+    // its head would destroy the running list here, and the handoff below
+    // would then free the freshly loaded list instead of the old one. Give
+    // the loader its own object, exactly like kernel_exec.
+    loader_proc->vmalist = vma_list_alloc();
+    if (!loader_proc->vmalist) {
+        vmm_free_address_space(new_pml4);
+        vfs_close_vnode(node);
+        aligned_free(loader_proc);
+        return -1;
+    }
 
     uint64_t entry = elf_load_user(buffer.get(), node->size, loader_proc);
     vfs_close_vnode(node);
 
     if (entry == 0) {
-        if (loader_proc->vma_list)
-            vma_free_all(loader_proc->vma_list);
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         return -1;
     }
 
+    // Point of no return for the thread group: POSIX exec terminates all
+    // other threads. The members must die BEFORE the swap — a live
+    // sibling would keep running on the freed old page tables (wild
+    // faults / cross-process writes into reused frames) and would hold
+    // shared VMA/fd references the reaper cannot account for.
+    if (!exec_terminate_thread_group(p)) {
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
+        vmm_free_address_space(new_pml4);
+        aligned_free(loader_proc);
+        DEBUG_WARN("exec: pid %lu members never died; refusing to swap address space", p->pid);
+        return -1;
+    }
+
     uint64_t *old_pml4 = p->page_table;
-    VMA *old_vma_list = p->vma_list;
+    VMA *old_vma_list = p->vmalist->head;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-    p->page_table = new_pml4;
-    p->vma_list = loader_proc->vma_list;
-    p->exec_entry = entry;
-    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
+    {
+        // Swap under the scheduler big lock (outermost) with the VMA leaf
+        // nested: the reaper's share classification, thread creation and
+        // the sever walk below all run under the big lock alone, so the
+        // swap and the severing of the dead members' stale references
+        // must be ONE critical section — a reaper running between the two
+        // would classify a just-unlinked member against the old pointers
+        // and free the address space a second time.
+        const uint64_t sched_flags = scheduler_big_lock_irqsave();
+        const uint64_t vma_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
+        p->page_table = new_pml4;
+        p->vmalist->head = loader_proc->vmalist->head;
+        p->exec_entry = entry;
+        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
 
-    loader_proc->vma_list = nullptr;
+        // The exec'ing member is now a group of one, exactly like a
+        // forked leader: its own VMA lock (a thread until now borrowed the
+        // group leader's, and that leader is dead), its own group id, and
+        // no recorded user stack — the old mapping went with the old
+        // address space; the new image gets the fresh USER_STACK_TOP.
+        p->vma_lock_ptr = &p->vma_lock;
+        p->leader_pid = p->pid;
+        p->user_stack_lo = 0;
+        p->user_stack_size = 0;
+
+        scheduler_sever_dead_group_references(old_pml4);
+        scheduler_big_unlock_irqrestore(sched_flags);
+    }
+
+    loader_proc->vmalist->head = nullptr;
+    vma_list_free(loader_proc->vmalist);
+    loader_proc->vmalist = nullptr;
     aligned_free(loader_proc);
 
     if (old_vma_list)
         vma_free_all(old_vma_list);
 
-    p->exec_entry = entry;
     kstring::strncpy(p->name, kstring::strrchr(k_path, '/') ? kstring::strrchr(k_path, '/') + 1 : k_path, 31);
 
     if (frame) {
@@ -1336,15 +1422,22 @@ static void user_task_wrapper()
     }
     kstring::zero_memory(loader_proc, sizeof(Process));
     loader_proc->page_table = new_pml4;
-    loader_proc->vma_list = nullptr;
+    loader_proc->vmalist = vma_list_alloc();
+    if (!loader_proc->vmalist) {
+        vmm_free_address_space(new_pml4);
+        aligned_free(loader_proc);
+        DEBUG_ERROR("kernel_exec: vma list allocation failed for %s", resolved);
+        return -1;
+    }
     loader_proc->uid = p->uid;
     loader_proc->parent_pid = p->pid;
     spinlock_init(&loader_proc->vma_lock);
 
     uint64_t entry = elf_load_user(buffer.get(), file_size, loader_proc);
     if (entry == 0) {
-        if (loader_proc->vma_list)
-            vma_free_all(loader_proc->vma_list);
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         DEBUG_ERROR("kernel_exec: elf_load_user failed for %s", resolved);
@@ -1357,8 +1450,9 @@ static void user_task_wrapper()
     // active (observed as a supervisor-only 2MiB fault at the ELF entry).
     Process *child = scheduler_create_task_deferred(user_task_wrapper, path);
     if (!child) {
-        if (loader_proc->vma_list)
-            vma_free_all(loader_proc->vma_list);
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         DEBUG_ERROR("kernel_exec: scheduler_create_task failed for %s", resolved);
@@ -1366,8 +1460,10 @@ static void user_task_wrapper()
     }
 
     child->page_table = new_pml4;
-    child->vma_list = loader_proc->vma_list;
-    loader_proc->vma_list = nullptr;
+    child->vmalist->head = loader_proc->vmalist->head;
+    loader_proc->vmalist->head = nullptr;
+    vma_list_free(loader_proc->vmalist);
+    loader_proc->vmalist = nullptr;
     child->exec_entry = entry;
 
     // Capture before publishing: the task can run and exit on another core
@@ -1510,7 +1606,17 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     // munmap cannot free pages mid-rewrite. One batched shootdown replaces a
     // per-page IPI round trip.
     uint64_t sl_flags = spinlock_acquire_irqsave(current->vma_lock_ptr);
-    for (VMA *curr = current->vma_list; curr; curr = curr->next) {
+    // Cut the overlapping VMAs at the range boundaries first, then re-
+    // protect exactly the covered sub-range. Writing the flags to a whole
+    // straddling VMA instead clobbers the mapping's remaining pages: a
+    // sub-range PROT_NONE guard (pthread stacks) would strip PTE_WRITABLE
+    // from the entire mapping's metadata, so every later write validation
+    // into that mapping fails.
+    if (!vma_split_range(&current->vmalist->head, start_addr, end_addr)) {
+        spinlock_release_irqrestore(current->vma_lock_ptr, sl_flags);
+        return -12; // ENOMEM
+    }
+    for (VMA *curr = current->vmalist->head; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > start_addr) {
             // Preserve SHARED: dropping it would make the next fork COW
             // downgrade a genuinely shared (memfd/SHM) mapping.
@@ -1560,21 +1666,21 @@ extern "C" int64_t sys_memfd_create(const char *name, unsigned int flags)
         return -1;
     }
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
     int fd = -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used) {
+        if (!p->fdtab->fds[i].used) {
             fd = i;
-            p->fd_table[i].used = true;
-            p->fd_table[i].flags = 0;
-            kstring::zero_memory(p->fd_table[i].reserved, sizeof(p->fd_table[i].reserved));
-            p->fd_table[i].vnode = node;
-            p->fd_table[i].offset = 0;
-            p->fd_table[i].dir_pos = 0;
+            p->fdtab->fds[i].used = true;
+            p->fdtab->fds[i].flags = 0;
+            kstring::zero_memory(p->fdtab->fds[i].reserved, sizeof(p->fdtab->fds[i].reserved));
+            p->fdtab->fds[i].vnode = node;
+            p->fdtab->fds[i].offset = 0;
+            p->fdtab->fds[i].dir_pos = 0;
             break;
         }
     }
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     if (fd == -1) {
         vfs_close_vnode(node);
@@ -1590,15 +1696,15 @@ extern "C" int64_t sys_ftruncate(int fd, uint64_t size)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -9; // -EBADF
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return -9; // -EBADF
     }
 
-    VNode *node = p->fd_table[fd].vnode;
+    VNode *node = p->fdtab->fds[fd].vnode;
     __sync_fetch_and_add(&node->ref_count, 1);
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     int64_t res = -22; // -EINVAL
     if (node->ops->truncate) {
@@ -1621,9 +1727,9 @@ extern "C" int64_t sys_lseek(int fd, int64_t offset, int whence)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -9; // -EBADF
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    const bool valid = p->fd_table[fd].used && p->fd_table[fd].vnode;
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    const bool valid = p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode;
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
     if (!valid)
         return -9; // -EBADF
 
@@ -1639,13 +1745,13 @@ static uint64_t sys_fsize(int fd)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return static_cast<uint64_t>(-1);
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return static_cast<uint64_t>(-1);
     }
-    const uint64_t size = p->fd_table[fd].vnode->size;
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    const uint64_t size = p->fdtab->fds[fd].vnode->size;
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
     return size;
 }
 
@@ -1673,36 +1779,45 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
         return -3; // -ESRCH
     }
 
-    uint64_t sl_flags = 0;
-    if (current == target) {
-        sl_flags = spinlock_acquire_irqsave(&current->fd_lock);
-    } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-        sl_flags = spinlock_acquire_irqsave(&current->fd_lock);
-        spinlock_acquire(&target->fd_lock);
-    } else {
-        sl_flags = spinlock_acquire_irqsave(&target->fd_lock);
-        spinlock_acquire(&current->fd_lock);
+    // An exited-but-unreaped zombie holds no fd table (its descriptors
+    // were released at exit): transferring into it must fail cleanly, not
+    // dereference the null table. Same guard class as the vfs open-file
+    // scans.
+    if (!target->fdtab) {
+        scheduler_big_unlock_irqrestore(sched_flags);
+        return -3; // -ESRCH
     }
 
-    if (!current->fd_table[fd].used || !current->fd_table[fd].vnode) {
+    uint64_t sl_flags = 0;
+    if (current == target) {
+        sl_flags = spinlock_acquire_irqsave(&current->fdtab->lock);
+    } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
+        sl_flags = spinlock_acquire_irqsave(&current->fdtab->lock);
+        spinlock_acquire(&target->fdtab->lock);
+    } else {
+        sl_flags = spinlock_acquire_irqsave(&target->fdtab->lock);
+        spinlock_acquire(&current->fdtab->lock);
+    }
+
+    if (!current->fdtab->fds[fd].used || !current->fdtab->fds[fd].vnode) {
         if (current == target) {
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-            spinlock_release(&target->fd_lock);
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release(&target->fdtab->lock);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else {
-            spinlock_release(&current->fd_lock);
-            spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+            spinlock_release(&current->fdtab->lock);
+            spinlock_release_irqrestore(&target->fdtab->lock, sl_flags);
         }
         scheduler_big_unlock_irqrestore(sched_flags);
         return -9; // -EBADF
     }
 
-    VNode *node = current->fd_table[fd].vnode;
+    VNode *node = current->fdtab->fds[fd].vnode;
 
     int target_fd = -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!target->fd_table[i].used) {
+        if (!target->fdtab->fds[i].used) {
             target_fd = i;
             break;
         }
@@ -1710,30 +1825,30 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
 
     if (target_fd == -1) {
         if (current == target) {
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-            spinlock_release(&target->fd_lock);
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release(&target->fdtab->lock);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else {
-            spinlock_release(&current->fd_lock);
-            spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+            spinlock_release(&current->fdtab->lock);
+            spinlock_release_irqrestore(&target->fdtab->lock, sl_flags);
         }
         scheduler_big_unlock_irqrestore(sched_flags);
         return -24; // -EMFILE
     }
 
-    target->fd_table[target_fd] = current->fd_table[fd];
-    target->fd_table[target_fd].used = true;
+    target->fdtab->fds[target_fd] = current->fdtab->fds[fd];
+    target->fdtab->fds[target_fd].used = true;
     __sync_fetch_and_add(&node->ref_count, 1);
 
     if (current == target) {
-        spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
     } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-        spinlock_release(&target->fd_lock);
-        spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        spinlock_release(&target->fdtab->lock);
+        spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
     } else {
-        spinlock_release(&current->fd_lock);
-        spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+        spinlock_release(&current->fdtab->lock);
+        spinlock_release_irqrestore(&target->fdtab->lock, sl_flags);
     }
 
     scheduler_big_unlock_irqrestore(sched_flags);
@@ -1769,43 +1884,43 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!p)
                 return static_cast<uint64_t>(-1);
 
-            // All fd-table mutations happen under fd_lock: an unlocked
+            // All fd-table mutations happen under the table lock: an unlocked
             // allocation here raced close/dup2/fd_transfer in sibling threads.
-            const uint64_t pipe_flags = spinlock_acquire_irqsave(&p->fd_lock);
+            const uint64_t pipe_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
             int fd1 = find_free_fd(p);
             if (fd1 < 0) {
-                spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+                spinlock_release_irqrestore(&p->fdtab->lock, pipe_flags);
                 return static_cast<uint64_t>(-1);
             }
-            p->fd_table[fd1].used = true;
+            p->fdtab->fds[fd1].used = true;
             int fd2 = find_free_fd(p);
             if (fd2 < 0) {
-                p->fd_table[fd1].used = false;
-                spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+                p->fdtab->fds[fd1].used = false;
+                spinlock_release_irqrestore(&p->fdtab->lock, pipe_flags);
                 return static_cast<uint64_t>(-1);
             }
-            p->fd_table[fd2].used = true;
-            spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+            p->fdtab->fds[fd2].used = true;
+            spinlock_release_irqrestore(&p->fdtab->lock, pipe_flags);
 
             int pipe_id = pipe_create();
             if (pipe_id < 0) {
-                const uint64_t clr_flags = spinlock_acquire_irqsave(&p->fd_lock);
-                p->fd_table[fd1].used = false;
-                p->fd_table[fd2].used = false;
-                spinlock_release_irqrestore(&p->fd_lock, clr_flags);
+                const uint64_t clr_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+                p->fdtab->fds[fd1].used = false;
+                p->fdtab->fds[fd2].used = false;
+                spinlock_release_irqrestore(&p->fdtab->lock, clr_flags);
                 return static_cast<uint64_t>(-1);
             }
 
-            const uint64_t set_flags = spinlock_acquire_irqsave(&p->fd_lock);
-            p->fd_table[fd1].vnode = pipe_get_vnode(pipe_id, false);
-            p->fd_table[fd1].flags = 0;
-            p->fd_table[fd1].offset = 0;
-            p->fd_table[fd1].dir_pos = 0;
-            p->fd_table[fd2].vnode = pipe_get_vnode(pipe_id, true);
-            p->fd_table[fd2].flags = 0;
-            p->fd_table[fd2].offset = 0;
-            p->fd_table[fd2].dir_pos = 0;
-            spinlock_release_irqrestore(&p->fd_lock, set_flags);
+            const uint64_t set_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+            p->fdtab->fds[fd1].vnode = pipe_get_vnode(pipe_id, false);
+            p->fdtab->fds[fd1].flags = 0;
+            p->fdtab->fds[fd1].offset = 0;
+            p->fdtab->fds[fd1].dir_pos = 0;
+            p->fdtab->fds[fd2].vnode = pipe_get_vnode(pipe_id, true);
+            p->fdtab->fds[fd2].flags = 0;
+            p->fdtab->fds[fd2].offset = 0;
+            p->fdtab->fds[fd2].dir_pos = 0;
+            spinlock_release_irqrestore(&p->fdtab->lock, set_flags);
 
             STAC();
             reinterpret_cast<int *>(arg1)[0] = fd1;
@@ -1887,12 +2002,12 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 
             VNode *memfd_node = nullptr;
             if (fd >= 0 && fd < MAX_OPEN_FILES) {
-                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-                if (p->fd_table[fd].used && p->fd_table[fd].vnode && is_memfd_vnode(p->fd_table[fd].vnode)) {
-                    memfd_node = p->fd_table[fd].vnode;
+                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+                if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode && is_memfd_vnode(p->fdtab->fds[fd].vnode)) {
+                    memfd_node = p->fdtab->fds[fd].vnode;
                     __sync_fetch_and_add(&memfd_node->ref_count, 1);
                 }
-                spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+                spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
             }
 
             uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
@@ -1906,7 +2021,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             bool overlap_found;
             do {
                 overlap_found = false;
-                for (VMA *curr = p->vma_list; curr; curr = curr->next) {
+                for (VMA *curr = p->vmalist->head; curr; curr = curr->next) {
                     uint64_t probe_end = 0;
                     if (!checked_add_u64(virt_start, length, &probe_end)) {
                         spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
@@ -1948,7 +2063,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 flags |= PTE_SHARED;
                 vma_type = VMAType::Shared;
             }
-            if (!vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type)) {
+            if (!vma_add(&p->vmalist->head, virt_start, virt_end, flags, vma_type)) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                 if (memfd_node)
                     vfs_close_vnode(memfd_node);
@@ -1970,7 +2085,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 if (phys)
                                     pmm_refcount_dec(reinterpret_cast<void *>(phys));
                             }
-                            vma_remove(&p->vma_list, virt_start, virt_end);
+                            vma_remove(&p->vmalist->head, virt_start, virt_end);
                             spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
@@ -1986,7 +2101,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 if (phys)
                                     pmm_free_frame(reinterpret_cast<void *>(phys));
                             }
-                            vma_remove(&p->vma_list, virt_start, virt_end);
+                            vma_remove(&p->vmalist->head, virt_start, virt_end);
                             spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
@@ -2024,7 +2139,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 }
                             }
                         }
-                        vma_remove(&p->vma_list, virt_start, virt_end);
+                        vma_remove(&p->vmalist->head, virt_start, virt_end);
                         spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                         vfs_close_vnode(memfd_node);
                         return static_cast<uint64_t>(-1);
@@ -2047,7 +2162,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         if (phys)
                             pmm_free_frame(reinterpret_cast<void *>(phys));
                     }
-                    vma_remove(&p->vma_list, virt_start, virt_end);
+                    vma_remove(&p->vmalist->head, virt_start, virt_end);
                     spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                     return static_cast<uint64_t>(-1);
                 }
@@ -2061,7 +2176,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         if (phys)
                             pmm_free_frame(reinterpret_cast<void *>(phys));
                     }
-                    vma_remove(&p->vma_list, virt_start, virt_end);
+                    vma_remove(&p->vmalist->head, virt_start, virt_end);
                     spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                     return static_cast<uint64_t>(-1);
                 }
@@ -2357,7 +2472,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // Idempotent: a second call returns the existing mapping instead
             // of failing on already-present PTEs.
             uint64_t chk_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-            VMA *existing_fb = vma_find(p->vma_list, virt_start);
+            VMA *existing_fb = vma_find(p->vmalist->head, virt_start);
             if (existing_fb) {
                 const bool same_mapping = existing_fb->start == virt_start && existing_fb->end >= virt_start + size &&
                                           (existing_fb->flags & PTE_SHARED);
@@ -2368,7 +2483,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // Publish the VMA and install the PTEs under one continuous lock
             // hold, same as the SHM path: a racing munmap or fork clone
             // serializes here instead of tearing the half-installed mapping.
-            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+            if (!vma_add(&p->vmalist->head, virt_start, virt_start + size, flags, VMAType::Shared)) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
                 return static_cast<uint64_t>(-1);
             }
@@ -2382,7 +2497,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         for (size_t j = 0; j < i; j++) {
                             vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
                         }
-                        vma_remove(&p->vma_list, virt_start, virt_start + size);
+                        vma_remove(&p->vmalist->head, virt_start, virt_start + size);
                         spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
                         return static_cast<uint64_t>(-1);
                     }
@@ -3037,7 +3152,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
             uint64_t vma_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-            VMA *existing = vma_find(p->vma_list, virt_start);
+            VMA *existing = vma_find(p->vmalist->head, virt_start);
             if (existing) {
                 bool same_mapping = existing->start == virt_start && existing->end >= virt_start + size &&
                                     (existing->flags & PTE_SHARED);
@@ -3051,7 +3166,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // mapping whose metadata is not yet visible, and the clone can
             // never snapshot a half-installed region.
             uint64_t flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_SHARED;
-            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+            if (!vma_add(&p->vmalist->head, virt_start, virt_start + size, flags, VMAType::Shared)) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
                 return static_cast<uint64_t>(-1);
             }
@@ -3061,7 +3176,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 pmm_refcount_inc(reinterpret_cast<void *>(phys_start + mapped));
                 if (!vmm_map_page_in(p->page_table, virt_start + mapped, phys_start + mapped, flags).ok()) {
                     pmm_refcount_dec(reinterpret_cast<void *>(phys_start + mapped));
-                    vma_remove(&p->vma_list, virt_start, virt_start + size);
+                    vma_remove(&p->vmalist->head, virt_start, virt_start + size);
                     for (uint64_t rollback = 0; rollback < mapped; rollback += 4096) {
                         vmm_unmap_page_in(p->page_table, virt_start + rollback);
                         pmm_refcount_dec(reinterpret_cast<void *>(phys_start + rollback));
@@ -3103,10 +3218,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return shm_unmap_from_process(process_get_current(), (int)arg1) ? 0 : static_cast<uint64_t>(-1);
         case SYS_FUTEX:
             return sys_futex(reinterpret_cast<volatile uint32_t *>(arg1), static_cast<int>(arg2),
-                             static_cast<uint32_t>(arg3));
+                             static_cast<uint32_t>(arg3), frame->arg4);
         case SYS_THREAD_CREATE:
             return sys_thread_create(reinterpret_cast<void (*)()>(arg1), reinterpret_cast<void *>(arg2),
-                                     reinterpret_cast<void *>(arg3), frame);
+                                     reinterpret_cast<void *>(arg3), frame, frame->arg5, frame->arg6, frame->arg4);
+        case SYS_THREAD_EXIT:
+            sys_thread_exit(static_cast<int64_t>(arg1));
+            return 0; // unreachable: the thread never returns
+        case SYS_THREAD_DETACH:
+            return sys_thread_detach(arg1);
         case SYS_MPROTECT:
             return sys_mprotect(reinterpret_cast<void *>(arg1), static_cast<size_t>(arg2), static_cast<int>(arg3));
         case SYS_EPOLL_CREATE:

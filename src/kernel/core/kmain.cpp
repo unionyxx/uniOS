@@ -411,6 +411,14 @@ static void deferred_boot_services_task()
         net_test->priority = 4;
         scheduler_enqueue_task(net_test);
     }
+    // Debug-only, like the ktest suite: boot the userspace pthread self-test
+    // so every debug run exercises the libc thread stack end to end. Its
+    // serial summary line is the smoke suite's assertion surface.
+    const int64_t threadtest_pid = kernel_exec("/bin/threadtest.elf");
+    if (threadtest_pid < 0)
+        BOOT_WARN("failed to launch /bin/threadtest.elf");
+    else
+        BOOT_LOG("/bin/threadtest.elf queued as pid %lu", static_cast<uint64_t>(threadtest_pid));
 #endif
     sound_init();
     mount_removable_volumes();

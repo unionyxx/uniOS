@@ -89,7 +89,22 @@
 #define SYS_KILL 37
 
 /* Extended System Calls */
+/* WAIT args: uaddr, expected val, timeout_ms (arg4) — 0 waits until a
+ * wake or a signal, any other value returns -ETIMEDOUT (-110) on expiry.
+ * Sub-tick timeouts round up to one timer tick. The kernel tracks at
+ * most 16 concurrent timed waiters: beyond that the call returns
+ * -ENOSPC (-28) instead of silently waiting forever.
+ * WAKE args: uaddr, count — wakes up to `count` waiters parked on that
+ * exact 32-bit word (matched by its physical address, so the same page
+ * shared through different virtual addresses still matches); waiters
+ * parked on other words of the same page are not woken. */
 #define SYS_FUTEX 270
+/* args: entry, arg, stack_top, flags (arg4), stack_lo (arg5),
+ * stack_size (arg6). flags: THREAD_DETACHED (syscalls_ext.h) creates the
+ * thread already detached — it is never waitable and self-reaps through
+ * the kernel-zombie path on exit; unrecognised bits are ignored. The
+ * recorded range is unmapped when the thread calls SYS_THREAD_EXIT;
+ * 0/0 keeps the caller-managed stack of the original 3-arg form. */
 #define SYS_THREAD_CREATE 271
 #define SYS_EPOLL_CREATE 272
 #define SYS_EPOLL_CTL 273
@@ -121,10 +136,13 @@
 #define SYS_PING 295
 #define SYS_NET_RENEW 296
 
+/* Threads (extended: return negative errno). */
+#define SYS_THREAD_EXIT 297
+#define SYS_THREAD_DETACH 298
+
 /* Futex Opcodes */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
-#define FUTEX_REQUEUE 2
 
 /* Epoll Operations & Event Flags */
 #define EPOLL_CTL_ADD 1

@@ -415,12 +415,23 @@ int memfd_create(const char *name, unsigned int flags)
 
 int futex(volatile uint32_t *uaddr, int op, uint32_t val)
 {
-    return (int)syscall3(SYS_FUTEX, (uint64_t)uaddr, (uint64_t)op, (uint64_t)val);
+    /* arg4 must be explicit: syscall3 does not zero r10, and the kernel
+     * reads it as the FUTEX_WAIT timeout - register garbage would arm a
+     * random deadline. 0 = wait forever. */
+    return (int)syscall4(SYS_FUTEX, (uint64_t)uaddr, (uint64_t)op, (uint64_t)val, 0);
 }
 
-int thread_create(void (*fn)(void), void *arg, void *stack_addr, void *frame)
+int futex_wait_timeout(volatile uint32_t *uaddr, uint32_t expected, uint64_t timeout_ms)
 {
-    return (int)syscall4(SYS_THREAD_CREATE, (uint64_t)fn, (uint64_t)arg, (uint64_t)stack_addr, (uint64_t)frame);
+    return (int)syscall4(SYS_FUTEX, (uint64_t)uaddr, (uint64_t)FUTEX_WAIT, (uint64_t)expected, timeout_ms);
+}
+
+int thread_create(void (*fn)(void), void *arg, void *stack_addr)
+{
+    /* Caller-managed stack: no recorded range is passed, so the mapping
+     * outlives the thread (SYS_THREAD_EXIT unmaps recorded ranges only).
+     * syscall4 would leave the range args as register garbage. */
+    return (int)syscall6(SYS_THREAD_CREATE, (uint64_t)fn, (uint64_t)arg, (uint64_t)stack_addr, 0, 0, 0);
 }
 
 int ftruncate(int fd, uint64_t size)

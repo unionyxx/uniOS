@@ -12,7 +12,7 @@ Userspace invokes syscalls with the `syscall` instruction via inline wrappers (`
 - On return, pending signals are checked, volatile registers are zeroed (no kernel state leaks to user), and `o64 sysret` returns. Non-canonical `rcx` takes an `iretq` fallback instead.
 - A legacy `int 0x80` gate (DPL 3) reaches the same handler; userspace does not use it.
 
-Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and up) return negative errno values (`-4` EINTR, `-9` EBADF, `-12` ENOMEM, `-14` EFAULT, `-19` ENODEV, `-22` EINVAL, `-24` EMFILE, `-32` EPIPE). User pointers are validated against the process VMA list; string copies are bounded; data copies use SMAP-aware fixup paths.
+Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and up) return negative errno values (`-4` EINTR, `-9` EBADF, `-11` EAGAIN, `-12` ENOMEM, `-14` EFAULT, `-16` EBUSY, `-19` ENODEV, `-22` EINVAL, `-24` EMFILE, `-28` ENOSPC, `-32` EPIPE, `-110` ETIMEDOUT). User pointers are validated against the process VMA list; string copies are bounded; data copies use SMAP-aware fixup paths.
 
 ## Files and Descriptors
 
@@ -46,12 +46,16 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 | 39 | `SYS_GETPID` | Current pid |
 | 57 | `SYS_FORK` | Clone the process (CoW) |
 | 59 | `SYS_EXEC` | Replace the process image |
-| 60 | `SYS_EXIT` | Exit with status |
+| 60 | `SYS_EXIT` | Exit with status; kills the other live threads in the group |
 | 61 | `SYS_WAIT4` | Wait for children (`WNOHANG` = 1) |
 | 62 | `SYS_GETPROCS` | Snapshot the process list |
 | 102 | `SYS_GETUID` | Current uid |
 | 105 | `SYS_SETUID` | Set uid (root only) |
-| 271 | `SYS_THREAD_CREATE` | Create a thread in the same address space |
+| 271 | `SYS_THREAD_CREATE` | Create a thread sharing the address space and fd table |
+| 297 | `SYS_THREAD_EXIT` | Terminate only the calling thread (never returns) |
+| 298 | `SYS_THREAD_DETACH` | Mark a child thread detached (self-reap, no join) |
+
+Thread syscalls: `SYS_THREAD_CREATE(entry, arg, stack_top, flags, stack_lo, stack_size)` builds the entry frame from the caller's live syscall frame (user segments and rflags carry over; `arg` reaches the entry in `rdi`) and returns the new thread's pid, or `-22` for a null entry/stack_top/frame. `flags` (arg4) honors `THREAD_DETACHED` (`uapi/syscalls_ext.h`) — the thread is created detached, never waitable — and ignores unknown bits; `stack_lo`/`stack_size` (arg5/arg6) record a range that `SYS_THREAD_EXIT` unmaps, with 0/0 keeping the caller-managed stack of the original form. `SYS_THREAD_EXIT(status)` ends only the calling thread after unmapping its recorded range; `SYS_THREAD_DETACH(tid)` returns `-10` when `tid` is not a live child thread (forked children lead their own group). Threads are processes with their own pids: `SYS_GETPID` in a thread returns the thread pid, and a joinable thread is reaped by `SYS_WAIT4` from its creator. See [Processes — Threads](processes.md#threads).
 
 ## Memory
 
@@ -59,10 +63,12 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 | --- | --- | --- |
 | 9 | `SYS_MMAP` | Anonymous or memfd-backed mapping |
 | 10 | `SYS_MUNMAP` | Unmap a range |
-| 270 | `SYS_FUTEX` | FUTEX_WAIT / FUTEX_WAKE (keyed by physical page) |
+| 270 | `SYS_FUTEX` | FUTEX_WAIT / FUTEX_WAKE (WAIT takes a relative timeout in arg4; wakes are matched by the physical address of the 32-bit word) |
 | 272-274 | `SYS_EPOLL_CREATE/CTL/WAIT` | Epoll instances over fds |
 | 275 | `SYS_MPROTECT` | Change protections on mapped pages |
 | 276 | `SYS_MEMFD_CREATE` | Anonymous memory-file fd (max 16 MiB) |
+
+Futex: `FUTEX_WAIT(uaddr, expected, timeout_ms)` takes a relative timeout in milliseconds (arg4; 0 = infinite, sub-tick timeouts round up to one timer tick) and returns `-11` when the word holds a different value, `-110` on expiry, `-28` when the fixed 16-entry timed-wait table is full, and `-4` when a fatal signal interrupts the wait. `FUTEX_WAKE(uaddr, count)` wakes up to `count` waiters parked on that exact word (count 0 = every waiter on it) and returns how many it woke; the word is keyed by physical address, so the same shared frame mapped at different virtual addresses — cross-process shared memfd pages — still matches.
 
 ## Display, GUI, Input, Sound
 
