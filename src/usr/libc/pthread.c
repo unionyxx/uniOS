@@ -45,8 +45,9 @@ int pthread_create(pthread_t *thread, const void *attr, void *(*fn)(void *), voi
      * alignment (rsp % 16 == 8) and makes a plain return fall into the shim. */
     *(uint64_t *)(uintptr_t)(top - 8) = (uint64_t)(uintptr_t)__thread_exit_shim;
 
-    /* arg4 is unused by the kernel; arg5/arg6 record the stack range for the
-     * exit-time self-unmap. */
+    /* arg4 is the create-flags word: 0 = joinable, THREAD_DETACHED would
+     * create the thread detached. arg5/arg6 record the stack range for
+     * the exit-time self-unmap. */
     int64_t tid = (int64_t)syscall6(SYS_THREAD_CREATE, (uint64_t)(uintptr_t)fn, (uint64_t)(uintptr_t)arg, top - 8, 0,
                                     (uint64_t)(uintptr_t)base, PTHREAD_MAP_SIZE);
     if (tid < 0) {
