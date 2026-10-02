@@ -172,7 +172,9 @@ int rtl8139_receive(void *buffer, uint16_t max_length)
     const uint8_t *pkt = g_rtl8139.rx_buffer + g_rtl8139.rx_offset;
     const uint16_t status = pkt[0] | (pkt[1] << 8);
     const uint16_t length = pkt[2] | (pkt[3] << 8);
-    if (!(status & 0x01) || length == 0 || length > 1518) {
+    // Minimum ethernet frame is 64 bytes; lengths 1-3 would underflow the
+    // CRC strip below (length - 4 wraps around 64K).
+    if (!(status & 0x01) || length < 64 || length > 1518) {
         // Bad frame: skip it if its length is sane, otherwise resync from
         // the hardware's idea of where the ring head is.
         if ((status & 0x01) == 0 && length != 0 && length <= 1518) {

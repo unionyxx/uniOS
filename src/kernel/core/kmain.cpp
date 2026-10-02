@@ -32,6 +32,8 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/net/arp.h>
+#include <kernel/net/dns.h>
 #include <kernel/net/net.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
@@ -292,6 +294,32 @@ static void mount_removable_volumes()
     }
 }
 
+#ifdef DEBUG
+// Debug-only network self-test (runs only when a NIC was configured): proves
+// the ARP blocking helper and the UDP/DNS path end-to-end against the
+// emulated gateway/DNS (slirp always answers ARP for the gateway; the DNS
+// leg needs a host resolver with IPv4 answers, so it is informational).
+// Results land in the serial log (warn-level: quiet mode keeps those).
+static void net_self_test_task()
+{
+    if (!net_is_configured()) {
+        DEBUG_INFO("net self-test: skipped (no address)");
+        return;
+    }
+
+    uint8_t mac[6] = {};
+    const uint32_t probe_ip = net_get_gateway() != 0 ? net_get_gateway() : net_get_dns();
+    bool arp_ok = arp_resolve_blocking(probe_ip, mac, 3000);
+    DEBUG_WARN("net self-test: arp %d.%d.%d.%d -> %02x:%02x:%02x:%02x:%02x:%02x: %s", probe_ip & 0xFF,
+               (probe_ip >> 8) & 0xFF, (probe_ip >> 16) & 0xFF, (probe_ip >> 24) & 0xFF, mac[0], mac[1], mac[2], mac[3],
+               mac[4], mac[5], arp_ok ? "PASS" : "FAIL");
+
+    const uint32_t dns_ip = dns_resolve("unicode.org");
+    DEBUG_WARN("net self-test: dns unicode.org -> %d.%d.%d.%d: %s", dns_ip & 0xFF, (dns_ip >> 8) & 0xFF,
+               (dns_ip >> 16) & 0xFF, (dns_ip >> 24) & 0xFF, dns_ip != 0 ? "PASS" : "FAIL");
+}
+#endif
+
 static void deferred_boot_services_task()
 {
     BOOT_LOG("Boot stage: deferred services initialization");
@@ -301,6 +329,12 @@ static void deferred_boot_services_task()
             mount_persistent_data_volume();
     }
     net_init();
+#ifdef DEBUG
+    if (Process *net_test = scheduler_create_task_deferred(net_self_test_task, "NetSelfTest")) {
+        net_test->priority = 4;
+        scheduler_enqueue_task(net_test);
+    }
+#endif
     sound_init();
     mount_removable_volumes();
     boot_timing_log("deferred services ready");

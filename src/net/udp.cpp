@@ -7,6 +7,10 @@
 #include <kernel/sync/spinlock.h>
 
 static UdpSocket sockets[UDP_MAX_SOCKETS];
+// Guards the socket table (alloc/bind/close) and the per-socket rx handoff
+// (rx_ready + buffer). RX runs serialized inside net_poll(), but syscalls
+// (socket/bind/sendto/recvfrom/close) execute on any core.
+static Spinlock udp_table_lock = SPINLOCK_INIT;
 
 void udp_init()
 {
@@ -16,6 +20,25 @@ void udp_init()
         sockets[i].rx_ready = false;
     }
     DEBUG_INFO("udp: layer initialized (%d sockets)", UDP_MAX_SOCKETS);
+}
+
+// Pick an unused ephemeral source port so request/response over an unbound
+// socket can actually receive its replies (a hardcoded 49152 for every
+// unbound sender made replies undeliverable and let two senders collide).
+static uint16_t udp_ephemeral_port()
+{
+    for (uint16_t candidate = 49152; candidate < 65535; candidate++) {
+        bool taken = false;
+        for (int i = 0; i < UDP_MAX_SOCKETS; i++) {
+            if (sockets[i].in_use && sockets[i].bound && sockets[i].port == candidate) {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken)
+            return candidate;
+    }
+    return 0;
 }
 
 // Pseudo-header for checksum
@@ -82,6 +105,7 @@ void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
     }
 
     // Find socket bound to this port
+    uint64_t tbl_flags = spinlock_acquire_irqsave(&udp_table_lock);
     for (int i = 0; i < UDP_MAX_SOCKETS; i++) {
         if (sockets[i].in_use && sockets[i].bound && sockets[i].port == dst_port) {
             // Store in receive buffer
@@ -99,9 +123,11 @@ void udp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
             sockets[i].rx_src_port = src_port;
             sockets[i].rx_ready = true;
 
+            spinlock_release_irqrestore(&udp_table_lock, tbl_flags);
             return;
         }
     }
+    spinlock_release_irqrestore(&udp_table_lock, tbl_flags);
 
     // Also handle DHCP (port 68) specially
     if (dst_port == 68) {
@@ -153,20 +179,30 @@ bool udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void 
 
 int udp_socket()
 {
+    uint64_t flags = spinlock_acquire_irqsave(&udp_table_lock);
     for (int i = 0; i < UDP_MAX_SOCKETS; i++) {
         if (!sockets[i].in_use) {
             sockets[i].in_use = true;
             sockets[i].bound = false; // Created but not bound
             sockets[i].rx_ready = false;
+            spinlock_release_irqrestore(&udp_table_lock, flags);
             return i;
         }
     }
+    spinlock_release_irqrestore(&udp_table_lock, flags);
     return -1;
 }
 
 bool udp_bind(int sock, uint16_t port)
 {
-    if (sock < 0 || sock >= UDP_MAX_SOCKETS || !sockets[sock].in_use) {
+    if (sock < 0 || sock >= UDP_MAX_SOCKETS) {
+        DEBUG_ERROR("udp: bind failed, invalid socket %d", sock);
+        return false;
+    }
+
+    uint64_t flags = spinlock_acquire_irqsave(&udp_table_lock);
+    if (!sockets[sock].in_use) {
+        spinlock_release_irqrestore(&udp_table_lock, flags);
         DEBUG_ERROR("udp: bind failed, invalid socket %d", sock);
         return false;
     }
@@ -174,6 +210,7 @@ bool udp_bind(int sock, uint16_t port)
     // Check if port already in use
     for (int i = 0; i < UDP_MAX_SOCKETS; i++) {
         if (sockets[i].in_use && sockets[i].bound && sockets[i].port == port) {
+            spinlock_release_irqrestore(&udp_table_lock, flags);
             DEBUG_ERROR("udp: bind failed, port %d already in use by socket %d", port, i);
             return false;
         }
@@ -182,17 +219,35 @@ bool udp_bind(int sock, uint16_t port)
     sockets[sock].port = port;
     sockets[sock].bound = true;
     sockets[sock].rx_ready = false;
+    spinlock_release_irqrestore(&udp_table_lock, flags);
     DEBUG_INFO("udp: socket %d bound to port %d", sock, port);
     return true;
 }
 
 bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void *data, uint16_t length)
 {
-    if (sock < 0 || sock >= UDP_MAX_SOCKETS || !sockets[sock].in_use) {
+    if (sock < 0 || sock >= UDP_MAX_SOCKETS) {
         return false;
     }
 
-    uint16_t src_port = sockets[sock].bound ? sockets[sock].port : 49152; // Ephemeral
+    uint64_t flags = spinlock_acquire_irqsave(&udp_table_lock);
+    if (!sockets[sock].in_use) {
+        spinlock_release_irqrestore(&udp_table_lock, flags);
+        return false;
+    }
+    uint16_t src_port = sockets[sock].port;
+    if (!sockets[sock].bound) {
+        // Auto-bind an ephemeral source port so replies are deliverable.
+        src_port = udp_ephemeral_port();
+        if (src_port == 0) {
+            spinlock_release_irqrestore(&udp_table_lock, flags);
+            return false;
+        }
+        sockets[sock].port = src_port;
+        sockets[sock].bound = true;
+    }
+    spinlock_release_irqrestore(&udp_table_lock, flags);
+
     return udp_send(dst_ip, src_port, dst_port, data, length);
 }
 
@@ -200,11 +255,18 @@ int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uin
 {
     if (!buffer && max_len > 0)
         return -1;
-    if (sock < 0 || sock >= UDP_MAX_SOCKETS || !sockets[sock].in_use || !sockets[sock].bound) {
+    if (sock < 0 || sock >= UDP_MAX_SOCKETS) {
+        return -1;
+    }
+
+    uint64_t flags = spinlock_acquire_irqsave(&udp_table_lock);
+    if (!sockets[sock].in_use || !sockets[sock].bound) {
+        spinlock_release_irqrestore(&udp_table_lock, flags);
         return -1;
     }
 
     if (!sockets[sock].rx_ready) {
+        spinlock_release_irqrestore(&udp_table_lock, flags);
         return 0; // No data
     }
 
@@ -223,14 +285,17 @@ int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uin
         *src_port = sockets[sock].rx_src_port;
 
     sockets[sock].rx_ready = false;
+    spinlock_release_irqrestore(&udp_table_lock, flags);
     return len;
 }
 
 void udp_close(int sock)
 {
     if (sock >= 0 && sock < UDP_MAX_SOCKETS) {
+        uint64_t flags = spinlock_acquire_irqsave(&udp_table_lock);
         sockets[sock].in_use = false;
         sockets[sock].bound = false;
         sockets[sock].rx_ready = false;
+        spinlock_release_irqrestore(&udp_table_lock, flags);
     }
 }

@@ -28,6 +28,10 @@ struct IPv4Header
 void ipv4_init();
 void ipv4_receive(const void *data, uint16_t length);
 bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t length);
+// The IP whose MAC must be resolved to deliver to dst_ip (destination when
+// on-link, the default gateway otherwise). Callers that need a blocking
+// resolution resolve this BEFORE taking any network lock.
+uint32_t ipv4_route_resolve_ip(uint32_t dst_ip);
 uint16_t ipv4_checksum(const void *data, uint16_t length);
 
 // IP address helpers

@@ -10,6 +10,7 @@
 #include <kernel/net/net.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
+#include <kernel/sync/spinlock.h>
 
 // Global network configuration
 static NetConfig g_net_config = {0, 0, 0, 0, false};
@@ -25,6 +26,14 @@ static NicType g_active_nic = NIC_NONE;
 
 // RX buffer for polling
 static uint8_t rx_buffer[2048];
+
+// Serializes net_poll() across cores. Nothing in the poll path runs from IRQ
+// context (NICs are polled), so a plain lock suffices; without it two cores
+// (idle-loop pump + a syscall blocked in a network wait) raced the shared
+// rx_buffer and the NIC RX rings, duplicating and wedging frame delivery.
+// Re-entrancy is gone with non-blocking ARP: nothing inside net_poll can
+// call back into it.
+static Spinlock net_poll_lock = SPINLOCK_INIT;
 
 // Unified NIC functions
 static bool nic_send(const void *data, uint16_t length)
@@ -144,6 +153,8 @@ void net_poll()
     if (g_active_nic == NIC_NONE)
         return;
 
+    spinlock_acquire(&net_poll_lock);
+
     // Poll the active NIC
     nic_poll();
 
@@ -160,6 +171,8 @@ void net_poll()
 
     // Periodic DHCP lease renewal (no-op unless a lease is live and at T1).
     dhcp_tick();
+
+    spinlock_release(&net_poll_lock);
 }
 
 // Configuration getters

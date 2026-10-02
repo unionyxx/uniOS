@@ -31,12 +31,18 @@ struct ArpEntry
 };
 
 #define ARP_TABLE_SIZE 32
-#define ARP_TIMEOUT_MS 5000 // Timeout waiting for ARP reply
+#define ARP_TIMEOUT_MS 5000 // Blocking-resolution budget (syscall contexts)
 
 // ARP functions
 void arp_init();
 void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac);
+// Non-blocking: cache hit returns true with the MAC; on a miss it (rate
+// -limited) emits one request and returns false. Safe under any lock —
+// it never polls, sleeps or re-enters the network stack.
 bool arp_resolve(uint32_t ip, uint8_t *out_mac);
+// Blocking variant for callers that hold NO network locks (syscall entry
+// points): polls and yields until the entry appears or the timeout expires.
+bool arp_resolve_blocking(uint32_t ip, uint8_t *out_mac, uint64_t timeout_ms);
 void arp_send_request(uint32_t target_ip);
 void arp_add_entry(uint32_t ip, const uint8_t *mac);
 bool arp_lookup(uint32_t ip, uint8_t *out_mac);

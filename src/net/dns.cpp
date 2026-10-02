@@ -1,6 +1,8 @@
 #include <kernel/debug.h>
+#include <kernel/net/arp.h>
 #include <kernel/net/dns.h>
 #include <kernel/net/ethernet.h>
+#include <kernel/net/ipv4.h>
 #include <kernel/net/net.h>
 #include <kernel/net/udp.h>
 #include <kernel/time/timer.h>
@@ -133,8 +135,12 @@ static int dns_build_query(const char *hostname, uint8_t *buffer)
         return 0;
     int pos = DNS_HEADER_SIZE + name_len;
 
+    // QTYPE and QCLASS are 16-bit big-endian fields: writing them as single
+    // bytes produced a malformed question and every resolver answered
+    // FORMERR, so SYS_RESOLVE never resolved anything on a real network.
+    buffer[pos++] = 0;
     buffer[pos++] = DNS_TYPE_A;
-
+    buffer[pos++] = 0;
     buffer[pos++] = DNS_CLASS_IN;
 
     return pos;
@@ -291,6 +297,16 @@ static uint32_t dns_attempt(const char *hostname, uint32_t dns_server, bool *got
     }
 
     uint32_t result = 0;
+    // Resolve the route before sending: dns_attempt runs in syscall context
+    // with no network locks held, so the blocking ARP helper is safe here and
+    // the first query attempt is not wasted on a cold cache.
+    {
+        uint8_t route_mac[6];
+        if (!arp_resolve_blocking(ipv4_route_resolve_ip(dns_server), route_mac, 2000)) {
+            udp_close(sock);
+            return 0;
+        }
+    }
     if (!udp_sendto(sock, dns_server, DNS_PORT, query, query_len)) {
         udp_close(sock);
         return 0;

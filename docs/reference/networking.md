@@ -4,7 +4,7 @@ The network stack (`src/net/`) is a freestanding, fully polled IPv4 stack in the
 
 ## NIC Selection and Polling
 
-`net_init()` (deferred boot task) tries e1000 first, then RTL8139; the first success wins and exactly one NIC is active. Both drivers are interrupt-free: masks are cleared and `net_poll()` drains receive state. `net_poll()` polls the driver, feeds up to 32 packets into the ethernet layer, then runs TCP timers. It is called from the kernel idle loop every 10th iteration and re-entered from ARP resolution, TCP operations, DHCP, and DNS waits.
+`net_init()` (deferred boot task) tries e1000 first, then RTL8139; the first success wins and exactly one NIC is active. Both drivers are interrupt-free: masks are cleared and `net_poll()` drains receive state. `net_poll()` polls the driver, feeds up to 32 packets into the ethernet layer, then runs TCP timers and DHCP lease maintenance. It is called from the kernel idle loop every 10th iteration and from blocking network waits (DHCP, DNS, `arp_resolve_blocking`). A spinlock serializes concurrent `net_poll()` callers (idle-loop pump vs. a syscall blocked in a network wait); re-entrancy is impossible because ARP resolution no longer polls.
 
 There is no mbuf abstraction: each layer owns static 1600-byte staging buffers under spinlocks. TCP transmit segments are malloc'd per packet.
 
@@ -19,9 +19,11 @@ There is no mbuf abstraction: each layer owns static 1600-byte staging buffers u
 ## Ethernet and ARP
 
 - Ethernet accepts unicast-to-us and broadcast only; payloads below 46 bytes are padded; sending rejects zero destinations and payloads over 1500.
-- ARP table: 32 entries, no aging (entries never expire); a full table overwrites slot 0.
-- `arp_resolve()` serves cache hits immediately, broadcasts for misses, and busy-waits on `net_poll()` up to 5 seconds. Only one resolution can be outstanding; broadcasts resolve to the broadcast MAC.
+- ARP table: 32 entries, no aging (entries never expire); a full table evicts round-robin (never a fixed slot, so the default gateway cannot be dropped by table churn).
+- `arp_resolve()` is non-blocking: cache hits return the MAC; a miss emits one request (rate-limited to one per target per second) and returns false. It is safe under any lock - it never polls, sleeps, or re-enters the stack. TX paths treat false as "send failed, retry later".
+- `arp_resolve_blocking(ip, mac, timeout_ms)` is for syscall-level callers that hold no network locks (`tcp_connect`, `dns_attempt`): it polls and yields until the table entry appears.
 - Incoming ARP teaches the table on every packet (gratuitous learning) and replies to requests targeting our IP.
+- A debug-only net self-test task runs after DHCP: it blocking-resolves the gateway and resolves a name through the emulated DNS, logging PASS/FAIL on the serial console.
 
 ## IPv4 and ICMP
 
@@ -32,7 +34,7 @@ There is no mbuf abstraction: each layer owns static 1600-byte staging buffers u
 
 ## UDP
 
-16 sockets, each with a single 1500-byte receive slot (overwrite semantics, no queue). Duplicate binds are rejected; unbound sends use ephemeral port 49152. Checksums use a pseudo-header; computed zero transmits as `0xFFFF`. Datagrams addressed to port 68 with no bound socket feed DHCP.
+16 sockets, each with a single 1500-byte receive slot (overwrite semantics, no queue). Duplicate binds are rejected; an unbound `sendto` auto-binds a free ephemeral port (so replies are deliverable). Checksums use a pseudo-header; computed zero transmits as `0xFFFF`. Datagrams addressed to port 68 with no bound socket feed DHCP. A spinlock guards the socket table (alloc/bind/close and the receive handoff) against syscall-context cores; receive itself runs serialized inside `net_poll()`.
 
 ## DHCP
 

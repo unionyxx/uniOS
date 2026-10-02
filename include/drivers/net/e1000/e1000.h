@@ -142,23 +142,23 @@
 
 struct e1000_tx_desc
 {
-    uint64_t addr;    // Buffer address
-    uint16_t length;  // Data length
-    uint8_t cso;      // Checksum offset
-    uint8_t cmd;      // Command
-    uint8_t status;   // Status
-    uint8_t css;      // Checksum start
-    uint16_t special; // Special field
+    uint64_t addr;           // Buffer address
+    uint16_t length;         // Data length
+    uint8_t cso;             // Checksum offset
+    uint8_t cmd;             // Command
+    volatile uint8_t status; // Status (device-written via DMA: polled)
+    uint8_t css;             // Checksum start
+    uint16_t special;        // Special field
 } __attribute__((packed));
 
 struct e1000_rx_desc
 {
-    uint64_t addr;     // Buffer address
-    uint16_t length;   // Received length
-    uint16_t checksum; // Packet checksum
-    uint8_t status;    // Status
-    uint8_t errors;    // Errors
-    uint16_t special;  // Special field
+    uint64_t addr;           // Buffer address
+    uint16_t length;         // Received length
+    uint16_t checksum;       // Packet checksum
+    volatile uint8_t status; // Status (device-written via DMA: polled)
+    volatile uint8_t errors; // Errors (device-written via DMA)
+    uint16_t special;        // Special field
 } __attribute__((packed));
 
 // e1000 device structure

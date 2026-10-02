@@ -273,7 +273,10 @@ bool e1000_send(const void *data, uint16_t length)
     if (!(desc->status & E1000_TXD_STAT_DD)) {
         // The NIC may still be DMA-ing this frame: leaking the page is
         // deliberate; freeing it would hand memory to someone else while the
-        // DMA is live.
+        // DMA is live. The descriptor never reports DD either: retire it
+        // locally so the ring slot is not wedged forever (without this the
+        // first wait above failed on every wrap of the ring).
+        desc->status = E1000_TXD_STAT_DD;
         DEBUG_WARN("e1000: TX completion timeout; leaking the frame to stay safe");
         return false;
     }

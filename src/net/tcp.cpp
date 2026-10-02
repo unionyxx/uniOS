@@ -32,6 +32,7 @@
 
 #include <kernel/debug.h>
 #include <kernel/mm/heap.h>
+#include <kernel/net/arp.h>
 #include <kernel/net/ethernet.h>
 #include <kernel/net/ipv4.h>
 #include <kernel/net/net.h>
@@ -137,6 +138,7 @@ static uint16_t get_ephemeral_port()
 // itself is left initialized.
 static void tcp_socket_reset(TcpSocket *s)
 {
+    s->close_seq++;
     s->in_use = false;
     s->state = TCP_CLOSED;
     s->local_port = 0;
@@ -825,6 +827,15 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
         return false;
     }
 
+    // Resolve the route BEFORE touching the socket: a blocking ARP wait must
+    // never run under the socket lock - its net_poll() would enter tcp_poll(),
+    // which takes this very socket's lock and self-deadlocks with interrupts
+    // disabled.
+    uint8_t route_mac[6];
+    if (!arp_resolve_blocking(ipv4_route_resolve_ip(dst_ip), route_mac, ARP_TIMEOUT_MS)) {
+        return false;
+    }
+
     uint64_t flags = spinlock_acquire_irqsave(&sockets[sock].lock);
     if (!sockets[sock].in_use) {
         spinlock_release_irqrestore(&sockets[sock].lock, flags);
@@ -841,6 +852,13 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
         return false;
 
     flags = spinlock_acquire_irqsave(&s->lock);
+    if (!s->in_use) {
+        // tcp_close() ran between the two critical sections: the slot is
+        // already released; do not resurrect it.
+        spinlock_release_irqrestore(&s->lock, flags);
+        return false;
+    }
+    const uint32_t close_seq_at_start = s->close_seq;
     s->local_port = ephem_port;
     s->seq_num = tcp_generate_isn(net_get_ip(), dst_ip, ephem_port, dst_port);
     // Data space begins after the SYN; the SYN itself rides the control
@@ -878,8 +896,13 @@ bool tcp_connect(int sock, uint32_t dst_ip, uint16_t dst_port)
     }
 
     if (s->state != TCP_ESTABLISHED) {
+        // A concurrent tcp_close() during the wait already reset this slot
+        // and told the user it is gone: do not resurrect it (the old forced
+        // in_use=true leaked the slot whenever close raced connect).
+        const bool closed_by_other_thread = (s->close_seq != close_seq_at_start) || !s->in_use;
         tcp_socket_reset(s);
-        s->in_use = true; // Keep the slot allocated so connect can be retried.
+        if (!closed_by_other_thread)
+            s->in_use = true; // Keep the slot allocated so connect can be retried.
         spinlock_release_irqrestore(&s->lock, flags);
         return false;
     }

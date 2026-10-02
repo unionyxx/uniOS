@@ -122,6 +122,11 @@ struct TcpSocket
     ControlSegment ctrl;
     bool want_close;
 
+    // Bumped by every tcp_socket_reset(): tcp_connect snapshots it before
+    // its wait loop so a concurrent close() is detectable (the slot must not
+    // be resurrected out from under a user that already closed it).
+    uint32_t close_seq;
+
     // Connection tracking
     bool pending_ack;
     uint64_t last_activity;

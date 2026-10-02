@@ -2,19 +2,22 @@
 #include <kernel/net/arp.h>
 #include <kernel/net/ethernet.h>
 #include <kernel/net/net.h>
+#include <kernel/scheduler.h>
 #include <kernel/sync/spinlock.h>
 #include <kernel/time/timer.h>
 
 static ArpEntry arp_table[ARP_TABLE_SIZE];
-// Guards the ARP table and the pending-resolution state. Resolution can be
-// re-entered (net_poll() while waiting can itself trigger a send that needs a
-// different address), so both the table and the waiting state are locked.
+// Guards the ARP table and the request-rate state.
 static Spinlock arp_lock = SPINLOCK_INIT;
 
-static bool arp_waiting = false;
-static uint32_t arp_waiting_ip = 0;
-static uint8_t arp_waiting_mac[6];
-static bool arp_resolved = false;
+// Request rate limiting: one outstanding request per target per second, so
+// TX paths calling arp_resolve() from under their locks cannot storm the
+// link while a resolution is pending.
+static uint32_t arp_last_request_ip = 0;
+static uint64_t arp_last_request_ticks = 0;
+// Round-robin eviction cursor: never evict a fixed slot (the old "always
+// slot 0" could drop the default gateway every time the table filled).
+static uint8_t arp_evict_cursor = 0;
 
 static bool arp_mac_is_unusable(const uint8_t *mac)
 {
@@ -43,7 +46,7 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
 
     uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
 
-    // Check if already exists
+    // Update in place
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
             eth_mac_copy(arp_table[i].mac, mac);
@@ -63,10 +66,11 @@ void arp_add_entry(uint32_t ip, const uint8_t *mac)
         }
     }
 
-    // Table full, overwrite first entry (simple eviction)
-    arp_table[0].ip = ip;
-    eth_mac_copy(arp_table[0].mac, mac);
-    arp_table[0].valid = true;
+    // Table full: round-robin eviction
+    arp_table[arp_evict_cursor].ip = ip;
+    eth_mac_copy(arp_table[arp_evict_cursor].mac, mac);
+    arp_table[arp_evict_cursor].valid = true;
+    arp_evict_cursor = (arp_evict_cursor + 1) % ARP_TABLE_SIZE;
     spinlock_release_irqrestore(&arp_lock, flags);
 }
 
@@ -151,18 +155,9 @@ void arp_receive(const void *data, uint16_t length, const uint8_t *src_mac)
         return;
     }
 
-    // Learn sender's MAC (gratuitous learning)
+    // Learn sender's MAC (gratuitous learning: replies to our requests and
+    // announcements both populate the cache)
     arp_add_entry(arp->sender_ip, arp->sender_mac);
-
-    // Check if this is reply to our pending request
-    {
-        uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
-        if (arp_waiting && arp->sender_ip == arp_waiting_ip) {
-            eth_mac_copy(arp_waiting_mac, arp->sender_mac);
-            arp_resolved = true;
-        }
-        spinlock_release_irqrestore(&arp_lock, flags);
-    }
 
     uint16_t op = ntohs(arp->operation);
 
@@ -186,74 +181,59 @@ bool arp_resolve(uint32_t ip, uint8_t *out_mac)
     }
 
     // Check cache first
-    if (arp_lookup(ip, out_mac)) {
-        return true;
-    }
-
-    // Claim the pending-resolution slot. Resolution is re-entrant (net_poll()
-    // below can itself send a packet that needs a *different* address), so if
-    // a resolution is already in flight we must not clobber its target. In
-    // that case we skip sending a fresh request and simply wait for the table
-    // to be populated (replies are learned gratuitously by arp_add_entry).
-    bool started_wait = false;
-    {
-        uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
-        if (!arp_waiting) {
-            arp_waiting = true;
-            arp_waiting_ip = ip;
-            arp_resolved = false;
-            started_wait = true;
-        }
-        spinlock_release_irqrestore(&arp_lock, flags);
-    }
-
-    if (started_wait)
-        arp_send_request(ip);
-
-    // Wait for reply (with timeout)
-    uint64_t start = timer_get_ticks();
-    uint64_t timeout_ticks = (ARP_TIMEOUT_MS * timer_get_frequency()) / 1000;
-
-    while ((timer_get_ticks() - start) < timeout_ticks) {
-        // Poll network
-        net_poll();
-
-        {
-            uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
-            bool done = arp_resolved && arp_waiting_ip == ip;
-            spinlock_release_irqrestore(&arp_lock, flags);
-            if (done)
-                break;
-        }
-        // Also accept an entry learned gratuitously while we waited.
-        if (arp_lookup(ip, out_mac)) {
-            uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
-            if (started_wait)
-                arp_waiting = false;
-            spinlock_release_irqrestore(&arp_lock, flags);
-            return true;
-        }
-
-        // Small delay
-        for (volatile int i = 0; i < 10000; i++)
-            ;
-    }
-
-    {
-        uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
-        bool done = arp_resolved && arp_waiting_ip == ip;
-        if (started_wait)
-            arp_waiting = false;
-        if (done)
-            eth_mac_copy(out_mac, arp_waiting_mac);
-        spinlock_release_irqrestore(&arp_lock, flags);
-        if (done)
-            return true;
-    }
-
-    // Final table check before giving up.
     if (arp_lookup(ip, out_mac))
         return true;
+
+    // Miss: emit (rate-limited) one request and report "pending". This must
+    // never block or poll: callers reach here from under TX locks where a
+    // nested net_poll() would re-enter those same locks and self-deadlock,
+    // and where an interrupts-off busy-wait would stall the local timer.
+    // Callers treat false as "send failed, retry later".
+    bool send = false;
+    uint64_t flags = spinlock_acquire_irqsave(&arp_lock);
+    const uint64_t now = timer_get_ticks();
+    const uint64_t freq = timer_get_frequency() ? timer_get_frequency() : 1000;
+    if (arp_last_request_ip != ip || (now - arp_last_request_ticks) >= freq) { // 1 request / second / target
+        arp_last_request_ip = ip;
+        arp_last_request_ticks = now;
+        send = true;
+    }
+    spinlock_release_irqrestore(&arp_lock, flags);
+
+    if (send)
+        arp_send_request(ip);
+    return false;
+}
+
+bool arp_resolve_blocking(uint32_t ip, uint8_t *out_mac, uint64_t timeout_ms)
+{
+    if (!out_mac || ip == 0)
+        return false;
+
+    if (ip == 0xFFFFFFFF) {
+        eth_mac_copy(out_mac, ETH_BROADCAST_MAC);
+        return true;
+    }
+
+    if (arp_lookup(ip, out_mac))
+        return true;
+
+    // Only for callers that hold no network locks: net_poll() here can enter
+    // tcp_poll/udp receive paths that take those locks.
+    const uint64_t start = timer_get_ticks();
+    const uint64_t freq = timer_get_frequency() ? timer_get_frequency() : 1000;
+    const uint64_t timeout_ticks = (timeout_ms * freq) / 1000;
+
+    while ((timer_get_ticks() - start) < timeout_ticks) {
+        // Emit / refresh the request (rate-limited inside arp_resolve).
+        arp_resolve(ip, out_mac);
+
+        net_poll();
+        scheduler_yield();
+
+        if (arp_lookup(ip, out_mac))
+            return true;
+    }
 
     DEBUG_WARN("arp: resolution timeout for %d.%d.%d.%d", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
                (ip >> 24) & 0xFF);

@@ -32,6 +32,14 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
     const uint8_t *payload = (const uint8_t *)data + ICMP_HEADER_SIZE;
     uint16_t payload_len = length - ICMP_HEADER_SIZE;
 
+    // Validate the checksum before acting on the header: corrupt frames
+    // otherwise drive echo replies and ping callbacks with garbage RTTs
+    // (IPv4/UDP/TCP all validate on receive; ICMP was the odd one out).
+    if (ipv4_checksum(data, length) != 0) {
+        DEBUG_WARN("icmp: bad checksum");
+        return;
+    }
+
     switch (hdr->type) {
         case ICMP_TYPE_ECHO_REQUEST: {
             // Reply to ping. Limit to the IPv4 payload budget so checksum and

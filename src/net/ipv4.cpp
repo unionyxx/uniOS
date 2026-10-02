@@ -104,10 +104,11 @@ void ipv4_receive(const void *data, uint16_t length)
     }
 
     uint32_t our_ip = net_get_ip();
-    if (hdr->dst_ip != our_ip && hdr->dst_ip != 0xFFFFFFFF && // Broadcast
-        (hdr->dst_ip & 0xFF000000) != 0xFF000000) {           // Not class E / multicast
+    // Accept only frames addressed to us or to the limited broadcast address.
+    // The old class-E test was inverted, accepting all of 224.0.0.0/4 and
+    // 240.0.0.0/4 (multicast + reserved) as "ours".
+    if (hdr->dst_ip != our_ip && hdr->dst_ip != 0xFFFFFFFF)
         return;
-    }
 
     uint16_t total_length = ntohs(hdr->total_length);
     if (total_length < ihl || total_length > length)
@@ -135,6 +136,22 @@ void ipv4_receive(const void *data, uint16_t length)
 static Spinlock tx_lock = SPINLOCK_INIT;
 static uint8_t tx_buffer[1600];
 
+// The IP that actually needs a link-layer address for delivering to dst_ip:
+// the destination itself when on-link, the default gateway otherwise.
+uint32_t ipv4_route_resolve_ip(uint32_t dst_ip)
+{
+    if (dst_ip == 0xFFFFFFFF)
+        return dst_ip;
+    const uint32_t our_ip = net_get_ip();
+    const uint32_t netmask = net_get_netmask();
+    const uint32_t gateway = net_get_gateway();
+    if ((dst_ip & netmask) == (our_ip & netmask))
+        return dst_ip;
+    if (gateway != 0)
+        return gateway;
+    return dst_ip;
+}
+
 bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t length)
 {
     if ((!data && length > 0) || dst_ip == 0)
@@ -144,28 +161,14 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len
         return false;
     }
 
-    // Resolve MAC before taking the IPv4 TX lock. ARP resolution can poll the
-    // network and may re-enter IPv4 receive paths. Holding tx_lock across that
-    // poll would make ICMP/TCP replies able to deadlock this sender.
+    // Resolve MAC before taking the IPv4 TX lock. arp_resolve() is
+    // non-blocking (it may emit a request but never polls), so this stays
+    // safe under any caller-held lock; a cache miss simply fails the send
+    // and the caller retries after the poll loop has learned the reply.
     uint8_t dst_mac[6];
-    uint32_t our_ip = net_get_ip();
-    uint32_t netmask = net_get_netmask();
-    uint32_t gateway = net_get_gateway();
-
-    uint32_t resolve_ip;
-    if (dst_ip == 0xFFFFFFFF) {
-        resolve_ip = dst_ip;
-    } else if ((dst_ip & netmask) == (our_ip & netmask)) {
-        resolve_ip = dst_ip;
-    } else if (gateway != 0) {
-        resolve_ip = gateway;
-    } else {
-        resolve_ip = dst_ip;
-    }
+    uint32_t resolve_ip = ipv4_route_resolve_ip(dst_ip);
 
     if (!arp_resolve(resolve_ip, dst_mac)) {
-        DEBUG_WARN("ipv4: failed to resolve MAC for %d.%d.%d.%d", resolve_ip & 0xFF, (resolve_ip >> 8) & 0xFF,
-                   (resolve_ip >> 16) & 0xFF, (resolve_ip >> 24) & 0xFF);
         return false;
     }
 

@@ -46,7 +46,6 @@ extern bool display_buffer_set_wm_access(DisplayBufferHandle handle, bool allow)
 extern bool display_import_surface(uint64_t owner_pid, const DisplaySurfaceImport &request,
                                    DisplaySurface *out_surface);
 
-
 static constexpr uint64_t USER_STACK_TOP = 0x0000700000000000ULL;
 
 struct ShmBlock
@@ -2605,11 +2604,9 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 // enqueued its event between the poll above and the queue
                 // push is seen by the recheck (both sides serialize on
                 // g_sched_lock) and we never sleep.
-                scheduler_wait_rechecked(&p->event_wait_queue, nullptr,
-                                         [](void *raw) -> bool {
-                                             return !event_empty(static_cast<Process *>(raw)->event_queue);
-                                         },
-                                         p);
+                scheduler_wait_rechecked(
+                    &p->event_wait_queue, nullptr,
+                    [](void *raw) -> bool { return !event_empty(static_cast<Process *>(raw)->event_queue); }, p);
                 interrupts_restore(irq_flags);
             }
         }
@@ -2915,9 +2912,18 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!socket_decode_handle(static_cast<int>(arg1), &kind, &sock) || kind != SOCKET_KIND_TCP)
                 return static_cast<uint64_t>(-1);
             uint16_t len = arg3 > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(arg3);
+            // Copy the payload into a kernel buffer BEFORE tcp_send: its
+            // ring-full path context-switches (net_poll + yield), and a
+            // switch with STAC active leaves the next task running with
+            // SMAP disabled until it returns to user mode.
+            uint8_t *bounce = static_cast<uint8_t *>(malloc(len ? len : 1));
+            if (!bounce)
+                return static_cast<uint64_t>(-1);
             STAC();
-            int r = tcp_send(sock, reinterpret_cast<const void *>(arg2), len);
+            kstring::memcpy(bounce, reinterpret_cast<const void *>(arg2), len);
             CLAC();
+            int r = tcp_send(sock, bounce, len);
+            free(bounce);
             return static_cast<uint64_t>(r);
         }
         case SYS_RECV: {
