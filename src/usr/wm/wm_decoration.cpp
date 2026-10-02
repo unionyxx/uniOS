@@ -201,6 +201,12 @@ static void lock_window_decoration_background(Window &w)
     if (opaque) {
         w.decoration_bg_color = color;
         w.decoration_bg_locked = true;
+        // The shadow only renders once the tint is locked, and the cache
+        // built during the unlocked window (theme switch settle, launch)
+        // has no shadow. The theme signature alone does not schedule a
+        // redraw — without this damage the flat chrome stays on screen
+        // until a mouse move or window event happens to re-compose.
+        mark_window_frame_damage(w);
     }
 }
 
@@ -225,7 +231,7 @@ static uint32_t window_decoration_theme_signature(const Window &w)
     mix(static_cast<uint32_t>(wm_button_inset_x()));
     mix(static_cast<uint32_t>(wm_button_inset_y()));
     mix(static_cast<uint32_t>(wm_button_spacing()));
-    mix(static_cast<uint32_t>(gui_scaled_metric(12)));
+    mix(static_cast<uint32_t>(gui_panel_shadow_pad()));
     mix(static_cast<uint32_t>(wm_frame_border()));
     mix(static_cast<uint32_t>(wm_frame_shadow_offset_x()));
     mix(static_cast<uint32_t>(wm_frame_shadow_offset_y()));
@@ -249,17 +255,21 @@ static void draw_window_decoration_frame(Surface *dst, const Window &w, const Di
     // shadow can spread equally on all four sides; when drawing straight to the
     // backbuffer (active resize) the window is already at its screen position.
     int pad = wm_frame_shadow_offset_y();
-    int lx = (dst->buffer != g_backbuffer.buffer) ? pad : w.x;
-    int ly = (dst->buffer != g_backbuffer.buffer) ? pad : w.y;
+    bool dst_is_backbuffer = (dst->buffer == g_backbuffer.buffer);
+    int lx = dst_is_backbuffer ? w.x : pad;
+    int ly = dst_is_backbuffer ? w.y : pad;
     int sx = lx, sy = ly, sw = w.w, sh = w.h;
 
-    // The soft shadow is the expensive part of the chrome. Skip it until the
-    // client's background tint is locked: during launch the buffer is still
-    // zeroed/progressive, and rendering the shadow now would be thrown away
-    // by the rebuild the first opaque frame triggers. Presenting flat chrome
-    // first keeps the compositor responsive while the app starts.
+    // The soft shadow is the expensive part of the chrome to REBUILD in the
+    // cache: skip it until the client's background tint is locked (during
+    // launch the buffer is still zeroed/progressive, and the shadow would be
+    // thrown away by the rebuild the first opaque frame triggers). The
+    // direct-draw path below (active resize, no cache) re-locks the tint
+    // first, so a live resize keeps its shadow.
     if (w.decoration_bg_locked)
-        gui_draw_panel_shadow(dst, sx, sy, sw, sh, radius);
+        gui_draw_panel_shadow_clipped(dst, sx, sy, sw, sh, radius, dst_is_backbuffer ? clip.x : 0,
+                                      dst_is_backbuffer ? clip.y : 0, dst_is_backbuffer ? clip.w : 0,
+                                      dst_is_backbuffer ? clip.h : 0);
 
     // Opaque backing so the translucent hairline reads cleanly; the client blit
     // covers everything but the 1-px edge ring and the corners.
@@ -390,7 +400,13 @@ void draw_window_decoration_clipped(Surface *dst, Window &w, const DirtyRect &cl
                                   cache_stride, visible.w, visible.h);
         }
     } else {
-        // Active resize or no cache: draw frame directly for the dirty rect
+        // Active resize or no cache: draw frame directly for the dirty rect.
+        // Re-lock the background tint first: resize invalidation releases the
+        // lock and the cache path (which re-acquires it) is skipped during
+        // the drag, so without this the whole resize would render without a
+        // shadow. The lock samples the resize snapshot (the last committed
+        // frame), keeping the tint stable through the drag.
+        lock_window_decoration_background(w);
         draw_window_decoration_frame(dst, w, clip);
     }
     // Traffic-light buttons are drawn separately AFTER the client blit (called

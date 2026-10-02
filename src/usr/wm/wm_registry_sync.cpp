@@ -24,6 +24,16 @@ void wm_registry_sync_init(Registry *registry, GuiThemeMode initial_theme)
 
 void wm_sync_registry(Registry *registry)
 {
+    // Theme settle follow-up: the chrome tint only re-locks (and the shadow
+    // re-renders) when a compose pass runs after the resample window ends.
+    // Without this scheduled redraw the flat, shadowless chrome built during
+    // the settle window stays on screen until a mouse move or window event.
+    static uint64_t s_resample_redraw_at = 0;
+    if (s_resample_redraw_at != 0 && get_ticks() >= s_resample_redraw_at) {
+        s_resample_redraw_at = 0;
+        enqueue_damage_rect(0, 0, static_cast<int>(g_screen.width), static_cast<int>(g_screen.height));
+    }
+
     if (registry->settings_generation != g_last_settings_gen) {
         g_last_settings_gen = registry->settings_generation;
         GuiThemeMode next_theme = registry->theme_mode == GUI_THEME_LIGHT ? GUI_THEME_LIGHT : GUI_THEME_DARK;
@@ -43,6 +53,7 @@ void wm_sync_registry(Registry *registry)
             // color belongs to the old theme and must follow the app's
             // re-themed canvas before it locks again.
             uint64_t resample_until = get_ticks() + 750;
+            s_resample_redraw_at = resample_until + 1;
             for (int i = WM_FIRST_USER_WINDOW; i < g_window_count; i++) {
                 invalidate_window_decoration_cache(g_windows[i]);
                 g_windows[i].decoration_resample_until = resample_until;
