@@ -27,8 +27,10 @@ Reads and writes snapshot the descriptor and pin the vnode under the fd lock. Re
 
 A fixed table of 512 entries, one 4 KiB page each, with last-access accounting for eviction:
 
-- Cache entries hold vnode references; the dirty flag clears only on successful writeback.
-- Eviction is bounded: unflushable victims are aged rather than livelocked.
+- Cache entries hold vnode references; the dirty flag clears only on a full writeback (a short write — e.g. disk full — keeps the page dirty for a retry instead of dropping data a previously acknowledged write() left in the cache).
+- Entries in active use (reader/writer memcpy, writeback) are pinned: a pinned entry cannot be evicted or repurposed, so its (file, page) identity and data are stable across the copy. Writebacks pin across the device I/O; purges skip pinned entries and let the next pass retire them.
+- Eviction is bounded: unflushable victims are aged rather than livelocked; pinned entries are never selected.
+- `is_file_open` (the unlink/O_TRUNC guard) also treats a file with pinned or dirty cache entries as open, so storage is never freed under data the cache still owes the device.
 - Closing the last fd of a file purges its entries — repointing them to a still-open vnode of the same file, or flushing and dropping them — and then flushes the backing block device's write cache once, so a saved-and-closed file is durable without a global sync.
 - `SYS_SYNC` runs each mounted filesystem's sync op (with mount roots snapshotted outside the mount lock, since fs syncs issue device I/O), flushes all dirty pages, and then commits every block device's volatile write cache via `block_dev_flush_all()`.
 

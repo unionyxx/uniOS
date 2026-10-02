@@ -30,6 +30,10 @@ struct PageCacheEntry
     bool dirty;
     uint64_t last_access;
     bool valid;
+    // In-flight users (read memcpy, write memcpy, writeback): a pinned entry
+    // cannot be evicted or repurposed, so the raw pointer stays valid and the
+    // (vnode, page) identity cannot change under its holder. 0 = unpinned.
+    uint32_t pin_count;
 };
 
 static PageCacheEntry g_page_cache[MAX_CACHE_PAGES];
@@ -122,11 +126,41 @@ static PageCacheEntry *pc_find_locked(const VNode *node, uint64_t page_index)
     return nullptr;
 }
 
-// Writes back a dirty entry. The entry itself holds a reference on the node
-// (dropped only on eviction/purge), so the node stays alive across the write
-// even though g_pc_lock is released while I/O is in flight. `dirty` clears
-// only on success: a failed write keeps the data cached for a later retry
-// instead of dropping it on the floor.
+// Pin helpers: a pinned entry survives eviction and repurposing. Callers of
+// pc_get_page() must pc_unpin_page() when done copying.
+static void pc_unpin_page(PageCacheEntry *entry)
+{
+    if (!entry)
+        return;
+    uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
+    if (entry->pin_count > 0)
+        entry->pin_count--;
+    spinlock_release_irqrestore(&g_pc_lock, flags);
+}
+
+// True when a live cache entry for this node is in use (pinned) or carries
+// unflushed data: such files must not be unlinked/truncated underneath the
+// cache, or a later retry would write stale data into reallocated clusters.
+static bool pc_file_busy(const VNode *node)
+{
+    uint64_t flags = spinlock_acquire_irqsave(&g_pc_lock);
+    bool busy = false;
+    for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
+        if (g_page_cache[i].valid && (g_page_cache[i].pin_count != 0 || g_page_cache[i].dirty) &&
+            pc_match(g_page_cache[i], node)) {
+            busy = true;
+            break;
+        }
+    }
+    spinlock_release_irqrestore(&g_pc_lock, flags);
+    return busy;
+}
+
+// Writes back a dirty entry. The entry is pinned across the whole I/O (and
+// holds its own reference on the node), so the identity cannot change while
+// g_pc_lock is released; `dirty` clears only on a FULL write - a short write
+// (disk full) keeps the page dirty for a later retry instead of silently
+// dropping data the caller's write() already acknowledged.
 static bool pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags)
 {
     if (!entry->valid || !entry->dirty)
@@ -149,13 +183,16 @@ static bool pc_flush_entry_unlocked(PageCacheEntry *entry, uint64_t &flags)
         return false;
     kstring::memcpy(write_buf, entry->data, 4096);
 
+    entry->pin_count++;
     spinlock_release_irqrestore(&g_pc_lock, flags);
 
     int64_t wres = node->ops->write(node, write_buf, to_write, offset, nullptr);
     free(write_buf);
 
     flags = spinlock_acquire_irqsave(&g_pc_lock);
-    if (wres < 0)
+    if (entry->pin_count > 0)
+        entry->pin_count--;
+    if (wres < 0 || static_cast<uint64_t>(wres) < to_write)
         return false;
     entry->dirty = false;
     return true;
@@ -172,7 +209,7 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
     for (uint32_t attempts = 0; attempts < MAX_CACHE_PAGES; attempts++) {
         PageCacheEntry *best_victim = nullptr;
         for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
-            if (!g_page_cache[i].valid) {
+            if (!g_page_cache[i].valid && g_page_cache[i].pin_count == 0) {
                 best_victim = &g_page_cache[i];
                 break;
             }
@@ -181,7 +218,10 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
         if (!best_victim) {
             uint64_t oldest_access = -1ULL;
             for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
-                if (g_page_cache[i].valid && g_page_cache[i].last_access < oldest_access) {
+                // Pinned entries are in flight on another core: evicting one
+                // repurposes its memory under the pin holder's memcpy.
+                if (g_page_cache[i].valid && g_page_cache[i].pin_count == 0 &&
+                    g_page_cache[i].last_access < oldest_access) {
                     oldest_access = g_page_cache[i].last_access;
                     best_victim = &g_page_cache[i];
                 }
@@ -223,6 +263,7 @@ static PageCacheEntry *pc_evict_and_allocate_locked(VNode *node, uint64_t page_i
         }
         best_victim->page_index = page_index;
         best_victim->dirty = false;
+        best_victim->pin_count = 0;
         best_victim->last_access = ++g_page_cache_tick;
 
         // The cache entry holds a reference on the node until it is evicted
@@ -240,6 +281,7 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index)
     PageCacheEntry *entry = pc_find_locked(node, page_index);
     if (entry) {
         entry->last_access = ++g_page_cache_tick;
+        entry->pin_count++;
         spinlock_release_irqrestore(&g_pc_lock, flags);
         return entry;
     }
@@ -273,6 +315,7 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index)
     entry = pc_find_locked(node, page_index);
     if (entry) {
         entry->last_access = ++g_page_cache_tick;
+        entry->pin_count++;
         spinlock_release_irqrestore(&g_pc_lock, flags);
         free(temp_buf);
         return entry;
@@ -289,6 +332,7 @@ static PageCacheEntry *pc_get_page(VNode *node, uint64_t page_index)
 
     kstring::memcpy(entry->data, temp_buf, 4096);
     entry->valid = true;
+    entry->pin_count++;
     spinlock_release_irqrestore(&g_pc_lock, flags);
 
     free(temp_buf);
@@ -315,6 +359,12 @@ void pc_purge_vnode(VNode *node)
     for (size_t i = 0; i < MAX_CACHE_PAGES; i++) {
         if (!g_page_cache[i].valid || !pc_match(g_page_cache[i], node))
             continue;
+        if (g_page_cache[i].pin_count != 0) {
+            // Another core is mid-copy on this entry: neither invalidate nor
+            // repoint it (the pin holder's data must stay coherent). The next
+            // purge or eviction pass after the unpin handles it.
+            continue;
+        }
         if (g_page_cache[i].dirty) {
             if (!pc_flush_entry_unlocked(&g_page_cache[i], flags)) {
                 // Writeback failed: keep the page dirty and pinned rather than
@@ -322,7 +372,7 @@ void pc_purge_vnode(VNode *node)
                 continue;
             }
         }
-        if (g_page_cache[i].valid && pc_match(g_page_cache[i], node)) {
+        if (g_page_cache[i].valid && pc_match(g_page_cache[i], node) && g_page_cache[i].pin_count == 0) {
             if (alternate) {
                 // Repoint the cache at the still-open vnode for this file;
                 // the entry takes a reference on it and releases the one on
@@ -899,6 +949,7 @@ int64_t vfs_read(int fd, void *buf, uint64_t size)
                 }
 
                 kstring::memcpy(dest + total_read, entry->data + page_offset, page_bytes);
+                pc_unpin_page(entry);
                 total_read += page_bytes;
             }
 
@@ -994,12 +1045,18 @@ int64_t vfs_write(int fd, const void *buf, uint64_t size)
                     break;
                 }
 
-                kstring::memcpy(entry->data + page_offset, src + total_written, page_bytes);
-
-                uint64_t pc_flags = spinlock_acquire_irqsave(&g_pc_lock);
-                entry->dirty = true;
-                entry->last_access = ++g_page_cache_tick;
-                spinlock_release_irqrestore(&g_pc_lock, pc_flags);
+                // Copy + dirty-mark under the cache lock, with the entry pinned
+                // (pc_get_page pinned it): no eviction can repurpose the slot
+                // between the copy and the mark, and concurrent readers on
+                // other cores see whole pages.
+                {
+                    uint64_t pc_flags = spinlock_acquire_irqsave(&g_pc_lock);
+                    kstring::memcpy(entry->data + page_offset, src + total_written, page_bytes);
+                    entry->dirty = true;
+                    entry->last_access = ++g_page_cache_tick;
+                    spinlock_release_irqrestore(&g_pc_lock, pc_flags);
+                }
+                pc_unpin_page(entry);
 
                 total_written += page_bytes;
             }
@@ -1336,6 +1393,13 @@ bool is_file_open(const char *path)
         } while (curr != start);
     }
     scheduler_big_unlock_irqrestore(sched_flags);
+
+    // The page cache also keeps the file "in use": a pinned entry is being
+    // read/written right now, and a dirty one holds data no flush has landed
+    // yet. Unlinking underneath either would write stale bytes into
+    // reallocated clusters on the later retry.
+    if (!found)
+        found = pc_file_busy(target);
 
     vfs_close_vnode(target);
     return found;
