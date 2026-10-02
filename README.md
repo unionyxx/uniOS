@@ -108,7 +108,7 @@ Runtime assets use generated binary formats: `.uoic` (icons), `.uocu` (cursors),
 
 ## Documentation
 
-Full documentation lives at [unionyxx.github.io/uniOS/wiki](https://unionyxx.github.io/uniOS/wiki/), generated from `docs/reference/`.
+Full documentation lives at [unionyxx.github.io/uniOS/wiki](https://unionyxx.github.io/uniOS/wiki/), generated from `docs/reference/`. The project direction is tracked in [ROADMAP.md](ROADMAP.md).
 
 > [!NOTE]
 > Render the wiki locally with `meson compile -C build/debug wiki`.

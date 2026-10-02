@@ -1,5 +1,11 @@
 # Contributing
 
+## Where to Start
+
+- [ROADMAP.md](ROADMAP.md) tracks the project direction: what just landed, the highest-leverage gaps, and deferred work.
+- The `good-first-issue` label collects curated entry points sized for a first change.
+- Small, verifiable changes win: every area documents the exact commands that validate it (see [Validation Expectations](#validation-expectations)).
+
 ## Development Baseline
 
 - Target: x86-64.
