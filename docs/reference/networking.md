@@ -1,6 +1,6 @@
 # Networking
 
-The network stack (`src/net/`) is a freestanding, fully polled IPv4 stack in the kernel. Userspace reaches it through ten dedicated syscalls — sockets are not file descriptors — and consumes it today through the shell: `resolve`, `ifconfig`, and the `fetch` HTTP client.
+The network stack (`src/net/`) is a freestanding, fully polled IPv4 stack in the kernel. Userspace reaches it through thirteen dedicated syscalls — sockets are not file descriptors — and consumes it today through the shell: `resolve`, `ifconfig`, `ping`, `fetch`, and `dhcp`.
 
 ## NIC Selection and Polling
 
@@ -52,7 +52,7 @@ There is no mbuf abstraction: each layer owns static 1600-byte staging buffers u
 - Literal dotted quads are parsed directly.
 - Server: DHCP-provided DNS, falling back to `8.8.8.8`.
 - Single question, RD flag only — the resolver relies entirely on a recursive server. No iteration, no referrals.
-- Transport: one UDP socket on an ephemeral port, 5-second timeout, no retry, no caching.
+- Transport: one UDP socket on an ephemeral port, three attempts with fresh transaction IDs, no caching.
 - Parsing validates ID/QR/RCODE, skips questions and answers with bounds checks, handles compression pointers, and returns the first A record with rdlength 4. The parser is pure and ktest-covered against hostile inputs.
 
 ## Socket API

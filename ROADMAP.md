@@ -20,7 +20,7 @@ One line per item, with the file that proves the current state. Order within a s
 
 - TCP server sockets: `tcp_listen`/`tcp_accept` exist kernel-side (`include/kernel/net/tcp.h`) but are not exposed as syscalls; userspace TCP is client-only.
 - TLS: no crypto in-tree; `fetch` is HTTP-only.
-- DNS caching and retry: single 5-second attempt, no cache (`src/net/dns.cpp`).
+- DNS caching: three retry attempts exist (`src/net/dns.cpp`), but nothing is cached between lookups.
 - MP3 decode: stub only (`src/drivers/sound/mp3.cpp`).
 
 ## Contributing

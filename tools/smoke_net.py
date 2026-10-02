@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.server
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -61,13 +62,20 @@ def main() -> int:
         print("smoke-net: --qemu-smoke <path> is required", file=sys.stderr)
         return 2
 
-    with tempfile.TemporaryDirectory(prefix="unios-smoke-net-") as served:
+    served = tempfile.mkdtemp(prefix="unios-smoke-net-")
+    orig_cwd = os.getcwd()
+    try:
         with open(os.path.join(served, HELLO_NAME), "wb") as f:
             f.write(HELLO_BODY)
 
-        os.chdir(served)
+        # Serve from the tempdir without chdir-ing into it: a Windows host
+        # cannot clean up a directory that is the process CWD.
         handler = lambda *req, **kw: QuietHandler(*req, directory=served, **kw)  # noqa: E731
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), handler)
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), handler)
+        except OSError as e:
+            print(f"smoke-net: cannot bind 127.0.0.1:{PORT} ({e})", file=sys.stderr)
+            return 2
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -77,6 +85,9 @@ def main() -> int:
         finally:
             server.shutdown()
             server.server_close()
+    finally:
+        os.chdir(orig_cwd)
+        shutil.rmtree(served, ignore_errors=True)
 
     return 2
 
