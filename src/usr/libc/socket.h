@@ -43,6 +43,7 @@ int recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_
 int closesocket(int sockfd);
 int resolve_host(const char *hostname, struct in_addr *out_addr);
 int net_status(NetStatus *out);
+int socket_state(int sockfd); /* NET_TCP_* / NET_SOCK_UDP_OPEN or -errno */
 
 // Helpers
 uint16_t htons(uint16_t hostshort);

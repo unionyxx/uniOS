@@ -95,6 +95,11 @@ int net_status(NetStatus *out)
     return (int)syscall1(SYS_NET_STATUS, (uint64_t)out);
 }
 
+int socket_state(int sockfd)
+{
+    return (int)syscall1(SYS_SOCKET_STATE, (uint64_t)sockfd);
+}
+
 uint16_t htons(uint16_t v)
 {
     return (uint16_t)((v << 8) | (v >> 8));
