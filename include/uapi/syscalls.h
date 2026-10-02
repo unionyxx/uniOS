@@ -90,10 +90,16 @@
 
 /* Extended System Calls */
 /* WAIT args: uaddr, expected val, timeout_ms (arg4) — 0 waits until a
- * wake or a signal, any other value returns -ETIMEDOUT (-110) on expiry. */
+ * wake or a signal, any other value returns -ETIMEDOUT (-110) on expiry.
+ * Sub-tick timeouts round up to one timer tick. The kernel tracks at
+ * most 16 concurrent timed waiters: beyond that the call returns
+ * -ENOSPC (-28) instead of silently waiting forever. */
 #define SYS_FUTEX 270
-/* args: entry, arg, stack_top, stack_lo (arg5), stack_size (arg6).
- * The recorded range is unmapped when the thread calls SYS_THREAD_EXIT;
+/* args: entry, arg, stack_top, flags (arg4), stack_lo (arg5),
+ * stack_size (arg6). flags: THREAD_DETACHED (syscalls_ext.h) creates the
+ * thread already detached — it is never waitable and self-reaps through
+ * the kernel-zombie path on exit; unrecognised bits are ignored. The
+ * recorded range is unmapped when the thread calls SYS_THREAD_EXIT;
  * 0/0 keeps the caller-managed stack of the original 3-arg form. */
 #define SYS_THREAD_CREATE 271
 #define SYS_EPOLL_CREATE 272
