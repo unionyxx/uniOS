@@ -63,7 +63,7 @@ int pthread_join(pthread_t thread, void **retval)
 {
     int status = 0;
     if (waitpid((int)thread, &status) < 0)
-        return -10; // ESRCH: not a joinable child of this process
+        return -10; // ECHILD: not a joinable child of this process
     if (retval)
         *retval = (void *)(intptr_t)status;
     return 0;
