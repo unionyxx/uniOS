@@ -250,6 +250,7 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
 
     while (true) {
         uint64_t inst_flags = spinlock_acquire_irqsave(&inst->lock);
+        uint64_t pipe_gen = pipe_state_generation();
         EpollItem *curr = inst->items;
         while (curr && num_ready < maxevents) {
             uint32_t occurred = 0;
@@ -296,39 +297,28 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
             if (ticks_passed >= ticks_to_wait) {
                 break;
             }
+            // The wait queue has no native timeout: arm the tick-driven
+            // deadline so the scheduler wakes us when it expires.
+            scheduler_note_epoll_deadline(start_ticks + ticks_to_wait);
         }
 
+        // Queued sleep with a lost-wakeup guard: if a producer changed pipe
+        // state (or an event arrived) between the scan above and the queue
+        // push, the recheck sees it and we never sleep. Recheck reads are
+        // lockless atomics by design; see scheduler_wait_rechecked().
+        struct EpollRecheckCtx {
+            Process *proc;
+            uint64_t pipe_gen;
+        } recheck_ctx = {current, pipe_gen};
         uint64_t inst_flags2 = spinlock_acquire_irqsave(&inst->lock);
-
-        bool quick_ready = false;
-        EpollItem *scan = inst->items;
-        uint64_t fd_flags2 = spinlock_acquire_irqsave(&current->fd_lock);
-        while (scan) {
-            if (scan->fd >= 0 && scan->fd < MAX_OPEN_FILES && current->fd_table[scan->fd].used) {
-                VNode *vnode = current->fd_table[scan->fd].vnode;
-                uint32_t occ = 0;
-                if (pipe_is_pipe(vnode)) {
-                    if (pipe_is_ready(vnode, scan->events, &occ)) {
-                        quick_ready = true;
-                        break;
-                    }
-                } else {
-                    if (((EPOLLIN | EPOLLOUT) & scan->events) != 0) {
-                        quick_ready = true;
-                        break;
-                    }
-                }
-            }
-            scan = scan->next;
-        }
-        spinlock_release_irqrestore(&current->fd_lock, fd_flags2);
-
-        if (quick_ready) {
-            spinlock_release_irqrestore(&inst->lock, inst_flags2);
-            continue;
-        }
-
-        scheduler_wait(&g_epoll_wait_queue, &inst->lock);
+        scheduler_wait_rechecked(&g_epoll_wait_queue, &inst->lock,
+                                  [](void *raw) -> bool {
+                                      EpollRecheckCtx *ctx = static_cast<EpollRecheckCtx *>(raw);
+                                      if (!event_empty(ctx->proc->event_queue))
+                                          return true;
+                                      return pipe_state_generation() != ctx->pipe_gen;
+                                  },
+                                  &recheck_ctx);
         // scheduler_wait re-acquires the lock raw before returning, so we must release it raw
         // so that the next loop iteration's spinlock_acquire_irqsave succeeds.
         spinlock_release(&inst->lock);

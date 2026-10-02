@@ -46,6 +46,7 @@ extern bool display_buffer_set_wm_access(DisplayBufferHandle handle, bool allow)
 extern bool display_import_surface(uint64_t owner_pid, const DisplaySurfaceImport &request,
                                    DisplaySurface *out_surface);
 
+
 static constexpr uint64_t USER_STACK_TOP = 0x0000700000000000ULL;
 
 struct ShmBlock
@@ -1177,14 +1178,16 @@ static void user_task_wrapper()
     }
 
     char k_path[512];
-    if (!copy_string_from_user(path, k_path, 511))
+    if (!copy_string_from_user(path, k_path, 511)) {
         return -1;
+    }
 
     char resolved[512];
     vfs_resolve_relative_path(p->cwd, k_path, resolved);
     VNode *node = vfs_lookup_vnode(resolved);
-    if (!node)
+    if (!node) {
         return -1;
+    }
     if (node->is_dir) {
         vfs_close_vnode(node);
         return -1;
@@ -2571,7 +2574,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                     CLAC();
                     return 1;
                 }
-                scheduler_wait(&p->event_wait_queue, nullptr);
+                // Queued sleep with a lost-wakeup guard: a poster that
+                // enqueued its event between the poll above and the queue
+                // push is seen by the recheck (both sides serialize on
+                // g_sched_lock) and we never sleep.
+                scheduler_wait_rechecked(&p->event_wait_queue, nullptr,
+                                         [](void *raw) -> bool {
+                                             return !event_empty(static_cast<Process *>(raw)->event_queue);
+                                         },
+                                         p);
                 interrupts_restore(irq_flags);
             }
         }
