@@ -787,13 +787,37 @@ constexpr uint32_t TEST_SIG_CONTEXT_MAGIC = 0x51644374; // 'SigC'
 extern "C" void signal_check_interrupt(InterruptFrame *frame);
 bool g_in_ktest_signal = false;
 
+// A failed expectation jumps to the cleanup label instead of returning
+// mid-test: the surgery this test performs (page table, VMA list, signal
+// handlers, a user mapping) must be undone even on failure, or the next
+// ktest inherits a poisoned pid-0 task — a stale SIGUSR1 handler pointing
+// into nowhere, which a later signal delivery follows straight into
+// process_exit.
+#define SIG_CTX_CHECK(cond)                                                                                            \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ktest_record_failure(#cond, __FILE__, __LINE__);                                                           \
+            goto cleanup;                                                                                              \
+        }                                                                                                              \
+    } while (0)
+#define SIG_CTX_CHECK_EQ(a, b) SIG_CTX_CHECK((a) == (b))
+
 KTEST(extended_syscalls_signal_context)
 {
     Process *p = process_get_current();
-    KTEST_EXPECT(p != nullptr);
+    if (!p) {
+        ktest_record_failure("p != nullptr", __FILE__, __LINE__);
+        return;
+    }
 
-    uint64_t *orig_page_table = p->page_table;
+    const uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
+    const SignalControl orig_signals = p->signals;
+    uint64_t mmap_res = static_cast<uint64_t>(-1);
+    SyscallFrame mmap_frame = {};
+    mmap_frame.arg4 = MAP_PRIVATE | MAP_ANONYMOUS;
+    mmap_frame.arg5 = static_cast<uint64_t>(-1);
+    mmap_frame.arg6 = 0;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -802,116 +826,115 @@ KTEST(extended_syscalls_signal_context)
     // Allocate user memory to use as the user stack. The kernel signal frame
     // carries the full FPU_STATE_SIZE xsave area now, so one page is not
     // enough for the frame + red zone.
-    SyscallFrame mmap_frame = {};
-    mmap_frame.arg4 = MAP_PRIVATE | MAP_ANONYMOUS;
-    mmap_frame.arg5 = static_cast<uint64_t>(-1);
-    mmap_frame.arg6 = 0;
-    uint64_t mmap_res = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &mmap_frame);
-    KTEST_EXPECT(mmap_res != static_cast<uint64_t>(-1));
+    {
+        mmap_res = syscall_handler(SYS_MMAP, 0, 12288, PROT_READ | PROT_WRITE, &mmap_frame);
+        SIG_CTX_CHECK(mmap_res != static_cast<uint64_t>(-1));
 
-    // Save current signal state
-    SignalControl orig_signals = p->signals;
+        // Set up signal handler and restorer
+        p->signals.handlers[SIGUSR1] = reinterpret_cast<sighandler_t>(0x123456ULL);
+        p->signals.restorer = 0x7890ULL;
+        p->signals.pending = (1ULL << SIGUSR1);
+        p->signals.blocked = 0x112233ULL;
 
-    // Set up signal handler and restorer
-    p->signals.handlers[SIGUSR1] = reinterpret_cast<sighandler_t>(0x123456ULL);
-    p->signals.restorer = 0x7890ULL;
-    p->signals.pending = (1ULL << SIGUSR1);
-    p->signals.blocked = 0x112233ULL;
+        // Set up mock register state
+        TestStackFrame tf = {};
+        tf.original_rax = 0xAAABBBULL;
+        tf.frame.rip = 0x9999ULL;
+        tf.frame.rsp = mmap_res + 12288; // Top of the mapped region
+        tf.frame.cs = 0x23ULL;
+        tf.frame.ss = 0x1BULL;
+        tf.frame.rflags = 0x202ULL;
+        tf.frame.rbx = 0x11ULL;
+        tf.frame.rbp = 0x22ULL;
+        tf.frame.r12 = 0x33ULL;
+        tf.frame.r13 = 0x44ULL;
+        tf.frame.r14 = 0x55ULL;
+        tf.frame.r15 = 0x66ULL;
 
-    // Set up mock register state
-    TestStackFrame tf = {};
-    tf.original_rax = 0xAAABBBULL;
-    tf.frame.rip = 0x9999ULL;
-    tf.frame.rsp = mmap_res + 12288; // Top of the mapped region
-    tf.frame.cs = 0x23ULL;
-    tf.frame.ss = 0x1BULL;
-    tf.frame.rflags = 0x202ULL;
-    tf.frame.rbx = 0x11ULL;
-    tf.frame.rbp = 0x22ULL;
-    tf.frame.r12 = 0x33ULL;
-    tf.frame.r13 = 0x44ULL;
-    tf.frame.r14 = 0x55ULL;
-    tf.frame.r15 = 0x66ULL;
+        // Run signal check (this should deliver SIGUSR1)
+        signal_check(&tf.frame);
 
-    // Run signal check (this should deliver SIGUSR1)
-    signal_check(&tf.frame);
+        // Verify signal check side effects:
+        // RIP should point to the signal handler
+        SIG_CTX_CHECK_EQ(tf.frame.rip, 0x123456ULL);
+        // RSP should have decreased
+        SIG_CTX_CHECK(tf.frame.rsp < mmap_res + 12288);
+        // The signal should no longer be pending
+        SIG_CTX_CHECK_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
 
-    // Verify signal check side effects:
-    // RIP should point to the signal handler
-    KTEST_EXPECT_EQ(tf.frame.rip, 0x123456ULL);
-    // RSP should have decreased
-    KTEST_EXPECT(tf.frame.rsp < mmap_res + 12288);
-    // The signal should no longer be pending
-    KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
+        // Verify the data pushed to the user stack:
+        // The trampoline is pushed at RSP
+        uint64_t tramp_phys = vmm_virt_to_phys(tf.frame.rsp);
+        SIG_CTX_CHECK(tramp_phys != 0);
+        uint64_t *tramp_val = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(tramp_phys));
+        SIG_CTX_CHECK_EQ(*tramp_val, 0x7890ULL);
 
-    // Verify the data pushed to the user stack:
-    // The trampoline is pushed at RSP
-    uint64_t tramp_phys = vmm_virt_to_phys(tf.frame.rsp);
-    KTEST_EXPECT(tramp_phys != 0);
-    uint64_t *tramp_val = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(tramp_phys));
-    KTEST_EXPECT_EQ(*tramp_val, 0x7890ULL);
+        // The SignalContext starts at RSP + 8
+        uint64_t ctx_user_addr = tf.frame.rsp + 8;
+        uint64_t ctx_phys = vmm_virt_to_phys(ctx_user_addr);
+        SIG_CTX_CHECK(ctx_phys != 0);
 
-    // The SignalContext starts at RSP + 8
-    uint64_t ctx_user_addr = tf.frame.rsp + 8;
-    uint64_t ctx_phys = vmm_virt_to_phys(ctx_user_addr);
-    KTEST_EXPECT(ctx_phys != 0);
+        TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(vmm_phys_to_virt(ctx_phys));
+        SIG_CTX_CHECK_EQ(u_ctx->frame.rax, 0xAAABBBULL);
+        SIG_CTX_CHECK_EQ(u_ctx->old_mask, 0x112233ULL);
+        SIG_CTX_CHECK_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
 
-    TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(vmm_phys_to_virt(ctx_phys));
-    KTEST_EXPECT_EQ(u_ctx->frame.rax, 0xAAABBBULL);
-    KTEST_EXPECT_EQ(u_ctx->old_mask, 0x112233ULL);
-    KTEST_EXPECT_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
+        // Now simulate userspace returning from the signal handler:
+        // The trampoline would execute SYS_SIGRETURN.
+        // The user stack pointer would point to the SignalContext (i.e. tramp address is popped)
+        tf.frame.rsp += 8;
 
-    // Now simulate userspace returning from the signal handler:
-    // The trampoline would execute SYS_SIGRETURN.
-    // The user stack pointer would point to the SignalContext (i.e. tramp address is popped)
-    tf.frame.rsp += 8;
+        // Set g_in_ktest_signal to true to prevent sys_sigreturn from executing iretq and crashing
+        g_in_ktest_signal = true;
+        uint64_t returned_rax = syscall_handler(SYS_SIGRETURN, 0, 0, 0, &tf.frame);
+        g_in_ktest_signal = false;
 
-    // Set g_in_ktest_signal to true to prevent sys_sigreturn from executing iretq and crashing
-    g_in_ktest_signal = true;
-    uint64_t returned_rax = syscall_handler(SYS_SIGRETURN, 0, 0, 0, &tf.frame);
+        // Verify context restoration:
+        // Returned value should be the original RAX (restored into RAX in InterruptFrame)
+        SIG_CTX_CHECK_EQ(returned_rax, 0xAAABBBULL);
+        // RIP and RSP should be restored
+        SIG_CTX_CHECK_EQ(tf.frame.rip, 0x9999ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.rsp, mmap_res + 12288);
+        // Callee-saved registers should be restored
+        SIG_CTX_CHECK_EQ(tf.frame.rbx, 0x11ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.rbp, 0x22ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r12, 0x33ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r13, 0x44ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r14, 0x55ULL);
+        SIG_CTX_CHECK_EQ(tf.frame.r15, 0x66ULL);
+        // Signal mask should be restored
+        SIG_CTX_CHECK_EQ(p->signals.blocked, 0x112233ULL);
+
+        // --- Test signal_check_interrupt ---
+        p->signals.pending = (1ULL << SIGUSR1);
+
+        InterruptFrame int_frame = {};
+        int_frame.rip = 0xaaaaULL;
+        int_frame.rsp = mmap_res + 12288;
+        int_frame.cs = 0x23ULL; // Ring 3
+        int_frame.ss = 0x1BULL;
+        int_frame.rflags = 0x202ULL;
+        int_frame.rax = 0x5555ULL;
+
+        signal_check_interrupt(&int_frame);
+
+        // Verify it delivered the signal
+        SIG_CTX_CHECK_EQ(int_frame.rip, 0x123456ULL);
+        SIG_CTX_CHECK_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
+    }
+
+cleanup:
     g_in_ktest_signal = false;
-
-    // Verify context restoration:
-    // Returned value should be the original RAX (restored into RAX in InterruptFrame)
-    KTEST_EXPECT_EQ(returned_rax, 0xAAABBBULL);
-    // RIP and RSP should be restored
-    KTEST_EXPECT_EQ(tf.frame.rip, 0x9999ULL);
-    KTEST_EXPECT_EQ(tf.frame.rsp, mmap_res + 12288);
-    // Callee-saved registers should be restored
-    KTEST_EXPECT_EQ(tf.frame.rbx, 0x11ULL);
-    KTEST_EXPECT_EQ(tf.frame.rbp, 0x22ULL);
-    KTEST_EXPECT_EQ(tf.frame.r12, 0x33ULL);
-    KTEST_EXPECT_EQ(tf.frame.r13, 0x44ULL);
-    KTEST_EXPECT_EQ(tf.frame.r14, 0x55ULL);
-    KTEST_EXPECT_EQ(tf.frame.r15, 0x66ULL);
-    // Signal mask should be restored
-    KTEST_EXPECT_EQ(p->signals.blocked, 0x112233ULL);
-
-    // --- Test signal_check_interrupt ---
-    p->signals.pending = (1ULL << SIGUSR1);
-
-    InterruptFrame int_frame = {};
-    int_frame.rip = 0xaaaaULL;
-    int_frame.rsp = mmap_res + 12288;
-    int_frame.cs = 0x23ULL; // Ring 3
-    int_frame.ss = 0x1BULL;
-    int_frame.rflags = 0x202ULL;
-    int_frame.rax = 0x5555ULL;
-
-    signal_check_interrupt(&int_frame);
-
-    // Verify it delivered the signal
-    KTEST_EXPECT_EQ(int_frame.rip, 0x123456ULL);
-    KTEST_EXPECT_EQ(p->signals.pending & (1ULL << SIGUSR1), 0ULL);
-
-    // Clean up
-    uint64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 12288, 0, &mmap_frame);
-    KTEST_EXPECT_EQ(munmap_res, 0);
-
+    if (mmap_res != static_cast<uint64_t>(-1)) {
+        (void)syscall_handler(SYS_MUNMAP, mmap_res, 12288, 0, &mmap_frame);
+    }
     p->signals = orig_signals;
-    p->page_table = orig_page_table;
+    p->page_table = const_cast<uint64_t *>(orig_page_table);
     p->vmalist->head = orig_vma_list;
 }
+
+#undef SIG_CTX_CHECK
+#undef SIG_CTX_CHECK_EQ
 
 KTEST(extended_vfs_page_cache)
 {
