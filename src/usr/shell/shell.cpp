@@ -127,7 +127,7 @@ static const CommandEntry commands[] = {
     {"dmesg", "dmesg", "show kernel log status", CMD_NONE, cmd_dmesg, nullptr, nullptr},
 
     {"resolve", "resolve <host>", "resolve a DNS name", CMD_ARGS, nullptr, cmd_resolve, nullptr},
-    {"ping", "ping <host>", "resolve or probe a host", CMD_ARGS, nullptr, cmd_ping, nullptr},
+    {"ping", "ping <host> [count]", "probe a host with ICMP echo", CMD_ARGS, nullptr, cmd_ping, nullptr},
     {"fetch", "fetch <url> [outfile|-]", "download a file over HTTP", CMD_ARGS, nullptr, cmd_fetch, nullptr},
     {"ifconfig", "ifconfig", "show network interface status", CMD_NONE, cmd_ifconfig, nullptr, nullptr},
     {"sound", "sound <file>", "play audio through kernel parser", CMD_ARGS, nullptr, cmd_sound, nullptr},

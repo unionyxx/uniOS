@@ -100,6 +100,13 @@ int socket_state(int sockfd)
     return (int)syscall1(SYS_SOCKET_STATE, (uint64_t)sockfd);
 }
 
+int ping_host(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
+{
+    if (!rtt_ms)
+        return -14;
+    return (int)syscall3(SYS_PING, (uint64_t)ip, (uint64_t)timeout_ms, (uint64_t)rtt_ms);
+}
+
 uint16_t htons(uint16_t v)
 {
     return (uint16_t)((v << 8) | (v >> 8));

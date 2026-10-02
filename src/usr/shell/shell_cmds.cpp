@@ -1470,8 +1470,64 @@ void cmd_resolve(const char *hostname)
 
 void cmd_ping(const char *target)
 {
-    printf("ping: ICMP echo is not exposed to userland; resolving target instead\n");
-    cmd_resolve(target);
+    char host[128];
+    char extra[32];
+    const char *p = parse_token(skip_spaces(target), host, sizeof(host));
+    if (host[0] == '\0') {
+        printf("Usage: ping <host> [count]\n");
+        set_status(1);
+        return;
+    }
+    int count = 4;
+    parse_token(p, extra, sizeof(extra));
+    if (extra[0] != '\0') {
+        count = atoi(extra);
+        if (count < 1)
+            count = 1;
+        if (count > 16)
+            count = 16;
+    }
+
+    struct in_addr addr;
+    if (resolve_host(host, &addr) != 0) {
+        printf("ping: resolve failed for %s\n", host);
+        set_status(1);
+        return;
+    }
+    const uint32_t ip = addr.s_addr;
+    printf("PING %s (%u.%u.%u.%u), %d probes\n", host, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
+           (ip >> 24) & 0xFF, count);
+
+    uint32_t min_rtt = 0xFFFFFFFFu, max_rtt = 0;
+    uint64_t sum_rtt = 0;
+    uint32_t received = 0;
+    for (int i = 0; i < count; i++) {
+        uint32_t rtt = 0;
+        const int r = ping_host(ip, 2000, &rtt);
+        if (r == 0) {
+            received++;
+            sum_rtt += rtt;
+            if (rtt < min_rtt)
+                min_rtt = rtt;
+            if (rtt > max_rtt)
+                max_rtt = rtt;
+            printf("64 bytes from %u.%u.%u.%u: seq=%d rtt=%ums\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
+                   (ip >> 24) & 0xFF, i, rtt);
+        } else if (r == -110) {
+            printf("64 bytes from %u.%u.%u.%u: seq=%d timeout\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
+                   (ip >> 24) & 0xFF, i);
+        } else {
+            printf("ping: probe failed (errno %d)\n", -r);
+        }
+        if (i + 1 < count)
+            sleep_ms(500);
+    }
+
+    printf("--- %s ping statistics ---\n", host);
+    printf("%d sent, %u received, %u%% loss\n", count, received, (unsigned)((count - (int)received) * 100 / count));
+    if (received > 0)
+        printf("rtt min/avg/max = %u/%u/%u ms\n", min_rtt, (uint32_t)(sum_rtt / received), max_rtt);
+    set_status(received > 0 ? 0 : 1);
 }
 
 // Case-insensitive prefix compare for HTTP header names ("Content-Length"
