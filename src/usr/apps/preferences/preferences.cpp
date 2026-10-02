@@ -122,6 +122,7 @@ struct PreferencesApp
     WidgetField wallpaper;
     WidgetButton apply;
     WidgetButton def;
+    WidgetButton renew;
     WidgetToggle animations;
     WidgetToggle transparency;
     WidgetToggle grid;
@@ -991,11 +992,12 @@ static void draw_preferences(App *app, Surface *win)
                      (addrs[i] >> 16) & 0xFF, (addrs[i] >> 24) & 0xFF);
             rows[i + 2][1] = ip_text[i];
         }
-        int heights[6];
+        int heights[7];
         for (int i = 0; i < 6; i++)
             heights[i] = control_row;
+        heights[6] = control_row;
         PrefGroup g;
-        pref_group_begin(win, &g, content_x, y, content_w, heights, 6);
+        pref_group_begin(win, &g, content_x, y, content_w, heights, 7);
         for (int i = 0; i < 6; i++) {
             Rect row = pref_group_next(&g, control_row);
             int text_y = gui_align_text_y(gui_font_default(), row.y, row.h);
@@ -1009,8 +1011,15 @@ static void draw_preferences(App *app, Surface *win)
             gui_draw_text_clipped(win, gui_font_default(), row.x + row.w / 2, text_y, row.w / 2 - gui_space_4(), value,
                                   g_gui_style.text_muted, 0);
         }
-        y += 6 * control_row + gap;
-        gui_draw_string(win, content_x, y, "DHCP is the only address source; renew it from the shell with `dhcp`.",
+        {
+            Rect row = pref_group_next(&g, control_row);
+            int cy = row.y + (row.h - gui_app_control_h()) / 2;
+            int renew_w = gui_scaled_metric(150);
+            st->renew.rect = gui_rect_make(row.x + row.w - renew_w - gui_space_2(), cy, renew_w, gui_app_control_h());
+            widget_button_draw(win, &st->renew, "Renew DHCP Lease", true, false);
+        }
+        y += 7 * control_row + gap;
+        gui_draw_string(win, content_x, y, "DHCP is the only address source; the shell `dhcp` command renews too.",
                         g_gui_style.text_muted, 0);
         gui_draw_string(win, content_x, y + gui_line_height(), state->status, g_gui_style.text_muted, 0);
     } else if (state->section == PREF_SECTION_SYSTEM) {
@@ -1274,6 +1283,7 @@ static void preferences_event(App *app, const Event *ev)
                     changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
                     break;
                 case PREF_SECTION_NETWORK:
+                    changed |= (widget_button_event(&st->renew, ev) & WIDGET_CHANGED) != 0;
                     break;
                 case PREF_SECTION_SYSTEM:
                     changed |= (widget_toggle_event(&st->terminal, ev) & WIDGET_CHANGED) != 0;
@@ -1379,8 +1389,22 @@ static void preferences_event(App *app, const Event *ev)
                     break;
                 }
                 case PREF_SECTION_NETWORK: {
-                    // Read-only status rows: nothing interactive in this section
-                    // until the renew button lands.
+                    if (widget_button_event(&st->renew, ev) & WIDGET_CLICKED) {
+                        const int r = net_renew();
+                        refresh_network_status(state);
+                        if (r == 0)
+                            snprintf(state->status, sizeof(state->status), "DHCP lease renewed");
+                        else if (r == -16)
+                            snprintf(state->status, sizeof(state->status), "A renew is already in progress");
+                        else if (r == -19)
+                            snprintf(state->status, sizeof(state->status), "No network device");
+                        else if (r == -11)
+                            snprintf(state->status, sizeof(state->status), "Network not initialized yet");
+                        else
+                            snprintf(state->status, sizeof(state->status), "DHCP renew failed (no ACK)");
+                        app_invalidate_all(app);
+                        break;
+                    }
                     break;
                 }
                 case PREF_SECTION_SYSTEM: {

@@ -130,6 +130,7 @@ static const CommandEntry commands[] = {
     {"ping", "ping <host> [count]", "probe a host with ICMP echo", CMD_ARGS, nullptr, cmd_ping, nullptr},
     {"fetch", "fetch <url> [outfile|-]", "download a file over HTTP", CMD_ARGS, nullptr, cmd_fetch, nullptr},
     {"ifconfig", "ifconfig", "show network interface status", CMD_NONE, cmd_ifconfig, nullptr, nullptr},
+    {"dhcp", "dhcp", "renew the DHCP lease", CMD_NONE, cmd_dhcp_request, nullptr, nullptr},
     {"sound", "sound <file>", "play audio through kernel parser", CMD_ARGS, nullptr, cmd_sound, nullptr},
     {"play", "play <file>", "play WAV audio through user parser", CMD_ARGS, nullptr, cmd_play, nullptr},
 };

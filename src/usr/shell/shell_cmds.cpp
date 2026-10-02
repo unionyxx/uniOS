@@ -1872,7 +1872,27 @@ void cmd_ifconfig()
 
 void cmd_dhcp_request()
 {
-    printf("dhcp: DHCP is managed by the kernel network stack\n");
+    const int r = net_renew();
+    if (r == 0) {
+        NetStatus st;
+        if (net_status(&st) == 0 && st.ip != 0)
+            printf("dhcp: lease renewed (%u.%u.%u.%u)\n", st.ip & 0xFF, (st.ip >> 8) & 0xFF, (st.ip >> 16) & 0xFF,
+                   (st.ip >> 24) & 0xFF);
+        else
+            printf("dhcp: lease renewed\n");
+    } else if (r == -11) {
+        printf("dhcp: network not initialized yet\n");
+        set_status(1);
+    } else if (r == -16) {
+        printf("dhcp: a renew is already in progress\n");
+        set_status(1);
+    } else if (r == -19) {
+        printf("dhcp: no network device\n");
+        set_status(1);
+    } else {
+        printf("dhcp: renew failed (no ACK)\n");
+        set_status(1);
+    }
 }
 
 void cmd_login()

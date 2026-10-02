@@ -45,6 +45,7 @@ int resolve_host(const char *hostname, struct in_addr *out_addr);
 int net_status(NetStatus *out);
 int socket_state(int sockfd);                                      /* NET_TCP_* / NET_SOCK_UDP_OPEN or -errno */
 int ping_host(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms); /* 0 or -errno */
+int net_renew(void);                                               /* 0 or -errno */
 
 // Helpers
 uint16_t htons(uint16_t hostshort);

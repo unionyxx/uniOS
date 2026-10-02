@@ -107,6 +107,11 @@ int ping_host(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
     return (int)syscall3(SYS_PING, (uint64_t)ip, (uint64_t)timeout_ms, (uint64_t)rtt_ms);
 }
 
+int net_renew(void)
+{
+    return (int)syscall0(SYS_NET_RENEW);
+}
+
 uint16_t htons(uint16_t v)
 {
     return (uint16_t)((v << 8) | (v >> 8));
