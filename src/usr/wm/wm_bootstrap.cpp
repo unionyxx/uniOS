@@ -12,8 +12,10 @@
 Registry *wm_bootstrap()
 {
     g_screen = gui_init_framebuffer();
-    if (!g_screen.buffer)
+    if (!g_screen.buffer) {
+        LOG_ERROR("wm", "bootstrap: framebuffer init failed");
         return nullptr;
+    }
 
     {
         if (display_get_caps(&g_display_caps) == 0) {
@@ -28,12 +30,16 @@ Registry *wm_bootstrap()
     }
 
     int reg_shm = static_cast<int>(syscall1(SYS_SHM_GET, (sizeof(Registry) + 0xFFFu) & ~0xFFFu));
-    if (reg_shm < 0)
+    if (reg_shm < 0) {
+        LOG_ERROR("wm", "bootstrap: shm_get failed: %d", reg_shm);
         return nullptr;
+    }
 
     uint64_t reg_ptr = syscall1(SYS_SHM_MAP, static_cast<uint64_t>(reg_shm));
-    if (reg_ptr == 0 || reg_ptr == static_cast<uint64_t>(-1))
+    if (reg_ptr == 0 || reg_ptr == static_cast<uint64_t>(-1)) {
+        LOG_ERROR("wm", "bootstrap: shm_map failed: %llu", static_cast<unsigned long long>(reg_ptr));
         return nullptr;
+    }
 
     Registry *registry = reinterpret_cast<Registry *>(reg_ptr);
     memset(registry, 0, (sizeof(Registry) + 0xFFFu) & ~0xFFFu);
