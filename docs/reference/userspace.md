@@ -53,7 +53,7 @@ The kernel maps one region per thread (see [Processes — Thread-Local Storage](
 - Threads created by a group leader start from the image's initializers: the `.tdata` bytes form the `PT_TLS` template the kernel clones per thread, with the `.tbss` tail zero-filled. Values written by one thread are never visible to another; a thread's values survive fork (the block is COW-shared with the child).
 - `pthread_self` is an inline `fs:0` load plus the TCB `tid` field — no syscall — valid in every thread by the always-TCB invariant.
 
-Limits: no `pthread_key_*` (thread-specific data) and no per-thread `errno` — both deliberately absent until a consumer exists; the raw-negative-error convention covers callers today. The template facts are set at exec and copied by fork but never propagated by thread create, so a thread created by a non-leader thread gets a TCB-only mapping — `fs:0` and `pthread_self` still work, `__thread` accesses fault.
+Limits: no `pthread_key_*` (thread-specific data) and no per-thread `errno` — both deliberately absent until a consumer exists; the raw-negative-error convention covers callers today.
 
 ## libgui
 
