@@ -15,6 +15,11 @@ typedef struct
     uint32_t pitch;
     bool owns_buffer;
     DisplayBufferHandle display_handle;
+    // Padded allocation footprint (see gui_create_surface / resize capacity
+    // users): width/height carry the caller's current logical size, capacity
+    // carries how big the buffer actually is.
+    uint32_t capacity_w;
+    uint32_t capacity_h;
 } Surface;
 
 typedef struct

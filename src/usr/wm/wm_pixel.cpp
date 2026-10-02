@@ -222,7 +222,7 @@ bool ensure_surface_capacity(Surface *surface, uint32_t width, uint32_t height)
 {
     if (!surface)
         return false;
-    if (surface->buffer && surface->width >= width && surface->height >= height) {
+    if (surface->buffer && surface->capacity_w >= width && surface->capacity_h >= height) {
         surface->width = width;
         surface->height = height;
         return true;

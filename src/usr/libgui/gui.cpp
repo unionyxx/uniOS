@@ -511,12 +511,14 @@ Surface gui_init_framebuffer(void)
 
 Surface gui_create_surface(uint32_t width, uint32_t height)
 {
-    Surface s = {0, 0, 0, 0, false};
+    Surface s = {0, 0, 0, 0, 0, 0, 0, 0};
     size_t size = 0;
     if (!gui_surface_layout(width, height, &s.pitch, &size))
         return s;
 
     s.width = width;
+    s.capacity_w = width;
+    s.capacity_h = height;
     s.height = height;
     s.buffer = static_cast<uint32_t *>(malloc(size));
     s.owns_buffer = (s.buffer != nullptr);
@@ -536,6 +538,8 @@ void gui_destroy_surface(Surface *s)
     s->height = 0;
     s->pitch = 0;
     s->owns_buffer = false;
+    s->capacity_w = 0;
+    s->capacity_h = 0;
     s->display_handle = 0;
 }
 
