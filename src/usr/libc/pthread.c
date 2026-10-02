@@ -95,10 +95,12 @@ pthread_t pthread_self(void)
  *    -11 (EAGAIN) without sleeping when it moved. That closes the
  *    record-then-park window: anything that changes the word between a
  *    waiter's read and its park shows up as EAGAIN, never as a lost wake.
- *  - WAKE matches waiters by physical address, not by value, and returns
- *    how many it woke. A woken waiter whose expected value went stale
- *    simply re-runs its loop (a spurious wakeup, which POSIX allows).
- *  - WAIT's 4th argument is the timeout: 0 = forever, expiry = -110. */
+ *  - WAKE is word-matched: it reaches only waiters parked on the exact
+ *    same 32-bit futex word and returns how many it woke. A woken waiter
+ *    whose expected value went stale simply re-runs its loop (a spurious
+ *    wakeup, which POSIX allows).
+ *  - WAIT's 4th argument is the timeout: 0 = forever, expiry = -110, a
+ *    full timed-wait table = -28 (ENOSPC). */
 
 int pthread_mutex_init(pthread_mutex_t *mutex, const void *attr)
 {
@@ -138,8 +140,9 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
     /* 1 -> 0 uncontended; 2 -> 0 hands off: one woken waiter re-acquires
      * via CAS(0 -> 2), which re-arms the wake for the next unlock. The
      * exchange is a full barrier publishing the critical section's writes;
-     * a wake against an empty bucket is the benign lost-wake race - the
-     * would-be waiter is still before its park and gets EAGAIN instead. */
+     * a wake that finds no waiter parked on this word is the benign
+     * lost-wake race - the would-be waiter is still before its park and
+     * gets EAGAIN instead. */
     if (__sync_lock_test_and_set(&mutex->state, 0u) != 1u)
         futex(&mutex->state, FUTEX_WAKE, 1u);
     return 0;
