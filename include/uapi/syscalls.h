@@ -89,7 +89,12 @@
 #define SYS_KILL 37
 
 /* Extended System Calls */
+/* WAIT args: uaddr, expected val, timeout_ms (arg4) — 0 waits until a
+ * wake or a signal, any other value returns -ETIMEDOUT (-110) on expiry. */
 #define SYS_FUTEX 270
+/* args: entry, arg, stack_top, stack_lo (arg5), stack_size (arg6).
+ * The recorded range is unmapped when the thread calls SYS_THREAD_EXIT;
+ * 0/0 keeps the caller-managed stack of the original 3-arg form. */
 #define SYS_THREAD_CREATE 271
 #define SYS_EPOLL_CREATE 272
 #define SYS_EPOLL_CTL 273
