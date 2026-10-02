@@ -34,7 +34,9 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/net/arp.h>
 #include <kernel/net/dns.h>
+#include <kernel/net/icmp.h>
 #include <kernel/net/net.h>
+#include <kernel/net/tcp.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
@@ -296,10 +298,73 @@ static void mount_removable_volumes()
 
 #ifdef DEBUG
 // Debug-only network self-test (runs only when a NIC was configured): proves
-// the ARP blocking helper and the UDP/DNS path end-to-end against the
-// emulated gateway/DNS (slirp always answers ARP for the gateway; the DNS
-// leg needs a host resolver with IPv4 answers, so it is informational).
-// Results land in the serial log (warn-level: quiet mode keeps those).
+// the ARP blocking helper, the ICMP echo path, the UDP/DNS path and the TCP
+// client path end-to-end against the emulated gateway/DNS/HTTP server
+// (slirp always answers ARP and ICMP echo for the gateway; the DNS leg needs
+// a host resolver with IPv4 answers, so it is informational; the HTTP leg
+// fetches /hello.txt from 10.0.2.2:8931 where tools/smoke_net.py serves it).
+// Results land in the serial log (warn-level: quiet mode keeps those) and
+// one summary line is the smoke-net assertion surface.
+#define NET_SMOKE_HTTP_IP 0x0202000Au // host-order 10.0.2.2 (slirp gateway)
+#define NET_SMOKE_HTTP_PORT 8931
+
+static void net_self_test_http(const char **status)
+{
+    *status = "SKIP";
+    if (net_get_gateway() != NET_SMOKE_HTTP_IP)
+        return; // not slirp user networking: no host server to talk to
+
+    const int sock = tcp_socket();
+    if (sock < 0) {
+        *status = "FAIL";
+        return;
+    }
+
+    if (!tcp_connect(sock, NET_SMOKE_HTTP_IP, NET_SMOKE_HTTP_PORT)) {
+        DEBUG_WARN("net self-test: http connect to 10.0.2.2:%d failed", NET_SMOKE_HTTP_PORT);
+        tcp_close(sock);
+        *status = "FAIL";
+        return;
+    }
+
+    static const char request[] = "GET /hello.txt HTTP/1.0\r\nHost: 10.0.2.2\r\n\r\n";
+    if (tcp_send(sock, request, (uint16_t)(sizeof(request) - 1)) < 0) {
+        tcp_close(sock);
+        *status = "FAIL";
+        return;
+    }
+
+    static char response[4096];
+    size_t total = 0;
+    const uint64_t start = timer_get_ticks();
+    const uint64_t deadline = start + (5 * timer_get_frequency());
+    while (timer_get_ticks() < deadline) {
+        const TcpState st = tcp_get_state(sock);
+        const bool closed = (st == TCP_CLOSED) || (st >= TCP_FIN_WAIT_1 && st <= TCP_TIME_WAIT);
+        int n = tcp_recv(sock, response + total, (uint16_t)(sizeof(response) - 1 - total));
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        if (closed || total >= sizeof(response) - 1)
+            break;
+        net_poll();
+        scheduler_yield();
+    }
+
+    bool found = false;
+    for (size_t i = 0; i + 15 <= total; i++) {
+        if (kstring::memcmp(response + i, "uniOS-smoke-net", 15) == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    tcp_close(sock);
+    DEBUG_WARN("net self-test: http fetch %u bytes: %s", (unsigned)total, found ? "PASS" : "FAIL");
+    *status = found ? "PASS" : "FAIL";
+}
+
 static void net_self_test_task()
 {
     if (!net_is_configured()) {
@@ -314,9 +379,21 @@ static void net_self_test_task()
                (probe_ip >> 8) & 0xFF, (probe_ip >> 16) & 0xFF, (probe_ip >> 24) & 0xFF, mac[0], mac[1], mac[2], mac[3],
                mac[4], mac[5], arp_ok ? "PASS" : "FAIL");
 
+    uint32_t ping_rtt = 0;
+    const bool ping_ok = icmp_ping_probe(probe_ip, 2000, &ping_rtt) == 0;
+    DEBUG_WARN("net self-test: ping %d.%d.%d.%d: %s (rtt %ums)", probe_ip & 0xFF, (probe_ip >> 8) & 0xFF,
+               (probe_ip >> 16) & 0xFF, (probe_ip >> 24) & 0xFF, ping_ok ? "PASS" : "FAIL", ping_rtt);
+
     const uint32_t dns_ip = dns_resolve("unicode.org");
     DEBUG_WARN("net self-test: dns unicode.org -> %d.%d.%d.%d: %s", dns_ip & 0xFF, (dns_ip >> 8) & 0xFF,
                (dns_ip >> 16) & 0xFF, (dns_ip >> 24) & 0xFF, dns_ip != 0 ? "PASS" : "FAIL");
+
+    const char *http_status = "SKIP";
+    net_self_test_http(&http_status);
+
+    // Single summary line: the smoke-net suite's assertion surface.
+    DEBUG_WARN("net self-test summary: arp=%s ping=%s dns=%s http=%s", arp_ok ? "PASS" : "FAIL",
+               ping_ok ? "PASS" : "FAIL", dns_ip != 0 ? "PASS" : "FAIL", http_status);
 }
 #endif
 

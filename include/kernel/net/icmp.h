@@ -32,3 +32,7 @@ uint32_t icmp_rtt_ms(uint64_t sent_ticks, uint64_t now_ticks);
 // Extended syscall implementation (user pointer validated inside):
 // one blocking echo probe; 0 + *rtt_ms, or -errno.
 int64_t sys_ping(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms);
+
+// Kernel-context variant (rtt_ms is a kernel pointer): the same probe flow
+// used by the debug net self-test.
+int64_t icmp_ping_probe(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms);

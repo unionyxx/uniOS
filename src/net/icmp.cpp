@@ -189,10 +189,8 @@ void icmp_receive(const void *data, uint16_t length, uint32_t src_ip)
     }
 }
 
-int64_t sys_ping(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
+int64_t icmp_ping_probe(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
 {
-    if (!validate_user_ptr(rtt_ms, sizeof(uint32_t), true))
-        return -14; // -EFAULT
     if (ip == 0 || net_get_nic() == NET_NIC_NONE || !net_link_up())
         return -19; // -ENODEV
 
@@ -213,10 +211,8 @@ int64_t sys_ping(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
         uint32_t rtt = 0;
         if (icmp_ping_result(id, seq, &rtt)) {
             icmp_ping_release(id, seq);
-            KSTAC();
-            const bool ok = safe_copy_to_user(rtt_ms, &rtt, sizeof(rtt));
-            KCLAC();
-            return ok ? 0 : -14; // -EFAULT
+            *rtt_ms = rtt;
+            return 0;
         }
         if (timer_get_ticks() - start >= timeout_ticks)
             break;
@@ -226,4 +222,18 @@ int64_t sys_ping(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
 
     icmp_ping_release(id, seq);
     return -110; // -ETIMEDOUT
+}
+
+int64_t sys_ping(uint32_t ip, uint32_t timeout_ms, uint32_t *rtt_ms)
+{
+    if (!validate_user_ptr(rtt_ms, sizeof(uint32_t), true))
+        return -14; // -EFAULT
+    uint32_t rtt = 0;
+    const int64_t r = icmp_ping_probe(ip, timeout_ms, &rtt);
+    if (r != 0)
+        return r;
+    KSTAC();
+    const bool ok = safe_copy_to_user(rtt_ms, &rtt, sizeof(rtt));
+    KCLAC();
+    return ok ? 0 : -14; // -EFAULT
 }
