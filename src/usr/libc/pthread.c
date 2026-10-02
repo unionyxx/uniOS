@@ -142,8 +142,12 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
      * exchange is a full barrier publishing the critical section's writes;
      * a wake that finds no waiter parked on this word is the benign
      * lost-wake race - the would-be waiter is still before its park and
-     * gets EAGAIN instead. */
-    if (__sync_lock_test_and_set(&mutex->state, 0u) != 1u)
+     * gets EAGAIN instead. Unlocking what was already unlocked (0 -> 0,
+     * no state change) reports the error instead of waking. */
+    uint32_t prev = __sync_lock_test_and_set(&mutex->state, 0u);
+    if (prev == 0u)
+        return -1; // EPERM: the mutex was not held
+    if (prev == 2u)
         futex(&mutex->state, FUTEX_WAKE, 1u);
     return 0;
 }
@@ -322,7 +326,10 @@ int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
     if (state & RWLOCK_WRITER) {
         /* Drop the writer bit, keep the wanting-writer hint (other writers
          * may be queued). The CAS can only race a waiter setting the hint
-         * - the writer bit itself is ours until we clear it. */
+         * - the writer bit itself is ours until we clear it. Unlock by a
+         * non-holder would clear the holder's bit here: undetectable
+         * without owner tracking, which this one-word design carries none
+         * of (the detectable idle case below reports -1). */
         for (;;) {
             uint32_t cur = rwlock->state;
             if (__sync_val_compare_and_swap(&rwlock->state, cur, cur & ~RWLOCK_WRITER) == cur)
