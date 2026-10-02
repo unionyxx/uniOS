@@ -6,14 +6,14 @@ Driver code lives in `src/drivers/`. There is no unified driver model: each driv
 
 `src/drivers/bus/pci/pci.cpp` supports both config mechanisms:
 
-- **ECAM** (MMIO) parsed from the ACPI MCFG table — primary path, full 4 KiB per function, up to 4 segments cached.
+- **ECAM** (MMIO) parsed from the ACPI MCFG table — primary path, full 4 KiB per function, up to 4 segments cached. The entry count is computed against the 44-byte fixed MCFG header (not the struct including its trailing `entries[1]`), so the last segment is not dropped.
 - **Mechanism #1** I/O ports `0xCF8`/`0xCFC` — fallback, first 256 bytes only.
 
 Discovery scans bus 0-255, device 0-31, function 0-7 (multi-function only when the header type says so). Helpers exist for xHCI, AC97, HDA (vendor-restricted), and display devices.
 
 BAR handling detects I/O vs memory, 32/64-bit, probes sizes with the write-all-ones/read-back method, and enables bus mastering / memory / I/O space per device.
 
-MSI/MSI-X (`msi.cpp`): capability walk with a hop limit, MSI-X table mapping with up to 32 vectors, message address `0xFEE00000 | dest << 12`, fixed edge delivery. Requires the APIC.
+MSI/MSI-X (`msi.cpp`): capability walk with a hop limit, MSI-X table mapping with up to 32 vectors, message address `0xFEE00000 | dest << 12`, fixed edge delivery. Requires the APIC. `pci_enable_msix` masks every entry individually and then enables MSI-X with the Function Mask bit CLEAR — leaving it set masked all vectors forever, silently degrading interrupt-driven drivers to polling.
 
 ## ACPI
 

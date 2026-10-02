@@ -176,12 +176,19 @@ bool irq_register_isa_handler(uint8_t irq, IrqVectorHandler handler, void *ctx)
     if (!irq_register_vector_handler(vector, handler, ctx))
         return false;
 
-    if (g_apic_enabled) {
-        const uint32_t gsi = isa_irq_to_gsi(irq);
-        ioapic_set_entry(gsi, vector);
+    if (g_apic_enabled && ioapic_is_ready()) {
+        // ioapic_set_entry takes an ISA IRQ and performs the IRQ->GSI
+        // translation itself (via the MADT interrupt-source overrides).
+        // Pre-translating here ran the translation twice and truncated the
+        // GSI to 8 bits: on chipsets whose ISO chain maps IRQ0->GSI2 and
+        // IRQ2->GSI9, registering IRQ 0 re-resolved GSI 2 back to GSI 9 and
+        // programmed the wrong pin.
+        ioapic_set_entry(irq, vector);
         return true;
     }
 
+    // No IOAPIC (LAPIC-only firmware): route through the PIC instead of
+    // returning success for an unrouted, masked line.
     pic_clear_mask(irq);
     return true;
 }

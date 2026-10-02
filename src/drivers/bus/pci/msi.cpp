@@ -65,7 +65,7 @@ static void pci_disable_msix_if_present(const PciDevice *dev)
         return;
 
     uint16_t ctrl = pci_config_read16(dev->bus, dev->device, dev->function, (uint8_t)(cap_offset + MSIX_MSG_CTRL));
-    ctrl &= (uint16_t) ~(MSIX_CTRL_ENABLE | MSIX_CTRL_FUNC_MASK);
+    ctrl &= (uint16_t)~(MSIX_CTRL_ENABLE | MSIX_CTRL_FUNC_MASK);
     pci_config_write16(dev->bus, dev->device, dev->function, (uint8_t)(cap_offset + MSIX_MSG_CTRL), ctrl);
 }
 
@@ -198,7 +198,13 @@ bool pci_enable_msix(const PciDevice *dev, MsixState *state)
     }
     asm volatile("mfence" ::: "memory");
 
+    // Enable with the Function Mask CLEARED: while bit 14 is set the device
+    // masks ALL MSI-X vectors regardless of per-entry controls, and nothing
+    // ever cleared it after this setup - so MSI-X interrupts were never
+    // delivered and drivers silently fell back to polling. Every entry is
+    // individually masked above, so unmasking the function is safe.
     msg_ctrl |= MSIX_CTRL_ENABLE;
+    msg_ctrl &= (uint16_t)~MSIX_CTRL_FUNC_MASK;
     pci_config_write16(dev->bus, dev->device, dev->function, (uint8_t)(cap_offset + MSIX_MSG_CTRL), msg_ctrl);
 
     pci_disable_interrupts(dev);
@@ -214,7 +220,7 @@ void pci_disable_msix(const PciDevice *dev, MsixState *state)
 
     uint16_t msg_ctrl =
         pci_config_read16(dev->bus, dev->device, dev->function, (uint8_t)(state->cap_offset + MSIX_MSG_CTRL));
-    msg_ctrl &= (uint16_t) ~(MSIX_CTRL_ENABLE | MSIX_CTRL_FUNC_MASK);
+    msg_ctrl &= (uint16_t)~(MSIX_CTRL_ENABLE | MSIX_CTRL_FUNC_MASK);
     pci_config_write16(dev->bus, dev->device, dev->function, (uint8_t)(state->cap_offset + MSIX_MSG_CTRL), msg_ctrl);
 
     pci_enable_interrupts(dev);

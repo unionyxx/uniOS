@@ -555,7 +555,10 @@ void pci_init()
         return;
     }
 
-    uint32_t entry_count = (mcfg->header.length - sizeof(AcpiMcfg)) / sizeof(AcpiMcfgEntry);
+    // The fixed MCFG header is 44 bytes; sizeof(AcpiMcfg) counts a trailing
+    // entries[1], so the old formula dropped the last segment (QEMU/OVMF
+    // publish exactly one entry -> ECAM never engaged at all).
+    uint32_t entry_count = (mcfg->header.length - (sizeof(AcpiMcfg) - sizeof(AcpiMcfgEntry))) / sizeof(AcpiMcfgEntry);
     for (uint32_t i = 0;
          i < entry_count && g_num_ecam_entries < (int)(sizeof(g_ecam_entries) / sizeof(g_ecam_entries[0])); ++i) {
         AcpiMcfgEntry *entry = &mcfg->entries[i];
