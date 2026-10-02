@@ -23,8 +23,8 @@ The wallpaper config is a single path on the first line, not key/value.
 | `show_desktop_grid` | `0`, `1` | `1` | WM |
 | `clock_show_seconds` | `0`, `1` | `0` | Menubar |
 | `launch_terminal_on_boot` | `0`, `1` | `0` | init |
-| `ethernet_enabled` | `0`, `1` | `1` | Control center only (the stack always runs) |
-| `ethernet_use_dhcp` | `0`, `1` | `1` | Control center only |
+| `ethernet_enabled` | `0`, `1` | `1` | WM boot restore + control center only (the stack always runs; Settings no longer writes this key) |
+| `ethernet_use_dhcp` | `0`, `1` | `1` | WM boot restore + control center only (Settings no longer writes this key) |
 | `animations_enabled` | `0`, `1` | `1` | WM |
 | `transparency_level` | `0..255` | `180` | WM |
 | `volume_level` | `0..100` | `75` | WM |
