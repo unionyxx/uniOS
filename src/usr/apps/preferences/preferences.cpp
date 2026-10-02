@@ -13,6 +13,7 @@
 #include "../../libapp/widgets.h"
 #include "../../libc/config_utils.h"
 #include "../../libc/log.h"
+#include "../../libc/socket.h"
 #include "../../libc/unistd.h"
 #include "../../libc/wallpaper_defaults.h"
 
@@ -88,14 +89,15 @@ struct PreferencesState
     GuiThemeMode theme_mode;
     uint32_t system_flags;
     int storage_mode;
-    bool ethernet_enabled;
-    bool ethernet_use_dhcp;
     bool animations_enabled;
     uint32_t transparency_level;
     uint32_t volume_level;
     char wallpaper_path[256];
     char status[128];
     int section;
+    // Live network snapshot (Network tab, refreshed on section entry).
+    NetStatus net;
+    bool net_valid;
     // Input device settings (Devices tab).
     uint32_t input_pointer_speed; // Q8 kernel multiplier (256 == 1.0x)
     uint32_t input_repeat_delay;  // ms
@@ -124,8 +126,6 @@ struct PreferencesApp
     WidgetToggle transparency;
     WidgetToggle grid;
     WidgetToggle seconds;
-    WidgetToggle ethernet;
-    WidgetToggle dhcp;
     WidgetToggle terminal;
     WidgetSlider volume;
     WidgetSlider pointer_speed;
@@ -338,6 +338,15 @@ static void pref_kv_row(Surface *win, const Rect *r, const char *label, const ch
                           value ? value : "", g_gui_style.text, 0);
 }
 
+// Refresh the live network snapshot from the kernel. Called when the Network
+// tab becomes active (mirrors the Devices-tab lazy refresh).
+static void refresh_network_status(PreferencesState *state)
+{
+    if (!state)
+        return;
+    state->net_valid = net_status(&state->net) == 0;
+}
+
 // Refresh the input-device snapshot from the kernel. Called lazily when the
 // Devices tab is shown and debounced from idle to track hotplug.
 static void refresh_input_devices(PreferencesState *state)
@@ -378,8 +387,6 @@ static void load_preferences_state(PreferencesState *state, Registry *registry)
     state->theme_mode = GUI_THEME_DARK;
     state->system_flags = SYSTEM_FLAG_SHOW_DESKTOP_GRID;
     state->storage_mode = STORAGE_MODE_READ_ONLY;
-    state->ethernet_enabled = true;
-    state->ethernet_use_dhcp = true;
     state->animations_enabled = true;
     state->transparency_level = 180;
     state->volume_level = 75;
@@ -418,10 +425,6 @@ static void load_preferences_state(PreferencesState *state, Registry *registry)
             else
                 state->system_flags &= ~SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT;
         }
-        if (cfg_line_value(config, "ethernet_enabled", value, sizeof(value)))
-            state->ethernet_enabled = cfg_value_enabled(value, state->ethernet_enabled);
-        if (cfg_line_value(config, "ethernet_use_dhcp", value, sizeof(value)))
-            state->ethernet_use_dhcp = cfg_value_enabled(value, state->ethernet_use_dhcp);
         if (cfg_line_value(config, "animations_enabled", value, sizeof(value)))
             state->animations_enabled = cfg_value_enabled(value, state->animations_enabled);
         if (cfg_line_value(config, "transparency_level", value, sizeof(value))) {
@@ -492,8 +495,6 @@ static void load_preferences_state(PreferencesState *state, Registry *registry)
     if (registry) {
         state->theme_mode = (registry->theme_mode == GUI_THEME_LIGHT) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
         state->system_flags = registry->system_flags;
-        state->ethernet_enabled = registry->ethernet_enabled;
-        state->ethernet_use_dhcp = registry->ethernet_use_dhcp;
         state->animations_enabled = registry->animations_enabled;
         state->transparency_level = registry->transparency_level;
         state->volume_level = registry->volume_level <= 100 ? registry->volume_level : 100;
@@ -554,8 +555,6 @@ static bool persist_system_settings(const PreferencesState &state)
              "show_desktop_grid=%d\n"
              "clock_show_seconds=%d\n"
              "launch_terminal_on_boot=%d\n"
-             "ethernet_enabled=%d\n"
-             "ethernet_use_dhcp=%d\n"
              "animations_enabled=%d\n"
              "transparency_level=%u\n"
              "volume_level=%u\n"
@@ -565,10 +564,9 @@ static bool persist_system_settings(const PreferencesState &state)
              state.theme_mode == GUI_THEME_LIGHT ? "light" : "dark",
              (state.system_flags & SYSTEM_FLAG_SHOW_DESKTOP_GRID) ? 1 : 0,
              (state.system_flags & SYSTEM_FLAG_CLOCK_SHOW_SECONDS) ? 1 : 0,
-             (state.system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) ? 1 : 0, state.ethernet_enabled ? 1 : 0,
-             state.ethernet_use_dhcp ? 1 : 0, state.animations_enabled ? 1 : 0, state.transparency_level,
-             state.volume_level <= 100 ? state.volume_level : 100, state.input_pointer_speed, state.input_repeat_delay,
-             state.input_repeat_rate);
+             (state.system_flags & SYSTEM_FLAG_LAUNCH_TERMINAL_ON_BOOT) ? 1 : 0, state.animations_enabled ? 1 : 0,
+             state.transparency_level, state.volume_level <= 100 ? state.volume_level : 100, state.input_pointer_speed,
+             state.input_repeat_delay, state.input_repeat_rate);
     // Atomic write-temp-then-rename so a crashed write cannot corrupt the boot
     // config (the bootstrap /etc/system.conf covers the rename window).
     return cfg_write_text_file_atomic(SYSTEM_CONFIG_PATH, config);
@@ -580,8 +578,6 @@ static void publish_system_settings(const PreferencesState &state, Registry *reg
         return;
     registry->theme_mode = (uint32_t)state.theme_mode;
     registry->system_flags = state.system_flags;
-    registry->ethernet_enabled = state.ethernet_enabled;
-    registry->ethernet_use_dhcp = state.ethernet_use_dhcp;
     registry->animations_enabled = state.animations_enabled;
     registry->transparency_level = state.transparency_level;
     registry->volume_level = state.volume_level <= 100 ? state.volume_level : 100;
@@ -976,17 +972,45 @@ static void draw_preferences(App *app, Surface *win)
         st->volume.rect = pref_group_next(&g, pref_boxed_slider_h());
         widget_slider_draw(win, &st->volume, "Volume", 100);
     } else if (state->section == PREF_SECTION_NETWORK) {
-        int heights[2] = {tall, tall};
+        if (!state->net_valid)
+            refresh_network_status(state);
+        const NetStatus *net = &state->net;
+        const char *nic = "none";
+        if (net->nic == NET_NIC_E1000)
+            nic = "e1000";
+        else if (net->nic == NET_NIC_RTL8139)
+            nic = "rtl8139";
+        const char *rows[6][2] = {{"Interface", nic},      {"Link", net->link_up ? "up" : "down"},
+                                  {"IP address", nullptr}, // filled below (formatted dotted quads)
+                                  {"Netmask", nullptr},    {"Gateway", nullptr},
+                                  {"DNS", nullptr}};
+        char ip_text[4][20];
+        const uint32_t addrs[4] = {net->ip, net->netmask, net->gateway, net->dns};
+        for (int i = 0; i < 4; i++) {
+            snprintf(ip_text[i], sizeof(ip_text[i]), "%u.%u.%u.%u", addrs[i] & 0xFF, (addrs[i] >> 8) & 0xFF,
+                     (addrs[i] >> 16) & 0xFF, (addrs[i] >> 24) & 0xFF);
+            rows[i + 2][1] = ip_text[i];
+        }
+        int heights[6];
+        for (int i = 0; i < 6; i++)
+            heights[i] = control_row;
         PrefGroup g;
-        pref_group_begin(win, &g, content_x, y, content_w, heights, 2);
-        st->ethernet.rect = pref_group_next(&g, tall);
-        widget_toggle_draw(win, &st->ethernet, "Ethernet",
-                           "Use the wired Ethernet stack when a supported NIC is present", state->ethernet_enabled);
-        st->dhcp.rect = pref_group_next(&g, tall);
-        widget_toggle_draw(win, &st->dhcp, "DHCP", "Request address, gateway, and DNS over Ethernet",
-                           state->ethernet_use_dhcp);
-        y += 2 * tall + gap;
-        gui_draw_string(win, content_x, y, "Ethernet is the only supported network transport in this build.",
+        pref_group_begin(win, &g, content_x, y, content_w, heights, 6);
+        for (int i = 0; i < 6; i++) {
+            Rect row = pref_group_next(&g, control_row);
+            int text_y = gui_align_text_y(gui_font_default(), row.y, row.h);
+            gui_draw_text_clipped(win, gui_font_default(), row.x + gui_space_2(), text_y, row.w / 2, rows[i][0],
+                                  g_gui_style.text, 0);
+            const char *value = rows[i][1];
+            if (!state->net_valid)
+                value = "unavailable";
+            else if (i >= 2 && addrs[i - 2] == 0)
+                value = "not configured";
+            gui_draw_text_clipped(win, gui_font_default(), row.x + row.w / 2, text_y, row.w / 2 - gui_space_4(), value,
+                                  g_gui_style.text_muted, 0);
+        }
+        y += 6 * control_row + gap;
+        gui_draw_string(win, content_x, y, "DHCP is the only address source; renew it from the shell with `dhcp`.",
                         g_gui_style.text_muted, 0);
         gui_draw_string(win, content_x, y + gui_line_height(), state->status, g_gui_style.text_muted, 0);
     } else if (state->section == PREF_SECTION_SYSTEM) {
@@ -1132,8 +1156,6 @@ static void preferences_sync_from_registry(PreferencesApp *st, Registry *registr
     PreferencesState *state = &st->state;
     state->theme_mode = (registry->theme_mode == GUI_THEME_LIGHT) ? GUI_THEME_LIGHT : GUI_THEME_DARK;
     state->system_flags = registry->system_flags;
-    state->ethernet_enabled = registry->ethernet_enabled;
-    state->ethernet_use_dhcp = registry->ethernet_use_dhcp;
     state->animations_enabled = registry->animations_enabled;
     state->transparency_level = registry->transparency_level;
     state->volume_level = registry->volume_level <= 100 ? registry->volume_level : 100;
@@ -1171,8 +1193,6 @@ static void preferences_clear_hover(PreferencesApp *st)
     widget_toggle_reset(&st->transparency);
     widget_toggle_reset(&st->grid);
     widget_toggle_reset(&st->seconds);
-    widget_toggle_reset(&st->ethernet);
-    widget_toggle_reset(&st->dhcp);
     widget_toggle_reset(&st->terminal);
     for (int i = 0; i < INPUT_MAX_DEVICES; i++)
         widget_toggle_reset(&st->device_toggles[i]);
@@ -1254,8 +1274,6 @@ static void preferences_event(App *app, const Event *ev)
                     changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
                     break;
                 case PREF_SECTION_NETWORK:
-                    changed |= (widget_toggle_event(&st->ethernet, ev) & WIDGET_CHANGED) != 0;
-                    changed |= (widget_toggle_event(&st->dhcp, ev) & WIDGET_CHANGED) != 0;
                     break;
                 case PREF_SECTION_SYSTEM:
                     changed |= (widget_toggle_event(&st->terminal, ev) & WIDGET_CHANGED) != 0;
@@ -1288,6 +1306,8 @@ static void preferences_event(App *app, const Event *ev)
                 state->section = nav_index;
                 if (state->section == PREF_SECTION_DEVICES)
                     refresh_input_devices(state);
+                if (state->section == PREF_SECTION_NETWORK)
+                    refresh_network_status(state);
                 // The previous section's widgets keep stale hover flags that
                 // must not survive the switch (they would re-light when the
                 // user returns until the next mouse move).
@@ -1359,20 +1379,8 @@ static void preferences_event(App *app, const Event *ev)
                     break;
                 }
                 case PREF_SECTION_NETWORK: {
-                    if (widget_toggle_event(&st->ethernet, ev) & WIDGET_CLICKED) {
-                        state->ethernet_enabled = !state->ethernet_enabled;
-                        apply_settings(state, registry, "Ethernet updated",
-                                       "Ethernet setting applied for this session");
-                        app_invalidate_all(app);
-                        break;
-                    }
-                    if (widget_toggle_event(&st->dhcp, ev) & WIDGET_CLICKED) {
-                        state->ethernet_use_dhcp = !state->ethernet_use_dhcp;
-                        apply_settings(state, registry, "DHCP updated",
-                                       "Ethernet DHCP setting applied for this session");
-                        app_invalidate_all(app);
-                        break;
-                    }
+                    // Read-only status rows: nothing interactive in this section
+                    // until the renew button lands.
                     break;
                 }
                 case PREF_SECTION_SYSTEM: {
