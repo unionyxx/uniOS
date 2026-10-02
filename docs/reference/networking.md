@@ -62,6 +62,7 @@ Consequences of sockets not being fds:
 
 - `read/write/close/dup2` do not apply; sockets cannot be epoll-monitored.
 - `connect` blocks up to 5 s; TCP `send` blocks while the send ring is full; TCP `recv` and UDP `recvfrom` are nonblocking (return 0 when empty).
+- `recv` returning 0 means "ring empty", not EOF: `SYS_SOCKET_STATE` distinguishes a live connection from a closed one (`NET_TCP_CLOSE_WAIT` family with an empty ring is the remote-close signal).
 - No listen/accept syscalls: TCP is client-only from userspace (see [TCP](tcp.md)).
 
 ## Configuration
