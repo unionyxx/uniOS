@@ -246,6 +246,7 @@ libc = static_library(
     'src/usr/libc/wav.c',
     'src/usr/libc/log.c',
     'src/usr/libc/math.c',
+    'src/usr/libc/pthread.c',
   ],
   include_directories : user_inc,
   c_args : user_c_args,
