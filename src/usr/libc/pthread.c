@@ -85,3 +85,67 @@ pthread_t pthread_self(void)
 {
     return (pthread_t)syscall1(SYS_GETPID, 0);
 }
+/* ---- Synchronization primitives --------------------------------------- */
+
+/* Kernel futex contract (src/kernel/sync/futex.cpp), which these algorithms
+ * are built against:
+ *  - WAIT re-checks the expected value under the bucket lock and returns
+ *    -11 (EAGAIN) without sleeping when it moved. That closes the
+ *    record-then-park window: anything that changes the word between a
+ *    waiter's read and its park shows up as EAGAIN, never as a lost wake.
+ *  - WAKE matches waiters by physical address, not by value, and returns
+ *    how many it woke. A woken waiter whose expected value went stale
+ *    simply re-runs its loop (a spurious wakeup, which POSIX allows).
+ *  - WAIT's 4th argument is the timeout: 0 = forever, expiry = -110. */
+
+int pthread_mutex_init(pthread_mutex_t *mutex, const void *attr)
+{
+    (void)attr;
+    if (!mutex)
+        return -22; // EINVAL
+    mutex->state = 0;
+    return 0;
+}
+
+int pthread_mutex_lock(pthread_mutex_t *mutex)
+{
+    /* Fast path: 0 -> 1, locked with no waiters. */
+    if (__sync_val_compare_and_swap(&mutex->state, 0u, 1u) == 0u)
+        return 0;
+
+    for (;;) {
+        uint32_t state = mutex->state;
+        if (state == 0u) {
+            /* Acquire straight into the contended state: we (and possibly
+             * others) have been waiting, so unlockers must keep waking. */
+            if (__sync_val_compare_and_swap(&mutex->state, 0u, 2u) == 0u)
+                return 0;
+        } else {
+            /* 1 -> 2 tells the unlocker a waiter exists; then park on 2.
+             * A racing unlocker makes the CAS fail - re-evaluate instead
+             * of parking on a state that just went away. */
+            if (state == 1u && __sync_val_compare_and_swap(&mutex->state, 1u, 2u) != 1u)
+                continue;
+            futex(&mutex->state, FUTEX_WAIT, 2u);
+        }
+    }
+}
+
+int pthread_mutex_unlock(pthread_mutex_t *mutex)
+{
+    /* 1 -> 0 uncontended; 2 -> 0 hands off: one woken waiter re-acquires
+     * via CAS(0 -> 2), which re-arms the wake for the next unlock. The
+     * exchange is a full barrier publishing the critical section's writes;
+     * a wake against an empty bucket is the benign lost-wake race - the
+     * would-be waiter is still before its park and gets EAGAIN instead. */
+    if (__sync_lock_test_and_set(&mutex->state, 0u) != 1u)
+        futex(&mutex->state, FUTEX_WAKE, 1u);
+    return 0;
+}
+
+int pthread_mutex_trylock(pthread_mutex_t *mutex)
+{
+    if (__sync_val_compare_and_swap(&mutex->state, 0u, 1u) == 0u)
+        return 0;
+    return -16; // EBUSY
+}
