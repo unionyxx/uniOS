@@ -95,10 +95,12 @@ pthread_t pthread_self(void)
  *    -11 (EAGAIN) without sleeping when it moved. That closes the
  *    record-then-park window: anything that changes the word between a
  *    waiter's read and its park shows up as EAGAIN, never as a lost wake.
- *  - WAKE matches waiters by physical address, not by value, and returns
- *    how many it woke. A woken waiter whose expected value went stale
- *    simply re-runs its loop (a spurious wakeup, which POSIX allows).
- *  - WAIT's 4th argument is the timeout: 0 = forever, expiry = -110. */
+ *  - WAKE is word-matched: it reaches only waiters parked on the exact
+ *    same 32-bit futex word and returns how many it woke. A woken waiter
+ *    whose expected value went stale simply re-runs its loop (a spurious
+ *    wakeup, which POSIX allows).
+ *  - WAIT's 4th argument is the timeout: 0 = forever, expiry = -110, a
+ *    full timed-wait table = -28 (ENOSPC). */
 
 int pthread_mutex_init(pthread_mutex_t *mutex, const void *attr)
 {
@@ -138,9 +140,14 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
     /* 1 -> 0 uncontended; 2 -> 0 hands off: one woken waiter re-acquires
      * via CAS(0 -> 2), which re-arms the wake for the next unlock. The
      * exchange is a full barrier publishing the critical section's writes;
-     * a wake against an empty bucket is the benign lost-wake race - the
-     * would-be waiter is still before its park and gets EAGAIN instead. */
-    if (__sync_lock_test_and_set(&mutex->state, 0u) != 1u)
+     * a wake that finds no waiter parked on this word is the benign
+     * lost-wake race - the would-be waiter is still before its park and
+     * gets EAGAIN instead. Unlocking what was already unlocked (0 -> 0,
+     * no state change) reports the error instead of waking. */
+    uint32_t prev = __sync_lock_test_and_set(&mutex->state, 0u);
+    if (prev == 0u)
+        return -1; // EPERM: the mutex was not held
+    if (prev == 2u)
         futex(&mutex->state, FUTEX_WAKE, 1u);
     return 0;
 }
@@ -182,8 +189,12 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, uint64_
         return lock_err;
     /* Only the kernel deadline walker reports -110. EAGAIN and EINTR both
      * end as a successful (possibly spurious) wait - the caller re-checks
-     * its predicate. */
-    return err == -110 ? -110 : 0;
+     * its predicate. -28 means the timed-wait table was full and the wait
+     * never started: propagate it, or a saturated table silently turns
+     * the caller's deadline loop into a busy spin. */
+    if (err == -110 || err == -28)
+        return err;
+    return 0;
 }
 
 int pthread_cond_signal(pthread_cond_t *cond)
@@ -199,10 +210,10 @@ int pthread_cond_signal(pthread_cond_t *cond)
 int pthread_cond_broadcast(pthread_cond_t *cond)
 {
     __sync_fetch_and_add(&cond->seq, 1u);
-    /* The kernel futex has no REQUEUE (the uapi constant exists but
-     * sys_futex implements WAIT/WAKE only), so wake every waiter here and
-     * let each re-acquire the mutex through its own contended path - the
-     * end state a requeue would produce, at thundering-herd cost. */
+    /* The kernel futex implements WAIT/WAKE only - no requeue - so wake
+     * every waiter here and let each re-acquire the mutex through its own
+     * contended path: the end state a requeue would produce, at
+     * thundering-herd cost. */
     futex(&cond->seq, FUTEX_WAKE, 0x7FFFFFFFu);
     return 0;
 }
@@ -211,8 +222,12 @@ int pthread_once(pthread_once_t *once, void (*fn)(void))
 {
     if (!once || !fn)
         return -22; // EINVAL
-    if (*once == 2u)
+    if (*once == 2u) {
+        /* Acquire pair for the initializer's release, so fn's writes are
+         * visible before anything this thread does after the call. */
+        __sync_synchronize();
         return 0;
+    }
     if (__sync_val_compare_and_swap(once, 0u, 1u) == 0u) {
         fn();
         /* A locked op publishes the done state: full barrier, so every
@@ -311,7 +326,10 @@ int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
     if (state & RWLOCK_WRITER) {
         /* Drop the writer bit, keep the wanting-writer hint (other writers
          * may be queued). The CAS can only race a waiter setting the hint
-         * - the writer bit itself is ours until we clear it. */
+         * - the writer bit itself is ours until we clear it. Unlock by a
+         * non-holder would clear the holder's bit here: undetectable
+         * without owner tracking, which this one-word design carries none
+         * of (the detectable idle case below reports -1). */
         for (;;) {
             uint32_t cur = rwlock->state;
             if (__sync_val_compare_and_swap(&rwlock->state, cur, cur & ~RWLOCK_WRITER) == cur)
