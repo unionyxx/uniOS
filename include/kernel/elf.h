@@ -63,3 +63,15 @@ struct Process;
  * or malformed (same identity and phdr-table rules as elf_validate). */
 [[nodiscard]] bool elf_tls_info(const uint8_t *image, uint64_t size, uint64_t *template_offset, uint64_t *memsz,
                                 uint64_t *align, uint64_t *template_vaddr = nullptr, uint64_t *filesz = nullptr);
+
+/* Install a freshly loaded image's TLS into the loader's brand-new address
+ * space (its pml4 need not be on CR3 — the copy goes through the kernel
+ * direct map). The template bytes are bounced through the kernel heap off
+ * the image buffer, with the file-less .tbss tail zero-filled. An image
+ * without PT_TLS still installs a TCB-only mapping: every user thread must
+ * end up with a valid fs:0. tls_install writes the TCB tid from
+ * proc->pid — the exec path's loader copy already carries the exec'ing
+ * leader's pid; the boot launcher patches the tid afterwards. Returns
+ * false (nothing mapped, nothing to roll back beyond the caller's loader
+ * teardown) when an allocation or the install fails. */
+[[nodiscard]] bool elf_install_tls(Process *proc, const uint8_t *image, uint64_t image_size);

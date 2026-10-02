@@ -6,6 +6,7 @@
 #include <kernel/process.h>
 #include <kernel/sync/spinlock.h>
 #include <libk/kstring.h>
+#include <uapi/tcb.h>
 
 namespace {
 
@@ -228,6 +229,102 @@ KTEST(elf_load_user_records_tls_facts)
     KTEST_EXPECT_EQ(loader->tls_template_va, 0ULL);
     KTEST_EXPECT_EQ(loader->tls_template_size, 0ULL);
     KTEST_EXPECT_EQ(loader->tls_align, 0ULL);
+
+    scratch_loader_free(loader);
+}
+
+namespace {
+
+const uint8_t *direct_read(Process *p, uint64_t va)
+{
+    uint64_t *pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
+    const uint64_t phys = vmm_virt_to_phys_in(pml4, va);
+    if (phys == 0)
+        return nullptr;
+    // vmm_virt_to_phys_in folds the page offset into the returned address.
+    return reinterpret_cast<const uint8_t *>(vmm_phys_to_virt(phys));
+}
+
+} // namespace
+
+// The exec-side install: after elf_load_user mapped the segments, install
+// the leader's TLS block + TCB from the image buffer. The .tbss tail
+// ([filesz, memsz)) must read zero even though the file carries other
+// bytes there — the file image never holds the tbss part.
+KTEST(elf_install_tls_clones_template_and_tcb)
+{
+    TlsElf e;
+    make_tls_image(e);
+    // Garbage where the file does NOT own the block: the install must
+    // zero-fill the tail, never copy it.
+    e.payload[k_tls_filesz] = 0xFF;
+    e.payload[k_tls_filesz + 1] = 0xFF;
+    e.payload[k_tls_filesz + 2] = 0xFF;
+    e.payload[k_tls_filesz + 3] = 0xFF;
+
+    Process *loader = scratch_loader();
+    KTEST_EXPECT(loader != nullptr);
+    if (!loader)
+        return;
+
+    KTEST_EXPECT(elf_load_user(reinterpret_cast<const uint8_t *>(&e), sizeof(e), loader) == k_load_vaddr);
+    KTEST_EXPECT(elf_install_tls(loader, reinterpret_cast<const uint8_t *>(&e), sizeof(e)));
+
+    const uint64_t fs = loader->fs_base;
+    KTEST_EXPECT(fs != 0);
+
+    // Block: file-carried prefix byte for byte, zero tail.
+    const uint8_t *block = direct_read(loader, fs - k_tls_memsz);
+    KTEST_EXPECT(block != nullptr);
+    if (block) {
+        bool match = true;
+        for (uint64_t i = 0; i < k_tls_memsz; i++) {
+            const uint8_t want = (i < k_tls_filesz) ? static_cast<uint8_t>(i * 11 + 5) : 0;
+            if (block[i] != want) {
+                match = false;
+                break;
+            }
+        }
+        KTEST_EXPECT(match);
+    }
+
+    // TCB: self points at itself, tid is the loader's pid (exec preserves
+    // the pid, so the do_exec loader already carries the leader's).
+    const UniTcb *tcb = reinterpret_cast<const UniTcb *>(direct_read(loader, fs));
+    KTEST_EXPECT(tcb != nullptr);
+    if (tcb) {
+        KTEST_EXPECT_EQ(tcb->self, fs);
+        KTEST_EXPECT_EQ(tcb->tid, 0x1234ULL);
+    }
+
+    scratch_loader_free(loader);
+}
+
+// Always-TCB invariant: an image without PT_TLS still installs a TCB-only
+// mapping, so every user thread gets a valid fs:0.
+KTEST(elf_install_tls_absent_image_tcb_only)
+{
+    TlsElf e;
+    make_tls_image(e);
+    e.tls.p_type = PT_NULL;
+
+    Process *loader = scratch_loader();
+    KTEST_EXPECT(loader != nullptr);
+    if (!loader)
+        return;
+
+    KTEST_EXPECT(elf_load_user(reinterpret_cast<const uint8_t *>(&e), sizeof(e), loader) == k_load_vaddr);
+    KTEST_EXPECT(elf_install_tls(loader, reinterpret_cast<const uint8_t *>(&e), sizeof(e)));
+
+    const uint64_t fs = loader->fs_base;
+    KTEST_EXPECT(fs != 0);
+
+    const UniTcb *tcb = reinterpret_cast<const UniTcb *>(direct_read(loader, fs));
+    KTEST_EXPECT(tcb != nullptr);
+    if (tcb) {
+        KTEST_EXPECT_EQ(tcb->self, fs);
+        KTEST_EXPECT_EQ(tcb->tid, 0x1234ULL);
+    }
 
     scratch_loader_free(loader);
 }

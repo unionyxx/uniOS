@@ -6,6 +6,7 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
+#include <kernel/tls.h>
 #include <libk/kstring.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -155,6 +156,34 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
         return true;
     }
     return false;
+}
+
+[[nodiscard]] bool elf_install_tls(Process *proc, const uint8_t *image, uint64_t image_size)
+{
+    uint64_t offset = 0, memsz = 0, align = 0, vaddr = 0, filesz = 0;
+    if (!elf_tls_info(image, image_size, &offset, &memsz, &align, &vaddr, &filesz)) {
+        // No usable PT_TLS: outputs are zeroed, so this is the TCB-only
+        // install of the always-TCB invariant.
+        memsz = 0;
+        align = 0;
+    }
+
+    // Bounce the template through the kernel heap: tls_install reads its
+    // source as a plain kernel pointer, and the image's file bytes stop at
+    // filesz — the .tbss tail ([filesz, memsz)) must be zeroed here, the
+    // file never carries it.
+    uint8_t *template_src = nullptr;
+    if (memsz > 0) {
+        template_src = static_cast<uint8_t *>(malloc(memsz));
+        if (!template_src)
+            return false;
+        kstring::copy_memory(template_src, image + offset, filesz);
+        kstring::zero_memory(template_src + filesz, memsz - filesz);
+    }
+
+    const uint64_t start = tls_install(proc, template_src, memsz, align);
+    free(template_src);
+    return start != 0;
 }
 
 [[nodiscard]] static bool ensure_segment_vma(Process *proc, uint64_t start, uint64_t end, uint64_t flags, VMAType type)
