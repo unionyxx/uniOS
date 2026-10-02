@@ -7,8 +7,12 @@
 #include <kernel/scheduler.h>
 #include <kernel/sync/futex.h>
 #include <kernel/syscall.h>
+#include <kernel/time/timer.h>
+#include <libk/kstring.h>
 #include <uapi/syscalls.h>
 #include <uapi/syscalls_ext.h>
+
+extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd);
 
 namespace {
 
@@ -300,4 +304,526 @@ KTEST(futex_wait_timeout_expires)
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
     leader->vmalist->count = orig_vma_count;
+}
+
+// ---- timed futex wait hardening ----
+
+static volatile uint32_t *g_timed_word;
+
+// Wakes the shared futex word at ~5 ms and again at ~45 ms after start:
+// the first wake ends a short-deadline wait early (that wait's
+// registration must be dropped, not left behind), the second ends the
+// re-wait well before its own later deadline.
+static void timed_two_stage_waker()
+{
+    scheduler_sleep_ms(5);
+    sys_futex(g_timed_word, FUTEX_WAKE, 1);
+    scheduler_sleep_ms(40);
+    sys_futex(g_timed_word, FUTEX_WAKE, 1);
+    sys_thread_exit(0);
+}
+
+static void timed_single_waker()
+{
+    scheduler_sleep_ms(10);
+    sys_futex(g_timed_word, FUTEX_WAKE, 1);
+    sys_thread_exit(0);
+}
+
+KTEST(futex_timed_wake_deregisters_on_early_wake)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    g_timed_word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *g_timed_word = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    // Wakes at ~5 ms and ~45 ms (deadline of wait 1 is ~30 ms, of wait 2
+    // ~300 ms, so both wakes are genuinely early).
+    const int64_t tid = sys_thread_create(timed_two_stage_waker, nullptr, top, &mock_frame);
+    KTEST_EXPECT(tid > 0);
+
+    // Wait 1: genuinely woken before its deadline — must return 0.
+    KTEST_EXPECT_EQ(sys_futex(g_timed_word, FUTEX_WAIT, 0, 30), 0);
+    // Wait 2: fresh, far later deadline. A registration left behind by
+    // wait 1 would fire the walker at wait 1's old deadline and turn this
+    // into a spurious -110 while the thread is parked here.
+    KTEST_EXPECT_EQ(sys_futex(g_timed_word, FUTEX_WAIT, 0, 300), 0);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid, &status, 0);
+
+    free(stack);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+KTEST(futex_timeout_rounds_up_to_one_tick)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    volatile uint32_t *word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *word = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    // A sub-tick timeout must still consume at least one full tick:
+    // truncating (timeout_ms * freq) / 1000 to zero arms a deadline that
+    // is already expired at registration, so the wait returns without a
+    // single tick passing.
+    const uint64_t t0 = timer_get_ticks();
+    KTEST_EXPECT_EQ(sys_futex(word, FUTEX_WAIT, 0, 5), -110);
+    KTEST_EXPECT(timer_get_ticks() > t0);
+
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+KTEST(futex_huge_timeout_does_not_expire_early)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    g_timed_word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *g_timed_word = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    const int64_t tid = sys_thread_create(timed_single_waker, nullptr, top, &mock_frame);
+    KTEST_EXPECT(tid > 0);
+
+    // A saturating timeout_ms must not wrap the deadline into the past:
+    // the wait ends by the waker's wake (~10 ms), not by a premature
+    // -110 fired at registration time.
+    KTEST_EXPECT_EQ(sys_futex(g_timed_word, FUTEX_WAIT, 0, 1ULL << 63), 0);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid, &status, 0);
+
+    free(stack);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+// ---- SYS_THREAD_EXIT must not group-kill ----
+
+static volatile bool g_exit9_ran;
+static volatile uint64_t g_spinner_steps;
+static volatile bool g_spinner_run;
+
+static void exit_with_9_thread()
+{
+    g_exit9_ran = true;
+    sys_thread_exit(9);
+}
+
+static void spinner_sibling_thread()
+{
+    while (g_spinner_run) {
+        g_spinner_steps++;
+        scheduler_yield();
+    }
+    sys_thread_exit(0);
+}
+
+KTEST(thread_exit_leaves_leader_alive)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *exit_stack = malloc(4096);
+    void *spin_stack = malloc(4096);
+    KTEST_EXPECT(exit_stack != nullptr);
+    KTEST_EXPECT(spin_stack != nullptr);
+    void *exit_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(exit_stack) + 4096);
+    void *spin_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(spin_stack) + 4096);
+
+    g_exit9_ran = false;
+    g_spinner_run = true;
+    g_spinner_steps = 0;
+
+    // The exiting member records the surgery page as its stack; the
+    // sibling just spins until released.
+    const int64_t exit_tid = sys_thread_create(exit_with_9_thread, nullptr, exit_top, &mock_frame, TEST_VADDR, 4096);
+    const int64_t spin_tid = sys_thread_create(spinner_sibling_thread, nullptr, spin_top, &mock_frame);
+    KTEST_EXPECT(exit_tid > 0);
+    KTEST_EXPECT(spin_tid > 0);
+
+    // Bounded wait for the member to die and be auto-reaped (ktest
+    // threads are children of the pid-0 kernel task).
+    bool gone = false;
+    for (int i = 0; i < 500 && !gone; i++) {
+        scheduler_yield();
+        gone = process_find_by_pid(static_cast<uint64_t>(exit_tid)) == nullptr;
+    }
+    KTEST_EXPECT(gone);
+    KTEST_EXPECT(g_exit9_ran);
+
+    // The leader is still the running task, untouched by the member exit.
+    KTEST_EXPECT(process_get_current() == leader);
+    KTEST_EXPECT(leader->state == ProcessState_Running);
+    // The whole point of SYS_THREAD_EXIT vs SYS_EXIT: no group-kill. A
+    // regression to the group path would leave a pending SIGKILL on the
+    // leader — this kernel task survives signals, but the mask shows it.
+    KTEST_EXPECT((leader->signals.pending & (1ULL << SIGKILL)) == 0);
+
+    // The live sibling is still schedulable and making progress.
+    Process *spin = process_find_by_pid(static_cast<uint64_t>(spin_tid));
+    KTEST_EXPECT(spin != nullptr);
+    KTEST_EXPECT(spin->state != ProcessState_Zombie);
+    const uint64_t steps_before = g_spinner_steps;
+    for (int i = 0; i < 100 && g_spinner_steps == steps_before; i++)
+        scheduler_yield();
+    KTEST_EXPECT(g_spinner_steps > steps_before);
+
+    // The member's shared references were released on its exit: the fd
+    // table is back to leader + sibling, the recorded stack VMA is gone,
+    // and the exit status reached the parent stamp.
+    KTEST_EXPECT_EQ(leader->fdtab->refs, 2u);
+    KTEST_EXPECT(vma_find(leader->vmalist->head, TEST_VADDR) == nullptr);
+    KTEST_EXPECT_EQ(leader->exec_exit_status, 9);
+    // Residual gap: the ktest leader is the pid-0 kernel task, immune to
+    // signal death, so "the leader survives a real fatal group signal"
+    // cannot be asserted in ktest context; Task 6's userspace threadtest
+    // exercises the user-mode leader end to end.
+
+    g_spinner_run = false;
+    bool spin_gone = false;
+    for (int i = 0; i < 500 && !spin_gone; i++) {
+        scheduler_yield();
+        spin_gone = process_find_by_pid(static_cast<uint64_t>(spin_tid)) == nullptr;
+    }
+    KTEST_EXPECT(spin_gone);
+
+    int32_t status = 0;
+    (void)process_waitpid(exit_tid, &status, 0);
+    (void)process_waitpid(spin_tid, &status, 0);
+
+    free(exit_stack);
+    free(spin_stack);
+    if (vma_find(leader->vmalist->head, TEST_VADDR)) {
+        // Failure path: the kernel did not unmap; clean up by hand.
+        vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+        pmm_free_frame(page);
+        free(vma);
+    }
+    leader->signals.pending = 0;
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+KTEST(thread_detach_rejects_forked_children)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    // A stand-in for a forked child: its own group leader (leader_pid ==
+    // pid), linked as a child but never on the process list or any queue,
+    // so only the detach path's children-list walk can observe it.
+    auto *forked = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
+    KTEST_EXPECT(forked != nullptr);
+    kstring::zero_memory(forked, sizeof(Process));
+    forked->pid = 60000;
+    forked->leader_pid = 60000;
+    forked->parent_pid = leader->pid;
+    forked->state = ProcessState_Ready;
+    forked->sibling_next = leader->children_list;
+    leader->children_list = forked;
+
+    // Detach must refuse it (-ESRCH): orphaning a forked child would send
+    // its exit status into the kernel-zombie auto-reap where the parent
+    // can never collect it.
+    KTEST_EXPECT_EQ(sys_thread_detach(60000), -10);
+
+    // Teardown: unlink the stand-in if the call left it in place.
+    Process *prev = nullptr;
+    Process *c = leader->children_list;
+    while (c) {
+        if (c == forked) {
+            if (prev)
+                prev->sibling_next = c->sibling_next;
+            else
+                leader->children_list = c->sibling_next;
+            break;
+        }
+        prev = c;
+        c = c->sibling_next;
+    }
+    aligned_free(forked);
+}
+
+static void zombie_surgery_thread_entry()
+{
+    while (true)
+        scheduler_yield();
+}
+
+KTEST(fd_transfer_rejects_zombie_without_fd_table)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    // A thread that never runs, zombified by hand with its fd-table
+    // reference already dropped — exactly the state of an
+    // exited-but-unreaped joinable zombie (process_release_private_fds
+    // nulls fdtab at exit).
+    const int64_t tid = sys_thread_create(zombie_surgery_thread_entry, nullptr, top, &mock_frame);
+    KTEST_EXPECT(tid > 0);
+    Process *thread = process_find_by_pid(static_cast<uint64_t>(tid));
+    KTEST_EXPECT(thread != nullptr);
+    if (!thread) {
+        free(stack);
+        leader->page_table = orig_page_table;
+        return;
+    }
+
+    scheduler_remove_from_ready_queue(thread);
+    fd_table_release(thread->fdtab);
+    thread->fdtab = nullptr;
+    thread->state = ProcessState_Zombie;
+    // Sever the shared objects so the reaper fully frees this thread
+    // instead of deferring while the leader lives.
+    thread->vmalist = nullptr;
+    thread->page_table = nullptr;
+
+    // Transferring into a zombie with no fd table must fail cleanly
+    // (-ESRCH), not dereference the null table.
+    KTEST_EXPECT_EQ(sys_fd_transfer(static_cast<uint64_t>(tid), 0), -3);
+
+    int32_t status = 0;
+    KTEST_EXPECT_EQ(process_waitpid(tid, &status, 0), tid);
+
+    free(stack);
+    leader->page_table = orig_page_table;
+}
+
+KTEST(futex_timed_wait_table_full_returns_enospc)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    volatile uint32_t *word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *word = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    // Fill every timed-wait slot with far-future registrations on fake
+    // stand-ins: the walker only compares pointers, and a far-future
+    // deadline means it never touches them during the test.
+    Process *dummies[64];
+    size_t placed = 0;
+    const uint64_t far = timer_get_ticks() + 1000000000ULL;
+    for (; placed < 64; placed++) {
+        dummies[placed] = reinterpret_cast<Process *>(0x10000ULL + placed * 64);
+        if (!scheduler_note_wake_deadline(dummies[placed], far))
+            break;
+    }
+    KTEST_EXPECT(placed >= 1);
+
+    // The next timed waiter must get an honest -ENOSPC instead of a
+    // silently dropped timeout (an unbounded hang).
+    KTEST_EXPECT_EQ(sys_futex(word, FUTEX_WAIT, 0, 50), -28);
+
+    for (size_t i = 0; i <= placed && i < 64; i++)
+        scheduler_clear_wake_deadline(dummies[i]);
+
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+KTEST(thread_create_detached_flag_self_reaps)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    // THREAD_DETACHED at create time: the thread is never linked into any
+    // children list, so it is not waitable, and its exit routes to the
+    // kernel-zombie auto-reap.
+    const int64_t tid = sys_thread_create(group_futex_waiter_thread, nullptr, top, &mock_frame, 0, 0, THREAD_DETACHED);
+    KTEST_EXPECT(tid > 0);
+
+    int32_t status = 0;
+    KTEST_EXPECT_EQ(process_waitpid(static_cast<int64_t>(tid), &status, WNOHANG), -1);
+
+    // Kill it through the group path (the leader's exit signal) and wait
+    // for the auto-reap: the process disappears without any waitpid.
+    process_group_kill_siblings(leader);
+
+    bool gone = false;
+    for (int i = 0; i < 500 && !gone; i++) {
+        scheduler_yield();
+        gone = process_find_by_pid(static_cast<uint64_t>(tid)) == nullptr;
+    }
+    KTEST_EXPECT(gone);
+
+    free(stack);
+    leader->signals.pending = 0;
+    leader->page_table = orig_page_table;
 }
