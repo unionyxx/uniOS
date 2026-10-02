@@ -1595,10 +1595,10 @@ void scheduler_note_epoll_deadline(uint64_t deadline_ticks)
     }
 }
 
-void scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
+bool scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
 {
     if (!p)
-        return;
+        return true;
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     bool placed = false;
@@ -1622,11 +1622,41 @@ void scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
                 break;
             cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
         }
-    } else {
-        // No free slot: the timeout is dropped, the wait stays bounded only
-        // by a wake or a signal. Loud in debug so exhaustion is diagnosable.
-        DEBUG_WARN("timed wait table full: pid %lu timeout dropped", p->pid);
+        return true;
     }
+
+    // No free slot: report it so the caller can fail the wait instead of
+    // silently degrading to an infinite sleep. Loud in debug as well.
+    DEBUG_WARN("timed wait table full: pid %lu timeout dropped", p->pid);
+    return false;
+}
+
+// Caller MUST hold g_sched_lock. Removing entries can only raise the
+// table's true minimum, so the global deadline (<= that minimum by
+// construction) stays valid: it may fire early and re-arm from the
+// survivors.
+static void clear_timed_wait_entries_locked(Process *p)
+{
+    for (auto &e : g_timed_waits) {
+        if (e.proc == p)
+            e.proc = nullptr;
+    }
+}
+
+// A timed-wait registration must never outlive the wait that armed it:
+// when the wait ends by wake, signal or expiry, drop the entry. A
+// lingering entry makes the walker mark the process's next (unrelated)
+// blocked wait as timed out, and a freed-then-recycled Process at the
+// same address turns the liveness check into a false positive.
+void scheduler_clear_wake_deadline(Process *p)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    clear_timed_wait_entries_locked(p);
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
 }
 
 // Caller MUST hold g_sched_lock: membership in the circular process list
@@ -1657,26 +1687,45 @@ static void wake_expired_timed_waits(uint64_t now)
 
     g_timed_wake_deadline = UINT64_MAX;
     uint64_t earliest = UINT64_MAX;
+    bool unparked = false;
     for (auto &e : g_timed_waits) {
         if (!e.proc)
             continue;
-        if (now >= e.deadline) {
-            Process *target = e.proc;
-            e.proc = nullptr;
-            if (timed_wait_target_live(target) &&
-                (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting)) {
+        if (now < e.deadline) {
+            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+            continue;
+        }
+        Process *target = e.proc;
+        if (timed_wait_target_live(target)) {
+            if (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting) {
+                e.proc = nullptr;
                 target->timed_wake = true;
                 scheduler_wake_process_locked(target);
+            } else {
+                // Live but not parked: either still between registration
+                // and its scheduler_wait push, or already woken by its
+                // futex wake and returning (it deregisters itself).
+                // Dropping the entry here would lose a not-yet-parked
+                // waiter's timeout — an unbounded hang. Keep it and look
+                // again next tick.
+                unparked = true;
             }
         } else {
-            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+            // The waiter died before its deadline; exit deregisters it,
+            // so this is a backstop for a missed path.
+            e.proc = nullptr;
         }
     }
 
-    if (earliest != UINT64_MAX) {
+    uint64_t rearm = earliest;
+    if (unparked) {
+        const uint64_t next_tick = now + 1;
+        rearm = (next_tick < rearm) ? next_tick : rearm;
+    }
+    if (rearm != UINT64_MAX) {
         uint64_t cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
-        while (earliest < cur) {
-            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, earliest))
+        while (rearm < cur) {
+            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, rearm))
                 break;
             cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
         }
@@ -1926,6 +1975,11 @@ static void process_exit_common(int32_t status, bool group_kill)
     const uint64_t flags = interrupts_save_disable();
     (void)flags;
     spinlock_acquire(&g_sched_lock);
+
+    // A timed futex wait this thread abandoned by exiting must not leave
+    // its registration behind: the walker would otherwise mark a recycled
+    // Process at this address.
+    clear_timed_wait_entries_locked(current_proc());
 
     current_proc()->state = ProcessState_Zombie;
     current_proc()->exit_status = status;

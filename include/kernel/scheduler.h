@@ -91,8 +91,15 @@ struct SyscallFrame;
                                         uint64_t stack_lo = 0, uint64_t stack_size = 0);
 // Deadline machinery for timed waits on leaf wait queues (futex timeouts):
 // register the earliest wake deadline; the scheduler walker wakes waiters
-// still parked on their queue and marks them timed_wake.
-void scheduler_note_wake_deadline(struct Process *p, uint64_t deadline_ticks);
+// still parked on their queue and marks them timed_wake. Returns false
+// (and arms nothing) when the fixed timed-wait table is full — the caller
+// must fail the wait rather than degrade it to an infinite sleep.
+bool scheduler_note_wake_deadline(struct Process *p, uint64_t deadline_ticks);
+// Drop every timed-wait registration for `p`: the wait that armed it has
+// ended (wake, signal, expiry or thread exit). Registrations must never
+// outlive their wait, or the walker marks an unrelated later wait of the
+// same (or a recycled) Process as timed out.
+void scheduler_clear_wake_deadline(struct Process *p);
 void scheduler_remove_from_ready_queue(Process *p);
 void scheduler_boost_process_priority(Process *p, uint8_t new_priority);
 void scheduler_boost_process_priority_under_lock(Process *p, uint8_t new_priority);

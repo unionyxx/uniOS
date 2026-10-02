@@ -120,14 +120,37 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
 
         if (timeout_ms != 0) {
             // Wait queues have no native timeout: arm the tick-driven
-            // deadline walker. It only marks waiters still parked on the
-            // queue, so a real futex wake racing the deadline is never
-            // misread as a timeout.
-            const uint64_t freq = timer_get_frequency();
-            const uint64_t deadline = timer_get_ticks() + (timeout_ms * (freq ? freq : 1000)) / 1000;
-            scheduler_note_wake_deadline(current, deadline);
+            // deadline walker. Round UP to whole ticks and saturate: a
+            // truncated sub-tick delay would arm a deadline that is
+            // already expired at registration, and an unsaturated
+            // multiply can wrap it arbitrarily far into the past. Both
+            // end a wait that never really timed out.
+            const uint64_t freq = timer_get_frequency() ? static_cast<uint64_t>(timer_get_frequency()) : 1000;
+            uint64_t ticks;
+            if (timeout_ms > (UINT64_MAX - 999) / freq)
+                ticks = UINT64_MAX;
+            else
+                ticks = (timeout_ms * freq + 999) / 1000;
+            if (ticks == 0)
+                ticks = 1;
+            const uint64_t now = timer_get_ticks();
+            const uint64_t deadline = (ticks > UINT64_MAX - now) ? UINT64_MAX : now + ticks;
+
+            if (!scheduler_note_wake_deadline(current, deadline)) {
+                spinlock_release_irqrestore(&bucket->lock, flags);
+                // The fixed timed-wait table is full: an honest error
+                // beats a wait that silently lost its timeout (an
+                // unbounded hang nobody can diagnose in release builds).
+                return -28; // -ENOSPC
+            }
             scheduler_wait(&bucket->wait_queue, &bucket->lock);
             spinlock_release_irqrestore(&bucket->lock, flags);
+
+            // The wait ended (wake, timeout or signal): drop the
+            // registration before returning. A lingering entry would let
+            // the walker mark this process's next blocked wait as timed
+            // out, or a recycled Process at this address inherit it.
+            scheduler_clear_wake_deadline(current);
 
             if (current->timed_wake) {
                 current->timed_wake = false;
