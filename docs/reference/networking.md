@@ -30,7 +30,7 @@ There is no mbuf abstraction: each layer owns static 1600-byte staging buffers u
 - One global configuration (IP, netmask, gateway, DNS). No routing table: the next hop is the destination when on-link, else the gateway.
 - No fragmentation and no reassembly. Payloads are capped at 1480 bytes (MTU 1500 minus the fixed 20-byte header). TTL 64, incrementing ID.
 - Receive validates version/IHL/checksum/destination before dispatching to ICMP, UDP, or TCP.
-- ICMP implements echo request/reply only. No ICMP errors are generated or consumed. The shell `ping` command resolves the host instead — echo is not exposed to userland.
+- ICMP implements echo request/reply. No ICMP errors are generated or consumed. Echo is exposed to userland through `SYS_PING`: a ring of 8 outstanding probes matched by (identifier, sequence) — the reply path records RTT under the ring lock, the syscall claim/send/wait flow never holds the lock across polls. The shell `ping` resolves the host and sends up to 16 probes with RTT statistics.
 
 ## UDP
 

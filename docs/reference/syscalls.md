@@ -92,6 +92,7 @@ Error conventions: classic calls return `(uint64_t)-1`; extended calls (270 and 
 | 292 | `SYS_INPUT_SET_DEVICE_ENABLED` | Enable/disable an input source by stable id (PS/2 sentinel or USB slot) |
 | 293 | `SYS_NET_STATUS` | Fill `NetStatus` (`uapi/syscalls_ext.h`): ip/netmask/gateway/dns (host order), link_up, configured, nic |
 | 294 | `SYS_SOCKET_STATE` | Socket state: `NET_TCP_*` (mirrors kernel TcpState) for TCP handles, `NET_SOCK_UDP_OPEN` for UDP; `-9` EBADF for unused/invalid handles |
+| 295 | `SYS_PING` | One blocking ICMP echo probe `(ip, timeout_ms, *rtt_ms)`: 0 + rtt, `-110` ETIMEDOUT, `-19` ENODEV, `-16` EBUSY (probe ring full), `-14` EFAULT |
 
 Display syscalls: `GET_CAPS` 247, `PRESENT` 248, `WAIT` 249, `GET_STATUS` 250, `QUERY_CONNECTORS` 252, `GET_MODES` 253, `SET_MODE` 254, `BUFFER_CREATE` 255, `BUFFER_MAP` 256, `BUFFER_DESTROY` 257, `COMPOSE_SUBMIT` 258, `EVENT_WAIT` 259, `ATOMIC_COMMIT` 260, `BUFFER_SET_WM_ACCESS` 261, `SURFACE_IMPORT` 262. Present requests carry up to 128 damage rects; compose requests up to 32 layers and 32 damage rects. See [Display](display.md).
 
