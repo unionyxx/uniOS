@@ -312,11 +312,11 @@ static bool shm_unmap_from_process(Process *p, int id)
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
     vma_remove(&p->vma_list, mapping_start, mapping_end);
-    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
-    // Two passes: collect the frames while unmapping without flushing,
-    // invalidate on all cores, and only then drop the references (a dec to
-    // zero returns the frame to the pool — remote TLBs must be gone first).
+    // Clear the PTEs under the SAME hold that removed the metadata (fork's
+    // clone serializes here and does check-free refcount incs on present
+    // leaves); the flush and the refcount drops happen after the unlock,
+    // preserving flush-before-frame-release.
     const size_t num_pages = (mapping_end - mapping_start) / 4096;
     uint64_t *phys_list = static_cast<uint64_t *>(malloc(num_pages * sizeof(uint64_t)));
     size_t phys_count = 0;
@@ -329,6 +329,7 @@ static bool shm_unmap_from_process(Process *p, int id)
         if (phys_list && phys_count < num_pages)
             phys_list[phys_count++] = phys;
     }
+    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
     vmm_invalidate_tlb_range(mapping_start, num_pages);
 
@@ -369,25 +370,31 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
     }
-    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
-    // Unmap matching physical pages WITHOUT flushing, collect the frames,
-    // flush every core once, and only then return the frames to the pool:
-    // a remote TLB entry must never survive into a reallocated frame, and a
-    // per-page shootdown IPI made large munmaps O(n) round trips.
+    // Clear the PTEs under the SAME lock: fork's clone (which holds it) does
+    // a check-free pmm_refcount_inc per present leaf; a PTE cleared between
+    // its read and its bump panics "refcount_inc on free frame" or worse,
+    // silently maps a reallocated frame into the child. The flush stays
+    // after the unlock - never shoot down under a lock another core may be
+    // spinning on with interrupts disabled.
     const size_t num_pages = length / 4096;
     uint64_t *freed_phys = static_cast<uint64_t *>(malloc(num_pages * sizeof(uint64_t)));
 
     if (!freed_phys) {
-        // No scratch memory: slow path, still flush-before-free per page.
+        // No scratch memory: slow path. Clear and free under one continuous
+        // lock hold (releasing mid-walk would let a fresh mmap re-use the
+        // just-holed range and have its PTEs stolen). Futex waiters on these
+        // frames are NOT woken in this OOM-only fallback; the fast path
+        // always notifies.
         for (uint64_t virt = addr; virt < end_addr; virt += 4096) {
             uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
             if (!phys)
                 continue;
             vmm_unmap_page_in(p->page_table, virt);
-            futex_notify_freed_frames(&phys, 1);
             pmm_free_frame(reinterpret_cast<void *>(phys));
         }
+        spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
+        vmm_invalidate_tlb_range(addr, num_pages);
         return true;
     }
 
@@ -399,6 +406,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
         vmm_unmap_page_no_flush(p->page_table, virt);
         freed_phys[freed_count++] = phys;
     }
+    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
     vmm_invalidate_tlb_range(addr, num_pages);
 
@@ -1468,6 +1476,11 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     if (len == 0)
         return 0;
 
+    // Guard the rounding: len in [2^64-4095, 2^64-1] wraps to a tiny value
+    // and the syscall would silently succeed protecting nothing.
+    if (len > UINT64_MAX - 4095)
+        return -22; // EINVAL
+
     uint64_t rounded_len = (len + 4095) & ~4095ULL;
     uint64_t end_addr = 0;
     if (!checked_add_u64(start_addr, rounded_len, &end_addr) || end_addr >= USER_SPACE_MAX)
@@ -1491,13 +1504,24 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     uint64_t sl_flags = spinlock_acquire_irqsave(current->vma_lock_ptr);
     for (VMA *curr = current->vma_list; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > start_addr) {
-            curr->flags = pte_flags;
+            // Preserve SHARED: dropping it would make the next fork COW
+            // downgrade a genuinely shared (memfd/SHM) mapping.
+            curr->flags = pte_flags | (curr->flags & PTE_SHARED);
         }
     }
     for (uint64_t page_vaddr = start_addr; page_vaddr < end_addr; page_vaddr += 4096) {
         uint64_t phys = vmm_virt_to_phys_in(current->page_table, page_vaddr);
         if (phys != 0) {
-            vmm_replace_page_in(current->page_table, page_vaddr, phys & ~0xFFFULL, pte_flags);
+            uint64_t old_flags = vmm_get_page_flags_in(current->page_table, page_vaddr);
+            uint64_t new_flags = pte_flags | (old_flags & PTE_SHARED);
+            // COW pages (frame still shared with a fork child) must not
+            // become writable in place: the parent would write the shared
+            // frame while the child maps it read-only. Leave RO and let the
+            // write fault path do the copy.
+            if ((new_flags & PTE_WRITABLE) && !(new_flags & PTE_SHARED) &&
+                pmm_get_refcount(reinterpret_cast<void *>(phys & ~0xFFFULL)) > 1)
+                new_flags &= ~PTE_WRITABLE;
+            vmm_replace_page_in(current->page_table, page_vaddr, phys & ~0xFFFULL, new_flags);
         }
     }
     spinlock_release_irqrestore(current->vma_lock_ptr, sl_flags);
@@ -1850,9 +1874,28 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 
             uint64_t virt_start = 0x100000000ULL;
 
-            // FIX: Restart loop if overlap is found to handle unsorted VMA linked list
-            bool overlap_found;
+            int fd = static_cast<int>(frame->arg5);
+            uint64_t mmap_flags = frame->arg4;
+
+            VNode *memfd_node = nullptr;
+            if (fd >= 0 && fd < MAX_OPEN_FILES) {
+                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+                if (p->fd_table[fd].used && p->fd_table[fd].vnode && is_memfd_vnode(p->fd_table[fd].vnode)) {
+                    memfd_node = p->fd_table[fd].vnode;
+                    __sync_fetch_and_add(&memfd_node->ref_count, 1);
+                }
+                spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+            }
+
+            uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
+
+            // Address selection, VMA publication and PTE installation run
+            // under ONE continuous vma-lock hold: munmap clears PTEs and
+            // fork's clone snapshots them under this same lock, so a racing
+            // unmap can never steal the frames of a half-installed mapping
+            // and the clone can never refcount a page munmap is freeing.
             uint64_t vma_flags_lock = spinlock_acquire_irqsave(p->vma_lock_ptr);
+            bool overlap_found;
             do {
                 overlap_found = false;
                 for (VMA *curr = p->vma_list; curr; curr = curr->next) {
@@ -1873,36 +1916,39 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                     }
                 }
             } while (overlap_found);
-            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
 
             uint64_t virt_end = 0;
-            if (!checked_add_u64(virt_start, length, &virt_end) || virt_end >= USER_STACK_TOP)
+            if (!checked_add_u64(virt_start, length, &virt_end) || virt_end >= USER_STACK_TOP) {
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                 return static_cast<uint64_t>(-1);
+            }
 
             uint64_t flags = PTE_PRESENT | PTE_USER;
             if (arg3 & 2)
                 flags |= PTE_WRITABLE;
+            // PROT_EXEC is opt-in like in sys_mprotect: without it every
+            // anonymous mapping would be RWX, turning any userspace memory
+            // bug into a code-reuse primitive.
+            if (!(arg3 & 4))
+                flags |= PTE_NX;
 
-            int fd = static_cast<int>(frame->arg5);
-            uint64_t mmap_flags = frame->arg4;
-
-            VNode *memfd_node = nullptr;
-            if (fd >= 0 && fd < MAX_OPEN_FILES) {
-                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-                if (p->fd_table[fd].used && p->fd_table[fd].vnode && is_memfd_vnode(p->fd_table[fd].vnode)) {
-                    memfd_node = p->fd_table[fd].vnode;
-                    __sync_fetch_and_add(&memfd_node->ref_count, 1);
-                }
-                spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+            // Publish the metadata before the PTEs: every rollback below
+            // removes it again, and no other lock is held while we hold this
+            // one (fd/memfd/pmm are leaves taken underneath).
+            VMAType vma_type = VMAType::Data;
+            if (memfd_node && (mmap_flags & MAP_SHARED)) {
+                flags |= PTE_SHARED;
+                vma_type = VMAType::Shared;
+            }
+            if (!vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type)) {
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+                if (memfd_node)
+                    vfs_close_vnode(memfd_node);
+                return static_cast<uint64_t>(-1);
             }
 
-            uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
-
             if (memfd_node) {
-                bool is_shared = (mmap_flags & MAP_SHARED) != 0;
-                if (is_shared) {
-                    flags |= PTE_SHARED;
-                }
+                const bool is_shared = (mmap_flags & MAP_SHARED) != 0;
 
                 for (size_t i = 0; i < num_pages; i++) {
                     void *frame_ptr = nullptr;
@@ -1916,6 +1962,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 if (phys)
                                     pmm_refcount_dec(reinterpret_cast<void *>(phys));
                             }
+                            vma_remove(&p->vma_list, virt_start, virt_end);
+                            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
                         }
@@ -1930,6 +1978,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 if (phys)
                                     pmm_free_frame(reinterpret_cast<void *>(phys));
                             }
+                            vma_remove(&p->vma_list, virt_start, virt_end);
+                            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
                         }
@@ -1966,34 +2016,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 }
                             }
                         }
+                        vma_remove(&p->vma_list, virt_start, virt_end);
+                        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                         vfs_close_vnode(memfd_node);
                         return static_cast<uint64_t>(-1);
                     }
                 }
 
-                VMAType vma_type = is_shared ? VMAType::Shared : VMAType::Data;
-                uint64_t vma_flags_lock2 = spinlock_acquire_irqsave(p->vma_lock_ptr);
-                bool add_ok = vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type);
-                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock2);
-                if (!add_ok) {
-                    for (size_t i = 0; i < num_pages; i++) {
-                        uint64_t vaddr = virt_start + (i * 4096);
-                        uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                        vmm_unmap_page_in(target_pml4, vaddr);
-                        if (phys) {
-                            if (is_shared) {
-                                pmm_refcount_dec(reinterpret_cast<void *>(phys));
-                            } else {
-                                pmm_free_frame(reinterpret_cast<void *>(phys));
-                            }
-                        }
-                    }
-                    vfs_close_vnode(memfd_node);
-                    return static_cast<uint64_t>(-1);
-                }
-
                 vfs_close_vnode(memfd_node);
-
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                 asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
                 return virt_start;
             }
@@ -2008,6 +2039,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         if (phys)
                             pmm_free_frame(reinterpret_cast<void *>(phys));
                     }
+                    vma_remove(&p->vma_list, virt_start, virt_end);
+                    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                     return static_cast<uint64_t>(-1);
                 }
                 if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(new_frame), flags)
@@ -2020,26 +2053,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         if (phys)
                             pmm_free_frame(reinterpret_cast<void *>(phys));
                     }
+                    vma_remove(&p->vma_list, virt_start, virt_end);
+                    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                     return static_cast<uint64_t>(-1);
                 }
                 kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame))),
                                      4096);
             }
 
-            uint64_t vma_flags_lock3 = spinlock_acquire_irqsave(p->vma_lock_ptr);
-            bool add_ok2 = vma_add(&p->vma_list, virt_start, virt_end, flags, VMAType::Data);
-            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock3);
-            if (!add_ok2) {
-                for (size_t i = 0; i < num_pages; i++) {
-                    uint64_t vaddr = virt_start + (i * 4096);
-                    uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                    vmm_unmap_page_in(target_pml4, vaddr);
-                    if (phys)
-                        pmm_free_frame(reinterpret_cast<void *>(phys));
-                }
-                return static_cast<uint64_t>(-1);
-            }
-
+            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
             return virt_start;
         }
@@ -2323,15 +2345,22 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 
             // Idempotent: a second call returns the existing mapping instead
             // of failing on already-present PTEs.
-            uint64_t chk_flags = spinlock_acquire_irqsave(&p->vma_lock);
+            uint64_t chk_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
             VMA *existing_fb = vma_find(p->vma_list, virt_start);
             if (existing_fb) {
                 const bool same_mapping = existing_fb->start == virt_start && existing_fb->end >= virt_start + size &&
                                           (existing_fb->flags & PTE_SHARED);
-                spinlock_release_irqrestore(&p->vma_lock, chk_flags);
+                spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
                 return same_mapping ? virt_start : static_cast<uint64_t>(-1);
             }
-            spinlock_release_irqrestore(&p->vma_lock, chk_flags);
+
+            // Publish the VMA and install the PTEs under one continuous lock
+            // hold, same as the SHM path: a racing munmap or fork clone
+            // serializes here instead of tearing the half-installed mapping.
+            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+                spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
+                return static_cast<uint64_t>(-1);
+            }
 
             for (size_t i = 0; i < num_pages; i++) {
                 uint64_t phys = vmm_virt_to_phys(virt_addr + (i * 0x1000));
@@ -2342,20 +2371,13 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         for (size_t j = 0; j < i; j++) {
                             vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
                         }
+                        vma_remove(&p->vma_list, virt_start, virt_start + size);
+                        spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
                         return static_cast<uint64_t>(-1);
                     }
                 }
             }
-
-            uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
-            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
-                spinlock_release_irqrestore(&p->vma_lock, sl_flags);
-                for (size_t j = 0; j < num_pages; j++) {
-                    vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
-                }
-                return static_cast<uint64_t>(-1);
-            }
-            spinlock_release_irqrestore(&p->vma_lock, sl_flags);
+            spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
 
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
             return virt_start;
@@ -2996,45 +3018,44 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // Fixed-offset mapping for SHM to avoid VMA list walking races
             uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
-            uint64_t vma_flags = spinlock_acquire_irqsave(&p->vma_lock);
+            uint64_t vma_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
             VMA *existing = vma_find(p->vma_list, virt_start);
             if (existing) {
                 bool same_mapping = existing->start == virt_start && existing->end >= virt_start + size &&
                                     (existing->flags & PTE_SHARED);
-                spinlock_release_irqrestore(&p->vma_lock, vma_flags);
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
                 return same_mapping ? virt_start : static_cast<uint64_t>(-1);
             }
-            spinlock_release_irqrestore(&p->vma_lock, vma_flags);
 
+            // Publish the VMA and install the PTEs under one continuous lock
+            // hold: munmap and fork's clone serialize on this same lock, so a
+            // concurrent unmap can never clear (and steal) the frames of a
+            // mapping whose metadata is not yet visible, and the clone can
+            // never snapshot a half-installed region.
             uint64_t flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_SHARED;
+            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
+                return static_cast<uint64_t>(-1);
+            }
+
             uint64_t mapped = 0;
             for (; mapped < size; mapped += 4096) {
                 pmm_refcount_inc(reinterpret_cast<void *>(phys_start + mapped));
                 if (!vmm_map_page_in(p->page_table, virt_start + mapped, phys_start + mapped, flags).ok()) {
                     pmm_refcount_dec(reinterpret_cast<void *>(phys_start + mapped));
+                    vma_remove(&p->vma_list, virt_start, virt_start + size);
                     for (uint64_t rollback = 0; rollback < mapped; rollback += 4096) {
                         vmm_unmap_page_in(p->page_table, virt_start + rollback);
                         pmm_refcount_dec(reinterpret_cast<void *>(phys_start + rollback));
                     }
+                    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
                     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
                     return static_cast<uint64_t>(-1);
                 }
             }
+            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
 
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-            uint64_t vma_flags2 = spinlock_acquire_irqsave(&p->vma_lock);
-            bool vma_ok = vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared) != nullptr;
-            spinlock_release_irqrestore(&p->vma_lock, vma_flags2);
-            if (!vma_ok) {
-                // Rollback: Unmap and Dec Refcounts
-                for (uint64_t i = 0; i < size; i += 4096) {
-                    vmm_unmap_page_in(p->page_table, virt_start + i);
-                    pmm_refcount_dec(reinterpret_cast<void *>(phys_start + i));
-                }
-                asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-                return static_cast<uint64_t>(-1);
-            }
-
             return virt_start;
         }
         case SYS_SHM_FREE: {

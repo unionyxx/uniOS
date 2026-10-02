@@ -44,7 +44,11 @@ Key operations:
 - `vmm_map_mmio` / `vmm_alloc_dma`: mappings from the MMIO/DMA window with batched invalidation. `vmm_free_dma` performs a full TLB shootdown **before** frames return to the pool, so no remote core can keep DMAing into a reused frame.
 - `vmm_remap_framebuffer`: replaces the loader's WB mappings in place with WC+shared.
 - `vmm_protect_kernel`: `.text` read+execute, `.rodata`/`.requests` read-only+NX, `.data` through `__kernel_end` writable+NX.
-- `vmm_handle_page_fault`: demand paging for VMA-covered addresses, copy-on-write resolution (copy when refcount > 1, in-place permission upgrade otherwise), shared-page flag fixup.
+- `vmm_handle_page_fault`: demand paging for VMA-covered addresses, copy-on-write resolution (copy when refcount > 1, in-place permission upgrade otherwise), shared-page flag fixup. PTE installation happens under the VMA lock, but the TLB invalidation runs **after** the lock is released: `vmm_invalidate_tlb` waits for every core to acknowledge the shootdown IPI, and a sibling core spinning on the VMA lock with interrupts disabled can never take that IPI — flushing under the lock deadlocks into the shootdown timeout panic.
+
+The single VMA lock (`process->vma_lock_ptr`, the leader's embedded lock shared by all threads) is the serialization point for address-space changes. `SYS_MMAP` (anonymous and memfd), `SYS_SHM_MAP`, the framebuffer mapping and display-buffer mappings publish their VMA **and** install their PTEs under one continuous lock hold, with rollbacks removing the VMA again; `SYS_MUNMAP`, SHM/display-buffer unmap and `sys_mprotect` likewise clear/rewrite PTEs while still holding the lock that removed or trimmed the metadata, deferring the flush until after the unlock. This is what keeps fork's `vmm_clone_address_space` (which holds the same lock and does check-free `pmm_refcount_inc` on every present leaf) from racing an unmap into `refcount_inc on free frame` panics or cross-process frame reuse.
+
+`sys_mprotect` preserves the software `PTE_SHARED` bit (dropping it would make the next fork COW-downgrade a genuinely shared mapping), refuses to make a COW-shared page writable in place (leaves it read-only so the write-fault path performs the copy), and rejects lengths that would wrap the page rounding. `SYS_MMAP` treats `PROT_EXEC` as opt-in (`NX` unless requested), matching `sys_mprotect`.
 
 There is no PCID/INVPCID; local flushes are `invlpg` loops (> 32 pages: CR3 reload).
 

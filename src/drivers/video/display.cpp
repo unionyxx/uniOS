@@ -2283,12 +2283,12 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
     if (buffer->mapped_pid != 0 && buffer->mapped_pid != process->pid)
         return false;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&process->vma_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(process->vma_lock_ptr);
     const VMA *existing = vma_find(process->vma_list, virt_start);
     if (existing) {
         bool same_mapping =
             existing->start == virt_start && existing->end >= virt_start + size && (existing->flags & PTE_SHARED);
-        spinlock_release_irqrestore(&process->vma_lock, sl_flags);
+        spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
         if (!same_mapping)
             return false;
         buffer->mapped_pid = process->pid;
@@ -2301,9 +2301,17 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
         request->height = buffer->height;
         return true;
     }
-    spinlock_release_irqrestore(&process->vma_lock, sl_flags);
 
+    // Publish the VMA and install the PTEs under one continuous lock hold
+    // (munmap and fork's clone serialize on this lock; a half-installed
+    // mapping must never be visible to them). Rollbacks remove the VMA
+    // again before releasing.
     uint64_t flags = display_buffer_user_page_flags(*buffer);
+    if (!vma_add(&process->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+        spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
+        return false;
+    }
+
     for (uint64_t mapped = 0; mapped < size; mapped += 4096u) {
         uint64_t phys = buffer->dma.phys + mapped;
         pmm_refcount_inc(reinterpret_cast<void *>(phys));
@@ -2313,23 +2321,14 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
                 vmm_unmap_page_in(process->page_table, virt_start + rollback);
                 pmm_refcount_dec(reinterpret_cast<void *>(buffer->dma.phys + rollback));
             }
+            vma_remove(&process->vma_list, virt_start, virt_start + size);
+            spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
             return false;
         }
     }
-
+    spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-    sl_flags = spinlock_acquire_irqsave(&process->vma_lock);
-    bool vma_ok = vma_add(&process->vma_list, virt_start, virt_start + size, flags, VMAType::Shared) != nullptr;
-    spinlock_release_irqrestore(&process->vma_lock, sl_flags);
-    if (!vma_ok) {
-        for (uint64_t rollback = 0; rollback < size; rollback += 4096u) {
-            vmm_unmap_page_in(process->page_table, virt_start + rollback);
-            pmm_refcount_dec(reinterpret_cast<void *>(buffer->dma.phys + rollback));
-        }
-        asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-        return false;
-    }
 
     buffer->mapped_pid = process->pid;
     buffer->mapped_user_addr = virt_start;
@@ -2353,14 +2352,17 @@ static void display_unmap_buffer_from_current_process(DisplayBufferObject *buffe
 
     uint64_t size = buffer->mapped_user_size;
     uint64_t virt_start = buffer->mapped_user_addr;
-    uint64_t sl_flags = spinlock_acquire_irqsave(&process->vma_lock);
+    // Clear metadata AND PTEs under one continuous lock hold so a racing
+    // fork clone cannot refcount a frame this unmap is releasing; the flush
+    // happens after the unlock (never shoot down under a contended lock).
+    uint64_t sl_flags = spinlock_acquire_irqsave(process->vma_lock_ptr);
     vma_remove(&process->vma_list, virt_start, virt_start + size);
-    spinlock_release_irqrestore(&process->vma_lock, sl_flags);
 
     for (uint64_t i = 0; i < size; i += 4096u) {
         vmm_unmap_page_in(process->page_table, virt_start + i);
         pmm_refcount_dec(reinterpret_cast<void *>(buffer->dma.phys + i));
     }
+    spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
     buffer->mapped_pid = 0;
     buffer->mapped_user_addr = 0;

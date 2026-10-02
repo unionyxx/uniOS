@@ -1137,15 +1137,24 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
             fault_cpu->fault_depth--;
             return false;
         }
-        vmm_invalidate_tlb(page_vaddr);
+        // Flush AFTER releasing the vma lock: vmm_invalidate_tlb waits for
+        // every core to ack the shootdown, and a sibling faulting on this
+        // address spins on vma_lock with interrupts disabled - it could
+        // never take the shootdown IPI, so flushing under the lock
+        // deadlocks into the timeout panic.
         spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
+        vmm_invalidate_tlb(page_vaddr);
         fault_cpu->fault_depth--;
         return true;
     }
 
     if (vma_type == VMAType::Shared) {
-        vmm_set_page_flags(page_vaddr, map_flags);
         spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
+        // Outside the lock: this only flips permission bits on an already
+        // present PTE (it re-checks PRESENT and never touches the frame), so
+        // it cannot race frame lifetime, and vmm_set_page_flags invalidates
+        // internally - which must not happen under the vma lock.
+        vmm_set_page_flags(page_vaddr, map_flags);
         fault_cpu->fault_depth--;
         return true;
     }
@@ -1183,8 +1192,10 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         }
     }
 
-    vmm_invalidate_tlb(page_vaddr);
+    // Same reasoning as the fresh-map path: the TLB flush must happen with
+    // the vma lock released.
     spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
+    vmm_invalidate_tlb(page_vaddr);
     fault_cpu->fault_depth--;
     return true;
 }
