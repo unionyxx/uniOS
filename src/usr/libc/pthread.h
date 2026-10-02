@@ -62,3 +62,10 @@ int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
 int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, uint64_t timeout_ms);
 int pthread_cond_signal(pthread_cond_t *cond);
 int pthread_cond_broadcast(pthread_cond_t *cond);
+/* ---- Once: 0 = not run, 1 = initializer running, 2 = done. init runs
+ * exactly once no matter how many threads race here. */
+typedef volatile uint32_t pthread_once_t;
+
+#define PTHREAD_ONCE_INIT 0
+
+int pthread_once(pthread_once_t *once, void (*fn)(void));

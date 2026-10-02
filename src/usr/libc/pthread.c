@@ -203,3 +203,26 @@ int pthread_cond_broadcast(pthread_cond_t *cond)
     futex(&cond->seq, FUTEX_WAKE, 0x7FFFFFFFu);
     return 0;
 }
+int pthread_once(pthread_once_t *once, void (*fn)(void))
+{
+    if (!once || !fn)
+        return -22; // EINVAL
+    if (*once == 2u)
+        return 0;
+    if (__sync_val_compare_and_swap(once, 0u, 1u) == 0u) {
+        fn();
+        /* A locked op publishes the done state: full barrier, so every
+         * write fn made is visible before the flag, and atomic, so no
+         * reader observes a torn transition. */
+        __sync_val_compare_and_swap(once, 1u, 2u);
+        futex(once, FUTEX_WAKE, 0x7FFFFFFFu);
+        return 0;
+    }
+    /* Another thread is running the initializer: sleep on the running
+     * state - the 1 -> 2 transition turns the value check into EAGAIN and
+     * exits the loop (a plain read of 2 exits it without parking at all). */
+    while (*once != 2u)
+        futex(once, FUTEX_WAIT, 1u);
+    __sync_synchronize();
+    return 0;
+}
