@@ -222,6 +222,37 @@ KTEST(extended_syscalls_epoll)
     Process *p = process_get_current();
     KTEST_EXPECT(p != nullptr);
 
+    // sys_epoll_ctl/wait validate their user pointers now, so the test needs
+    // a real user mapping for the epoll_event structures.
+    uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vma_list;
+    uint32_t orig_vma_count = p->vma_count;
+
+    if (!p->page_table)
+        p->page_table = vmm_get_kernel_pml4();
+
+    uint64_t test_vaddr = 0x10000000ULL;
+    void *phys = pmm_alloc_frame();
+    KTEST_EXPECT(phys != nullptr);
+    Result<void> map_res =
+        vmm_replace_page_in(p->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys),
+                            PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map_res.ok());
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = test_vaddr;
+    vma->end = test_vaddr + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+
+    p->vma_list = vma;
+    p->vma_count = 1;
+
+    struct epoll_event *user_ev = reinterpret_cast<struct epoll_event *>(test_vaddr);
+    struct epoll_event *user_events = reinterpret_cast<struct epoll_event *>(test_vaddr + 64);
+
     int64_t epfd = sys_epoll_create(0);
     KTEST_EXPECT_EQ(epfd, -22); // size <= 0
 
@@ -243,38 +274,50 @@ KTEST(extended_syscalls_epoll)
     p->fd_table[write_fd].vnode = pipe_get_vnode(pipe_id, true);
     p->fd_table[write_fd].flags = 0;
 
-    struct epoll_event ev = {};
-    ev.events = EPOLLIN;
-    ev.data.fd = read_fd;
-    int64_t res = sys_epoll_ctl(static_cast<int>(epfd), EPOLL_CTL_ADD, read_fd, &ev);
+    user_ev->events = EPOLLIN;
+    user_ev->data.fd = read_fd;
+    int64_t res = sys_epoll_ctl(static_cast<int>(epfd), EPOLL_CTL_ADD, read_fd, user_ev);
     KTEST_EXPECT_EQ(res, 0);
 
     // duplicate add
-    res = sys_epoll_ctl(static_cast<int>(epfd), EPOLL_CTL_ADD, read_fd, &ev);
+    res = sys_epoll_ctl(static_cast<int>(epfd), EPOLL_CTL_ADD, read_fd, user_ev);
     KTEST_EXPECT_EQ(res, -17); // -EEXIST
 
-    struct epoll_event events[2] = {};
-    res = sys_epoll_wait(static_cast<int>(epfd), events, 2, 0);
+    // kernel pointers are rejected by validation
+    struct epoll_event kernel_ev = {};
+    kernel_ev.events = EPOLLIN;
+    res = sys_epoll_ctl(static_cast<int>(epfd), EPOLL_CTL_ADD, write_fd, &kernel_ev);
+    KTEST_EXPECT_EQ(res, -14); // -EFAULT
+
+    res = sys_epoll_wait(static_cast<int>(epfd), user_events, 2, 0);
     KTEST_EXPECT_EQ(res, 0); // pipe empty
 
     int64_t written = pipe_write(pipe_id, "test", 4);
     KTEST_EXPECT_EQ(written, 4);
 
-    res = sys_epoll_wait(static_cast<int>(epfd), events, 2, 0);
+    res = sys_epoll_wait(static_cast<int>(epfd), user_events, 2, 0);
     KTEST_EXPECT_EQ(res, 1);
-    KTEST_EXPECT_EQ(events[0].data.fd, read_fd);
-    KTEST_EXPECT((events[0].events & EPOLLIN) != 0);
+    KTEST_EXPECT_EQ(user_events[0].data.fd, read_fd);
+    KTEST_EXPECT((user_events[0].events & EPOLLIN) != 0);
 
     char buf[4];
     int64_t read_bytes = pipe_read(pipe_id, buf, 4);
     KTEST_EXPECT_EQ(read_bytes, 4);
 
-    res = sys_epoll_wait(static_cast<int>(epfd), events, 2, 0);
+    res = sys_epoll_wait(static_cast<int>(epfd), user_events, 2, 0);
     KTEST_EXPECT_EQ(res, 0); // pipe drained
 
     vfs_close(read_fd);
     vfs_close(write_fd);
     vfs_close(static_cast<int>(epfd));
+
+    vmm_unmap_page_in(p->page_table, test_vaddr);
+    pmm_free_frame(phys);
+    free(vma);
+
+    p->page_table = orig_page_table;
+    p->vma_list = orig_vma_list;
+    p->vma_count = orig_vma_count;
 }
 
 #ifndef SEEK_SET

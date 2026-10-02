@@ -9,6 +9,7 @@
 #include <kernel/debug.h>
 #include <kernel/cpu.h>
 #include <kernel/time/timer.h>
+#include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 
 #define STAC() \
@@ -141,7 +142,10 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 
     struct epoll_event local_event = {0, {0}};
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
-        if (!event) {
+        // The event pointer is dereferenced below through STAC: without this
+        // validation a kernel or unmapped address would be an arbitrary
+        // kernel read (and an unfaultable kernel-mode #PF on unmapped).
+        if (!event || !validate_user_ptr(event, sizeof(struct epoll_event), false)) {
             vfs_close_vnode(ep_vnode);
             return -14; // EFAULT
         }
@@ -214,7 +218,9 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
 {
     if (maxevents <= 0)
         return -22; // EINVAL
-    if (!events)
+    // The events array is written below through STAC: without this validation
+    // a kernel or unmapped address would be an arbitrary kernel write.
+    if (!events || !validate_user_ptr(events, (size_t)maxevents * sizeof(struct epoll_event), true))
         return -14; // EFAULT
 
     Process *current = process_get_current();

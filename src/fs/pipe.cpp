@@ -52,6 +52,21 @@ static bool pipes_initialized = false;
 static Spinlock g_pipe_slot_lock = SPINLOCK_INIT;
 static int g_pipe_debug_reads = 0;
 static int g_pipe_debug_writes = 0;
+// Bumped after every pipe state change (data/space/close), before the wake.
+// Epoll sleepers compare it under g_sched_lock after queuing: a producer
+// that already finished set+wake before they queued is guaranteed visible
+// here, closing the check-then-sleep lost-wakeup window.
+static volatile uint64_t g_pipe_state_generation = 0;
+
+static inline void pipe_note_state_change()
+{
+    __atomic_add_fetch(&g_pipe_state_generation, 1, __ATOMIC_RELEASE);
+}
+
+uint64_t pipe_state_generation()
+{
+    return __atomic_load_n(&g_pipe_state_generation, __ATOMIC_ACQUIRE);
+}
 
 void pipe_init()
 {
@@ -113,6 +128,7 @@ int64_t pipe_read(int pipe_id, char *buf, uint64_t count)
                 g_pipe_debug_reads++;
             }
 
+            pipe_note_state_change();
             scheduler_wake_all(&p->space_wait);
             spinlock_release_irqrestore(&p->lock, flags);
             return (int64_t)to_read;
@@ -167,6 +183,7 @@ int64_t pipe_write(int pipe_id, const char *buf, uint64_t count)
                 g_pipe_debug_writes++;
             }
 
+            pipe_note_state_change();
             scheduler_wake_all(&p->data_wait);
             spinlock_release_irqrestore(&p->lock, flags);
             return (int64_t)to_write;
@@ -184,6 +201,7 @@ void pipe_close_read(int pipe_id)
 
     uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     p->read_closed = true;
+    pipe_note_state_change();
     scheduler_wake_all(&p->space_wait);
     // A reader blocked on an empty pipe must also be woken: with the read
     // end gone it observes EOF instead of hanging forever.
@@ -203,6 +221,7 @@ void pipe_close_write(int pipe_id)
 
     uint64_t flags = spinlock_acquire_irqsave(&p->lock);
     p->write_closed = true;
+    pipe_note_state_change();
     scheduler_wake_all(&p->data_wait);
 
     if (p->read_closed) {

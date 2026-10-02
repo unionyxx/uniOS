@@ -30,6 +30,7 @@
 #include <kernel/sync/spinlock.h>
 #include <kernel/syscall.h>
 #include <kernel/time/timer.h>
+#include <kernel/user_ptr.h>
 #include <libk/kstd.h>
 #include <libk/kstring.h>
 #include <stddef.h>
@@ -45,7 +46,6 @@ extern bool display_buffer_set_wm_access(DisplayBufferHandle handle, bool allow)
 extern bool display_import_surface(uint64_t owner_pid, const DisplaySurfaceImport &request,
                                    DisplaySurface *out_surface);
 
-static constexpr uint64_t USER_SPACE_MAX = 0x0000800000000000ULL;
 static constexpr uint64_t USER_STACK_TOP = 0x0000700000000000ULL;
 
 struct ShmBlock
@@ -183,40 +183,6 @@ bool safe_copy_to_user(void *dest, const void *src, size_t n);
         return false;
     *out = (size_t)((value + 0xFFFULL) & ~0xFFFULL);
     return *out != 0;
-}
-
-[[nodiscard]] static bool validate_user_ptr(const void *ptr, size_t size, bool write = false)
-{
-    const uint64_t addr = reinterpret_cast<uint64_t>(ptr);
-    if (addr == 0 || addr >= USER_SPACE_MAX)
-        return false;
-    if (size == 0)
-        return true;
-
-    const uint64_t end = addr + size;
-    if (end < addr || end > USER_SPACE_MAX)
-        return false;
-
-    Process *p = process_get_current();
-    if (!p)
-        return false;
-
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->vma_lock);
-    uint64_t current = addr;
-    while (current < end) {
-        VMA *vma = vma_find(p->vma_list, current);
-        if (!vma) {
-            spinlock_release_irqrestore(&p->vma_lock, sl_flags);
-            return false;
-        }
-        if (write && !(vma->flags & PTE_WRITABLE)) {
-            spinlock_release_irqrestore(&p->vma_lock, sl_flags);
-            return false;
-        }
-        current = vma->end;
-    }
-    spinlock_release_irqrestore(&p->vma_lock, sl_flags);
-    return true;
 }
 
 [[nodiscard]] static size_t validate_user_string(const char *str, size_t max_len)

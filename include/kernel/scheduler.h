@@ -59,6 +59,24 @@ void scheduler_sleep_ms(uint64_t ms);
 struct WaitQueue;
 struct Spinlock;
 void scheduler_wait(WaitQueue *q, Spinlock *lock);
+
+// Sleep queue deadline for timed epoll waits. sys_epoll_wait parks on
+// g_epoll_wait_queue, which has no native timeout; the tick path fires the
+// deadline and wakes the queue.
+void scheduler_note_epoll_deadline(uint64_t deadline_ticks);
+
+// Queued sleep with a lost-wakeup guard. The task is pushed onto the wait
+// queue under g_sched_lock first; `recheck` then runs while still holding
+// g_sched_lock. If it returns true, the task never sleeps: the condition
+// became true after the caller's last check and any producer that set it
+// already ran its wake (serialized by g_sched_lock) against an empty queue.
+// The recheck must only read locklessly-atomic state (aligned word loads,
+// no leaf locks): its verdict is a hint — false negatives are recovered by
+// the producer's later wake finding this task queued, false positives just
+// re-run the caller's scan loop.
+typedef bool (*scheduler_wait_recheck_fn)(void *ctx);
+void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck,
+                               void *ctx);
 void scheduler_wake_all(WaitQueue *q);
 void scheduler_wake_all_locked(WaitQueue *q);
 void scheduler_wake_one(WaitQueue *q);

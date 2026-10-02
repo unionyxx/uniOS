@@ -39,6 +39,10 @@ static Process *g_proc_tail = nullptr;
 static uint64_t g_next_pid = 1;
 static volatile uint32_t g_shutdown_action = 0;
 WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
+// Earliest absolute tick at which some epoll waiter's timeout expires,
+// UINT64_MAX when none is armed. Updated lock-free (monotonic min); fired
+// from the tick path under g_sched_lock.
+static volatile uint64_t g_epoll_wake_deadline = UINT64_MAX;
 extern "C" void scheduler_unlock_after_switch();
 
 // Zombies whose resources are still shared with live threads cannot be freed
@@ -678,6 +682,13 @@ static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 1)
 
     const uint64_t now = timer_get_ticks();
 
+    // Timed epoll waits: g_epoll_wait_queue has no native timeout, so the
+    // tick path here is what enforces sys_epoll_wait's timeout argument.
+    if (g_epoll_wait_queue.head && now >= g_epoll_wake_deadline) {
+        g_epoll_wake_deadline = UINT64_MAX;
+        wait_queue_wake_all(&g_epoll_wait_queue);
+    }
+
     if (cur->state == ProcessState_Running) {
         uint32_t max_slice = (cur->priority == 0) ? 5 : (cur->priority == 1) ? 20 : 50;
         if (cur->time_slice >= max_slice) {
@@ -827,10 +838,47 @@ void scheduler_wait(WaitQueue *q, Spinlock *lock)
 
     scheduler_schedule_internal();
 
+    // Re-acquire the leaf before restoring interrupts: it was released (raw,
+    // with IF=0) inside the wait, so reacquiring under IF=0 keeps the lock
+    // never-held-with-IF=1 until the caller's flags are back.
+    if (lock)
+        spinlock_acquire(lock);
     interrupts_restore(flags);
+}
+
+void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck, void *ctx)
+{
+    if (!current_proc() || !q)
+        return;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    wait_queue_push(q, current_proc());
+
+    if (lock)
+        spinlock_release_no_restore(lock);
+
+    if (recheck && recheck(ctx)) {
+        // The condition turned true between the caller's last scan and this
+        // push. Whoever set it finished their wake before we queued (both
+        // sides serialize on g_sched_lock), so that wake saw an empty queue
+        // and no future wake is coming — sleep would hang. Dequeue and
+        // return; the caller's loop re-runs its locked scan.
+        wait_queue_remove(q, current_proc());
+        current_proc()->state = ProcessState_Running;
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        if (lock)
+            spinlock_acquire(lock);
+        return;
+    }
+
+    scheduler_schedule_internal();
 
     if (lock)
         spinlock_acquire(lock);
+    interrupts_restore(flags);
 }
 
 void scheduler_wake_all(WaitQueue *q)
@@ -1392,10 +1440,27 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     return proc;
 }
 
+void scheduler_note_epoll_deadline(uint64_t deadline_ticks)
+{
+    uint64_t cur = __atomic_load_n(&g_epoll_wake_deadline, __ATOMIC_RELAXED);
+    while (deadline_ticks < cur) {
+        if (__sync_bool_compare_and_swap(&g_epoll_wake_deadline, cur, deadline_ticks))
+            return;
+        cur = __atomic_load_n(&g_epoll_wake_deadline, __ATOMIC_RELAXED);
+    }
+}
+
 void scheduler_notify_input_waiters()
 {
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
+
+    // Input events also break epoll waits (its loop returns early when the
+    // caller's own event queue is non-empty), so nudge the epoll queue like
+    // scheduler_wake_all() does — otherwise an event that arrives via this
+    // path never wakes a sleeping epoll waiter.
+    if (g_epoll_wait_queue.head)
+        wait_queue_wake_all(&g_epoll_wait_queue);
 
     Process *p = g_proc_list;
     if (p) {

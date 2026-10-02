@@ -30,4 +30,8 @@ void pipe_close_write(int pipe_id);
 
 bool pipe_is_pipe(VNode *node);
 bool pipe_is_ready(VNode *node, uint32_t events, uint32_t *out_occurred);
+// Monotonic count of pipe state changes (data, space, closes). Epoll's
+// queued-sleep recheck compares this locklessly to catch producers whose
+// wake already ran before the sleeper queued.
+uint64_t pipe_state_generation();
 
