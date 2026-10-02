@@ -2536,6 +2536,12 @@ static void thread_create_unwind(Process *thread)
     // disagree.
     thread->tls_len = ((thread->fs_base + sizeof(UniTcb) + 0xFFF) & ~0xFFFULL) - tls_lo;
 
+    // The template facts are group-wide: every member must carry them or a
+    // thread created by this thread clones nothing and faults on __thread.
+    thread->tls_template_va = parent->tls_template_va;
+    thread->tls_template_size = parent->tls_template_size;
+    thread->tls_align = parent->tls_align;
+
     kstring::strncpy(thread->name, parent->name, 24);
     kstring::strncat(thread->name, "/thr", 7);
 

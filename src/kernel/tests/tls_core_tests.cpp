@@ -241,6 +241,13 @@ KTEST(tls_template_clone)
         KTEST_EXPECT(thread->fs_base != 0);
         KTEST_EXPECT(thread->tls_lo != 0);
 
+        // The template facts are group-wide: the created member must carry
+        // them or a thread created by this thread would clone nothing and
+        // fault on its first __thread access.
+        KTEST_EXPECT_EQ(thread->tls_template_va, TEST_TEMPLATE_VADDR);
+        KTEST_EXPECT_EQ(thread->tls_template_size, kTemplateBytes);
+        KTEST_EXPECT_EQ(thread->tls_align, kTemplateAlign);
+
         // The clone's block [fs_base - size, fs_base) holds the template
         // image byte for byte; align 32 rounds 64 bytes to 64, so the
         // thread pointer sits exactly one block above the mapping start.
