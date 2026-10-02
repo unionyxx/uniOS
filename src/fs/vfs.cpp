@@ -77,6 +77,13 @@ static VNode *vfs_find_open_vnode_for(const VNode *like_node)
     if (start) {
         Process *curr = start;
         do {
+            // Exited-but-unreaped zombies sit on the list with fdtab already
+            // released (process_release_private_fds nulls it); they hold no
+            // descriptors, so skip them instead of dereferencing null.
+            if (!curr->fdtab) {
+                curr = curr->next;
+                continue;
+            }
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
                 if (curr->fdtab->fds[i].used && curr->fdtab->fds[i].vnode) {
                     VNode *other = curr->fdtab->fds[i].vnode;
@@ -986,6 +993,11 @@ static void vfs_sync_file_size_locked(VNode *like_node, uint64_t new_size)
     if (start) {
         Process *curr = start;
         do {
+            // Exited-but-unreaped zombies hold no descriptors (fdtab is null).
+            if (!curr->fdtab) {
+                curr = curr->next;
+                continue;
+            }
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
                 if (curr->fdtab->fds[i].used && curr->fdtab->fds[i].vnode) {
                     VNode *other = curr->fdtab->fds[i].vnode;
@@ -1406,6 +1418,12 @@ bool is_file_open(const char *path)
     if (start) {
         const Process *curr = start;
         do {
+            // Exited-but-unreaped zombies have no fd table; they cannot hold
+            // the file open.
+            if (!curr->fdtab) {
+                curr = curr->next;
+                continue;
+            }
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
                 if (curr->fdtab->fds[i].used && curr->fdtab->fds[i].vnode &&
                     vfs_is_same_file(curr->fdtab->fds[i].vnode, target)) {
