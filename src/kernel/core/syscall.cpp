@@ -40,6 +40,7 @@
 #include <uapi/input.h>
 #include <uapi/signal.h>
 #include <uapi/sound.h>
+#include <uapi/tcb.h>
 
 using kstd::unique_ptr;
 using kstring::string_view;
@@ -1294,7 +1295,8 @@ static bool exec_terminate_thread_group(Process *leader)
         return -1;
     }
 
-    uint64_t entry = elf_load_user(buffer.get(), node->size, loader_proc);
+    const uint64_t image_size = node->size;
+    uint64_t entry = elf_load_user(buffer.get(), image_size, loader_proc);
     vfs_close_vnode(node);
 
     if (entry == 0) {
@@ -1303,6 +1305,25 @@ static bool exec_terminate_thread_group(Process *leader)
         vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
+        return -1;
+    }
+
+    // Install the new image's TLS (block + TCB) in the loader's fresh space
+    // BEFORE the point of no return: an allocation failure here unwinds
+    // exactly like a loader failure, with nothing swapped. The loader is a
+    // byte copy of p, so its pid is the exec'ing leader's (exec preserves
+    // the pid) and tls_install writes the correct TCB tid. Give the loader
+    // its own vma lock — a memcpy of a lock word held elsewhere would
+    // deadlock — instead of the borrowed live one.
+    spinlock_init(&loader_proc->vma_lock);
+    loader_proc->vma_lock_ptr = &loader_proc->vma_lock;
+    if (!elf_install_tls(loader_proc, buffer.get(), image_size)) {
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
+        vmm_free_address_space(new_pml4);
+        aligned_free(loader_proc);
+        DEBUG_WARN("exec: pid %lu tls install failed", p->pid);
         return -1;
     }
 
@@ -1337,6 +1358,12 @@ static bool exec_terminate_thread_group(Process *leader)
         p->page_table = new_pml4;
         p->vmalist->head = loader_proc->vmalist->head;
         p->exec_entry = entry;
+        // The new TLS state rides the same swap: fs_base plus the
+        // group-wide template facts later thread creations clone from.
+        p->fs_base = loader_proc->fs_base;
+        p->tls_template_va = loader_proc->tls_template_va;
+        p->tls_template_size = loader_proc->tls_template_size;
+        p->tls_align = loader_proc->tls_align;
         spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
 
         // The exec'ing member is now a group of one, exactly like a
@@ -1348,6 +1375,10 @@ static bool exec_terminate_thread_group(Process *leader)
         p->leader_pid = p->pid;
         p->user_stack_lo = 0;
         p->user_stack_size = 0;
+        // The thread-owned TLS mapping went with the old address space the
+        // same way: the fresh TCB at fs_base is all this thread has now.
+        p->tls_lo = 0;
+        p->tls_len = 0;
 
         scheduler_sever_dead_group_references(old_pml4);
         scheduler_big_unlock_irqrestore(sched_flags);
@@ -1432,6 +1463,7 @@ static bool exec_terminate_thread_group(Process *leader)
     loader_proc->uid = p->uid;
     loader_proc->parent_pid = p->pid;
     spinlock_init(&loader_proc->vma_lock);
+    loader_proc->vma_lock_ptr = &loader_proc->vma_lock;
 
     uint64_t entry = elf_load_user(buffer.get(), file_size, loader_proc);
     if (entry == 0) {
@@ -1441,6 +1473,20 @@ static bool exec_terminate_thread_group(Process *leader)
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         DEBUG_ERROR("kernel_exec: elf_load_user failed for %s", resolved);
+        return -1;
+    }
+
+    // Install the image's TLS before the task exists: a failure here
+    // unwinds exactly like a loader failure, with no half-built child to
+    // tear down. The loader is a throwaway with pid 0, so the TCB's tid is
+    // patched to the child's pid below, before the child can ever run.
+    if (!elf_install_tls(loader_proc, buffer.get(), file_size)) {
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
+        vmm_free_address_space(new_pml4);
+        aligned_free(loader_proc);
+        DEBUG_ERROR("kernel_exec: tls install failed for %s", resolved);
         return -1;
     }
 
@@ -1465,6 +1511,20 @@ static bool exec_terminate_thread_group(Process *leader)
     vma_list_free(loader_proc->vmalist);
     loader_proc->vmalist = nullptr;
     child->exec_entry = entry;
+
+    // The TLS state rides the handoff with the address space. The TCB was
+    // written with the throwaway loader's pid; fix tid in place through
+    // the direct map — vmm_virt_to_phys_in folds the page offset into its
+    // return, so the translated address lands on the TCB's first byte.
+    child->fs_base = loader_proc->fs_base;
+    child->tls_template_va = loader_proc->tls_template_va;
+    child->tls_template_size = loader_proc->tls_template_size;
+    child->tls_align = loader_proc->tls_align;
+    if (child->fs_base != 0) {
+        const uint64_t tcb_phys = vmm_virt_to_phys_in(new_pml4, child->fs_base);
+        if (tcb_phys != 0)
+            reinterpret_cast<UniTcb *>(vmm_phys_to_virt(tcb_phys))->tid = child->pid;
+    }
 
     // Capture before publishing: the task can run and exit on another core
     // the moment it is queued.
