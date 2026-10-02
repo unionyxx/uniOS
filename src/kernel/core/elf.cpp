@@ -146,6 +146,14 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
         uint64_t file_end = 0;
         if (add_overflow_u64(phdr[i].p_offset, phdr[i].p_filesz, &file_end) || file_end > size)
             return false;
+        // The recorded vaddr becomes the clone source for sys_thread_create
+        // (safe_copy_from_user, a fault-fixup walk): without a user-half
+        // bound a crafted header points the clone at the kernel's mapped
+        // half and copies kernel memory into a user TLS block.
+        constexpr uint64_t kKernelHalfFloor = 0xFFFF800000000000ULL;
+        uint64_t template_end = 0;
+        if (add_overflow_u64(phdr[i].p_vaddr, phdr[i].p_memsz, &template_end) || template_end > kKernelHalfFloor)
+            return false;
         *template_offset = phdr[i].p_offset;
         *memsz = phdr[i].p_memsz;
         *align = phdr[i].p_align;

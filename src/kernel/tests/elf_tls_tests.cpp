@@ -328,3 +328,21 @@ KTEST(elf_install_tls_absent_image_tcb_only)
 
     scratch_loader_free(loader);
 }
+
+// The template vaddr is the sys_thread_create clone source: a kernel-half
+// vaddr would copy kernel memory into a user TLS block through the
+// fault-fixup walk, so the parse must reject it.
+KTEST(elf_tls_info_rejects_kernel_half_vaddr)
+{
+    uint64_t off = 0, memsz = 0, align = 0, vaddr = 0, filesz = 0;
+    TlsElf e;
+    make_tls_image(e);
+    e.tls.p_vaddr = 0xFFFF800000000000ULL + k_tls_offset;
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&e), sizeof(e), &off, &memsz, &align, &vaddr, &filesz));
+
+    TlsElf spans = e;
+    spans.tls.p_vaddr = 0xFFFF800000000000ULL - 8; // just below the kernel half
+    spans.tls.p_memsz = 16;                      // vaddr + memsz crosses into it
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&spans), sizeof(spans), &off, &memsz, &align, &vaddr,
+                               &filesz));
+}
