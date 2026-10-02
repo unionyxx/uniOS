@@ -29,8 +29,8 @@ KTEST(net_syscall_status_fills_struct)
     KTEST_EXPECT(current != nullptr);
 
     uint64_t *orig_page_table = current->page_table;
-    VMA *orig_vma_list = current->vma_list;
-    uint32_t orig_vma_count = current->vma_count;
+    VMA *orig_vma_list = current->vmalist->head;
+    uint32_t orig_vma_count = current->vmalist->count;
 
     if (!current->page_table)
         current->page_table = vmm_get_kernel_pml4();
@@ -50,8 +50,8 @@ KTEST(net_syscall_status_fills_struct)
     vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
-    current->vma_list = vma;
-    current->vma_count = 1;
+    current->vmalist->head = vma;
+    current->vmalist->count = 1;
 
     NetStatus *out = reinterpret_cast<NetStatus *>(TEST_VADDR);
     kstring::zero_memory(out, sizeof(NetStatus));
@@ -69,8 +69,8 @@ KTEST(net_syscall_status_fills_struct)
     free(vma);
 
     current->page_table = orig_page_table;
-    current->vma_list = orig_vma_list;
-    current->vma_count = orig_vma_count;
+    current->vmalist->head = orig_vma_list;
+    current->vmalist->count = orig_vma_count;
 }
 
 KTEST(net_syscall_socket_state_rejects_bad_handles)

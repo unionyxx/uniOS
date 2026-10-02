@@ -1,22 +1,22 @@
-#include <kernel/sync/futex.h>
+#include <kernel/cpu.h>
+#include <kernel/debug.h>
 #include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
-#include <kernel/debug.h>
-#include <kernel/cpu.h>
 #include <kernel/scheduler.h>
+#include <kernel/sync/futex.h>
 #include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 
-#define STAC() \
-    do { \
-        if (g_cpu_features.has_smap) \
-            asm volatile("stac" ::: "memory"); \
+#define STAC()                                                                                                         \
+    do {                                                                                                               \
+        if (g_cpu_features.has_smap)                                                                                   \
+            asm volatile("stac" ::: "memory");                                                                         \
     } while (0)
 
-#define CLAC() \
-    do { \
-        if (g_cpu_features.has_smap) \
-            asm volatile("clac" ::: "memory"); \
+#define CLAC()                                                                                                         \
+    do {                                                                                                               \
+        if (g_cpu_features.has_smap)                                                                                   \
+            asm volatile("clac" ::: "memory");                                                                         \
     } while (0)
 
 FutexBucket g_futex_table[FUTEX_HASH_SIZE];
@@ -43,7 +43,7 @@ static bool futex_read_user_value(Process *p, volatile uint32_t *uaddr, uint32_t
 {
     const uint64_t addr = reinterpret_cast<uint64_t>(uaddr);
     uint64_t flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-    VMA *vma = vma_find(p->vma_list, addr);
+    VMA *vma = vma_find(p->vmalist->head, addr);
     if (!vma || vma->start > addr || vma->end < addr + sizeof(uint32_t)) {
         spinlock_release_irqrestore(p->vma_lock_ptr, flags);
         return false;
@@ -90,7 +90,8 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
     }
 
     // virt -> phys for the futex address
-    uint64_t phys_addr = vmm_virt_to_phys_in(current->page_table, reinterpret_cast<uint64_t>(const_cast<uint32_t *>(uaddr)));
+    uint64_t phys_addr =
+        vmm_virt_to_phys_in(current->page_table, reinterpret_cast<uint64_t>(const_cast<uint32_t *>(uaddr)));
     if (phys_addr == 0)
         return -14; // -EFAULT
 
@@ -125,8 +126,7 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
             return -4; // -EINTR
 
         return 0;
-    }
-    else if (op == FUTEX_WAKE) {
+    } else if (op == FUTEX_WAKE) {
         uint64_t flags = spinlock_acquire_irqsave(&bucket->lock);
         int woken = scheduler_wake_waiters_under_leaf(&bucket->wait_queue, val);
         spinlock_release_irqrestore(&bucket->lock, flags);

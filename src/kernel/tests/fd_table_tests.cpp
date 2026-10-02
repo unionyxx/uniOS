@@ -97,7 +97,7 @@ KTEST(fd_table_thread_create_shares_parent_table)
     if (thread) {
         scheduler_remove_from_ready_queue(thread);
         thread->state = ProcessState_Zombie;
-        thread->vma_list = nullptr;
+        thread->vmalist->head = nullptr;
         thread->page_table = nullptr;
     }
     // Reap immediately: the kernel-zombie reaper steals unwaited zombies

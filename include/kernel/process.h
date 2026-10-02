@@ -30,6 +30,20 @@ struct Context
 
 constexpr size_t FPU_STATE_SIZE = 4096; // Increased to 4K for safety
 
+// Shared, refcounted-by-lifetime VMA list. Threads share the leader's list
+// object live (the head field is shared, so unlinking the first node is
+// visible to every member); fork clones the list into a fresh object (COW).
+// Lifetime follows the existing deferred-free rules in the scheduler
+// (compare vmalist pointers), like page tables.
+struct VmaList
+{
+    VMA *head;
+    uint32_t count;
+};
+
+[[nodiscard]] VmaList *vma_list_alloc();
+void vma_list_free(VmaList *list);
+
 // Shared, refcounted file-descriptor table. Fork deep-copies the entries
 // (per-vnode refs bumped); threads created by sys_thread_create share the
 // leader's table live, so fd operations in one thread are visible to all
@@ -88,8 +102,7 @@ struct Process
     FdTable *fdtab;
 
     alignas(64) Spinlock vma_lock;
-    VMA *vma_list;
-    uint32_t vma_count;
+    VmaList *vmalist; // shared with threads, cloned on fork
     Spinlock *vma_lock_ptr;
     uint32_t _pad_vma[5]; // Maintain 64-byte alignment or at least clear padding
 

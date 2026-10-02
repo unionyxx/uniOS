@@ -16,7 +16,7 @@ STATIC_ASSERT(offsetof(Process, fpu_state) == 64, "Process::fpu_state offset mis
 STATIC_ASSERT(offsetof(Process, pid) == 4160, "Process::pid offset mismatch");
 STATIC_ASSERT(offsetof(Process, sp) == 4216, "Process::sp offset mismatch");
 STATIC_ASSERT(offsetof(Process, page_table) == 4240, "Process::page_table offset mismatch");
-STATIC_ASSERT(offsetof(Process, vma_list) == 4360, "Process::vma_list offset mismatch");
+STATIC_ASSERT(offsetof(Process, vmalist) == 4360, "Process::vmalist offset mismatch");
 
 using kstring::memcpy;
 
@@ -1081,7 +1081,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
     const bool write_fault = (error_code & 0x2) != 0;
 
     Process *curr = process_get_current();
-    if (!curr || !curr->vma_list || !curr->page_table) {
+    if (!curr || !curr->vmalist->head || !curr->page_table) {
         fault_cpu->fault_depth--;
         return false;
     }
@@ -1099,7 +1099,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         return false;
     }
 
-    VMA *vma = vma_find(curr->vma_list, fault_addr);
+    VMA *vma = vma_find(curr->vmalist->head, fault_addr);
     if (!vma) {
         spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
         fault_cpu->fault_depth--;

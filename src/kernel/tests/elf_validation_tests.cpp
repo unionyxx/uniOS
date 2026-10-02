@@ -260,7 +260,8 @@ KTEST(elf_load_user_zeroes_multipage_bss_in_bounds)
     KTEST_EXPECT(loader != nullptr);
     kstring::zero_memory(loader, sizeof(Process));
     loader->page_table = pml4;
-    loader->vma_list = nullptr;
+    loader->vmalist = vma_list_alloc();
+    KTEST_EXPECT(loader->vmalist != nullptr);
 
     const uint64_t entry = elf_load_user(reinterpret_cast<const uint8_t *>(&e), sizeof(e), loader);
     KTEST_EXPECT(entry == k_entry);
@@ -308,8 +309,11 @@ KTEST(elf_load_user_zeroes_multipage_bss_in_bounds)
     }
     KTEST_EXPECT(bss_zero);
 
-    if (loader->vma_list)
-        vma_free_all(loader->vma_list);
+    if (loader->vmalist) {
+        if (loader->vmalist->head)
+            vma_free_all(loader->vmalist->head);
+        vma_list_free(loader->vmalist);
+    }
     vmm_free_address_space(pml4);
     aligned_free(loader);
 }

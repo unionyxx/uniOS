@@ -101,14 +101,14 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
         return true;
 
     VMA *prev = nullptr;
-    VMA *curr = proc->vma_list;
+    VMA *curr = proc->vmalist->head;
     while (curr && curr->end < start) {
         prev = curr;
         curr = curr->next;
     }
 
     if (!curr || end < curr->start)
-        return vma_add(&proc->vma_list, start, end, flags, type) != nullptr;
+        return vma_add(&proc->vmalist->head, start, end, flags, type) != nullptr;
 
     curr->start = curr->start < start ? curr->start : start;
     curr->end = curr->end > end ? curr->end : end;
@@ -291,7 +291,7 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
     constexpr int USER_STACK_PAGES = 8; // 32 KB default stack
     const uint64_t stack_base = k_user_stack_top - (USER_STACK_PAGES * k_page_size);
     if (proc) {
-        if (!vma_add(&proc->vma_list, stack_base, k_user_stack_top, PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX,
+        if (!vma_add(&proc->vmalist->head, stack_base, k_user_stack_top, PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX,
                      VMAType::Stack)) {
             DEBUG_ERROR("elf_load_user: failed to add stack VMA");
             return 0;

@@ -43,6 +43,7 @@ WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
 // UINT64_MAX when none is armed. Updated lock-free (monotonic min); fired
 // from the tick path under g_sched_lock.
 static volatile uint64_t g_epoll_wake_deadline = UINT64_MAX;
+
 extern "C" void scheduler_unlock_after_switch();
 
 // Zombies whose resources are still shared with live threads cannot be freed
@@ -128,7 +129,7 @@ static bool process_free_reaped(Process *target)
             if (curr != target) {
                 if (curr->page_table == target->page_table)
                     share_page_table = true;
-                if (curr->vma_list == target->vma_list)
+                if (curr->vmalist == target->vmalist)
                     share_vma_list = true;
                 // Threads lock VMAs through the leader's EMBEDDED spinlock;
                 // freeing the struct while they do is a use-after-free of
@@ -165,8 +166,11 @@ static bool process_free_reaped(Process *target)
 
     if (target->page_table)
         vmm_free_address_space(target->page_table);
-    if (target->vma_list)
-        vma_free_all(target->vma_list);
+    if (target->vmalist) {
+        vma_free_all(target->vmalist->head);
+        vma_list_free(target->vmalist);
+        target->vmalist = nullptr;
+    }
 
     aligned_free(target);
     return true;
@@ -269,6 +273,22 @@ static void reap_kernel_zombies()
         DEBUG_INFO("Reaped detached zombie PID %d", target->pid);
         process_free_reaped(target);
     }
+}
+
+VmaList *vma_list_alloc()
+{
+    auto *l = static_cast<VmaList *>(aligned_alloc(64, sizeof(VmaList)));
+    if (!l)
+        return nullptr;
+    l->head = nullptr;
+    l->count = 0;
+    return l;
+}
+
+void vma_list_free(VmaList *list)
+{
+    if (list)
+        aligned_free(list);
 }
 
 FdTable *fd_table_alloc(bool stdio_marks)
@@ -1285,6 +1305,7 @@ void scheduler_init()
 
     kproc->priority = 2;
     kproc->fdtab = fd_table_alloc();
+    kproc->vmalist = vma_list_alloc();
 
     init_fpu_state(kproc->fpu_state);
     kproc->fpu_initialized = true;
@@ -1337,6 +1358,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     proc->cwd[0] = '/';
     proc->cwd[1] = '\0';
     proc->fdtab = fd_table_alloc();
+    proc->vmalist = vma_list_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
 
@@ -1421,6 +1443,7 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     proc->cwd[0] = '/';
     proc->cwd[1] = '\0';
     proc->fdtab = fd_table_alloc();
+    proc->vmalist = vma_list_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
 
@@ -1512,6 +1535,7 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     proc->priority = NUM_PRIORITY_LEVELS - 1; // IDLE class: never preempts real work
     proc->time_slice = 0;
     proc->fdtab = fd_table_alloc(false);
+    proc->vmalist = vma_list_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
     init_fpu_state(proc->fpu_state);
@@ -1638,6 +1662,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     // Fork semantics: the child gets its own table (entries copied, per-vnode
     // refs bumped under the table's irqsave leaf lock).
     child->fdtab = fd_table_copy(current_proc()->fdtab);
+    child->vmalist = vma_list_alloc();
 
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
@@ -1663,10 +1688,12 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     spinlock_init(&child->vma_lock);
     child->vma_lock_ptr = &child->vma_lock;
     uint64_t vma_clone_flags = spinlock_acquire_irqsave(current_proc()->vma_lock_ptr);
-    child->vma_list = vma_clone(current_proc()->vma_list);
+    VMA *cloned_head = vma_clone(current_proc()->vmalist->head);
     spinlock_release_irqrestore(current_proc()->vma_lock_ptr, vma_clone_flags);
+    child->vmalist->head = cloned_head;
+    child->vmalist->count = current_proc()->vmalist->count;
 
-    if (current_proc()->vma_list && !child->vma_list) {
+    if (current_proc()->vmalist->head && !child->vmalist->head) {
         process_release_private_fds(child);
         vmm_free_address_space(child->page_table);
         aligned_free(child);
@@ -1677,8 +1704,8 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     void *stack_phys = pmm_alloc_frames(stack_pages);
     if (!stack_phys) {
         process_release_private_fds(child);
-        if (child->vma_list)
-            vma_free_all(child->vma_list);
+        if (child->vmalist->head)
+            vma_free_all(child->vmalist->head);
         vmm_free_address_space(child->page_table);
         aligned_free(child);
         return static_cast<uint64_t>(-1);
@@ -2059,7 +2086,7 @@ extern "C" void thread_ret();
     kstring::strncpy(thread->cwd, parent->cwd, sizeof(thread->cwd));
 
     thread->page_table = parent->page_table;
-    thread->vma_list = parent->vma_list;
+    thread->vmalist = parent->vmalist; // shared live: head + count
     spinlock_init(&thread->vma_lock);
     thread->vma_lock_ptr = parent->vma_lock_ptr;
 

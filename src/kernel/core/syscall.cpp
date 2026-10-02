@@ -311,7 +311,7 @@ static bool shm_unmap_from_process(Process *p, int id)
     const uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-    VMA *mapping = vma_find(p->vma_list, virt_start);
+    VMA *mapping = vma_find(p->vmalist->head, virt_start);
     if (!mapping || mapping->start != virt_start || mapping->type != VMAType::Shared) {
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
@@ -319,7 +319,7 @@ static bool shm_unmap_from_process(Process *p, int id)
 
     const uint64_t mapping_start = mapping->start;
     const uint64_t mapping_end = mapping->end;
-    vma_remove(&p->vma_list, mapping_start, mapping_end);
+    vma_remove(&p->vmalist->head, mapping_start, mapping_end);
 
     // Clear the PTEs under the SAME hold that removed the metadata (fork's
     // clone serializes here and does check-free refcount incs on present
@@ -364,7 +364,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     uint64_t end_addr = addr + length;
 
     // Check for overlap with protected Text or Stack VMAs
-    for (VMA *curr = p->vma_list; curr; curr = curr->next) {
+    for (VMA *curr = p->vmalist->head; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > addr) {
             if (curr->type == VMAType::Text || curr->type == VMAType::Stack) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
@@ -374,7 +374,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     }
 
     // Apply the unmap logic to the VMA list
-    if (!vma_unmap(&p->vma_list, addr, end_addr)) {
+    if (!vma_unmap(&p->vmalist->head, addr, end_addr)) {
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
         return false;
     }
@@ -1246,29 +1246,44 @@ static void user_task_wrapper()
 
     kstring::memcpy(loader_proc, p, sizeof(Process));
     loader_proc->page_table = new_pml4;
-    loader_proc->vma_list = nullptr;
+    // The loader MUST NOT alias the live process's VmaList object: resetting
+    // its head would destroy the running list here, and the handoff below
+    // would then free the freshly loaded list instead of the old one. Give
+    // the loader its own object, exactly like kernel_exec.
+    loader_proc->vmalist = vma_list_alloc();
+    if (!loader_proc->vmalist) {
+        vmm_free_address_space(new_pml4);
+        vfs_close_vnode(node);
+        aligned_free(loader_proc);
+        return -1;
+    }
 
     uint64_t entry = elf_load_user(buffer.get(), node->size, loader_proc);
     vfs_close_vnode(node);
 
     if (entry == 0) {
-        if (loader_proc->vma_list)
-            vma_free_all(loader_proc->vma_list);
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         return -1;
     }
 
     uint64_t *old_pml4 = p->page_table;
-    VMA *old_vma_list = p->vma_list;
+    VMA *old_vma_list = p->vmalist->head;
 
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     p->page_table = new_pml4;
-    p->vma_list = loader_proc->vma_list;
+    p->vmalist->head = loader_proc->vmalist->head;
+    p->vmalist->count = loader_proc->vmalist->count;
     p->exec_entry = entry;
     spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
-    loader_proc->vma_list = nullptr;
+    loader_proc->vmalist->head = nullptr;
+    loader_proc->vmalist->count = 0;
+    vma_list_free(loader_proc->vmalist);
+    loader_proc->vmalist = nullptr;
     aligned_free(loader_proc);
 
     if (old_vma_list)
@@ -1336,15 +1351,22 @@ static void user_task_wrapper()
     }
     kstring::zero_memory(loader_proc, sizeof(Process));
     loader_proc->page_table = new_pml4;
-    loader_proc->vma_list = nullptr;
+    loader_proc->vmalist = vma_list_alloc();
+    if (!loader_proc->vmalist) {
+        vmm_free_address_space(new_pml4);
+        aligned_free(loader_proc);
+        DEBUG_ERROR("kernel_exec: vma list allocation failed for %s", resolved);
+        return -1;
+    }
     loader_proc->uid = p->uid;
     loader_proc->parent_pid = p->pid;
     spinlock_init(&loader_proc->vma_lock);
 
     uint64_t entry = elf_load_user(buffer.get(), file_size, loader_proc);
     if (entry == 0) {
-        if (loader_proc->vma_list)
-            vma_free_all(loader_proc->vma_list);
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         DEBUG_ERROR("kernel_exec: elf_load_user failed for %s", resolved);
@@ -1357,8 +1379,9 @@ static void user_task_wrapper()
     // active (observed as a supervisor-only 2MiB fault at the ELF entry).
     Process *child = scheduler_create_task_deferred(user_task_wrapper, path);
     if (!child) {
-        if (loader_proc->vma_list)
-            vma_free_all(loader_proc->vma_list);
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
         DEBUG_ERROR("kernel_exec: scheduler_create_task failed for %s", resolved);
@@ -1366,8 +1389,12 @@ static void user_task_wrapper()
     }
 
     child->page_table = new_pml4;
-    child->vma_list = loader_proc->vma_list;
-    loader_proc->vma_list = nullptr;
+    child->vmalist->head = loader_proc->vmalist->head;
+    child->vmalist->count = loader_proc->vmalist->count;
+    loader_proc->vmalist->head = nullptr;
+    loader_proc->vmalist->count = 0;
+    vma_list_free(loader_proc->vmalist);
+    loader_proc->vmalist = nullptr;
     child->exec_entry = entry;
 
     // Capture before publishing: the task can run and exit on another core
@@ -1510,7 +1537,7 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     // munmap cannot free pages mid-rewrite. One batched shootdown replaces a
     // per-page IPI round trip.
     uint64_t sl_flags = spinlock_acquire_irqsave(current->vma_lock_ptr);
-    for (VMA *curr = current->vma_list; curr; curr = curr->next) {
+    for (VMA *curr = current->vmalist->head; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > start_addr) {
             // Preserve SHARED: dropping it would make the next fork COW
             // downgrade a genuinely shared (memfd/SHM) mapping.
@@ -1906,7 +1933,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             bool overlap_found;
             do {
                 overlap_found = false;
-                for (VMA *curr = p->vma_list; curr; curr = curr->next) {
+                for (VMA *curr = p->vmalist->head; curr; curr = curr->next) {
                     uint64_t probe_end = 0;
                     if (!checked_add_u64(virt_start, length, &probe_end)) {
                         spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
@@ -1948,7 +1975,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 flags |= PTE_SHARED;
                 vma_type = VMAType::Shared;
             }
-            if (!vma_add(&p->vma_list, virt_start, virt_end, flags, vma_type)) {
+            if (!vma_add(&p->vmalist->head, virt_start, virt_end, flags, vma_type)) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                 if (memfd_node)
                     vfs_close_vnode(memfd_node);
@@ -1970,7 +1997,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 if (phys)
                                     pmm_refcount_dec(reinterpret_cast<void *>(phys));
                             }
-                            vma_remove(&p->vma_list, virt_start, virt_end);
+                            vma_remove(&p->vmalist->head, virt_start, virt_end);
                             spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
@@ -1986,7 +2013,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 if (phys)
                                     pmm_free_frame(reinterpret_cast<void *>(phys));
                             }
-                            vma_remove(&p->vma_list, virt_start, virt_end);
+                            vma_remove(&p->vmalist->head, virt_start, virt_end);
                             spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                             vfs_close_vnode(memfd_node);
                             return static_cast<uint64_t>(-1);
@@ -2024,7 +2051,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                                 }
                             }
                         }
-                        vma_remove(&p->vma_list, virt_start, virt_end);
+                        vma_remove(&p->vmalist->head, virt_start, virt_end);
                         spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                         vfs_close_vnode(memfd_node);
                         return static_cast<uint64_t>(-1);
@@ -2047,7 +2074,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         if (phys)
                             pmm_free_frame(reinterpret_cast<void *>(phys));
                     }
-                    vma_remove(&p->vma_list, virt_start, virt_end);
+                    vma_remove(&p->vmalist->head, virt_start, virt_end);
                     spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                     return static_cast<uint64_t>(-1);
                 }
@@ -2061,7 +2088,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         if (phys)
                             pmm_free_frame(reinterpret_cast<void *>(phys));
                     }
-                    vma_remove(&p->vma_list, virt_start, virt_end);
+                    vma_remove(&p->vmalist->head, virt_start, virt_end);
                     spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
                     return static_cast<uint64_t>(-1);
                 }
@@ -2357,7 +2384,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // Idempotent: a second call returns the existing mapping instead
             // of failing on already-present PTEs.
             uint64_t chk_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-            VMA *existing_fb = vma_find(p->vma_list, virt_start);
+            VMA *existing_fb = vma_find(p->vmalist->head, virt_start);
             if (existing_fb) {
                 const bool same_mapping = existing_fb->start == virt_start && existing_fb->end >= virt_start + size &&
                                           (existing_fb->flags & PTE_SHARED);
@@ -2368,7 +2395,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // Publish the VMA and install the PTEs under one continuous lock
             // hold, same as the SHM path: a racing munmap or fork clone
             // serializes here instead of tearing the half-installed mapping.
-            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+            if (!vma_add(&p->vmalist->head, virt_start, virt_start + size, flags, VMAType::Shared)) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
                 return static_cast<uint64_t>(-1);
             }
@@ -2382,7 +2409,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                         for (size_t j = 0; j < i; j++) {
                             vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
                         }
-                        vma_remove(&p->vma_list, virt_start, virt_start + size);
+                        vma_remove(&p->vmalist->head, virt_start, virt_start + size);
                         spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
                         return static_cast<uint64_t>(-1);
                     }
@@ -3037,7 +3064,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 
             uint64_t vma_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-            VMA *existing = vma_find(p->vma_list, virt_start);
+            VMA *existing = vma_find(p->vmalist->head, virt_start);
             if (existing) {
                 bool same_mapping = existing->start == virt_start && existing->end >= virt_start + size &&
                                     (existing->flags & PTE_SHARED);
@@ -3051,7 +3078,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             // mapping whose metadata is not yet visible, and the clone can
             // never snapshot a half-installed region.
             uint64_t flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_SHARED;
-            if (!vma_add(&p->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+            if (!vma_add(&p->vmalist->head, virt_start, virt_start + size, flags, VMAType::Shared)) {
                 spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
                 return static_cast<uint64_t>(-1);
             }
@@ -3061,7 +3088,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 pmm_refcount_inc(reinterpret_cast<void *>(phys_start + mapped));
                 if (!vmm_map_page_in(p->page_table, virt_start + mapped, phys_start + mapped, flags).ok()) {
                     pmm_refcount_dec(reinterpret_cast<void *>(phys_start + mapped));
-                    vma_remove(&p->vma_list, virt_start, virt_start + size);
+                    vma_remove(&p->vmalist->head, virt_start, virt_start + size);
                     for (uint64_t rollback = 0; rollback < mapped; rollback += 4096) {
                         vmm_unmap_page_in(p->page_table, virt_start + rollback);
                         pmm_refcount_dec(reinterpret_cast<void *>(phys_start + rollback));

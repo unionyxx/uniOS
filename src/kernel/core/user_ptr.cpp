@@ -1,8 +1,8 @@
-#include <kernel/user_ptr.h>
 #include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/process.h>
 #include <kernel/sync/spinlock.h>
+#include <kernel/user_ptr.h>
 
 [[nodiscard]] bool validate_user_ptr(const void *ptr, size_t size, bool write)
 {
@@ -25,7 +25,7 @@
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     uint64_t current = addr;
     while (current < end) {
-        VMA *vma = vma_find(p->vma_list, current);
+        VMA *vma = vma_find(p->vmalist->head, current);
         if (!vma) {
             spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
             return false;

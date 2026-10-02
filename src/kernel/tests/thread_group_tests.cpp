@@ -40,8 +40,8 @@ KTEST(thread_group_exit_kills_blocked_siblings)
     KTEST_EXPECT(leader != nullptr);
 
     uint64_t *orig_page_table = leader->page_table;
-    VMA *orig_vma_list = leader->vma_list;
-    uint32_t orig_vma_count = leader->vma_count;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -60,8 +60,8 @@ KTEST(thread_group_exit_kills_blocked_siblings)
     vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
-    leader->vma_list = vma;
-    leader->vma_count = 1;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -124,6 +124,6 @@ KTEST(thread_group_exit_kills_blocked_siblings)
     // inherit a false fatal signal.
     leader->signals.pending = 0;
     leader->page_table = orig_page_table;
-    leader->vma_list = orig_vma_list;
-    leader->vma_count = orig_vma_count;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
 }

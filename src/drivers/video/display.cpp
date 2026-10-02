@@ -2284,7 +2284,7 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
         return false;
 
     uint64_t sl_flags = spinlock_acquire_irqsave(process->vma_lock_ptr);
-    const VMA *existing = vma_find(process->vma_list, virt_start);
+    const VMA *existing = vma_find(process->vmalist->head, virt_start);
     if (existing) {
         bool same_mapping =
             existing->start == virt_start && existing->end >= virt_start + size && (existing->flags & PTE_SHARED);
@@ -2307,7 +2307,7 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
     // mapping must never be visible to them). Rollbacks remove the VMA
     // again before releasing.
     uint64_t flags = display_buffer_user_page_flags(*buffer);
-    if (!vma_add(&process->vma_list, virt_start, virt_start + size, flags, VMAType::Shared)) {
+    if (!vma_add(&process->vmalist->head, virt_start, virt_start + size, flags, VMAType::Shared)) {
         spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
         return false;
     }
@@ -2321,7 +2321,7 @@ static bool display_map_buffer_into_process(DisplayBufferObject *buffer, Display
                 vmm_unmap_page_in(process->page_table, virt_start + rollback);
                 pmm_refcount_dec(reinterpret_cast<void *>(buffer->dma.phys + rollback));
             }
-            vma_remove(&process->vma_list, virt_start, virt_start + size);
+            vma_remove(&process->vmalist->head, virt_start, virt_start + size);
             spinlock_release_irqrestore(process->vma_lock_ptr, sl_flags);
             asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
             return false;
@@ -2356,7 +2356,7 @@ static void display_unmap_buffer_from_current_process(DisplayBufferObject *buffe
     // fork clone cannot refcount a frame this unmap is releasing; the flush
     // happens after the unlock (never shoot down under a contended lock).
     uint64_t sl_flags = spinlock_acquire_irqsave(process->vma_lock_ptr);
-    vma_remove(&process->vma_list, virt_start, virt_start + size);
+    vma_remove(&process->vmalist->head, virt_start, virt_start + size);
 
     for (uint64_t i = 0; i < size; i += 4096u) {
         vmm_unmap_page_in(process->page_table, virt_start + i);
