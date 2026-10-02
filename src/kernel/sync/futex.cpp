@@ -157,7 +157,19 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
                 return -110; // -ETIMEDOUT
             }
         } else {
-            scheduler_wait(&bucket->wait_queue, &bucket->lock);
+            // Untimed wait with a lost-signal guard. On SMP a fatal signal
+            // can land between the pre-wait check above and the queue push:
+            // the sender sets the pending bit but its unlocked state read
+            // still sees Running, so no wake ever comes and the waiter
+            // would sleep through its own death until an unrelated futex
+            // wake. The queued recheck closes that window — the pending
+            // mask is re-read under g_sched_lock, immediately before the
+            // park (on UP the bucket lock already keeps IRQs off across
+            // the whole check-to-park span, so only SMP benefits).
+            scheduler_wait_rechecked(
+                &bucket->wait_queue, &bucket->lock,
+                [](void *raw) -> bool { return scheduler_fatal_signal_pending(static_cast<const Process *>(raw)); },
+                current);
             spinlock_release_irqrestore(&bucket->lock, flags);
         }
 

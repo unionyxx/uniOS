@@ -13,6 +13,7 @@
 #include <uapi/syscalls_ext.h>
 
 extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd);
+void signal_send(Process *p, int sig);
 
 namespace {
 
@@ -490,6 +491,106 @@ KTEST(futex_huge_timeout_does_not_expire_early)
     vmm_unmap_page_in(leader->page_table, TEST_VADDR);
     pmm_free_frame(page);
     free(vma);
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+    leader->vmalist->count = orig_vma_count;
+}
+
+// ---- untimed futex waits vs fatal signals ----
+
+static volatile uint32_t *g_eintr_word;
+static volatile int64_t g_eintr_retval;
+
+static void futex_eintr_waiter_thread()
+{
+    g_eintr_retval = sys_futex(g_eintr_word, FUTEX_WAIT, 0);
+    sys_thread_exit(0);
+}
+
+// The EINTR contract at every signal arrival point a ktest can drive an
+// untimed futex wait through: pending before the call (pre-wait check)
+// and pending while parked (wake + post-wait check). The third point —
+// a fatal signal landing between the pre-wait check and the queue push —
+// is SMP-only and not deterministically constructible here (on UP the
+// bucket lock keeps IRQs off across that whole span); the queued recheck
+// in the untimed path covers it by construction.
+KTEST(futex_untimed_wait_returns_eintr_on_fatal_signal)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    uint32_t orig_vma_count = leader->vmalist->count;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    volatile uint32_t *word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *word = 0;
+
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + 4096;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->next = nullptr;
+    leader->vmalist->head = vma;
+    leader->vmalist->count = 1;
+
+    // Signal already pending: the wait must refuse to sleep instead of
+    // parking with a fatal signal queued.
+    leader->signals.pending = 1ULL << SIGKILL;
+    KTEST_EXPECT_EQ(sys_futex(word, FUTEX_WAIT, 0, 0), -4);
+    leader->signals.pending = 0;
+
+    // Signal arriving while parked: the waiter must come back with -EINTR
+    // rather than sleeping until an unrelated futex wake.
+    g_eintr_word = word;
+    g_eintr_retval = 0;
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    const int64_t tid = sys_thread_create(futex_eintr_waiter_thread, nullptr, top, &mock_frame);
+    KTEST_EXPECT(tid > 0);
+
+    bool parked = false;
+    for (int i = 0; i < 200 && !parked; i++) {
+        scheduler_yield();
+        Process *waiter = process_find_by_pid(static_cast<uint64_t>(tid));
+        parked = waiter && (waiter->state == ProcessState_Waiting || waiter->state == ProcessState_Blocked);
+    }
+    KTEST_EXPECT(parked);
+
+    signal_send(process_find_by_pid(static_cast<uint64_t>(tid)), SIGKILL);
+
+    bool done = false;
+    for (int i = 0; i < 500 && !done; i++) {
+        scheduler_yield();
+        done = g_eintr_retval != 0 || process_find_by_pid(static_cast<uint64_t>(tid)) == nullptr;
+    }
+    KTEST_EXPECT(done);
+    KTEST_EXPECT_EQ(g_eintr_retval, -4);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid, &status, 0);
+
+    free(stack);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(vma);
+    leader->signals.pending = 0;
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
     leader->vmalist->count = orig_vma_count;

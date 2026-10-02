@@ -988,6 +988,17 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
     if (lock)
         spinlock_release_no_restore(lock);
 
+    // Order the push before the recheck's condition read. Without this
+    // fence, store-load reordering can leave the queued state (p->state,
+    // p->waiting_queue) in this core's store buffer while the recheck
+    // already reads the condition; a producer that set the condition in
+    // that gap and read the stale un-queued state skips its wake, and the
+    // task sleeps through the condition it was promised to catch. With
+    // the fence, either the recheck sees the condition, or the producer's
+    // own post-store read sees the queued task and its wake (which
+    // serializes on g_sched_lock) is already on its way.
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
     if (recheck && recheck(ctx)) {
         // The condition turned true between the caller's last scan and this
         // push. Whoever set it finished their wake before we queued (both
