@@ -11,7 +11,7 @@ Userspace programs are native ELF binaries under `src/usr/`, linked at `0x400000
 3. Calls `main()` with no arguments (no argc/argv/envp or aux vector is delivered yet).
 4. Calls `exit(retval)`; a hang loop catches returns.
 
-It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as the signal restorer.
+It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as the signal restorer, and `__thread_exit_shim`: a thread whose entry function returns falls into it, and it moves the return value (`rax`) to the first argument, realigns the stack, and tail-jumps to `pthread_exit` — so a plain return cleans up exactly like an explicit exit.
 
 ## libc Subset
 
@@ -28,6 +28,19 @@ It also exports `__sigret` (`SYS_SIGRETURN` trampoline), which libc installs as 
 - **math**: freestanding `sqrt/sin/cos/tan/fabs/fmod` (plus `f` variants) — bit-seeded Newton sqrt (machine epsilon across the full double range) and range-reduced Taylor trig, so apps never hand-roll math.
 - **cxx.cpp**: global `new`/`delete` over malloc, a `__cxa_pure_virtual` fault handler, and the static-object runtime glue (`__cxa_guard_acquire/release/abort`, `__cxa_atexit`/`__cxa_finalize`/`__dso_handle` — single-threaded fast-path guards; static destructors are not run at exit because process teardown reclaims everything).
 - **vec.h / str.h**: header-only C++ containers for apps. `Vec<T>` is a growable array for trivially-copyable elements (realloc + memmove growth; `push`/`pop`/`insert`/`remove`/`resize`/`reserve`, checked `at()`, move-only ownership) that bounds-checks indexed access in debug builds and returns false on allocation failure instead of aborting. `String` is a growable NUL-terminated buffer (`assign`/`append`/`equals`, always-valid `c_str()`). They replace fixed-size row/entry arrays so lists are no longer silently truncated.
+
+## Threads (pthread)
+
+`src/usr/libc/pthread.h`/`pthread.c` implement a pthread-shaped API over the thread syscalls. `pthread_t` is the thread's pid; functions return 0 on success or the raw negative errno on failure (no `errno` in userspace). Every synchronization object is a single 32-bit word with a valid all-zero initial state (`PTHREAD_MUTEX_INITIALIZER`, `PTHREAD_COND_INITIALIZER`, `PTHREAD_RWLOCK_INITIALIZER`; `PTHREAD_ONCE_INIT` = 0), and `pthread_mutex_init`/`pthread_cond_init`/`pthread_rwlock_init` zero the word (`attr` ignored). See [Processes — Threads](processes.md#threads) for the kernel side.
+
+- **Lifecycle**: `pthread_create` mmaps one 132 KiB anonymous RW mapping per thread — 128 KiB of usable stack with a one-page `PROT_NONE` guard below it — writes the shim address at the stack top, and passes the whole range as the thread's recorded stack so the kernel unmaps it at exit; `attr` is ignored. `pthread_join` is a `waitpid` on the tid (`-10` when the target is not a joinable child); the status travels through the 32-bit exit channel, so only `int32_t`-ranged values round-trip. `pthread_exit` never returns, and a plain `return` from the entry function reaches it through the shim. `pthread_detach` wraps `SYS_THREAD_DETACH`; `pthread_self` is `SYS_GETPID`.
+- **Mutex**: one 32-bit word (0 unlocked, 1 locked, 2 locked-with-waiters), so a zero-initialized object is a valid unlocked mutex. `pthread_mutex_lock` futex-waits on the word under contention; `pthread_mutex_unlock` of an unheld mutex returns `-1` and leaves the state unchanged; `pthread_mutex_trylock` returns `-16` (EBUSY).
+- **Condvar**: a sequence counter. `pthread_cond_wait` records the counter, releases the mutex, and futex-waits on the recorded value; spurious wakeups are possible, so the caller owns the predicate loop. `pthread_cond_timedwait` takes a relative timeout in ms (0 = forever): `-110` (ETIMEDOUT) on expiry, `-28` propagated when the kernel's 16-slot timed-wait table is full and the wait never started. `pthread_cond_signal` bumps the counter and wakes one waiter; `pthread_cond_broadcast` bumps it and wakes every waiter — the futex has no requeue, so each re-acquires the mutex through its own contended path.
+- **Once**: `pthread_once_t` walks 0 (not run) → 1 (initializer running) → 2 (done); concurrent callers futex-wait on the running state.
+- **Rwlock**: one 32-bit word — active reader count in bits 0-29, writer-held bit 30, writer-waiting bit 31; a waiting writer blocks new readers, so a reader stream cannot starve it. `pthread_rwlock_rdlock` and `pthread_rwlock_wrlock` futex-wait on the word when blocked; `pthread_rwlock_tryrdlock` returns `-16` (EBUSY) when a writer holds or wants the lock, `pthread_rwlock_trywrlock` when readers are active or a writer holds it; `pthread_rwlock_unlock` of an idle rwlock returns `-1`, and unlocking a writer-held rwlock you do not own is undetectable — the one-word design carries no owner tracking.
+- The raw wrappers remain in `unistd.h` (`thread_create` with a caller-managed stack, `futex`, `futex_wait_timeout`) and `sys/mman.h` (`mmap`/`munmap`/`mprotect`, `MAP_FAILED`).
+
+Limits: no TLS, no attribute surface (fixed 128 KiB stacks), no `pthread_cancel`, no recursive or error-checking mutexes.
 
 ## libgui
 
@@ -77,7 +90,7 @@ Per `meson.build`:
 
 - `crt0` is assembled from `crt0.asm` (NASM elf64).
 - `libc`, `libgui`, `libapp`, and `libmedia` are static libraries built freestanding (`-fno-exceptions -fno-rtti -mno-red-zone`, no stack protector, no PIE).
-- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`) or `crt0 + libc + libapp + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `files` and `imageviewer`), so only referenced codec objects are pulled in.
+- The `app_sources` map lists each app directory; sources are globbed at setup time. Apps link `crt0 + libc` (`shell`, `init`, `threadtest`) or `crt0 + libc + libapp + libgui` (everything else) with `--whole-archive` through `ld.lld` and `user.ld`. `libmedia` is linked after `--no-whole-archive` for apps that need it (currently `files` and `imageviewer`), so only referenced codec objects are pulled in.
 - Each app ELF is staged as `/bin/<name>.elf` and packed into `unifs.img`.
 
-Current apps: shell, init, wm, menubar, dock, files, terminal, latitude, preferences, clock, calendar, calculator, imageviewer. Adding an app requires a map entry (see [Building and running](build.md)).
+Current apps: shell, init, wm, menubar, dock, files, terminal, latitude, preferences, clock, calendar, calculator, imageviewer, threadtest (a debug boot self-test; see [Testing](testing.md)). Adding an app requires a map entry (see [Building and running](build.md)).
