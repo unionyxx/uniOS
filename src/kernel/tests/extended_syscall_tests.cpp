@@ -1,21 +1,22 @@
-#include <kernel/ktest.h>
-#include <kernel/process.h>
-#include <kernel/scheduler.h>
-#include <kernel/sync/futex.h>
-#include <kernel/sync/mutex.h>
-#include <kernel/sync/epoll.h>
-#include <kernel/mm/vmm.h>
-#include <kernel/mm/vma.h>
-#include <kernel/mm/pmm.h>
-#include <kernel/mm/heap.h>
 #include <kernel/fs/pipe.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/ktest.h>
+#include <kernel/mm/heap.h>
+#include <kernel/mm/pmm.h>
+#include <kernel/mm/vma.h>
+#include <kernel/mm/vmm.h>
+#include <kernel/panic.h>
+#include <kernel/process.h>
+#include <kernel/scheduler.h>
+#include <kernel/sync/epoll.h>
+#include <kernel/sync/futex.h>
+#include <kernel/sync/mutex.h>
 #include <kernel/syscall.h>
-#include <uapi/syscalls.h>
-#include <uapi/syscalls_ext.h>
+#include <kernel/time/timer.h>
 #include <libk/kstd.h>
 #include <libk/kstring.h>
-#include <kernel/panic.h>
+#include <uapi/syscalls.h>
+#include <uapi/syscalls_ext.h>
 
 extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot);
 
@@ -63,9 +64,8 @@ KTEST(extended_syscalls_futex)
     const uint64_t test_vaddr = 0x10000000ULL;
     void *futex_phys = pmm_alloc_frame();
     KTEST_EXPECT(futex_phys != nullptr);
-    Result<void> futex_map =
-        vmm_replace_page_in(current->page_table, test_vaddr, reinterpret_cast<uint64_t>(futex_phys),
-                            PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    Result<void> futex_map = vmm_replace_page_in(
+        current->page_table, test_vaddr, reinterpret_cast<uint64_t>(futex_phys), PTE_PRESENT | PTE_USER | PTE_WRITABLE);
     KTEST_EXPECT(futex_map.ok());
     volatile uint32_t *uval = reinterpret_cast<volatile uint32_t *>(test_vaddr);
     *uval = 42;
@@ -216,7 +216,8 @@ KTEST(extended_syscalls_mprotect)
     // The bootloader identity-maps low RAM in the kernel PML4, so this slot is
     // already present: replace it deliberately (this is the mprotect test, not
     // the fresh-map path).
-    Result<void> map_res = vmm_replace_page_in(current->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys), PTE_PRESENT | PTE_USER);
+    Result<void> map_res =
+        vmm_replace_page_in(current->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys), PTE_PRESENT | PTE_USER);
     KTEST_EXPECT(map_res.ok());
 
     VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
@@ -277,9 +278,8 @@ KTEST(extended_syscalls_epoll)
     uint64_t test_vaddr = 0x10000000ULL;
     void *phys = pmm_alloc_frame();
     KTEST_EXPECT(phys != nullptr);
-    Result<void> map_res =
-        vmm_replace_page_in(p->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys),
-                            PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    Result<void> map_res = vmm_replace_page_in(p->page_table, test_vaddr, reinterpret_cast<uint64_t>(phys),
+                                               PTE_PRESENT | PTE_USER | PTE_WRITABLE);
     KTEST_EXPECT(map_res.ok());
 
     VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
@@ -361,6 +361,174 @@ KTEST(extended_syscalls_epoll)
     p->page_table = orig_page_table;
     p->vma_list = orig_vma_list;
     p->vma_count = orig_vma_count;
+}
+
+// Writer thread for the epoll wake test: yields for a while, then writes to
+// the pipe so a sleeper in sys_epoll_wait must be woken by a real producer.
+static void epoll_writer_thread(void *arg)
+{
+    int pipe_id = static_cast<int>(reinterpret_cast<uintptr_t>(arg));
+    for (int i = 0; i < 20; i++)
+        scheduler_yield();
+    pipe_write(pipe_id, "WAKE", 4);
+    while (true)
+        scheduler_yield();
+}
+
+// Common setup for the blocking epoll tests: maps a user page for the events
+// array, creates an epoll instance and a registered pipe read end.
+struct EpollBlockFixture
+{
+    VMA *vma;
+    void *phys;
+    int64_t epfd;
+    int pipe_id;
+    int read_fd;
+    struct epoll_event *user_ev;
+    struct epoll_event *user_events;
+};
+
+static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
+{
+    const uint64_t test_vaddr = 0x10000000ULL;
+    f.vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    f.phys = pmm_alloc_frame();
+    if (!f.vma || !f.phys)
+        return false;
+    if (!vmm_replace_page_in(p->page_table, test_vaddr, reinterpret_cast<uint64_t>(f.phys),
+                             PTE_PRESENT | PTE_USER | PTE_WRITABLE)
+             .ok())
+        return false;
+    f.vma->start = test_vaddr;
+    f.vma->end = test_vaddr + 4096;
+    f.vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    f.vma->type = VMAType::Anonymous;
+    f.vma->next = nullptr;
+    p->vma_list = f.vma;
+    p->vma_count = 1;
+
+    f.user_ev = reinterpret_cast<struct epoll_event *>(test_vaddr);
+    f.user_events = f.user_ev;
+
+    f.epfd = sys_epoll_create(4);
+    f.pipe_id = pipe_create();
+    f.read_fd = test_find_free_fd(p);
+    if (f.epfd < 3 || f.pipe_id < 0 || f.read_fd < 0)
+        return false;
+
+    p->fd_table[f.read_fd].used = true;
+    p->fd_table[f.read_fd].vnode = pipe_get_vnode(f.pipe_id, false);
+    p->fd_table[f.read_fd].flags = 0;
+
+    f.user_ev->events = EPOLLIN;
+    f.user_ev->data.fd = f.read_fd;
+    return sys_epoll_ctl(static_cast<int>(f.epfd), EPOLL_CTL_ADD, f.read_fd, f.user_ev) == 0;
+}
+
+static void epoll_block_fixture_teardown(Process *p, EpollBlockFixture &f, uint64_t *orig_page_table,
+                                         VMA *orig_vma_list, uint32_t orig_vma_count)
+{
+    vfs_close(f.read_fd);
+    vfs_close(static_cast<int>(f.epfd));
+    pipe_close_write(f.pipe_id);
+    pipe_close_read(f.pipe_id);
+    vmm_unmap_page_in(p->page_table, 0x10000000ULL);
+    pmm_free_frame(f.phys);
+    free(f.vma);
+    p->page_table = orig_page_table;
+    p->vma_list = orig_vma_list;
+    p->vma_count = orig_vma_count;
+}
+
+KTEST(extended_syscalls_epoll_timeout)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+
+    uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vma_list;
+    uint32_t orig_vma_count = p->vma_count;
+    if (!p->page_table)
+        p->page_table = vmm_get_kernel_pml4();
+
+    EpollBlockFixture f = {};
+    KTEST_EXPECT(epoll_block_fixture_setup(p, f));
+    if (!f.vma)
+        return;
+
+    // Blocking wait with a timeout on a pipe nobody writes to: the timeout
+    // must actually fire (nothing else wakes the epoll queue on a quiet
+    // system, so only the tick-driven deadline returns the sleeper).
+    const uint64_t start = timer_get_ticks();
+    int64_t r = sys_epoll_wait(static_cast<int>(f.epfd), f.user_events, 2, 300);
+    const uint64_t elapsed = timer_get_ticks() - start;
+    KTEST_EXPECT_EQ(r, 0);
+    KTEST_EXPECT(elapsed >= 200); // ~300ms budget with a generous margin
+
+    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+}
+
+KTEST(extended_syscalls_epoll_wake)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+
+    uint64_t *orig_page_table = p->page_table;
+    VMA *orig_vma_list = p->vma_list;
+    uint32_t orig_vma_count = p->vma_count;
+    if (!p->page_table)
+        p->page_table = vmm_get_kernel_pml4();
+
+    EpollBlockFixture f = {};
+    KTEST_EXPECT(epoll_block_fixture_setup(p, f));
+    if (!f.vma)
+        return;
+
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    if (!stack) {
+        epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+        return;
+    }
+    void *stack_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    int64_t thread_pid =
+        sys_thread_create(reinterpret_cast<void (*)()>(epoll_writer_thread),
+                          reinterpret_cast<void *>(static_cast<uintptr_t>(f.pipe_id)), stack_top, &mock_frame);
+    KTEST_EXPECT(thread_pid > 0);
+
+    // A writer on another thread must wake the sleeping epoll_wait through
+    // pipe_write -> scheduler_wake_all -> the epoll queue nudge: exactly the
+    // lost-wakeup window the queued recheck in scheduler_wait_rechecked
+    // closes. If the wake were lost this would sit for the full 5 s.
+    int64_t r = sys_epoll_wait(static_cast<int>(f.epfd), f.user_events, 2, 5000);
+    KTEST_EXPECT_EQ(r, 1);
+    if (r == 1) {
+        KTEST_EXPECT_EQ(f.user_events[0].data.fd, f.read_fd);
+        KTEST_EXPECT((f.user_events[0].events & EPOLLIN) != 0);
+    }
+
+    // Reap the writer thread: it shares the test's throwaway VMA list and
+    // page table, so detach both before the reaper can free them.
+    Process *child = process_find_by_pid(static_cast<uint64_t>(thread_pid));
+    KTEST_EXPECT(child != nullptr);
+    if (child) {
+        scheduler_remove_from_ready_queue(child);
+        child->state = ProcessState_Zombie;
+        child->vma_list = nullptr;
+        child->page_table = nullptr;
+        int32_t status = 0;
+        int64_t reaped = process_waitpid(thread_pid, &status, 0);
+        KTEST_EXPECT_EQ(reaped, thread_pid);
+    }
+
+    free(stack);
+    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
 }
 
 #ifndef SEEK_SET
@@ -618,12 +786,14 @@ KTEST(extended_syscalls_mmap_offset)
     p->vma_count = orig_vma_count;
 }
 
-struct TestStackFrame {
+struct TestStackFrame
+{
     uint64_t original_rax;
     SyscallFrame frame;
 };
 
-struct alignas(64) TestSignalContext {
+struct alignas(64) TestSignalContext
+{
     InterruptFrame frame;
     // Must mirror the kernel's SignalContext (FPU_STATE_SIZE).
     alignas(64) uint8_t fpu_state[FPU_STATE_SIZE];
@@ -705,7 +875,7 @@ KTEST(extended_syscalls_signal_context)
     uint64_t ctx_user_addr = tf.frame.rsp + 8;
     uint64_t ctx_phys = vmm_virt_to_phys(ctx_user_addr);
     KTEST_EXPECT(ctx_phys != 0);
-    
+
     TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(vmm_phys_to_virt(ctx_phys));
     KTEST_EXPECT_EQ(u_ctx->frame.rax, 0xAAABBBULL);
     KTEST_EXPECT_EQ(u_ctx->old_mask, 0x112233ULL);
@@ -720,7 +890,7 @@ KTEST(extended_syscalls_signal_context)
     g_in_ktest_signal = true;
     uint64_t returned_rax = syscall_handler(SYS_SIGRETURN, 0, 0, 0, &tf.frame);
     g_in_ktest_signal = false;
-    
+
     // Verify context restoration:
     // Returned value should be the original RAX (restored into RAX in InterruptFrame)
     KTEST_EXPECT_EQ(returned_rax, 0xAAABBBULL);
@@ -739,7 +909,7 @@ KTEST(extended_syscalls_signal_context)
 
     // --- Test signal_check_interrupt ---
     p->signals.pending = (1ULL << SIGUSR1);
-    
+
     InterruptFrame int_frame = {};
     int_frame.rip = 0xaaaaULL;
     int_frame.rsp = mmap_res + 12288;
@@ -770,46 +940,46 @@ KTEST(extended_vfs_page_cache)
     int fd1 = vfs_open("/file1.txt", O_CREAT | O_RDWR);
     int fd2 = vfs_open("/file2.txt", O_CREAT | O_RDWR);
     int fd3 = vfs_open("/file3.txt", O_CREAT | O_RDWR);
-    
+
     KTEST_EXPECT(fd1 >= 3);
     KTEST_EXPECT(fd2 >= 3);
     KTEST_EXPECT(fd3 >= 3);
-    
+
     // Allocate buffer
     uint8_t *buf = static_cast<uint8_t *>(malloc(4096));
     KTEST_EXPECT(buf != nullptr);
-    
+
     // Fill buffer with some recognizable pattern
     for (int i = 0; i < 4096; i++) {
         buf[i] = static_cast<uint8_t>(i % 256);
     }
-    
+
     // Write 200 pages to file1.txt
     for (int i = 0; i < 200; i++) {
         int64_t written = vfs_write(fd1, buf, 4096);
         KTEST_EXPECT_EQ(written, 4096);
     }
-    
+
     // Write 200 pages to file2.txt
     for (int i = 0; i < 200; i++) {
         int64_t written = vfs_write(fd2, buf, 4096);
         KTEST_EXPECT_EQ(written, 4096);
     }
-    
+
     // Write 200 pages to file3.txt
     // This will exceed the 512 max pages, triggering eviction/flushing of file1.txt pages!
     for (int i = 0; i < 200; i++) {
         int64_t written = vfs_write(fd3, buf, 4096);
         KTEST_EXPECT_EQ(written, 4096);
     }
-    
+
     // Now seek back and read from file1.txt to verify data is intact (read from disk since it was evicted)
     int64_t seek_res = vfs_seek(fd1, 0, SEEK_SET);
     KTEST_EXPECT_EQ(seek_res, 0);
-    
+
     uint8_t *read_buf = static_cast<uint8_t *>(malloc(4096));
     KTEST_EXPECT(read_buf != nullptr);
-    
+
     for (int i = 0; i < 200; i++) {
         int64_t bytes_read = vfs_read(fd1, read_buf, 4096);
         KTEST_EXPECT_EQ(bytes_read, 4096);
@@ -821,17 +991,17 @@ KTEST(extended_vfs_page_cache)
             }
         }
     }
-    
+
     // Close all files
     KTEST_EXPECT_EQ(vfs_close(fd1), 0);
     KTEST_EXPECT_EQ(vfs_close(fd2), 0);
     KTEST_EXPECT_EQ(vfs_close(fd3), 0);
-    
+
     // Cleanup files from unifs
     vfs_unlink("/file1.txt");
     vfs_unlink("/file2.txt");
     vfs_unlink("/file3.txt");
-    
+
     free(buf);
     free(read_buf);
 }
@@ -847,11 +1017,11 @@ static void pi_low_priority_thread()
 
     mutex_lock(&g_test_mutex);
     g_pi_thread_step = 1;
-    
+
     while (g_pi_thread_step == 1) {
         scheduler_yield();
     }
-    
+
     mutex_unlock(&g_test_mutex);
     while (true) {
         scheduler_yield();
@@ -863,30 +1033,27 @@ KTEST(extended_priority_inheritance)
     g_pi_thread_step = 0;
     g_low_priority_proc = nullptr;
     mutex_init(&g_test_mutex);
-    
+
     Process *thread = scheduler_create_task(pi_low_priority_thread, "pi_test_thread");
     KTEST_EXPECT(thread != nullptr);
-    
+
     while (g_pi_thread_step == 0) {
         scheduler_yield();
     }
-    
+
     KTEST_EXPECT(g_low_priority_proc != nullptr);
     KTEST_EXPECT_EQ(g_low_priority_proc->priority, 2);
-    
+
     Process *current = process_get_current();
     uint8_t orig_priority = current->priority;
     current->priority = 0;
-    
+
     g_pi_thread_step = 2;
-    
+
     mutex_lock(&g_test_mutex);
-    
+
     KTEST_EXPECT_EQ(g_low_priority_proc->priority, 0);
-    
+
     mutex_unlock(&g_test_mutex);
     current->priority = orig_priority;
 }
-
-
-
