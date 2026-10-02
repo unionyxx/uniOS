@@ -15,3 +15,7 @@ bool unifs_is_mounted();
 uint64_t unifs_get_total_size();
 uint64_t unifs_get_file_count();
 uint64_t unifs_get_boot_file_count();
+// Per-file size cap enforced by the RAM overlay. The VFS write path checks it
+// up front so writes beyond it fail immediately instead of succeeding and
+// silently truncating at flush time.
+uint64_t unifs_max_file_size();

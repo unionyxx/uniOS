@@ -10,11 +10,14 @@ uniOS mounts boot content from `unifs.img` at `/` and persistent data from a FAT
 
 The boot image is never written. Writes are shadowed into a volatile RAM overlay:
 
-- Up to 64 RAM files, 1 MiB each, names up to 63 bytes.
+- Up to 64 RAM files, 1 MiB each, names up to 63 bytes. The VFS write path enforces the 1 MiB cap up front (ENOSPC) so writes beyond it fail instead of succeeding and silently truncating at flush time.
 - Writing or truncating a boot file copies it to RAM first (copy-on-write from image data).
+- Sparse writes (seek past EOF, then write) zero the gap: the gap becomes readable file data and would otherwise disclose kernel heap contents.
 - Delete removes only the RAM copy — a boot file cannot be removed, only shadowed by a RAM entry of the same name.
 - `mkdir` creates a RAM directory entry; directories are implicit path prefixes in both tables.
 - Readdir merges boot entries (minus shadowed ones) with RAM files.
+- The RAM table is fully serialized by one spinlock: create re-validates existence under the lock (no duplicate names), delete re-validates its victim, and reads copy outside the lock with a generation counter — a concurrent realloc/free bumps the generation and the read retries, so a writer can never free a buffer an in-flight read is copying from.
+- Mount-time validation rejects entries whose names are not NUL-terminated within their 64 bytes (string views would walk into the offset/size fields).
 
 Nothing in the overlay survives reboot. Persistent state belongs on `/data`.
 

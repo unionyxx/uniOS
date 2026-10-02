@@ -61,6 +61,10 @@ struct RAMFile
     uint64_t size;
     uint64_t capacity;
     bool used;
+    // Bumped under g_ram_lock on every realloc/free/size change. Readers copy
+    // outside the lock and retry when it moved, so a writer's free() can
+    // never race an in-flight memcpy (the old UAF).
+    uint64_t gen;
 };
 
 static uint8_t *g_fs_start = nullptr;
@@ -77,7 +81,9 @@ static void normalize_boot_entry_name(char *name)
     if (!name)
         return;
 
-    for (size_t i = 0; name[i] != '\0'; i++) {
+    // Bounded: an unterminated name must not walk into the entry's
+    // offset/size fields (and rewrite them after range validation).
+    for (size_t i = 0; i < sizeof(g_boot_entries[0].name) && name[i] != '\0'; i++) {
         if (name[i] == '\\')
             name[i] = '/';
     }
@@ -158,6 +164,12 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         return UnifsError::Exists;
 
     uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
+    // Re-validate under the lock: the lockless check above raced a concurrent
+    // create of the same name (duplicate RAMFiles) on another core.
+    if (find_ram_file(name)) {
+        spinlock_release_irqrestore(&g_ram_lock, flags);
+        return UnifsError::Exists;
+    }
     RAMFile *slot = find_free_slot();
     if (!slot) {
         spinlock_release_irqrestore(&g_ram_lock, flags);
@@ -191,21 +203,31 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     }
 
     uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
+    // Re-validate under the lock: the file may have been created/found
+    // outside it and raced a delete/recreate.
+    RAMFile *locked = find_ram_file(name);
+    if (!locked || locked != file) {
+        spinlock_release_irqrestore(&g_ram_lock, flags);
+        return UnifsError::NotFound;
+    }
     if (size > file->capacity) {
         free(file->data);
         file->data = static_cast<uint8_t *>(malloc(size));
         if (!file->data) {
             file->size = 0;
             file->capacity = 0;
+            file->gen++;
             spinlock_release_irqrestore(&g_ram_lock, flags);
             return UnifsError::NoMemory;
         }
         file->capacity = size;
+        file->gen++;
     }
 
     if (data && size > 0)
         kstring::memcpy(file->data, data, size);
     file->size = size;
+    file->gen++;
     spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return UnifsError::Ok;
@@ -249,6 +271,11 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
     }
 
     flags = spinlock_acquire_irqsave(&g_ram_lock);
+    // Re-validate under the lock: find_ram_file ran outside it.
+    if (!find_ram_file(name) || !file->used) {
+        spinlock_release_irqrestore(&g_ram_lock, flags);
+        return UnifsError::NotFound;
+    }
     uint64_t new_size = file->size + size;
     if (new_size > MAX_FILE_SIZE) {
         spinlock_release_irqrestore(&g_ram_lock, flags);
@@ -266,13 +293,17 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         if (file->data && file->size > 0) {
             kstring::memcpy(new_data, file->data, file->size);
             free(file->data);
+        } else {
+            kstring::zero_memory(new_data, new_capacity);
         }
         file->data = new_data;
         file->capacity = new_capacity;
+        file->gen++;
     }
 
     kstring::memcpy(file->data + file->size, data, size);
     file->size = new_size;
+    file->gen++;
     spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return UnifsError::Ok;
@@ -291,12 +322,20 @@ static const uint8_t ELF_MAGIC[] = {0x7F, 'E', 'L', 'F'};
         return UnifsError::InUse;
 
     uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
+    // Re-validate under the lock: the find outside raced another delete or a
+    // re-create of the same name (which must not have its fresh data freed).
+    RAMFile *victim = find_ram_file(name);
+    if (!victim || victim != file) {
+        spinlock_release_irqrestore(&g_ram_lock, flags);
+        return UnifsError::NotFound;
+    }
     free(file->data);
     file->data = nullptr;
     file->size = 0;
     file->capacity = 0;
     file->used = false;
     file->name[0] = '\0';
+    file->gen++;
     g_ram_file_count--;
     spinlock_release_irqrestore(&g_ram_lock, flags);
 
@@ -308,15 +347,54 @@ static int64_t unifs_vfs_read(VNode *node, void *buf, uint64_t size, uint64_t of
     if (node->is_dir)
         return -1;
 
-    UniFSFile file;
-    if (!unifs_open_into(static_cast<const char *>(node->fs_data), file))
-        return -1;
-    if (offset >= file.size)
-        return 0;
+    const string_view name(static_cast<const char *>(node->fs_data));
 
-    uint64_t to_read = (size < file.size - offset) ? size : file.size - offset;
-    kstring::memcpy(buf, file.data + offset, to_read);
-    return static_cast<int64_t>(to_read);
+    // RAM files mutate (realloc/free) under g_ram_lock: snapshot under the
+    // lock, copy outside it (exec-sized reads must not mask IRQs for the
+    // whole transfer), and retry if the generation moved. Boot entries are
+    // immutable, so they need no retry.
+    for (int retry = 0; retry < 8; retry++) {
+        const uint8_t *src = nullptr;
+        uint64_t src_size = 0;
+        uint64_t gen_start = 0;
+        bool is_ram = false;
+
+        {
+            uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
+            if (auto *ram = find_ram_file(name)) {
+                src = ram->data;
+                src_size = ram->size;
+                gen_start = ram->gen;
+                is_ram = true;
+            } else if (auto *boot = find_boot_entry(name)) {
+                src = g_fs_start + boot->offset;
+                src_size = boot->size;
+            }
+            spinlock_release_irqrestore(&g_ram_lock, flags);
+        }
+
+        if (!src || offset >= src_size)
+            return is_ram ? 0 : 0;
+
+        const uint64_t to_read = (size < src_size - offset) ? size : src_size - offset;
+        kstring::memcpy(buf, src + offset, to_read);
+
+        if (!is_ram)
+            return static_cast<int64_t>(to_read);
+
+        {
+            uint64_t flags = spinlock_acquire_irqsave(&g_ram_lock);
+            RAMFile *ram = find_ram_file(name);
+            const uint64_t gen_end = ram ? ram->gen : gen_start + 1; // deleted = moved
+            spinlock_release_irqrestore(&g_ram_lock, flags);
+            if (gen_end == gen_start)
+                return static_cast<int64_t>(to_read);
+        }
+        // A writer reallocated/freed the buffer mid-copy: retry with the new
+        // snapshot.
+    }
+
+    return -1; // lost the race repeatedly
 }
 
 static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint64_t offset, FileDescriptor *fd)
@@ -382,14 +460,29 @@ static int64_t unifs_vfs_write(VNode *node, const void *buf, uint64_t size, uint
         if (file->data) {
             kstring::memcpy(new_data, file->data, file->size);
             free(file->data);
+        } else {
+            kstring::zero_memory(new_data, new_cap);
         }
+        // Sparse writes (seek past EOF, then write) leave the gap
+        // [file->size, offset) as raw malloc memory: it becomes readable file
+        // data, leaking kernel heap contents to userspace. Zero it.
+        if (offset > file->size)
+            kstring::zero_memory(new_data + file->size, offset - file->size);
         file->data = new_data;
         file->capacity = new_cap;
+        file->gen++;
+    } else if (offset > file->size) {
+        // Growing within the existing capacity: the gap is uninitialized
+        // malloc memory from an earlier write with the same hazard.
+        kstring::zero_memory(file->data + file->size, offset - file->size);
+        file->gen++;
     }
 
     kstring::memcpy(file->data + offset, buf, size);
-    if (new_end > file->size)
+    if (new_end > file->size) {
         file->size = new_end;
+        file->gen++;
+    }
     spinlock_release_irqrestore(&g_ram_lock, flags);
 
     return static_cast<int64_t>(size);
@@ -490,10 +583,18 @@ static int unifs_vfs_rename(VNode *old_dir, const char *old_name, VNode *new_dir
         new_file->data = old_file->data;
         new_file->size = old_file->size;
         new_file->capacity = old_file->capacity;
+        new_file->gen++;
 
-        // Clear old file entry so it doesn't free the data we just stole
+        // Clear old file entry so it doesn't free the data we just stole.
+        // The slot is retired here (the compensating unifs_delete below is a
+        // no-op), so retire the counter too: it used to drift upward on every
+        // RAM-file rename.
         old_file->data = nullptr;
+        old_file->size = 0;
+        old_file->capacity = 0;
         old_file->used = false;
+        old_file->gen++;
+        g_ram_file_count--;
         spinlock_release_irqrestore(&g_ram_lock, flags);
 
         static_cast<void>(unifs_delete(old_path));
@@ -523,15 +624,15 @@ static void unifs_vfs_close(VNode *node)
 }
 
 VNodeOps unifs_file_ops = {.read = unifs_vfs_read,
-                                  .write = unifs_vfs_write,
-                                  .readdir = nullptr,
-                                  .lookup = nullptr,
-                                  .create = nullptr,
-                                  .mkdir = nullptr,
-                                  .unlink = nullptr,
-                                  .rename = nullptr,
-                                  .truncate = unifs_vfs_truncate,
-                                  .close = unifs_vfs_close};
+                           .write = unifs_vfs_write,
+                           .readdir = nullptr,
+                           .lookup = nullptr,
+                           .create = nullptr,
+                           .mkdir = nullptr,
+                           .unlink = nullptr,
+                           .rename = nullptr,
+                           .truncate = unifs_vfs_truncate,
+                           .close = unifs_vfs_close};
 
 static VNode *unifs_vfs_lookup(VNode *dir, const char *name);
 static int unifs_vfs_readdir(VNode *node, uint64_t index, char *name_out);
@@ -839,6 +940,19 @@ void unifs_init(void *start_addr, uint64_t image_size)
             g_mounted = false;
             return;
         }
+        // Names must be NUL-terminated within their 64 bytes: an unterminated
+        // name makes every string_view walk into the offset/size fields.
+        bool terminated = false;
+        for (size_t c = 0; c < sizeof(e.name); c++) {
+            if (e.name[c] == '\0') {
+                terminated = true;
+                break;
+            }
+        }
+        if (!terminated) {
+            g_mounted = false;
+            return;
+        }
     }
 
     for (uint64_t i = 0; i < g_boot_header->file_count; i++)
@@ -869,4 +983,9 @@ uint64_t unifs_get_total_size()
 uint64_t unifs_get_boot_file_count()
 {
     return g_mounted ? g_boot_header->file_count : 0;
+}
+
+uint64_t unifs_max_file_size()
+{
+    return MAX_FILE_SIZE;
 }

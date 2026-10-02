@@ -2,6 +2,7 @@
 #include <kernel/fs/block_dev.h>
 #include <kernel/fs/fat32.h>
 #include <kernel/fs/storage_guard.h>
+#include <kernel/fs/unifs.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/mm/heap.h>
 #include <kernel/process.h>
@@ -1029,6 +1030,22 @@ int64_t vfs_write(int fd, const void *buf, uint64_t size)
             const uint8_t *src = static_cast<const uint8_t *>(buf);
             uint64_t total_written = 0;
             bool io_error = false;
+
+            // uniFS enforces its per-file cap only at flush time; check it
+            // here so a write beyond the cap fails instead of succeeding and
+            // silently truncating when the page-cache flush hits the limit
+            // (the unflushable page would stay dirty and pinned forever).
+            if (vn->ops == &unifs_file_ops) {
+                uint64_t write_base = (desc.flags & FD_FLAG_APPEND) ? vn->size : desc.offset;
+                if (write_base + bytes_to_write > unifs_max_file_size()) {
+                    uint64_t allowed = unifs_max_file_size() > write_base ? unifs_max_file_size() - write_base : 0;
+                    if (allowed == 0) {
+                        vfs_close_vnode(vn);
+                        return -1; // ENOSPC
+                    }
+                    bytes_to_write = allowed;
+                }
+            }
 
             while (total_written < bytes_to_write) {
                 uint64_t curr_offset = offset + total_written;
