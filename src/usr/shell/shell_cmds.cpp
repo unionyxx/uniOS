@@ -1641,6 +1641,11 @@ void cmd_fetch(const char *args)
         return;
     }
 
+    // Stall watchdog: any server that stops sending (without closing) for
+    // 15 seconds fails the fetch instead of wedging the shell forever.
+    constexpr uint64_t FETCH_STALL_MS = 15000;
+    uint64_t last_progress = get_ticks();
+
     // Phase 1: accumulate the header block until \r\n\r\n. Body bytes that
     // arrive in the same read stay in `chunk`/`carry_len` for phase 2.
     char header[2048];
@@ -1664,9 +1669,16 @@ void cmd_fetch(const char *args)
                 set_status(1);
                 return;
             }
+            if (get_ticks() - last_progress > FETCH_STALL_MS) {
+                printf("fetch: connection stalled before headers\n");
+                closesocket(sock);
+                set_status(1);
+                return;
+            }
             sleep_ms(20);
             continue;
         }
+        last_progress = get_ticks();
         for (int i = 0; i < n; i++) {
             if (header_len + 1 >= sizeof(header)) {
                 printf("fetch: response headers too large\n");
@@ -1782,6 +1794,7 @@ void cmd_fetch(const char *args)
     // Phase 2: stream the body (carry bytes first, then fresh reads).
     uint64_t total = 0;
     uint64_t next_progress = 64 * 1024;
+    bool stalled = false;
     if (carry_len > 0) {
         if (write(out_fd, chunk, carry_len) != (int)carry_len) {
             printf("fetch: write to '%s' failed\n", to_stdout ? "<stdout>" : out_path);
@@ -1792,6 +1805,7 @@ void cmd_fetch(const char *args)
             return;
         }
         total += carry_len;
+        last_progress = get_ticks();
     }
     for (;;) {
         if (have_length && total >= content_length)
@@ -1811,6 +1825,7 @@ void cmd_fetch(const char *args)
                 return;
             }
             total += (uint64_t)n;
+            last_progress = get_ticks();
             if (total >= next_progress) {
                 printf("fetch: %llu bytes\n", (unsigned long long)total);
                 next_progress += 64 * 1024;
@@ -1820,6 +1835,11 @@ void cmd_fetch(const char *args)
         int st = socket_state(sock);
         if (st == NET_TCP_CLOSED || (st >= NET_TCP_FIN_WAIT_1 && st <= NET_TCP_TIME_WAIT))
             break;
+        if (get_ticks() - last_progress > FETCH_STALL_MS) {
+            printf("fetch: connection stalled (%llu bytes received)\n", (unsigned long long)total);
+            stalled = true;
+            break;
+        }
         sleep_ms(20);
     }
 
@@ -1827,6 +1847,10 @@ void cmd_fetch(const char *args)
     if (!to_stdout)
         close(out_fd);
 
+    if (stalled) {
+        set_status(1);
+        return;
+    }
     if (have_length && total < content_length) {
         printf("fetch: short body: %llu of %llu bytes\n", (unsigned long long)total,
                (unsigned long long)content_length);
