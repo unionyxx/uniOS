@@ -1,8 +1,10 @@
 #include <kernel/sync/futex.h>
+#include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/debug.h>
 #include <kernel/cpu.h>
 #include <kernel/scheduler.h>
+#include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 
 #define STAC() \
@@ -32,6 +34,39 @@ static inline uint32_t futex_hash(uint64_t phys_addr)
     return (phys_addr >> 12) % FUTEX_HASH_SIZE;
 }
 
+// Read the futex word with the VMA pinned: munmap removes the VMA metadata
+// under vma_lock_ptr before it clears any PTEs, so holding the lock across
+// lookup + read means the page cannot disappear between translation and the
+// user access (the old translate-then-read window faulted unfaultably in
+// kernel mode when a sibling thread raced an munmap).
+static bool futex_read_user_value(Process *p, volatile uint32_t *uaddr, uint32_t *out)
+{
+    const uint64_t addr = reinterpret_cast<uint64_t>(uaddr);
+    uint64_t flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
+    VMA *vma = vma_find(p->vma_list, addr);
+    if (!vma || vma->start > addr || vma->end < addr + sizeof(uint32_t)) {
+        spinlock_release_irqrestore(p->vma_lock_ptr, flags);
+        return false;
+    }
+    STAC();
+    *out = *uaddr;
+    CLAC();
+    spinlock_release_irqrestore(p->vma_lock_ptr, flags);
+    return true;
+}
+
+void futex_notify_freed_frames(const uint64_t *frames, size_t count)
+{
+    if (!frames || count == 0)
+        return;
+    for (size_t i = 0; i < count; i++) {
+        FutexBucket *bucket = &g_futex_table[futex_hash(frames[i])];
+        uint64_t flags = spinlock_acquire_irqsave(&bucket->lock);
+        scheduler_wake_waiters_under_leaf(&bucket->wait_queue, 0);
+        spinlock_release_irqrestore(&bucket->lock, flags);
+    }
+}
+
 int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
 {
     // Buckets are initialized at boot (kmain, single-core). A lazy init here
@@ -41,6 +76,13 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
     if (reinterpret_cast<uintptr_t>(uaddr) % sizeof(uint32_t) != 0) {
         return -22; // EINVAL: Unaligned access
     }
+
+    // Kernel-space addresses must never become futex keys: the kernel half
+    // is mapped in every page table, so a kernel pointer would resolve to a
+    // shared, attacker-chosen bucket (a comparison oracle and a socket for
+    // parking unrelated waiters).
+    if (reinterpret_cast<uintptr_t>(uaddr) >= USER_SPACE_MAX)
+        return -14; // -EFAULT
 
     Process *current = process_get_current();
     if (!current) {
@@ -58,9 +100,11 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
     if (op == FUTEX_WAIT) {
         uint64_t flags = spinlock_acquire_irqsave(&bucket->lock);
 
-        STAC();
-        uint32_t current_val = *uaddr;
-        CLAC();
+        uint32_t current_val = 0;
+        if (!futex_read_user_value(current, uaddr, &current_val)) {
+            spinlock_release_irqrestore(&bucket->lock, flags);
+            return -14; // -EFAULT: unmapped while we held the bucket lock
+        }
 
         if (current_val != val) {
             spinlock_release_irqrestore(&bucket->lock, flags);
@@ -74,20 +118,17 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
 
         scheduler_wait(&bucket->wait_queue, &bucket->lock);
         spinlock_release_irqrestore(&bucket->lock, flags);
+
+        // Woken by a signal delivery rather than a futex wake: report the
+        // interruption instead of a spurious success.
+        if (scheduler_fatal_signal_pending(current))
+            return -4; // -EINTR
+
         return 0;
     }
     else if (op == FUTEX_WAKE) {
         uint64_t flags = spinlock_acquire_irqsave(&bucket->lock);
-
-        int woken = 0;
-        Process *curr = bucket->wait_queue.head;
-        while (curr && woken < static_cast<int>(val)) {
-            Process *next = curr->queue_next;
-            scheduler_wake_process(curr);
-            woken++;
-            curr = next;
-        }
-
+        int woken = scheduler_wake_waiters_under_leaf(&bucket->wait_queue, val);
         spinlock_release_irqrestore(&bucket->lock, flags);
         return woken;
     }

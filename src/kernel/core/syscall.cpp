@@ -385,6 +385,7 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
             if (!phys)
                 continue;
             vmm_unmap_page_in(p->page_table, virt);
+            futex_notify_freed_frames(&phys, 1);
             pmm_free_frame(reinterpret_cast<void *>(phys));
         }
         return true;
@@ -401,6 +402,10 @@ static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
 
     vmm_invalidate_tlb_range(addr, num_pages);
 
+    // Wake futex waiters keyed on the freed pages BEFORE the frames return
+    // to the PMM: once recycled, a new owner's futex would inherit (and
+    // cross-wake) the stale waiters otherwise.
+    futex_notify_freed_frames(freed_phys, freed_count);
     for (size_t i = 0; i < freed_count; i++)
         pmm_free_frame(reinterpret_cast<void *>(freed_phys[i]));
     free(freed_phys);

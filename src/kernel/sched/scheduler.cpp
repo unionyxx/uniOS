@@ -881,9 +881,30 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
     interrupts_restore(flags);
 }
 
-void scheduler_wake_all(WaitQueue *q)
+int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count)
 {
-    const uint64_t flags = interrupts_save_disable();
+    if (!q || !q->head)
+        return 0;
+
+    // Serialize the traversal against signal-driven wait_queue_remove,
+    // which unlinks waiters under g_sched_lock alone: walking the list with
+    // only the caller's leaf lock can follow a stale queue_next into a
+    // reaped Process.
+    spinlock_acquire(&g_sched_lock);
+    int woken = 0;
+    Process *curr = q->head;
+    while (curr && (count == 0 || (uint32_t)woken < count)) {
+        Process *next = curr->queue_next;
+        scheduler_wake_process_locked(curr);
+        woken++;
+        curr = next;
+    }
+    spinlock_release(&g_sched_lock);
+    return woken;
+}
+
+void scheduler_wake_all(WaitQueue *q)
+{    const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     wait_queue_wake_all(q);
     if (q != &g_epoll_wait_queue) {

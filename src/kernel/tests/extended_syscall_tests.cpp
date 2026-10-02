@@ -37,10 +37,10 @@ static void dummy_thread_entry()
     }
 }
 
-static volatile uint32_t g_test_futex = 0;
+static volatile uint32_t *g_test_futex_addr = nullptr;
 static void futex_waiter_thread()
 {
-    sys_futex(&g_test_futex, FUTEX_WAIT, 0);
+    sys_futex(g_test_futex_addr, FUTEX_WAIT, 0);
     while (true) {
         scheduler_yield();
     }
@@ -52,26 +52,56 @@ KTEST(extended_syscalls_futex)
     KTEST_EXPECT(current != nullptr);
 
     uint64_t *orig_page_table = current->page_table;
+    VMA *orig_vma_list = current->vma_list;
+    uint32_t orig_vma_count = current->vma_count;
+
     if (!current->page_table)
         current->page_table = vmm_get_kernel_pml4();
 
+    // sys_futex validates and reads through user VMAs now: map a real user
+    // page for the futex word and install its VMA.
+    const uint64_t test_vaddr = 0x10000000ULL;
+    void *futex_phys = pmm_alloc_frame();
+    KTEST_EXPECT(futex_phys != nullptr);
+    Result<void> futex_map =
+        vmm_replace_page_in(current->page_table, test_vaddr, reinterpret_cast<uint64_t>(futex_phys),
+                            PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(futex_map.ok());
+    volatile uint32_t *uval = reinterpret_cast<volatile uint32_t *>(test_vaddr);
+    *uval = 42;
+
+    VMA *futex_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(futex_vma != nullptr);
+    futex_vma->start = test_vaddr;
+    futex_vma->end = test_vaddr + 4096;
+    futex_vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    futex_vma->type = VMAType::Anonymous;
+    futex_vma->next = nullptr;
+    current->vma_list = futex_vma;
+    current->vma_count = 1;
+
     volatile uint32_t val = 42;
 
-    volatile uint32_t *unaligned_uaddr = reinterpret_cast<volatile uint32_t *>(reinterpret_cast<uintptr_t>(&val) | 1);
+    volatile uint32_t *unaligned_uaddr = reinterpret_cast<volatile uint32_t *>(reinterpret_cast<uintptr_t>(uval) | 1);
     int64_t res = sys_futex(unaligned_uaddr, FUTEX_WAIT, 42);
     KTEST_EXPECT_EQ(res, -22); // -EINVAL
 
     res = sys_futex(nullptr, FUTEX_WAIT, 42);
     KTEST_EXPECT_EQ(res, -14); // -EFAULT
 
-    res = sys_futex(&val, FUTEX_WAIT, 100);
+    // kernel-space addresses are rejected outright
+    res = sys_futex(&val, FUTEX_WAIT, 42);
+    KTEST_EXPECT_EQ(res, -14); // -EFAULT
+
+    res = sys_futex(uval, FUTEX_WAIT, 100);
     KTEST_EXPECT_EQ(res, -11); // -EAGAIN (val != expected)
 
-    res = sys_futex(&val, FUTEX_WAKE, 1);
+    res = sys_futex(uval, FUTEX_WAKE, 1);
     KTEST_EXPECT_EQ(res, 0); // nobody waiting
 
     // Test actual blocking and waking to ensure the futex lock is correctly released
-    g_test_futex = 0;
+    *uval = 0;
+    g_test_futex_addr = uval;
     void *stack = malloc(4096);
     KTEST_EXPECT(stack != nullptr);
     void *stack_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
@@ -90,7 +120,7 @@ KTEST(extended_syscalls_futex)
     }
 
     // Wake the waiter thread
-    int64_t woken = sys_futex(&g_test_futex, FUTEX_WAKE, 1);
+    int64_t woken = sys_futex(uval, FUTEX_WAKE, 1);
     KTEST_EXPECT_EQ(woken, 1);
 
     // Yield to let the waiter thread resume
@@ -99,7 +129,7 @@ KTEST(extended_syscalls_futex)
     }
 
     // Call WAKE again to verify we do not deadlock on bucket->lock
-    int64_t woken2 = sys_futex(&g_test_futex, FUTEX_WAKE, 1);
+    int64_t woken2 = sys_futex(uval, FUTEX_WAKE, 1);
     KTEST_EXPECT_EQ(woken2, 0);
 
     // Reap the child thread
@@ -107,13 +137,26 @@ KTEST(extended_syscalls_futex)
     KTEST_EXPECT(child != nullptr);
     scheduler_remove_from_ready_queue(child);
     child->state = ProcessState_Zombie;
+    // The thread captured the test's throwaway VMA list and page table at
+    // create time (it ran during the surgery window). Clear both so the
+    // deferred reaper never frees them out from under the test's own
+    // cleanup below.
+    child->vma_list = nullptr;
+    child->page_table = nullptr;
 
     int32_t status = 0;
     int64_t reaped_pid = process_waitpid(thread_pid, &status, 0);
     KTEST_EXPECT_EQ(reaped_pid, thread_pid);
 
     free(stack);
+    g_test_futex_addr = nullptr;
+    vmm_unmap_page_in(current->page_table, test_vaddr);
+    pmm_free_frame(futex_phys);
+    free(futex_vma);
+
     current->page_table = orig_page_table;
+    current->vma_list = orig_vma_list;
+    current->vma_count = orig_vma_count;
 }
 
 KTEST(extended_syscalls_thread_create)

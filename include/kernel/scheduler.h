@@ -77,6 +77,12 @@ void scheduler_note_epoll_deadline(uint64_t deadline_ticks);
 typedef bool (*scheduler_wait_recheck_fn)(void *ctx);
 void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck,
                                void *ctx);
+
+// Wake up to `count` waiters from q (count == 0 wakes all), taking g_sched_lock
+// around the whole traversal so signal-driven queue removals cannot interleave.
+// For callers that hold the queue's own leaf lock (futex buckets); the lock
+// order is leaf -> scheduler, matching scheduler_wait.
+int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count);
 void scheduler_wake_all(WaitQueue *q);
 void scheduler_wake_all_locked(WaitQueue *q);
 void scheduler_wake_one(WaitQueue *q);
