@@ -64,6 +64,9 @@ jobs:
         meson compile -C build/debug boot-disk iso
         meson test -C build/debug --suite smoke --print-errorlogs
 
+    - name: Network smoke (slirp + host HTTP server)
+      run: meson test -C build/debug --suite smoke-net --print-errorlogs
+
     - name: Build uniOS (Release)
       run: |
         meson setup build/release --cross-file toolchains/llvm.ini --buildtype release

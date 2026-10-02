@@ -704,8 +704,13 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     command : qemu_base_command + qemu_usb_devices + qemu_esp_usb_boot_command + qemu_headless,
   )
 
-  run_target('run', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command)
-  run_target('run-serial', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command + qemu_serial_stdio)
+  # Default interactive runs are networked (slirp user networking); the
+  # smoke suite's headless target stays NIC-free so default CI is
+  # deterministic. Use run-qemu / run-disk for NIC-free interactive boots.
+  run_target('run', depends : [boot_disk],
+             command : qemu_base_command + qemu_net_devices + qemu_disk_boot_command)
+  run_target('run-serial', depends : [boot_disk],
+             command : qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio)
   run_target('run-headless', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command + qemu_headless)
   run_target('run-disk', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command)
   run_target('run-disk-serial', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command + qemu_serial_stdio)
@@ -767,6 +772,55 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     ] + qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
     depends : [boot_disk],
     suite : 'smoke-smp',
+    timeout : smoke_smp_test_timeout,
+  )
+
+  # Network smoke: meson test -C build/debug --suite smoke-net
+  # Boots with slirp user networking against a host-side HTTP server
+  # (tools/smoke_net.py) and asserts the debug net self-test summary:
+  # DHCP + ARP + ICMP ping + a real TCP HTTP download. The net markers only
+  # exist in debug builds (#ifdef DEBUG self-test), so they gate like the
+  # ktest marker does; in a release tree this reduces to the desktop-frame
+  # marker.
+  smoke_net = files('tools/smoke_net.py')[0]
+  # Field tokens like "ping=PASS" appear only in the self-test summary line
+  # (the per-leg log lines use spaces, never '='), so they make unambiguous
+  # markers without line anchoring.
+  qemu_smoke_net_args = qemu_smoke_success_args
+  if build_is_debug
+    qemu_smoke_net_args += [
+      '--success',
+      'arp=PASS',
+      '--success',
+      'ping=PASS',
+      '--success',
+      'http=PASS',
+      '--fail',
+      'arp=FAIL',
+      '--fail',
+      'ping=FAIL',
+      '--fail',
+      'http=FAIL',
+    ]
+  endif
+  test(
+    'qemu-smoke-net',
+    py,
+    args : [
+      smoke_net,
+      '--qemu-smoke',
+      qemu_smoke,
+      '--timeout',
+      smoke_smp_qemu_timeout,
+    ] + qemu_smoke_net_args + [
+      '--fail',
+      'ktest suite failed',
+      '--fail',
+      'KERNEL PANIC',
+      '--',
+    ] + qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    depends : [boot_disk],
+    suite : 'smoke-net',
     timeout : smoke_smp_test_timeout,
   )
 
