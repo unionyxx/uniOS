@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <uapi/syscalls.h>
+#include <uapi/tcb.h>
 
 #include "syscall.h"
 #include "unistd.h"
@@ -84,7 +85,12 @@ int pthread_detach(pthread_t thread)
 
 pthread_t pthread_self(void)
 {
-    return (pthread_t)syscall1(SYS_GETPID, 0);
+    /* The kernel installs a TCB at the fs base for every user thread (the
+     * always-TCB invariant), so the tid is one segmented load away - no
+     * syscall, no failure path. */
+    void *tcb;
+    __asm__ __volatile__("movq %%fs:0x0, %0" : "=r"(tcb));
+    return (pthread_t)((UniTcb *)tcb)->tid;
 }
 
 /* ---- Synchronization primitives --------------------------------------- */

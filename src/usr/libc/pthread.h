@@ -28,6 +28,9 @@ void pthread_exit(void *retval) __attribute__((noreturn));
 /* Route a child thread to the kernel-zombie reaper: its exit needs no join. */
 int pthread_detach(pthread_t thread);
 
+/* The calling thread's id, read from the thread control block the kernel
+ * keeps at the fs base (uapi/tcb.h). Every user thread has one (the
+ * always-TCB invariant), so this never fails and needs no syscall. */
 pthread_t pthread_self(void);
 
 /* ---- Mutex: one word. 0 = unlocked, 1 = locked, 2 = locked with waiters.
