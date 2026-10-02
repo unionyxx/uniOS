@@ -28,6 +28,12 @@ extern "C" uint8_t g_use_xsave;
 extern "C" uint32_t g_xsave_mask_lo;
 extern "C" uint32_t g_xsave_mask_hi;
 
+// Write the current CPU's user fs base (the TLS thread pointer). Uses
+// wrfsbase when the CPU supports it, else the FS_BASE MSR. The kernel
+// never otherwise touches user FS; this is the only writer besides
+// tls_install setting proc->fs_base.
+void cpu_set_user_fs_base(uint64_t base);
+
 struct Process;
 
 // Per-core kernel data. Once a core is configured, its IA32_GS_BASE and

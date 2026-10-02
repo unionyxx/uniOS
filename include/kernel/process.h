@@ -120,6 +120,19 @@ struct Process
     uint64_t leader_pid;
     uint64_t user_stack_lo; // recorded thread stack (0 = none)
     uint64_t user_stack_size;
+
+    // Static TLS state. fs_base is the thread pointer (UniTcb address, 0
+    // until installed). The template facts are group-wide: they describe
+    // the image's PT_TLS inside this address space, cloned per thread at
+    // create. tls_lo/tls_len record this thread's own TLS mapping (leaders'
+    // blocks die with the address space, so theirs stay 0).
+    uint64_t fs_base;
+    uint64_t tls_template_va;
+    uint64_t tls_template_size; // PT_TLS p_memsz; 0 = image has no TLS
+    uint64_t tls_align;         // PT_TLS p_align; 0 = image has no TLS
+    uint64_t tls_lo;            // this thread's TLS mapping (0 = none)
+    uint64_t tls_len;
+
     bool thread_detached; // detached at exit: routes to the kernel-zombie auto-reap
     bool timed_wake;      // woken by the deadline walker (futex timeouts)
 
