@@ -135,11 +135,18 @@ KTEST(extended_syscalls_futex)
     KTEST_EXPECT(child != nullptr);
     scheduler_remove_from_ready_queue(child);
     child->state = ProcessState_Zombie;
-    // The thread captured the test's throwaway VMA list and page table at
-    // create time (it ran during the surgery window). Clear both so the
+    // The thread never exits through SYS_THREAD_EXIT, so its TLS mapping
+    // must leave by hand: the head restore below would drop the VMA node
+    // while the PTE stays mapped, poisoning every later first-fit.
+    if (child->tls_lo != 0) {
+        (void)munmap_process_range(child, child->tls_lo, child->tls_len);
+        child->tls_lo = 0;
+        child->tls_len = 0;
+    }
+    // Sever the child's references (not the shared list itself) so the
     // deferred reaper never frees them out from under the test's own
     // cleanup below.
-    child->vmalist->head = nullptr;
+    child->vmalist = nullptr;
     child->page_table = nullptr;
 
     int32_t status = 0;
@@ -185,6 +192,13 @@ KTEST(extended_syscalls_thread_create)
     // pull it out of the run queues before the scheduler ever touches it
     scheduler_remove_from_ready_queue(child);
     child->state = ProcessState_Zombie;
+    // The thread never runs or exits: its TLS mapping (installed at
+    // create) must leave by hand or the node-PTE pair outlives the test.
+    if (child->tls_lo != 0) {
+        (void)munmap_process_range(child, child->tls_lo, child->tls_len);
+        child->tls_lo = 0;
+        child->tls_len = 0;
+    }
 
     int32_t status = 0;
     int64_t reaped_pid = process_waitpid(thread_pid, &status, 0);
@@ -507,7 +521,15 @@ KTEST(extended_syscalls_epoll_wake)
     if (child) {
         scheduler_remove_from_ready_queue(child);
         child->state = ProcessState_Zombie;
-        child->vmalist->head = nullptr;
+        // The writer never exits through SYS_THREAD_EXIT and never touches
+        // user memory again: drain its TLS mapping by hand, then sever its
+        // references (not the shared list itself).
+        if (child->tls_lo != 0) {
+            (void)munmap_process_range(child, child->tls_lo, child->tls_len);
+            child->tls_lo = 0;
+            child->tls_len = 0;
+        }
+        child->vmalist = nullptr;
         child->page_table = nullptr;
         int32_t status = 0;
         int64_t reaped = process_waitpid(thread_pid, &status, 0);

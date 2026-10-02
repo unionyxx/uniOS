@@ -24,6 +24,27 @@ constexpr uint64_t TEST_VADDR_ALIAS = 0x10010000ULL;
 
 } // namespace
 
+// Threads this file abandons (signal death, hand-zombification) never
+// leave through SYS_THREAD_EXIT, so their TLS mappings stay in the shared
+// list; the head restore in each cleanup would drop the VMA nodes while
+// their PTEs stay mapped, poisoning every later first-fit
+// (vmm_map_page_in refuses present PTEs). Drain them first.
+static void drain_abandoned_tls(Process *leader)
+{
+    uint64_t lo[8];
+    uint64_t len[8];
+    int found = 0;
+    for (VMA *v = leader->vmalist->head; v && found < 8; v = v->next) {
+        if (v->type == VMAType::Data) {
+            lo[found] = v->start;
+            len[found] = v->end - v->start;
+            found++;
+        }
+    }
+    for (int i = 0; i < found; i++)
+        (void)munmap_process_range(leader, lo[i], len[i]);
+}
+
 // Both siblings block in a futex wait: that is the state where SIGKILL must
 // reach them (futex waits are signal-aware). Running kernel-mode tasks are
 // not signal-killable by design; user threads get their deaths at the
@@ -119,6 +140,10 @@ KTEST(thread_group_exit_kills_blocked_siblings)
     int32_t status = 0;
     (void)process_waitpid(tid_a, &status, 0);
     (void)process_waitpid(tid_b, &status, 0);
+
+    // The siblings died by the group signal: drain their TLS mappings
+    // before the head restore drops the nodes.
+    drain_abandoned_tls(leader);
 
     free(stack_a);
     free(stack_b);
@@ -252,6 +277,9 @@ KTEST(thread_detach_self_reaps)
         gone = process_find_by_pid(static_cast<uint64_t>(tid)) == nullptr;
     }
     KTEST_EXPECT(gone);
+
+    // Signal death leaves the thread's TLS mapping in the shared list.
+    drain_abandoned_tls(leader);
 
     free(stack);
     leader->signals.pending = 0;
@@ -1164,6 +1192,13 @@ KTEST(fd_transfer_rejects_zombie_without_fd_table)
     fd_table_release(thread->fdtab);
     thread->fdtab = nullptr;
     thread->state = ProcessState_Zombie;
+    // The thread never exits through SYS_THREAD_EXIT: drain its TLS
+    // mapping before severing, or the node-PTE pair outlives the test.
+    if (thread->tls_lo != 0) {
+        (void)munmap_process_range(thread, thread->tls_lo, thread->tls_len);
+        thread->tls_lo = 0;
+        thread->tls_len = 0;
+    }
     // Sever the shared objects so the reaper fully frees this thread
     // instead of deferring while the leader lives.
     thread->vmalist = nullptr;
@@ -1271,6 +1306,9 @@ KTEST(thread_create_detached_flag_self_reaps)
         gone = process_find_by_pid(static_cast<uint64_t>(tid)) == nullptr;
     }
     KTEST_EXPECT(gone);
+
+    // Signal death leaves the thread's TLS mapping in the shared list.
+    drain_abandoned_tls(leader);
 
     free(stack);
     leader->signals.pending = 0;

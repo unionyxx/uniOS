@@ -97,7 +97,15 @@ KTEST(fd_table_thread_create_shares_parent_table)
     if (thread) {
         scheduler_remove_from_ready_queue(thread);
         thread->state = ProcessState_Zombie;
-        thread->vmalist->head = nullptr;
+        // The thread never exits through SYS_THREAD_EXIT: drain its TLS
+        // mapping by hand, then sever its references (not the shared list
+        // itself) so the reaper cannot follow them.
+        if (thread->tls_lo != 0) {
+            (void)munmap_process_range(thread, thread->tls_lo, thread->tls_len);
+            thread->tls_lo = 0;
+            thread->tls_len = 0;
+        }
+        thread->vmalist = nullptr;
         thread->page_table = nullptr;
     }
     // Reap immediately: the kernel-zombie reaper steals unwaited zombies

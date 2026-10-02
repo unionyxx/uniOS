@@ -14,9 +14,12 @@
 #include <kernel/scheduler.h>
 #include <kernel/sync/spinlock.h>
 #include <kernel/time/timer.h>
+#include <kernel/tls.h>
+#include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 #include <uapi/syscalls.h>
 #include <uapi/syscalls_ext.h>
+#include <uapi/tcb.h>
 
 extern "C" void load_idt(void *);
 extern "C" void init_fpu_state(uint8_t *fpu_buffer);
@@ -2049,6 +2052,17 @@ void sys_thread_exit(int64_t status)
         self->user_stack_lo = 0;
         self->user_stack_size = 0;
     }
+    // Same discipline as the stack range above — strictly on the kernel
+    // stack, one leaf at a time; a refused unmap leaks loudly rather than
+    // pulling the mapping out from under running code.
+    if (self && self->tls_lo != 0 && self->tls_len != 0) {
+        if (!munmap_process_range(self, self->tls_lo, self->tls_len)) {
+            KLOG(LogModule::Sched, LogLevel::Error, "thread exit: tls unmap refused for pid %llu (%s); mapping leaks",
+                 (unsigned long long)self->pid, self->name);
+        }
+        self->tls_lo = 0;
+        self->tls_len = 0;
+    }
     // pthread_exit: this member only, the group stays alive.
     process_exit_common(static_cast<int32_t>(status), false);
 }
@@ -2340,6 +2354,20 @@ void scheduler_sleep_ms(uint64_t ms)
 
 extern "C" void thread_ret();
 
+// Unwind a half-built thread before its publication: release the fd-table
+// reference, return the kernel stack frames, free the struct.
+static void thread_create_unwind(Process *thread)
+{
+    process_release_private_fds(thread);
+    uintptr_t frame_addr = thread->stack_phys;
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    for (size_t i = 0; i < stack_pages; i++) {
+        pmm_free_frame(reinterpret_cast<void *>(frame_addr));
+        frame_addr += 4096;
+    }
+    aligned_free(thread);
+}
+
 [[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame,
                                         uint64_t stack_lo, uint64_t stack_size, uint64_t flags)
 {
@@ -2430,6 +2458,36 @@ extern "C" void thread_ret();
     kstring::zero_memory(child_context, sizeof(Context));
     child_context->rip = reinterpret_cast<uint64_t>(thread_ret);
     thread->sp = stack_top_hhdm;
+
+    // Clone the group's TLS template into the new thread's own block. The
+    // template bytes cross the user boundary only through the safe walk
+    // (bounce buffer); a size-0 template still installs the TCB — the
+    // always-TCB invariant keeps fs:0 valid for every user thread. Failure
+    // unwinds everything the create has taken so far.
+    uint8_t *tls_bounce = nullptr;
+    if (parent->tls_template_size != 0) {
+        tls_bounce = static_cast<uint8_t *>(malloc(parent->tls_template_size));
+        if (tls_bounce && !safe_copy_from_user(tls_bounce, reinterpret_cast<const void *>(parent->tls_template_va),
+                                               parent->tls_template_size)) {
+            free(tls_bounce);
+            tls_bounce = nullptr;
+        }
+        if (!tls_bounce) {
+            thread_create_unwind(thread);
+            return -12; // -ENOMEM
+        }
+    }
+    const uint64_t tls_lo = tls_install(thread, tls_bounce, parent->tls_template_size, parent->tls_align);
+    free(tls_bounce);
+    if (tls_lo == 0) {
+        thread_create_unwind(thread);
+        return -12; // -ENOMEM
+    }
+    thread->tls_lo = tls_lo;
+    // The mapping ends at page_align(fs_base + 16): the length follows
+    // from the layout tls_install just wrote, so the two can never
+    // disagree.
+    thread->tls_len = ((thread->fs_base + sizeof(UniTcb) + 0xFFF) & ~0xFFFULL) - tls_lo;
 
     kstring::strncpy(thread->name, parent->name, 24);
     kstring::strncat(thread->name, "/thr", 7);
