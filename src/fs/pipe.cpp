@@ -45,6 +45,11 @@ VNode *pipe_get_vnode(int pipe_id, bool is_write)
 struct PipeInternal : public Pipe
 {
     Spinlock lock;
+    // Bumped by pipe_create() when this slot is recycled: a reader/writer
+    // blocked (or mid-check) when another core closed both ends and the slot
+    // was reused must detect the recycling instead of operating on the new
+    // pipe's data and queues.
+    uint64_t gen;
 };
 
 static PipeInternal pipes[MAX_PIPES];
@@ -96,6 +101,7 @@ int pipe_create()
             pipes[i].read_closed = false;
             pipes[i].data_wait = {nullptr, nullptr};
             pipes[i].space_wait = {nullptr, nullptr};
+            pipes[i].gen++;
             spinlock_release_irqrestore(&g_pipe_slot_lock, flags);
             return i;
         }
@@ -106,13 +112,19 @@ int pipe_create()
 
 int64_t pipe_read(int pipe_id, char *buf, uint64_t count)
 {
-    if (pipe_id < 0 || pipe_id >= MAX_PIPES || !pipes[pipe_id].in_use) {
+    if (pipe_id < 0 || pipe_id >= MAX_PIPES) {
         return -1;
     }
 
     PipeInternal *p = &pipes[pipe_id];
 
     uint64_t flags = spinlock_acquire_irqsave(&p->lock);
+    if (!p->in_use) {
+        spinlock_release_irqrestore(&p->lock, flags);
+        return -1;
+    }
+    // Snapshot under the lock: the slot's identity for this whole call.
+    const uint64_t my_gen = p->gen;
     while (true) {
         if (p->count > 0) {
             uint64_t to_read = (count < p->count) ? count : p->count;
@@ -145,18 +157,30 @@ int64_t pipe_read(int pipe_id, char *buf, uint64_t count)
         }
 
         scheduler_wait(&p->data_wait, &p->lock);
+        // The slot may have been closed and recycled while we slept: without
+        // the generation check this loop would go on reading the NEW pipe's
+        // data (cross-process data theft) or block on its queues.
+        if (!p->in_use || p->gen != my_gen) {
+            spinlock_release_irqrestore(&p->lock, flags);
+            return -1;
+        }
     }
 }
 
 int64_t pipe_write(int pipe_id, const char *buf, uint64_t count)
 {
-    if (pipe_id < 0 || pipe_id >= MAX_PIPES || !pipes[pipe_id].in_use) {
+    if (pipe_id < 0 || pipe_id >= MAX_PIPES) {
         return -1;
     }
 
     PipeInternal *p = &pipes[pipe_id];
 
     uint64_t flags = spinlock_acquire_irqsave(&p->lock);
+    if (!p->in_use) {
+        spinlock_release_irqrestore(&p->lock, flags);
+        return -1;
+    }
+    const uint64_t my_gen = p->gen;
     while (true) {
         if (p->read_closed || p->write_closed) {
             spinlock_release_irqrestore(&p->lock, flags);
@@ -190,6 +214,11 @@ int64_t pipe_write(int pipe_id, const char *buf, uint64_t count)
         }
 
         scheduler_wait(&p->space_wait, &p->lock);
+        if (!p->in_use || p->gen != my_gen) {
+            // Slot recycled while we slept: this pipe no longer exists.
+            spinlock_release_irqrestore(&p->lock, flags);
+            return -1;
+        }
     }
 }
 
@@ -269,4 +298,3 @@ bool pipe_is_ready(VNode *node, uint32_t events, uint32_t *out_occurred)
     }
     return false;
 }
-
