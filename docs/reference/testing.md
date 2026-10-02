@@ -23,11 +23,11 @@ The harness (`tools/qemu_smoke.py`) boots `boot.img` headless with serial on std
 - Success markers: `first desktop frame submitted` (always) and `ktest suite passed` (debug builds).
 - Failure markers: `ktest suite failed`, `KERNEL PANIC`.
 
-Debug builds also run a userspace thread self-test: the deferred boot-services task `kernel_exec`s `/bin/threadtest.elf` (plain C, `crt0 + libc`, no GUI) after the net self-test spawn. It exercises create (with cross-thread fd visibility), mutex, condvar (timedwait timeout cycles), join, and detach scenarios, prints one serial summary line, and exits nonzero when any scenario fails. The smoke suite requires the summary (each scenario is a debug-gated success marker, like the ktest marker) and fails on the `=FAIL` spellings:
+Debug builds also run a userspace thread self-test: the deferred boot-services task `kernel_exec`s `/bin/threadtest.elf` (plain C, `crt0 + libc`, no GUI) after the net self-test spawn. It exercises create (with cross-thread fd visibility), mutex, condvar (timedwait timeout cycles), join, and detach scenarios, exits nonzero when any scenario fails, and prints one serial summary line:
 
 `thread self-test summary: create=PASS mutex=PASS cond=PASS join=PASS detach=PASS`
 
-In a release tree the markers do not exist, so the suite reduces to the desktop-frame marker. The app is also runnable from the shell.
+The suite's pass condition is not the full sentence: it greps the five field tokens — debug-gated success markers `create=PASS`, `mutex=PASS`, `cond=PASS`, `join=PASS`, `detach=PASS` (one per scenario, like the ktest marker) plus failure markers on the `=FAIL` spellings of the same fields. The tokens are substrings matched anywhere in the serial log, and they appear only in the summary line (the app's per-scenario log lines use spaces, never `=`), so they need no line anchoring. In a release tree the markers do not exist, so the suite reduces to the desktop-frame marker. The app is also runnable from the shell.
 
 SMP suites are opt-in and heavier:
 
