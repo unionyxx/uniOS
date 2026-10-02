@@ -38,7 +38,6 @@ constexpr size_t FPU_STATE_SIZE = 4096; // Increased to 4K for safety
 struct VmaList
 {
     VMA *head;
-    uint32_t count;
 };
 
 [[nodiscard]] VmaList *vma_list_alloc();

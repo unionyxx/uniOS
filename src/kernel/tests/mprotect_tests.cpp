@@ -31,7 +31,6 @@ KTEST(mprotect_subrange_guard_page)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -54,7 +53,6 @@ KTEST(mprotect_subrange_guard_page)
     vma->is_cow = false;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     // The pthread guard geometry: protect the first page of the mapping.
     KTEST_EXPECT_EQ(sys_mprotect(reinterpret_cast<void *>(TEST_VADDR), 4096, PROT_NONE), 0);
@@ -85,7 +83,6 @@ KTEST(mprotect_subrange_guard_page)
 
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // A sub-range strictly inside a mapping exercises both range boundaries:
@@ -99,7 +96,6 @@ KTEST(mprotect_subrange_split_then_unmap)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -122,7 +118,6 @@ KTEST(mprotect_subrange_split_then_unmap)
     vma->is_cow = false;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     // Protect the two middle pages: [base+1p, base+3p).
     const uint64_t mid_lo = TEST_VADDR + 4096;
@@ -174,5 +169,4 @@ KTEST(mprotect_subrange_split_then_unmap)
 
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }

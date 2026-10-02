@@ -54,7 +54,6 @@ KTEST(extended_syscalls_futex)
 
     uint64_t *orig_page_table = current->page_table;
     VMA *orig_vma_list = current->vmalist->head;
-    uint32_t orig_vma_count = current->vmalist->count;
 
     if (!current->page_table)
         current->page_table = vmm_get_kernel_pml4();
@@ -78,7 +77,6 @@ KTEST(extended_syscalls_futex)
     futex_vma->type = VMAType::Anonymous;
     futex_vma->next = nullptr;
     current->vmalist->head = futex_vma;
-    current->vmalist->count = 1;
 
     volatile uint32_t val = 42;
 
@@ -156,7 +154,6 @@ KTEST(extended_syscalls_futex)
 
     current->page_table = orig_page_table;
     current->vmalist->head = orig_vma_list;
-    current->vmalist->count = orig_vma_count;
 }
 
 KTEST(extended_syscalls_thread_create)
@@ -204,7 +201,6 @@ KTEST(extended_syscalls_mprotect)
 
     uint64_t *orig_page_table = current->page_table;
     VMA *orig_vma_list = current->vmalist->head;
-    uint32_t orig_vma_count = current->vmalist->count;
 
     if (!current->page_table)
         current->page_table = vmm_get_kernel_pml4();
@@ -229,7 +225,6 @@ KTEST(extended_syscalls_mprotect)
     vma->next = nullptr;
 
     current->vmalist->head = vma;
-    current->vmalist->count = 1;
 
     // unaligned addr
     int64_t res = sys_mprotect(reinterpret_cast<void *>(test_vaddr | 1), 4096, PROT_READ | PROT_WRITE);
@@ -258,7 +253,6 @@ KTEST(extended_syscalls_mprotect)
 
     current->page_table = orig_page_table;
     current->vmalist->head = orig_vma_list;
-    current->vmalist->count = orig_vma_count;
 }
 
 KTEST(extended_syscalls_epoll)
@@ -270,7 +264,6 @@ KTEST(extended_syscalls_epoll)
     // a real user mapping for the epoll_event structures.
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
 
     if (!p->page_table)
         p->page_table = vmm_get_kernel_pml4();
@@ -291,7 +284,6 @@ KTEST(extended_syscalls_epoll)
     vma->next = nullptr;
 
     p->vmalist->head = vma;
-    p->vmalist->count = 1;
 
     struct epoll_event *user_ev = reinterpret_cast<struct epoll_event *>(test_vaddr);
     struct epoll_event *user_events = reinterpret_cast<struct epoll_event *>(test_vaddr + 64);
@@ -360,7 +352,6 @@ KTEST(extended_syscalls_epoll)
 
     p->page_table = orig_page_table;
     p->vmalist->head = orig_vma_list;
-    p->vmalist->count = orig_vma_count;
 }
 
 // Writer thread for the epoll wake test: yields for a while, then writes to
@@ -405,7 +396,6 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
     f.vma->type = VMAType::Anonymous;
     f.vma->next = nullptr;
     p->vmalist->head = f.vma;
-    p->vmalist->count = 1;
 
     f.user_ev = reinterpret_cast<struct epoll_event *>(test_vaddr);
     f.user_events = f.user_ev;
@@ -426,7 +416,7 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
 }
 
 static void epoll_block_fixture_teardown(Process *p, EpollBlockFixture &f, uint64_t *orig_page_table,
-                                         VMA *orig_vma_list, uint32_t orig_vma_count)
+                                         VMA *orig_vma_list)
 {
     vfs_close(f.read_fd);
     vfs_close(static_cast<int>(f.epfd));
@@ -437,7 +427,6 @@ static void epoll_block_fixture_teardown(Process *p, EpollBlockFixture &f, uint6
     free(f.vma);
     p->page_table = orig_page_table;
     p->vmalist->head = orig_vma_list;
-    p->vmalist->count = orig_vma_count;
 }
 
 KTEST(extended_syscalls_epoll_timeout)
@@ -447,7 +436,6 @@ KTEST(extended_syscalls_epoll_timeout)
 
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
     if (!p->page_table)
         p->page_table = vmm_get_kernel_pml4();
 
@@ -465,7 +453,7 @@ KTEST(extended_syscalls_epoll_timeout)
     KTEST_EXPECT_EQ(r, 0);
     KTEST_EXPECT(elapsed >= 200); // ~300ms budget with a generous margin
 
-    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list);
 }
 
 KTEST(extended_syscalls_epoll_wake)
@@ -475,7 +463,6 @@ KTEST(extended_syscalls_epoll_wake)
 
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
     if (!p->page_table)
         p->page_table = vmm_get_kernel_pml4();
 
@@ -487,7 +474,7 @@ KTEST(extended_syscalls_epoll_wake)
     void *stack = malloc(4096);
     KTEST_EXPECT(stack != nullptr);
     if (!stack) {
-        epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+        epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list);
         return;
     }
     void *stack_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
@@ -528,7 +515,7 @@ KTEST(extended_syscalls_epoll_wake)
     }
 
     free(stack);
-    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list, orig_vma_count);
+    epoll_block_fixture_teardown(p, f, orig_page_table, orig_vma_list);
 }
 
 #ifndef SEEK_SET
@@ -544,7 +531,6 @@ KTEST(extended_syscalls_memfd)
 
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -619,7 +605,6 @@ KTEST(extended_syscalls_memfd)
 
     p->page_table = orig_page_table;
     p->vmalist->head = orig_vma_list;
-    p->vmalist->count = orig_vma_count;
 }
 
 extern "C" int64_t sys_ftruncate(int fd, uint64_t size);
@@ -663,7 +648,6 @@ KTEST(extended_syscalls_vma_split_unmap)
 
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -719,7 +703,6 @@ KTEST(extended_syscalls_vma_split_unmap)
 
     p->page_table = orig_page_table;
     p->vmalist->head = orig_vma_list;
-    p->vmalist->count = orig_vma_count;
 }
 
 KTEST(extended_syscalls_mmap_offset)
@@ -729,7 +712,6 @@ KTEST(extended_syscalls_mmap_offset)
 
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -783,7 +765,6 @@ KTEST(extended_syscalls_mmap_offset)
 
     p->page_table = orig_page_table;
     p->vmalist->head = orig_vma_list;
-    p->vmalist->count = orig_vma_count;
 }
 
 struct TestStackFrame
@@ -813,7 +794,6 @@ KTEST(extended_syscalls_signal_context)
 
     uint64_t *orig_page_table = p->page_table;
     VMA *orig_vma_list = p->vmalist->head;
-    uint32_t orig_vma_count = p->vmalist->count;
 
     if (!p->page_table) {
         p->page_table = vmm_get_kernel_pml4();
@@ -931,7 +911,6 @@ KTEST(extended_syscalls_signal_context)
     p->signals = orig_signals;
     p->page_table = orig_page_table;
     p->vmalist->head = orig_vma_list;
-    p->vmalist->count = orig_vma_count;
 }
 
 KTEST(extended_vfs_page_cache)

@@ -1276,12 +1276,10 @@ static void user_task_wrapper()
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     p->page_table = new_pml4;
     p->vmalist->head = loader_proc->vmalist->head;
-    p->vmalist->count = loader_proc->vmalist->count;
     p->exec_entry = entry;
     spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
 
     loader_proc->vmalist->head = nullptr;
-    loader_proc->vmalist->count = 0;
     vma_list_free(loader_proc->vmalist);
     loader_proc->vmalist = nullptr;
     aligned_free(loader_proc);
@@ -1390,9 +1388,7 @@ static void user_task_wrapper()
 
     child->page_table = new_pml4;
     child->vmalist->head = loader_proc->vmalist->head;
-    child->vmalist->count = loader_proc->vmalist->count;
     loader_proc->vmalist->head = nullptr;
-    loader_proc->vmalist->count = 0;
     vma_list_free(loader_proc->vmalist);
     loader_proc->vmalist = nullptr;
     child->exec_entry = entry;

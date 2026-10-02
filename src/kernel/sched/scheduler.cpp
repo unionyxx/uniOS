@@ -297,7 +297,6 @@ VmaList *vma_list_alloc()
     if (!l)
         return nullptr;
     l->head = nullptr;
-    l->count = 0;
     return l;
 }
 
@@ -1860,7 +1859,6 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     VMA *cloned_head = vma_clone(current_proc()->vmalist->head);
     spinlock_release_irqrestore(current_proc()->vma_lock_ptr, vma_clone_flags);
     child->vmalist->head = cloned_head;
-    child->vmalist->count = current_proc()->vmalist->count;
 
     if (current_proc()->vmalist->head && !child->vmalist->head) {
         process_release_private_fds(child);
@@ -2299,7 +2297,7 @@ extern "C" void thread_ret();
     kstring::strncpy(thread->cwd, parent->cwd, sizeof(thread->cwd));
 
     thread->page_table = parent->page_table;
-    thread->vmalist = parent->vmalist; // shared live: head + count
+    thread->vmalist = parent->vmalist; // shared live
     spinlock_init(&thread->vma_lock);
     thread->vma_lock_ptr = parent->vma_lock_ptr;
 

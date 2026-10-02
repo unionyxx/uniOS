@@ -49,7 +49,6 @@ KTEST(thread_group_exit_kills_blocked_siblings)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -69,7 +68,6 @@ KTEST(thread_group_exit_kills_blocked_siblings)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -133,7 +131,6 @@ KTEST(thread_group_exit_kills_blocked_siblings)
     leader->signals.pending = 0;
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 static volatile bool g_thread_exit_ran;
@@ -151,7 +148,6 @@ KTEST(thread_exit_unmaps_recorded_stack)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -169,7 +165,6 @@ KTEST(thread_exit_unmaps_recorded_stack)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -217,7 +212,6 @@ KTEST(thread_exit_unmaps_recorded_stack)
     leader->signals.pending = 0;
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 KTEST(thread_detach_self_reaps)
@@ -271,7 +265,6 @@ KTEST(futex_wait_timeout_expires)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -291,7 +284,6 @@ KTEST(futex_wait_timeout_expires)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     // Nobody wakes the word: a 50 ms timeout must expire instead of hanging.
     const int64_t r = sys_futex(word, FUTEX_WAIT, 0, 50);
@@ -307,7 +299,6 @@ KTEST(futex_wait_timeout_expires)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // ---- timed futex wait hardening ----
@@ -341,7 +332,6 @@ KTEST(futex_timed_wake_deregisters_on_early_wake)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -361,7 +351,6 @@ KTEST(futex_timed_wake_deregisters_on_early_wake)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -393,7 +382,6 @@ KTEST(futex_timed_wake_deregisters_on_early_wake)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 KTEST(futex_timeout_rounds_up_to_one_tick)
@@ -403,7 +391,6 @@ KTEST(futex_timeout_rounds_up_to_one_tick)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -423,7 +410,6 @@ KTEST(futex_timeout_rounds_up_to_one_tick)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     // A sub-tick timeout must still consume at least one full tick:
     // truncating (timeout_ms * freq) / 1000 to zero arms a deadline that
@@ -438,7 +424,6 @@ KTEST(futex_timeout_rounds_up_to_one_tick)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 KTEST(futex_huge_timeout_does_not_expire_early)
@@ -448,7 +433,6 @@ KTEST(futex_huge_timeout_does_not_expire_early)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -468,7 +452,6 @@ KTEST(futex_huge_timeout_does_not_expire_early)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -496,7 +479,6 @@ KTEST(futex_huge_timeout_does_not_expire_early)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // ---- untimed futex waits vs fatal signals ----
@@ -524,7 +506,6 @@ KTEST(futex_untimed_wait_returns_eintr_on_fatal_signal)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -544,7 +525,6 @@ KTEST(futex_untimed_wait_returns_eintr_on_fatal_signal)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     // Signal already pending: the wait must refuse to sleep instead of
     // parking with a fatal signal queued.
@@ -596,7 +576,6 @@ KTEST(futex_untimed_wait_returns_eintr_on_fatal_signal)
     leader->signals.pending = 0;
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // ---- futex wake word matching ----
@@ -639,7 +618,6 @@ KTEST(futex_wake_matches_only_the_addressed_word)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -661,7 +639,6 @@ KTEST(futex_wake_matches_only_the_addressed_word)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -738,7 +715,6 @@ KTEST(futex_wake_matches_only_the_addressed_word)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // The wake count must be spent per word: wake(1) reaches one of the
@@ -761,7 +737,6 @@ KTEST(futex_wake_count_spends_one_wake_per_word)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -781,7 +756,6 @@ KTEST(futex_wake_count_spends_one_wake_per_word)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -849,7 +823,6 @@ KTEST(futex_wake_count_spends_one_wake_per_word)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // The futex key is the PHYSICAL word: one frame mapped at two virtual
@@ -863,7 +836,6 @@ KTEST(futex_wake_matches_across_virtual_aliases)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -891,7 +863,6 @@ KTEST(futex_wake_matches_across_virtual_aliases)
     vma_alias->type = VMAType::Anonymous;
     vma_alias->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 2;
 
     // A parks on word 0 of the frame THROUGH THE ALIAS; B parks on word 8
     // of the same frame through the first mapping.
@@ -977,7 +948,6 @@ KTEST(futex_wake_matches_across_virtual_aliases)
     free(vma_alias);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 // ---- SYS_THREAD_EXIT must not group-kill ----
@@ -1008,7 +978,6 @@ KTEST(thread_exit_leaves_leader_alive)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -1026,7 +995,6 @@ KTEST(thread_exit_leaves_leader_alive)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     SyscallFrame mock_frame = {};
     mock_frame.cs = 0x08;
@@ -1112,7 +1080,6 @@ KTEST(thread_exit_leaves_leader_alive)
     leader->signals.pending = 0;
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 KTEST(thread_detach_rejects_forked_children)
@@ -1220,7 +1187,6 @@ KTEST(futex_timed_wait_table_full_returns_enospc)
 
     uint64_t *orig_page_table = leader->page_table;
     VMA *orig_vma_list = leader->vmalist->head;
-    uint32_t orig_vma_count = leader->vmalist->count;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
 
@@ -1240,7 +1206,6 @@ KTEST(futex_timed_wait_table_full_returns_enospc)
     vma->type = VMAType::Anonymous;
     vma->next = nullptr;
     leader->vmalist->head = vma;
-    leader->vmalist->count = 1;
 
     // Fill every timed-wait slot with far-future registrations on fake
     // stand-ins: the walker only compares pointers, and a far-future
@@ -1267,7 +1232,6 @@ KTEST(futex_timed_wait_table_full_returns_enospc)
     free(vma);
     leader->page_table = orig_page_table;
     leader->vmalist->head = orig_vma_list;
-    leader->vmalist->count = orig_vma_count;
 }
 
 KTEST(thread_create_detached_flag_self_reaps)
