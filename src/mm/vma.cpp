@@ -119,6 +119,39 @@ void vma_remove(VMA **list_ptr, uint64_t start, uint64_t end)
     return true;
 }
 
+[[nodiscard]] bool vma_split_range(VMA **list_ptr, uint64_t start, uint64_t end)
+{
+    if (!list_ptr || start >= end)
+        return true;
+
+    // Cut at both boundaries so that afterwards every VMA overlapping
+    // [start, end) lies fully inside it (VMAs never overlap, so at most
+    // one VMA can strictly contain a boundary address). A failed
+    // allocation aborts with the list semantically unchanged: a cut that
+    // did land only split a VMA into two with identical flags.
+    for (int boundary = 0; boundary < 2; boundary++) {
+        const uint64_t addr = (boundary == 0) ? start : end;
+        for (VMA **link = list_ptr; *link; link = &(*link)->next) {
+            VMA *curr = *link;
+            if (curr->start < addr && addr < curr->end) {
+                VMA *tail = static_cast<VMA *>(malloc(sizeof(VMA)));
+                if (!tail)
+                    return false;
+                tail->start = addr;
+                tail->end = curr->end;
+                tail->flags = curr->flags;
+                tail->type = curr->type;
+                tail->is_cow = curr->is_cow;
+                tail->next = curr->next;
+                curr->end = addr;
+                curr->next = tail;
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] VMA *vma_clone(const VMA *src_list)
 {
     VMA *new_list = nullptr;

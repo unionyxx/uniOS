@@ -1537,6 +1537,16 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     // munmap cannot free pages mid-rewrite. One batched shootdown replaces a
     // per-page IPI round trip.
     uint64_t sl_flags = spinlock_acquire_irqsave(current->vma_lock_ptr);
+    // Cut the overlapping VMAs at the range boundaries first, then re-
+    // protect exactly the covered sub-range. Writing the flags to a whole
+    // straddling VMA instead clobbers the mapping's remaining pages: a
+    // sub-range PROT_NONE guard (pthread stacks) would strip PTE_WRITABLE
+    // from the entire mapping's metadata, so every later write validation
+    // into that mapping fails.
+    if (!vma_split_range(&current->vmalist->head, start_addr, end_addr)) {
+        spinlock_release_irqrestore(current->vma_lock_ptr, sl_flags);
+        return -12; // ENOMEM
+    }
     for (VMA *curr = current->vmalist->head; curr; curr = curr->next) {
         if (curr->start < end_addr && curr->end > start_addr) {
             // Preserve SHARED: dropping it would make the next fork COW
