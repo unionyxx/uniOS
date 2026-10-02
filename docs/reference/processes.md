@@ -38,7 +38,7 @@ There is no argv/envp or aux vector: `crt0` calls `main()` with no arguments.
 
 - The entry frame is cloned from the caller's live syscall frame, so the thread starts with the caller's user segments and rflags; `arg` reaches the entry in `rdi` through the `thread_ret` trampoline.
 - `SYS_GETPID` in a thread returns the thread's own pid. A joinable thread is a child of its **creator** only: `SYS_WAIT4` reaps it from the creating thread, not from the group.
-- Detached threads (the `THREAD_DETACHED` create flag or `SYS_THREAD_DETACH`) are orphaned to pid 0 — the kernel-zombie reaper collects them with no waitpid, and a later waitpid on the tid fails. `SYS_THREAD_DETACH` refuses forked children (`-10` ESRCH): they lead their own group, and orphaning them would discard their exit status.
+- Detached threads (the `THREAD_DETACHED` create flag or `SYS_THREAD_DETACH`) are orphaned to pid 0 — the kernel-zombie reaper collects them with no waitpid, and a later waitpid on the tid fails. `SYS_THREAD_DETACH` refuses forked children (`-10` ECHILD): they lead their own group, and orphaning them would discard their exit status.
 - The fd table outlives any single thread: each exit drops one reference (`process_release_private_fds`), and the table — with its vnodes — is freed only at the last release.
 
 ## Exit and Wait
