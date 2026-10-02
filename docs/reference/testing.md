@@ -10,7 +10,7 @@ Kernel tests use the `KTEST()` macro (`include/kernel/ktest.h`); system-level va
 - Tests run only in debug builds, after filesystem mounts and before SMP bring-up. Release builds boot straight to the desktop.
 - Test files live next to the code they cover as `*_tests.cpp`: PMM/VMM/heap tests in `src/mm/tests/`, scheduler/SMP/syscall tests in `src/kernel/tests/`, congestion-control and DNS tests in `src/net/`.
 
-Notable coverage: zeroed-frame and double-free guards, HHDM round trips, heap realloc patterns and calloc overflow, ready-queue state guards, exactly-once enqueue across cores, per-CPU sanity, a threaded stress mix (heap churn, irqsave spinlocks, mutex handoff), fd-table fork-copy/thread-share/refcount, thread-group exit (including a sibling blocked in a futex wait), thread exit unmap + detach routing, timed futex waits (word-matched wakes, the 16-slot table's ENOSPC, tick round-up), TCP congestion policy, and hostile DNS input.
+Notable coverage: zeroed-frame and double-free guards, HHDM round trips, heap realloc patterns and calloc overflow, ready-queue state guards, exactly-once enqueue across cores, per-CPU sanity, a threaded stress mix (heap churn, irqsave spinlocks, mutex handoff), fd-table fork-copy/thread-share/refcount, thread-group exit (including a sibling blocked in a futex wait), thread exit unmap + detach routing, timed futex waits (word-matched wakes, the 16-slot table's ENOSPC, tick round-up), static TLS (block/TCB install layout, per-thread template clone, exit unmap, fork carry-over, and PT_TLS parse including the kernel-half `p_vaddr` rejection), TCP congestion policy, and hostile DNS input.
 
 ## Smoke Suites
 
@@ -23,11 +23,13 @@ The harness (`tools/qemu_smoke.py`) boots `boot.img` headless with serial on std
 - Success markers: `first desktop frame submitted` (always) and `ktest suite passed` (debug builds).
 - Failure markers: `ktest suite failed`, `KERNEL PANIC`.
 
-Debug builds also run a userspace thread self-test: the deferred boot-services task `kernel_exec`s `/bin/threadtest.elf` (plain C, `crt0 + libc`, no GUI) after the net self-test spawn. It exercises create (with cross-thread fd visibility), mutex, condvar (timedwait timeout cycles), join, and detach scenarios, exits nonzero when any scenario fails, and prints one serial summary line:
+Debug builds also run a userspace thread self-test: the deferred boot-services task `kernel_exec`s `/bin/threadtest.elf` (plain C, `crt0 + libc`, no GUI) after the net self-test spawn. It exercises create (with cross-thread fd visibility), mutex, condvar (timedwait timeout cycles), join, detach, and tls scenarios, exits nonzero when any scenario fails, and prints one serial summary line:
 
-`thread self-test summary: create=PASS mutex=PASS cond=PASS join=PASS detach=PASS`
+`thread self-test summary: create=PASS mutex=PASS cond=PASS join=PASS detach=PASS tls=PASS`
 
-The suite's pass condition is not the full sentence: it greps the five field tokens — debug-gated success markers `create=PASS`, `mutex=PASS`, `cond=PASS`, `join=PASS`, `detach=PASS` (one per scenario, like the ktest marker) plus failure markers on the `=FAIL` spellings of the same fields. The tokens are substrings matched anywhere in the serial log, and they appear only in the summary line (the app's per-scenario log lines use spaces, never `=`), so they need no line anchoring. In a release tree the markers do not exist, so the suite reduces to the desktop-frame marker. The app is also runnable from the shell.
+The tls scenario pins the per-thread contract end-to-end: four workers each run 5000 increments on their own `__thread` counter and return 5000 through the exit channel (a shared block would split the 20000 increments), the main thread's counter must stay zero, a nonzero-initialized `__thread` canary must read its initial value in every thread (a block shifted against the link-time TPOFF corrupts initialized variables), and the TCB at `fs:0` must self-identify and carry the `pthread_self` tid.
+
+The suite's pass condition is not the full sentence: it greps the six field tokens — debug-gated success markers `create=PASS`, `mutex=PASS`, `cond=PASS`, `join=PASS`, `detach=PASS`, `tls=PASS` (one per scenario, like the ktest marker) plus failure markers on the `=FAIL` spellings of the same fields. The tokens are substrings matched anywhere in the serial log, and they appear only in the summary line (the app's per-scenario log lines use spaces, never `=`), so they need no line anchoring. In a release tree the markers do not exist, so the suite reduces to the desktop-frame marker. The app is also runnable from the shell.
 
 SMP suites are opt-in and heavier:
 
