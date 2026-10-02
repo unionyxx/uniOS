@@ -415,6 +415,16 @@ void wm_commit_windows(Registry *registry)
                     DirtyRect visible = {};
                     if (rect_intersection(damaged, client, &visible)) {
                         enqueue_damage_rect(visible.x, visible.y, visible.w, visible.h);
+                        // User-window content changes what sits behind the
+                        // shell glass (compose_desktop_for_blur composes
+                        // user windows over the wallpaper), so re-capture the
+                        // blurred backdrop for this rect. Shell windows
+                        // (menubar/dock, i < WM_FIRST_USER_WINDOW) are NOT
+                        // part of the blur source: their own redraw damage
+                        // must not feed back into a re-blur, or the shell
+                        // and the WM ping-pong generations forever.
+                        if (i >= WM_FIRST_USER_WINDOW)
+                            capture_shell_backdrop_for_rect(visible, registry);
                     }
                 }
                 w.active = true;

@@ -158,8 +158,6 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
                 prepend_damage_rect(g_scene_cursor_rect);
         }
 
-        DirtyRect compose_union = {0, 0, 0, 0};
-        bool has_compose_union = false;
         int dirty_count = clamp_dirty_rect_count(g_dirty_count);
 
         uint64_t compose_tsc_start = wm_tsc_now();
@@ -167,13 +165,6 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
             DirtyRect &r = g_dirty_rects[d];
             if (r.w <= 0 || r.h <= 0)
                 continue;
-
-            if (!has_compose_union) {
-                compose_union = r;
-                has_compose_union = true;
-            } else {
-                compose_union = rect_union(compose_union, r);
-            }
 
             if (!compose_rect_clipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry)) {
                 compose_rect_unclipped(r, focus, g_input.hover_frame_index, g_input.hover_button, registry);
@@ -184,9 +175,13 @@ bool wm_build_frame(Registry *registry, bool manip, bool inter, bool resizing, u
         g_frame_stats.last_compose_ticks = wm_tsc_now() - compose_tsc_start;
         g_frame_stats.total_compose_ticks += g_frame_stats.last_compose_ticks;
 
-        if (has_compose_union) {
-            capture_shell_backdrop_for_rect(compose_union, const_cast<Registry *>(registry));
-        }
+        // Backdrop capture is NOT driven by the compose union: the shell
+        // strips' own redraw damage lands in that union, and feeding it back
+        // here re-blurred every frame (generation bump -> shell redraw ->
+        // damage -> re-blur, 60 fps forever on an idle desktop). Blur
+        // re-capture is attributed where the damage originates: user-window
+        // content changes (wm_commit_windows) and geometry transitions
+        // (moves/closes/adds capture their own old+new bounds).
         if (g_shell_blur_available)
             flush_shell_blur_updates(registry);
 
