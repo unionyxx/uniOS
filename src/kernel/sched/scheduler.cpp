@@ -44,6 +44,21 @@ WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
 // from the tick path under g_sched_lock.
 static volatile uint64_t g_epoll_wake_deadline = UINT64_MAX;
 
+// Timed waits on leaf wait queues (futex timeouts): unlike epoll's single
+// global queue there is no one queue to wake, so each waiter registers
+// itself. The walker wakes entries whose deadline passed AND that are still
+// parked (Blocked/Waiting): a waiter woken by its leaf (futex WAKE) is
+// already Running/Ready and is skipped, so a genuine wake is never misread
+// as a timeout.
+struct TimedWaitEntry
+{
+    Process *proc;
+    uint64_t deadline;
+};
+static TimedWaitEntry g_timed_waits[16];
+static volatile uint64_t g_timed_wake_deadline = UINT64_MAX;
+static void wake_expired_timed_waits(uint64_t now);
+
 extern "C" void scheduler_unlock_after_switch();
 
 // Zombies whose resources are still shared with live threads cannot be freed
@@ -800,6 +815,7 @@ static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 1)
         g_epoll_wake_deadline = UINT64_MAX;
         wait_queue_wake_all(&g_epoll_wait_queue);
     }
+    wake_expired_timed_waits(now);
 
     if (cur->state == ProcessState_Running) {
         uint32_t max_slice = (cur->priority == 0) ? 5 : (cur->priority == 1) ? 20 : 50;
@@ -1579,6 +1595,71 @@ void scheduler_note_epoll_deadline(uint64_t deadline_ticks)
     }
 }
 
+void scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
+{
+    if (!p)
+        return;
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+    bool placed = false;
+    uint64_t earliest = UINT64_MAX;
+    for (auto &e : g_timed_waits) {
+        if (!placed && e.proc == nullptr) {
+            e.proc = p;
+            e.deadline = deadline_ticks;
+            placed = true;
+        }
+        if (e.proc)
+            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+    }
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    if (placed) {
+        uint64_t cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        while (earliest < cur) {
+            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, earliest))
+                break;
+            cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+// Caller MUST hold g_sched_lock: this runs from scheduler_schedule_internal
+// (the tick path that also drives the epoll deadline). The wake path is
+// scheduler_wake_process_locked, which requires exactly that.
+static void wake_expired_timed_waits(uint64_t now)
+{
+    if (g_timed_wake_deadline == UINT64_MAX || now < g_timed_wake_deadline)
+        return;
+
+    g_timed_wake_deadline = UINT64_MAX;
+    uint64_t earliest = UINT64_MAX;
+    for (auto &e : g_timed_waits) {
+        if (!e.proc)
+            continue;
+        if (now >= e.deadline) {
+            Process *target = e.proc;
+            e.proc = nullptr;
+            if (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting) {
+                target->timed_wake = true;
+                scheduler_wake_process_locked(target);
+            }
+        } else {
+            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+        }
+    }
+
+    if (earliest != UINT64_MAX) {
+        uint64_t cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        while (earliest < cur) {
+            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, earliest))
+                break;
+            cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 void scheduler_notify_input_waiters()
 {
     const uint64_t flags = interrupts_save_disable();
@@ -1782,7 +1863,30 @@ void process_group_kill_siblings(Process *self)
     interrupts_restore(flags);
 }
 
+static void process_exit_common(int32_t status, bool group_kill);
+
 void process_exit(int32_t status)
+{
+    // exit() from any thread terminates the whole group.
+    process_exit_common(status, true);
+}
+
+void sys_thread_exit(int64_t status)
+{
+    Process *self = process_get_current();
+    if (self && self->user_stack_lo != 0 && self->user_stack_size != 0) {
+        // Strictly on the kernel stack here: the caller never returns to the
+        // user stack, so the unmap (VMA nodes, PTEs, frames, futex waiters)
+        // cannot pull memory out from under running code.
+        munmap_process_range(self, self->user_stack_lo, self->user_stack_size);
+        self->user_stack_lo = 0;
+        self->user_stack_size = 0;
+    }
+    // pthread_exit: this member only, the group stays alive.
+    process_exit_common(static_cast<int32_t>(status), false);
+}
+
+static void process_exit_common(int32_t status, bool group_kill)
 {
     DEBUG_INFO("Process %d (%s) exiting with status %d on cpu%u", current_proc()->pid, current_proc()->name, status,
                cpu_get_local()->cpu_id);
@@ -1790,7 +1894,8 @@ void process_exit(int32_t status)
     // exit() from any thread terminates the whole group: signal the siblings
     // before releasing this member's resources so dying members cannot race
     // the shared fd-table teardown.
-    process_group_kill_siblings(current_proc());
+    if (group_kill)
+        process_group_kill_siblings(current_proc());
 
     process_release_private_fds(current_proc());
     shm_cleanup_process(current_proc());
@@ -2045,7 +2150,8 @@ void scheduler_sleep_ms(uint64_t ms)
 
 extern "C" void thread_ret();
 
-[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame)
+[[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, SyscallFrame *frame,
+                                        uint64_t stack_lo, uint64_t stack_size)
 {
     if (!entry || !stack_top || !frame) {
         return -22;
@@ -2067,6 +2173,8 @@ extern "C" void thread_ret();
     thread->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
     thread->leader_pid = parent->leader_pid;
     thread->parent_pid = parent->pid;
+    thread->user_stack_lo = stack_lo;
+    thread->user_stack_size = stack_size;
     thread->uid = parent->uid;
     thread->state = ProcessState_Ready;
     thread->priority = parent->priority;
@@ -2150,6 +2258,45 @@ extern "C" void thread_ret();
     scheduler_notify_idle_cpus();
 
     return thread_pid;
+}
+
+int64_t sys_thread_detach(uint64_t tid)
+{
+    Process *cur = process_get_current();
+    if (!cur)
+        return -1;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    Process *prev_sibling = nullptr;
+    Process *target = cur->children_list;
+    while (target) {
+        if (target->pid == tid)
+            break;
+        prev_sibling = target;
+        target = target->sibling_next;
+    }
+
+    if (!target || target->state == ProcessState_Zombie) {
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(flags);
+        return -10; // -ESRCH: not a live child thread
+    }
+
+    // Orphan the thread: the kernel-zombie reaper collects parent_pid == 0
+    // zombies without any waitpid, which is exactly the detached contract.
+    if (prev_sibling)
+        prev_sibling->sibling_next = target->sibling_next;
+    else
+        cur->children_list = target->sibling_next;
+    target->sibling_next = nullptr;
+    target->parent_pid = 0;
+    target->thread_detached = true;
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+    return 0;
 }
 
 void preempt_disable()

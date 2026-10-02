@@ -121,6 +121,10 @@
 #define SYS_PING 295
 #define SYS_NET_RENEW 296
 
+/* Threads (extended: return negative errno). */
+#define SYS_THREAD_EXIT 297
+#define SYS_THREAD_DETACH 298
+
 /* Futex Opcodes */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1

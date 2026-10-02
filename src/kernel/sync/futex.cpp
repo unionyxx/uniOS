@@ -4,6 +4,7 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/scheduler.h>
 #include <kernel/sync/futex.h>
+#include <kernel/time/timer.h>
 #include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 
@@ -67,7 +68,7 @@ void futex_notify_freed_frames(const uint64_t *frames, size_t count)
     }
 }
 
-int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
+int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_ms)
 {
     // Buckets are initialized at boot (kmain, single-core). A lazy init here
     // raced on SMP: two cores could initialize a bucket lock while a third
@@ -117,8 +118,25 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val)
             return -4; // -EINTR: do not sleep through a fatal signal
         }
 
-        scheduler_wait(&bucket->wait_queue, &bucket->lock);
-        spinlock_release_irqrestore(&bucket->lock, flags);
+        if (timeout_ms != 0) {
+            // Wait queues have no native timeout: arm the tick-driven
+            // deadline walker. It only marks waiters still parked on the
+            // queue, so a real futex wake racing the deadline is never
+            // misread as a timeout.
+            const uint64_t freq = timer_get_frequency();
+            const uint64_t deadline = timer_get_ticks() + (timeout_ms * (freq ? freq : 1000)) / 1000;
+            scheduler_note_wake_deadline(current, deadline);
+            scheduler_wait(&bucket->wait_queue, &bucket->lock);
+            spinlock_release_irqrestore(&bucket->lock, flags);
+
+            if (current->timed_wake) {
+                current->timed_wake = false;
+                return -110; // -ETIMEDOUT
+            }
+        } else {
+            scheduler_wait(&bucket->wait_queue, &bucket->lock);
+            spinlock_release_irqrestore(&bucket->lock, flags);
+        }
 
         // Woken by a signal delivery rather than a futex wake: report the
         // interruption instead of a spurious success.

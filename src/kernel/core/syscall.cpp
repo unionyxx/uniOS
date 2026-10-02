@@ -349,7 +349,7 @@ static bool shm_unmap_from_process(Process *p, int id)
     return true;
 }
 
-static bool munmap_process_range(Process *p, uint64_t addr, size_t length)
+bool munmap_process_range(Process *p, uint64_t addr, size_t length)
 {
     if (!p || !p->page_table || addr == 0 || length == 0 || (addr & 0xFFFULL) != 0)
         return false;
@@ -3130,10 +3130,15 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return shm_unmap_from_process(process_get_current(), (int)arg1) ? 0 : static_cast<uint64_t>(-1);
         case SYS_FUTEX:
             return sys_futex(reinterpret_cast<volatile uint32_t *>(arg1), static_cast<int>(arg2),
-                             static_cast<uint32_t>(arg3));
+                             static_cast<uint32_t>(arg3), frame->arg4);
         case SYS_THREAD_CREATE:
             return sys_thread_create(reinterpret_cast<void (*)()>(arg1), reinterpret_cast<void *>(arg2),
-                                     reinterpret_cast<void *>(arg3), frame);
+                                     reinterpret_cast<void *>(arg3), frame, frame->arg5, frame->arg6);
+        case SYS_THREAD_EXIT:
+            sys_thread_exit(static_cast<int64_t>(arg1));
+            return 0; // unreachable: the thread never returns
+        case SYS_THREAD_DETACH:
+            return sys_thread_detach(arg1);
         case SYS_MPROTECT:
             return sys_mprotect(reinterpret_cast<void *>(arg1), static_cast<size_t>(arg2), static_cast<int>(arg3));
         case SYS_EPOLL_CREATE:

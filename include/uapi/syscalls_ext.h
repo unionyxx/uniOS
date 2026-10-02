@@ -9,7 +9,6 @@ extern "C" {
 #include <uapi/syscalls.h>
 
 #define THREAD_DETACHED (1u << 0)
-#define THREAD_INHERIT_FDS (1u << 1)
 
 typedef struct thread_attr
 {

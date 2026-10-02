@@ -121,7 +121,8 @@ struct Process
     uint64_t leader_pid;
     uint64_t user_stack_lo; // recorded thread stack (0 = none)
     uint64_t user_stack_size;
-    bool thread_detached; // exits route to the kernel-zombie auto-reap
+    bool thread_detached; // detached at exit: routes to the kernel-zombie auto-reap
+    bool timed_wake;      // woken by the deadline walker (futex timeouts)
 
     SignalControl signals;
 
@@ -160,6 +161,14 @@ void process_exit(int32_t status);
 // zombies skipped). Wakes blocked members through the signal path; called by
 // process_exit before the caller zombifies.
 void process_group_kill_siblings(Process *self);
+
+// Terminate only the calling thread: unmap the recorded user stack while on
+// the kernel stack, then exit without group-kill. Never returns.
+[[noreturn]] void sys_thread_exit(int64_t status);
+
+// Mark a child thread detached (ESRH/-10 if not a live child): it leaves the
+// caller's children list and the kernel-zombie reaper takes it on exit.
+int64_t sys_thread_detach(uint64_t tid);
 
 void system_reboot();
 void system_poweroff();
