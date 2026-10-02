@@ -25,7 +25,7 @@ The child's pid is captured before it is published to the scheduler — a fast e
 
 `SYS_EXEC` replaces the process image:
 
-- Refused when other threads share the address space.
+- A threaded process tears its thread group down first, mirroring exit-group: every live member is SIGKILLed through the locked signal path, the deaths are awaited (bounded at 1 s, yielding so members run to their deaths), and the joinable zombies are reaped so the deferred-free paths own their stacks and structs. A member that wedges past the deadline makes the exec fail — the address space must stay untouched while a sibling still runs on it.
 - The ELF is validated (`\x7FELF`, ELF64, little-endian, `ET_EXEC`/`ET_DYN`, `EM_X86_64`, sane program headers). Entry must be covered by a segment, and overlapping `PT_LOAD` segments are rejected (they could merge writable and executable ranges).
 - Segments map with `USER` plus `WRITABLE` when `PF_W` and `NX` unless `PF_X`; the 32 KiB user stack maps below `0x0000700000000000`. Each page's BSS tail (`[filesz, memsz)`) is zeroed with the range clamped to the page — the lower bound is `max(page start, vaddr+filesz)`, because on pages deep in a multi-page BSS the file end lies below the page and an unclamped subtraction would wrap the zero-fill into unrelated physical memory below the segment.
 - The old address space and VMAs are freed only after the new ones are installed; CR3 is switched on return to user.
