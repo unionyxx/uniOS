@@ -2484,7 +2484,7 @@ int64_t sys_thread_detach(uint64_t tid)
     if (!target || target->state == ProcessState_Zombie) {
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
-        return -10; // -ESRCH: not a live child thread
+        return -10; // -ECHILD: not a live child thread
     }
 
     // Only threads of the caller's group: a forked child is its own group
@@ -2493,7 +2493,7 @@ int64_t sys_thread_detach(uint64_t tid)
     if (target->leader_pid == target->pid) {
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
-        return -10; // -ESRCH: not a child thread
+        return -10; // -ECHILD: not a child thread
     }
 
     // Orphan the thread: the kernel-zombie reaper collects parent_pid == 0
