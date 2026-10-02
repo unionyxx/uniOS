@@ -573,6 +573,19 @@ static void wait_queue_remove(WaitQueue *q, Process *p)
 
 void wait_queue_push(WaitQueue *q, Process *p)
 {
+    // A process joining a wait queue is logically off-CPU from this moment,
+    // even though it is still executing and will context-switch away inside
+    // the scheduler call that follows. Wakes can run between the push and
+    // that switch — including the sleeper's OWN schedule_internal (the epoll
+    // deadline check runs there): with on_cpu still set, wait_queue_wake_all
+    // flips the process to Ready while ready_queue_push skips it (on_cpu
+    // guard), and because its state is no longer Running the scheduler's
+    // own re-queue is skipped too. The switch then clears on_cpu and the
+    // process sits in NO queue — lost forever, which froze whole user space
+    // minutes after boot. Clearing on_cpu here keeps every wake path sound:
+    // a wake either finds the process still running (next == cur, restores
+    // on_cpu) or properly parked in the ready queue.
+    p->on_cpu = false;
     p->state = ProcessState_Waiting;
     p->queue_next = nullptr;
     p->waiting_queue = q;
@@ -867,6 +880,7 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
         // return; the caller's loop re-runs its locked scan.
         wait_queue_remove(q, current_proc());
         current_proc()->state = ProcessState_Running;
+        current_proc()->on_cpu = true;
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
         if (lock)
@@ -904,7 +918,8 @@ int scheduler_wake_waiters_under_leaf(WaitQueue *q, uint32_t count)
 }
 
 void scheduler_wake_all(WaitQueue *q)
-{    const uint64_t flags = interrupts_save_disable();
+{
+    const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
     wait_queue_wake_all(q);
     if (q != &g_epoll_wait_queue) {

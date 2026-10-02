@@ -26,6 +26,7 @@ Each core has a private idle task (pid 0) that is never inserted into the runque
 
 - The sleep queue is delta-encoded: each entry stores ticks relative to the previous entry, and each tick consumes elapsed time from the head.
 - Wait queues are FIFOs. `scheduler_wait(queue, lock)` pushes the task, releases the given lock, schedules, and re-acquires the lock on return. `scheduler_wake_all` additionally nudges the global epoll wait queue; `scheduler_wake_one` wakes exactly the head waiter (wake-one + resleep-on-miss).
+- A task joining a wait queue is marked off-CPU at push time (`wait_queue_push` clears `on_cpu`) even though it still executes until the context switch inside the scheduler call. This matters because wakes can run between the push and the switch — including the sleeper's own `scheduler_schedule_internal` (the epoll deadline check lives there): with `on_cpu` still set, the wake flipped the task to Ready while `ready_queue_push` skipped it (on-CPU guard) and the scheduler skipped its own re-queue (state no longer Running), leaving the task in no queue at all — lost forever, which froze all of user space minutes after boot.
 - Blocking paths (stdin reads, pipes, futex, event waits) return `-EINTR` when a fatal signal becomes pending.
 
 ## Context Switch
