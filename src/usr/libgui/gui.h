@@ -22,6 +22,9 @@ typedef struct
     uint32_t capacity_h;
 } Surface;
 
+// Mirrors the on-disk UOF v2 glyph record (see tools/uof_convert.py). Advances
+// and the horizontal bearing are 26.6 fixed point; atlas_x counts subcolumns
+// (output pixels * GuiFont::oversample_x).
 typedef struct
 {
     uint32_t codepoint;
@@ -29,11 +32,19 @@ typedef struct
     uint16_t atlas_y;
     uint16_t width;
     uint16_t height;
-    int16_t bearing_x;
+    int16_t bearing_x26;
     int16_t bearing_y;
-    int16_t advance_x;
-    int16_t reserved;
-} GuiGlyph;
+    int16_t advance_x26;
+    uint8_t kern_left;
+    uint8_t kern_right;
+} __attribute__((packed)) GuiGlyph;
+
+typedef struct
+{
+    uint32_t left;
+    uint32_t right;
+    int16_t value; // 26.6, additive with the class matrix
+} __attribute__((packed)) GuiKern;
 
 typedef struct
 {
@@ -41,6 +52,7 @@ typedef struct
     uint32_t glyph_count;
     uint32_t fallback_index;
     uint16_t pixel_size;
+    uint16_t oversample_x;
     uint16_t atlas_width;
     uint16_t atlas_height;
     int16_t ascent;
@@ -50,8 +62,12 @@ typedef struct
     int16_t max_advance;
     int16_t max_ink_width;
     int16_t ascii_index[128];
-    int16_t ascii_advance[128];
-    uint8_t alpha_lut[256];
+    int16_t ascii_advance26[128];
+    GuiKern *kern_pairs;
+    uint32_t kern_count;
+    int16_t *kern_matrix; // (matrix_c1+1) x (matrix_c2+1), row-major, 26.6
+    uint16_t matrix_c1;
+    uint16_t matrix_c2;
     GuiGlyph *glyphs;
     uint8_t *atlas;
 } GuiFont;

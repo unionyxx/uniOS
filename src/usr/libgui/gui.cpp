@@ -10,6 +10,7 @@
 
 #include "../libc/log.h"
 #include "../libc/syscall.h"
+#include "font_internal.h"
 #include "gui_canvas_utils.h"
 #include "gui_pixops.h"
 
@@ -1123,28 +1124,13 @@ int gui_measure_text_n(const GuiFont *font, const char *str, size_t len)
     if (!str || len == 0)
         return 0;
 
-    int width = 0;
-    size_t i = 0;
-    for (; i < len && str[i] && str[i] != '\n'; i++) {
-        uint8_t ch = static_cast<uint8_t>(str[i]);
-        if (!font) {
-            width += 8;
-            continue;
-        }
-        if (ch < 128u) {
-            width += font->ascii_advance[ch] > 0 ? font->ascii_advance[ch] : gui_font_max_advance(font);
-        } else {
-            const GuiGlyph *glyph = nullptr;
-            if (font->glyphs && font->glyph_count > 0) {
-                if (font->fallback_index < font->glyph_count)
-                    glyph = &font->glyphs[font->fallback_index];
-                else
-                    glyph = &font->glyphs[0];
-            }
-            width += glyph ? glyph->advance_x : gui_font_max_advance(font);
-        }
+    if (!font) {
+        size_t n = 0;
+        while (n < len && str[n] && str[n] != '\n')
+            n++;
+        return (int)(n * 8u);
     }
-    return width;
+    return (gui_text_advance26(font, str, len) + 32) >> 6;
 }
 
 static constexpr size_t k_gui_clip_text_limit = 255;
@@ -1169,26 +1155,7 @@ size_t gui_truncate_text(const GuiFont *font, const char *str, int max_width, ch
         return 0;
 
     size_t len = gui_bounded_clip_text_len(str, k_gui_clip_text_limit);
-    int full_width = 0;
-    for (size_t i = 0; i < len; i++) {
-        uint8_t ch = static_cast<uint8_t>(str[i]);
-        if (!font) {
-            full_width += 8;
-        } else if (ch < 128u) {
-            full_width += font->ascii_advance[ch] > 0 ? font->ascii_advance[ch] : gui_font_max_advance(font);
-        } else {
-            const GuiGlyph *glyph = nullptr;
-            if (font->glyphs && font->glyph_count > 0) {
-                if (font->fallback_index < font->glyph_count)
-                    glyph = &font->glyphs[font->fallback_index];
-                else
-                    glyph = &font->glyphs[0];
-            }
-            full_width += glyph ? glyph->advance_x : gui_font_max_advance(font);
-        }
-    }
-
-    if (full_width <= max_width) {
+    if (gui_measure_text_n(font, str, len) <= max_width) {
         size_t copy_len = len;
         if (copy_len >= out_size)
             copy_len = out_size - 1;
@@ -1204,28 +1171,27 @@ size_t gui_truncate_text(const GuiFont *font, const char *str, int max_width, ch
 
     int target_width = max_width - ellipsis_w;
     size_t clipped = 0;
-    int clipped_width = 0;
-    while (clipped < len && str[clipped]) {
-        uint8_t ch = static_cast<uint8_t>(str[clipped]);
-        int advance = 8;
-        if (font) {
-            if (ch < 128u) {
-                advance = font->ascii_advance[ch] > 0 ? font->ascii_advance[ch] : gui_font_max_advance(font);
-            } else {
-                const GuiGlyph *glyph = nullptr;
-                if (font->glyphs && font->glyph_count > 0) {
-                    if (font->fallback_index < font->glyph_count)
-                        glyph = &font->glyphs[font->fallback_index];
-                    else
-                        glyph = &font->glyphs[0];
-                }
-                advance = glyph ? glyph->advance_x : gui_font_max_advance(font);
-            }
+    if (font) {
+        // Walk codepoints: the cut must land on a UTF-8 boundary.
+        GuiTextWalk walk;
+        gui_text_walk_init(&walk, font, str, len);
+        uint32_t cp = 0;
+        int32_t pos26 = 0;
+        size_t consumed = 0;
+        const GuiGlyph *glyph = nullptr;
+        while ((glyph = gui_text_walk_next(&walk, &cp, &pos26, &consumed)) != nullptr) {
+            if (((pos26 + glyph->advance_x26 + 32) >> 6) > target_width)
+                break;
+            clipped += consumed;
         }
-        if (clipped_width + advance > target_width)
-            break;
-        clipped_width += advance;
-        clipped++;
+    } else {
+        int clipped_width = 0;
+        while (clipped < len && str[clipped]) {
+            if (clipped_width + 8 > target_width)
+                break;
+            clipped_width += 8;
+            clipped++;
+        }
     }
 
     if (clipped >= out_size)

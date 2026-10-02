@@ -4,17 +4,28 @@
 #include <unistd.h>
 
 #include "../libc/log.h"
+#include "font_internal.h"
 #include "gui.h"
 
+// UOF v2 loader and text rasterizer. The format is produced by
+// tools/uof_convert.py: 8-bit coverage atlases baked from 4x4 supersampled
+// FreeType renders, 26.6 fixed-point advances, GPOS kerning as a class
+// matrix plus additive pair exceptions, and horizontally oversampled
+// subcolumns for draw-time subpixel positioning.
+//
+// Layout mirrors the on-disk records exactly (packed, little-endian), so the
+// glyph table is memcpy'd straight into place.
+
 static constexpr uint32_t UOF_MAGIC = 0x4E464F55u; // "UOFN", little-endian
-static constexpr uint16_t UOF_VERSION = 1;
+static constexpr uint16_t UOF_VERSION = 2;
 
 struct UofHeader
 {
     uint32_t magic;
     uint16_t version;
     uint16_t flags;
-    uint32_t pixel_size;
+    uint16_t pixel_size;
+    uint16_t oversample_x;
     uint16_t atlas_width;
     uint16_t atlas_height;
     int16_t ascent;
@@ -22,11 +33,39 @@ struct UofHeader
     int16_t line_gap;
     uint32_t glyph_count;
     uint32_t kerning_count;
+    uint16_t matrix_c1;
+    uint16_t matrix_c2;
     uint32_t fallback_index;
     uint32_t glyph_offset;
     uint32_t kerning_offset;
+    uint32_t matrix_offset;
     uint32_t atlas_offset;
 } __attribute__((packed));
+
+struct UofGlyphRecord
+{
+    uint32_t codepoint;
+    uint16_t atlas_x;
+    uint16_t atlas_y;
+    uint16_t width;
+    uint16_t height;
+    int16_t bearing_x26;
+    int16_t bearing_y;
+    int16_t advance_x26;
+    uint8_t kern_left;
+    uint8_t kern_right;
+} __attribute__((packed));
+
+struct UofKernRecord
+{
+    uint32_t left;
+    uint32_t right;
+    int16_t value;
+} __attribute__((packed));
+
+static_assert(sizeof(UofHeader) == 54, "UOF v2 header size");
+static_assert(sizeof(UofGlyphRecord) == sizeof(GuiGlyph), "glyph record mirrors GuiGlyph");
+static_assert(sizeof(UofKernRecord) == sizeof(GuiKern), "kern record mirrors GuiKern");
 
 static GuiFont g_ui_font = {};
 static GuiFont g_title_font = {};
@@ -41,9 +80,10 @@ static bool g_mono_zoom_loaded[11] = {};
 static constexpr int k_font_sizes[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
 static constexpr int k_font_size_count = (int)(sizeof(k_font_sizes) / sizeof(k_font_sizes[0]));
 static constexpr size_t k_gui_text_scan_limit = 1024;
+static constexpr uint32_t k_max_atlas_bytes = 512u * 1024u * 1024u;
 
 static bool gui_font_load_from_file(GuiFont *font, const char *path);
-static inline const GuiGlyph *gui_font_fallback_glyph(const GuiFont *font);
+static const GuiGlyph *gui_font_fallback_glyph(const GuiFont *font);
 static size_t gui_bounded_line_length(const char *str, size_t limit);
 
 static int clamp_font_target(int target)
@@ -107,12 +147,13 @@ static int nearest_font_index(int pixel_size)
     return best;
 }
 
-static bool load_nearest_font(GuiFont *font, const char *prefix, int preferred_size)
+static bool load_font_files_near(GuiFont *font, const char *prefix, int preferred_size, bool allow_below_11)
 {
     if (!font || !prefix)
         return false;
 
-    int preferred_index = nearest_font_index(clamp_font_target(preferred_size));
+    int target = allow_below_11 ? preferred_size : clamp_font_target(preferred_size);
+    int preferred_index = nearest_font_index(target);
     char path[64];
     for (int radius = 0; radius < k_font_size_count; radius++) {
         int left = preferred_index - radius;
@@ -129,37 +170,18 @@ static bool load_nearest_font(GuiFont *font, const char *prefix, int preferred_s
         }
     }
     return false;
+}
+
+static bool load_nearest_font(GuiFont *font, const char *prefix, int preferred_size)
+{
+    return load_font_files_near(font, prefix, preferred_size, false);
 }
 
 // Like load_nearest_font but without the 11px floor, so terminal zoom-out can
 // reach the smaller bundled sizes.
 static bool load_font_at_size(GuiFont *font, const char *prefix, int pixel_size)
 {
-    if (!font || !prefix)
-        return false;
-
-    int preferred_index = nearest_font_index(pixel_size);
-    char path[64];
-    for (int radius = 0; radius < k_font_size_count; radius++) {
-        int left = preferred_index - radius;
-        int right = preferred_index + radius;
-        if (left >= 0) {
-            snprintf(path, sizeof(path), "/usr/share/fonts/%s-%d.uof", prefix, k_font_sizes[left]);
-            if (gui_font_load_from_file(font, path))
-                return true;
-        }
-        if (right < k_font_size_count && right != left) {
-            snprintf(path, sizeof(path), "/usr/share/fonts/%s-%d.uof", prefix, k_font_sizes[right]);
-            if (gui_font_load_from_file(font, path))
-                return true;
-        }
-    }
-    return false;
-}
-
-static int fallback_text_width(const char *str)
-{
-    return (int)(gui_bounded_line_length(str, k_gui_text_scan_limit) * 8u);
+    return load_font_files_near(font, prefix, pixel_size, true);
 }
 
 static size_t gui_bounded_line_length(const char *str, size_t limit)
@@ -172,6 +194,23 @@ static size_t gui_bounded_line_length(const char *str, size_t limit)
     return len;
 }
 
+// RLE atlas decode: (run_length-1, value) byte pairs expanding to exactly
+// atlas_stride * atlas_height coverage bytes.
+static bool uof_decode_atlas_rle(const uint8_t *stream, size_t stream_bytes, uint8_t *atlas, uint32_t atlas_bytes)
+{
+    if (stream_bytes % 2 != 0)
+        return false;
+    uint32_t out = 0;
+    for (size_t i = 0; i + 1 < stream_bytes; i += 2) {
+        uint32_t run = (uint32_t)stream[i] + 1u;
+        if (run > atlas_bytes - out)
+            return false;
+        memset(atlas + out, stream[i + 1], run);
+        out += run;
+    }
+    return out == atlas_bytes;
+}
+
 static bool gui_font_load_from_file(GuiFont *font, const char *path)
 {
     if (!font || !path)
@@ -182,113 +221,150 @@ static bool gui_font_load_from_file(GuiFont *font, const char *path)
     if (!gui_load_file(path, &data, &size))
         return false;
 
-    if (size < sizeof(UofHeader)) {
-        free(data);
-        return false;
-    }
+    bool ok = false;
+    GuiGlyph *glyphs = nullptr;
+    GuiKern *kern_pairs = nullptr;
+    int16_t *matrix = nullptr;
+    uint8_t *atlas = nullptr;
 
-    const UofHeader *header = reinterpret_cast<const UofHeader *>(data);
-    if (header->magic != UOF_MAGIC || header->version != UOF_VERSION) {
-        free(data);
-        return false;
-    }
-    if (header->glyph_count == 0 || header->fallback_index >= header->glyph_count) {
-        free(data);
-        return false;
-    }
-    // Glyph indices are cached in int16_t (ascii_index); reject tables that
-    // would wrap a stored index.
-    if (header->glyph_count > 32767u) {
-        free(data);
-        return false;
-    }
-    if (header->glyph_offset > size || header->atlas_offset > size || header->kerning_offset > size) {
-        free(data);
-        return false;
-    }
+    do {
+        if (size < sizeof(UofHeader))
+            break;
+        const UofHeader *header = reinterpret_cast<const UofHeader *>(data);
+        if (header->magic != UOF_MAGIC || header->version != UOF_VERSION)
+            break;
+        if (header->oversample_x != 1u && header->oversample_x != 4u)
+            break;
+        if (header->glyph_count == 0 || header->fallback_index >= header->glyph_count)
+            break;
+        // Glyph indices are cached in int16_t (ascii_index); reject tables that
+        // would wrap a stored index.
+        if (header->glyph_count > 32767u)
+            break;
+        if (header->matrix_c1 > 255u || header->matrix_c2 > 255u)
+            break;
 
-    uint64_t glyph_bytes64 = (uint64_t)header->glyph_count * (uint64_t)sizeof(GuiGlyph);
-    if (glyph_bytes64 > 0xFFFFFFFFu || (uint64_t)header->glyph_offset + glyph_bytes64 > size) {
-        free(data);
-        return false;
-    }
-    uint64_t atlas_bytes64 = (uint64_t)header->atlas_width * (uint64_t)header->atlas_height;
-    if (atlas_bytes64 > 0xFFFFFFFFu || (uint64_t)header->atlas_offset + atlas_bytes64 > size) {
-        free(data);
-        return false;
-    }
-    uint32_t glyph_bytes = (uint32_t)glyph_bytes64;
-    uint32_t atlas_bytes = (uint32_t)atlas_bytes64;
+        uint64_t glyph_bytes64 = (uint64_t)header->glyph_count * (uint64_t)sizeof(UofGlyphRecord);
+        uint64_t kern_bytes64 = (uint64_t)header->kerning_count * (uint64_t)sizeof(UofKernRecord);
+        uint64_t matrix_count64 = ((uint64_t)header->matrix_c1 + 1u) * ((uint64_t)header->matrix_c2 + 1u);
+        uint64_t matrix_bytes64 = matrix_count64 * 2u;
+        uint64_t glyph_end = (uint64_t)header->glyph_offset + glyph_bytes64;
+        uint64_t kern_end = (uint64_t)header->kerning_offset + kern_bytes64;
+        uint64_t matrix_end = (uint64_t)header->matrix_offset + matrix_bytes64;
 
-    memset(font, 0, sizeof(*font));
-    font->magic = header->magic;
-    font->glyph_count = header->glyph_count;
-    font->fallback_index = header->fallback_index;
-    font->pixel_size = (uint16_t)header->pixel_size;
-    font->atlas_width = header->atlas_width;
-    font->atlas_height = header->atlas_height;
-    font->ascent = header->ascent;
-    font->descent = header->descent;
-    font->line_gap = header->line_gap;
+        if (header->glyph_offset != sizeof(UofHeader) || header->glyph_offset >= size)
+            break;
+        if (header->kerning_offset != glyph_end || header->kerning_offset > size || kern_end > size)
+            break;
+        if (header->matrix_offset != kern_end || header->matrix_offset > size || matrix_end > size)
+            break;
+        if (header->atlas_offset != matrix_end || header->atlas_offset > size)
+            break;
+        if (glyph_bytes64 > 0xFFFFFFFFu || kern_bytes64 > 0xFFFFFFFFu || matrix_bytes64 > 0xFFFFFFFFu)
+            break;
 
-    font->glyphs = static_cast<GuiGlyph *>(malloc(glyph_bytes));
-    font->atlas = static_cast<uint8_t *>(malloc(atlas_bytes));
-    if (!font->glyphs || !font->atlas) {
-        free(font->glyphs);
-        free(font->atlas);
+        uint32_t stride = (uint32_t)header->atlas_width * (uint32_t)header->oversample_x;
+        uint64_t atlas_bytes64 = (uint64_t)stride * (uint64_t)header->atlas_height;
+        if (atlas_bytes64 == 0 || atlas_bytes64 > k_max_atlas_bytes)
+            break;
+        uint32_t atlas_bytes = (uint32_t)atlas_bytes64;
+
+        glyphs = static_cast<GuiGlyph *>(malloc(glyph_bytes64 == 0 ? 1 : (size_t)glyph_bytes64));
+        kern_pairs = header->kerning_count ? static_cast<GuiKern *>(malloc((size_t)kern_bytes64)) : nullptr;
+        matrix = static_cast<int16_t *>(malloc((size_t)matrix_bytes64));
+        atlas = static_cast<uint8_t *>(malloc(atlas_bytes));
+        if (!glyphs || !matrix || !atlas || (header->kerning_count && !kern_pairs))
+            break;
+
+        memcpy(glyphs, data + header->glyph_offset, (size_t)glyph_bytes64);
+        if (kern_pairs)
+            memcpy(kern_pairs, data + header->kerning_offset, (size_t)kern_bytes64);
+        memcpy(matrix, data + header->matrix_offset, (size_t)matrix_bytes64);
+        if (!uof_decode_atlas_rle(data + header->atlas_offset, size - header->atlas_offset, atlas, atlas_bytes))
+            break;
+
         memset(font, 0, sizeof(*font));
-        free(data);
-        return false;
-    }
+        font->magic = header->magic;
+        font->glyph_count = header->glyph_count;
+        font->fallback_index = header->fallback_index;
+        font->pixel_size = header->pixel_size;
+        font->oversample_x = header->oversample_x;
+        font->atlas_width = header->atlas_width;
+        font->atlas_height = header->atlas_height;
+        font->ascent = header->ascent;
+        font->descent = header->descent;
+        font->line_gap = header->line_gap;
+        font->kern_pairs = kern_pairs;
+        font->kern_count = header->kerning_count;
+        font->kern_matrix = matrix;
+        font->matrix_c1 = header->matrix_c1;
+        font->matrix_c2 = header->matrix_c2;
+        font->glyphs = glyphs;
+        font->atlas = atlas;
+        kern_pairs = nullptr;
+        matrix = nullptr;
+        glyphs = nullptr;
+        atlas = nullptr;
 
-    memcpy(font->glyphs, data + header->glyph_offset, glyph_bytes);
-    memcpy(font->atlas, data + header->atlas_offset, atlas_bytes);
-    free(data);
-
-    font->max_advance = 8;
-    font->max_ink_width = 8;
-    for (int i = 0; i < 128; i++)
-        font->ascii_index[i] = -1;
-
-    for (uint32_t i = 0; i < font->glyph_count; i++) {
-        GuiGlyph &glyph = font->glyphs[i];
-        // A glyph whose atlas rect escapes the atlas would read out of bounds at
-        // draw time (corrupt .uof); blank its ink so it renders nothing.
-        if ((uint32_t)glyph.atlas_x + glyph.width > font->atlas_width ||
-            (uint32_t)glyph.atlas_y + glyph.height > font->atlas_height) {
-            glyph.width = 0;
-            glyph.height = 0;
-        }
-        if (glyph.advance_x > font->max_advance)
-            font->max_advance = glyph.advance_x;
-        if ((int16_t)glyph.width > font->max_ink_width)
-            font->max_ink_width = (int16_t)glyph.width;
-        if (glyph.codepoint < 128u)
-            font->ascii_index[glyph.codepoint] = (int16_t)i;
-    }
-    if (font->max_advance <= 0)
         font->max_advance = 8;
-    if (font->max_ink_width <= 0)
-        font->max_ink_width = font->max_advance;
+        font->max_ink_width = 8;
+        for (int i = 0; i < 128; i++)
+            font->ascii_index[i] = -1;
 
-    font->line_height = font->ascent + font->descent + font->line_gap;
-    if (font->line_height <= 0)
-        font->line_height = font->pixel_size > 0 ? (int16_t)font->pixel_size : 16;
+        for (uint32_t i = 0; i < font->glyph_count; i++) {
+            GuiGlyph &glyph = font->glyphs[i];
+            // A glyph whose atlas rect escapes the atlas would read out of
+            // bounds at draw time (corrupt .uof); blank its ink so it renders
+            // nothing. Oversampled slots also need one subcolumn of headroom
+            // left of atlas_x for the phase filter's negative taps.
+            uint32_t rect_end_x = (uint32_t)glyph.atlas_x + (uint32_t)glyph.width * font->oversample_x;
+            if (rect_end_x > stride || (uint32_t)glyph.atlas_y + glyph.height > font->atlas_height ||
+                (font->oversample_x > 1u && glyph.atlas_x < font->oversample_x)) {
+                glyph.width = 0;
+                glyph.height = 0;
+            }
+            int16_t adv_px = (int16_t)((glyph.advance_x26 + 32) >> 6);
+            if (adv_px > font->max_advance)
+                font->max_advance = adv_px;
+            if ((int)glyph.width > font->max_ink_width)
+                font->max_ink_width = (int)glyph.width;
+            if (glyph.codepoint < 128u)
+                font->ascii_index[glyph.codepoint] = (int16_t)i;
+        }
+        if (font->max_advance <= 0)
+            font->max_advance = 8;
+        if (font->max_ink_width <= 0)
+            font->max_ink_width = font->max_advance;
 
-    int fallback_advance = font->max_advance;
-    if (const GuiGlyph *fallback = gui_font_fallback_glyph(font)) {
-        if (fallback->advance_x > 0)
-            fallback_advance = fallback->advance_x;
-    }
+        font->line_height = (int16_t)(font->ascent + font->descent + font->line_gap);
+        if (font->line_height <= 0)
+            font->line_height = font->pixel_size > 0 ? (int16_t)font->pixel_size : 16;
 
-    for (int i = 0; i < 128; i++)
-        font->ascii_advance[i] = (int16_t)fallback_advance;
-    for (uint32_t i = 0; i < font->glyph_count; i++) {
-        const GuiGlyph &glyph = font->glyphs[i];
-        if (glyph.codepoint < 128u)
-            font->ascii_advance[glyph.codepoint] = glyph.advance_x > 0 ? glyph.advance_x : (int16_t)fallback_advance;
-    }
-    return true;
+        int32_t fallback_advance26 = font->max_advance * 64;
+        if (const GuiGlyph *fallback = gui_font_fallback_glyph(font)) {
+            if (fallback->advance_x26 > 0)
+                fallback_advance26 = fallback->advance_x26;
+        }
+
+        for (int i = 0; i < 128; i++)
+            font->ascii_advance26[i] = (int16_t)fallback_advance26;
+        for (uint32_t i = 0; i < font->glyph_count; i++) {
+            const GuiGlyph &glyph = font->glyphs[i];
+            if (glyph.codepoint < 128u)
+                font->ascii_advance26[glyph.codepoint] =
+                    glyph.advance_x26 > 0 ? glyph.advance_x26 : (int16_t)fallback_advance26;
+        }
+        ok = true;
+    } while (false);
+
+    free(glyphs);
+    free(kern_pairs);
+    free(matrix);
+    free(atlas);
+    if (!ok)
+        memset(font, 0, sizeof(*font));
+    free(data);
+    return ok;
 }
 
 static const GuiGlyph *gui_font_find_glyph(const GuiFont *font, uint32_t codepoint)
@@ -299,13 +375,28 @@ static const GuiGlyph *gui_font_find_glyph(const GuiFont *font, uint32_t codepoi
         int16_t idx = font->ascii_index[codepoint];
         if (idx >= 0 && (uint32_t)idx < font->glyph_count)
             return &font->glyphs[idx];
+        // Non-ASCII-mapped control chars fall through to the table search,
+        // then the fallback glyph.
+    }
+    // Glyphs are stored sorted by codepoint: binary search.
+    uint32_t lo = 0;
+    uint32_t hi = font->glyph_count;
+    while (lo < hi) {
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        uint32_t cp = font->glyphs[mid].codepoint;
+        if (cp == codepoint)
+            return &font->glyphs[mid];
+        if (cp < codepoint)
+            lo = mid + 1;
+        else
+            hi = mid;
     }
     if (font->fallback_index < font->glyph_count)
         return &font->glyphs[font->fallback_index];
     return &font->glyphs[0];
 }
 
-static inline const GuiGlyph *gui_font_fallback_glyph(const GuiFont *font)
+static const GuiGlyph *gui_font_fallback_glyph(const GuiFont *font)
 {
     if (!font || !font->glyphs || font->glyph_count == 0)
         return nullptr;
@@ -314,26 +405,125 @@ static inline const GuiGlyph *gui_font_fallback_glyph(const GuiFont *font)
     return &font->glyphs[0];
 }
 
-static inline const GuiGlyph *resolve_glyph_and_advance(const GuiFont *font, uint8_t ch, int *advance)
+// Kern between two adjacent glyphs: class matrix hit plus an additive
+// exception pair (kept sorted for binary search). Both contributions are
+// 26.6; missing entries contribute nothing.
+static int32_t gui_font_kern26(const GuiFont *font, const GuiGlyph *left, const GuiGlyph *right, uint32_t left_cp,
+                               uint32_t right_cp)
 {
-    if (advance)
-        *advance = font ? gui_font_max_advance(font) : 8;
-    if (!font)
+    if (!font || !left || !right)
+        return 0;
+    int32_t total = 0;
+    if (left->kern_left && right->kern_right)
+        total = font->kern_matrix[(uint32_t)left->kern_left * (uint32_t)(font->matrix_c2 + 1) + right->kern_right];
+    if (font->kern_count) {
+        uint32_t lo = 0;
+        uint32_t hi = font->kern_count;
+        while (lo < hi) {
+            uint32_t mid = lo + ((hi - lo) >> 1);
+            const GuiKern &pair = font->kern_pairs[mid];
+            if (pair.left == left_cp && pair.right == right_cp)
+                return total + pair.value;
+            if (pair.left < left_cp || (pair.left == left_cp && pair.right < right_cp))
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+    }
+    return total;
+}
+
+// Decode one UTF-8 codepoint. Invalid sequences (including overlong encodings
+// and truncated input) decode to U+FFFD and consume a single byte, matching
+// the fallback-glyph tolerance of the byte-oriented v1 renderer.
+static uint32_t utf8_decode(const char *str, const char *end, size_t *consumed)
+{
+    *consumed = 1;
+    uint8_t first = (uint8_t)str[0];
+    if (first < 0x80u)
+        return first;
+    size_t len = 0;
+    uint32_t cp = 0;
+    if ((first & 0xE0u) == 0xC0u) {
+        len = 2;
+        cp = first & 0x1Fu;
+    } else if ((first & 0xF0u) == 0xE0u) {
+        len = 3;
+        cp = first & 0x0Fu;
+    } else if ((first & 0xF8u) == 0xF0u) {
+        len = 4;
+        cp = first & 0x07u;
+    } else {
+        return 0xFFFDu;
+    }
+    if (str + len > end)
+        return 0xFFFDu;
+    for (size_t i = 1; i < len; i++) {
+        uint8_t cont = (uint8_t)str[i];
+        if ((cont & 0xC0u) != 0x80u)
+            return 0xFFFDu;
+        cp = (cp << 6) | (cont & 0x3Fu);
+    }
+    // Reject overlong encodings, surrogates and out-of-range codepoints.
+    static const uint32_t k_min_cp[5] = {0, 0, 0x80, 0x800, 0x10000};
+    if (cp < k_min_cp[len] || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu))
+        return 0xFFFDu;
+    *consumed = len;
+    return cp;
+}
+
+size_t gui_text_walk_init(GuiTextWalk *w, const GuiFont *font, const char *str, size_t len)
+{
+    if (!w)
+        return 0;
+    w->font = font;
+    w->it = str;
+    w->prev_glyph = nullptr;
+    w->prev_cp = 0;
+    w->pen26 = 0;
+    size_t run = gui_bounded_line_length(str, len);
+    w->end = str ? str + run : nullptr;
+    return run;
+}
+
+const GuiGlyph *gui_text_walk_next(GuiTextWalk *w, uint32_t *codepoint, int32_t *pos26, size_t *consumed)
+{
+    if (!w || !w->it || w->it >= w->end)
         return nullptr;
 
-    if (ch < 128u) {
-        if (advance && font->ascii_advance[ch] > 0)
-            *advance = font->ascii_advance[ch];
-        int16_t idx = font->ascii_index[ch];
-        if (idx >= 0 && (uint32_t)idx < font->glyph_count)
-            return &font->glyphs[idx];
-        return gui_font_fallback_glyph(font);
-    }
+    size_t len = 1;
+    uint32_t cp = utf8_decode(w->it, w->end, &len);
+    const GuiGlyph *glyph = w->font ? gui_font_find_glyph(w->font, cp) : nullptr;
+    if (glyph && w->prev_glyph)
+        w->pen26 += gui_font_kern26(w->font, w->prev_glyph, glyph, w->prev_cp, cp);
 
-    const GuiGlyph *glyph = gui_font_find_glyph(font, ch);
-    if (advance && glyph)
-        *advance = glyph->advance_x;
+    if (codepoint)
+        *codepoint = cp;
+    if (pos26)
+        *pos26 = w->pen26;
+    if (consumed)
+        *consumed = len;
+
+    if (glyph)
+        w->pen26 += glyph->advance_x26;
+    else
+        w->pen26 += 8 * 64; // null font: built-in 8x8 cell per byte
+    w->it += len;
+    w->prev_glyph = glyph;
+    w->prev_cp = cp;
     return glyph;
+}
+
+int32_t gui_text_advance26(const GuiFont *font, const char *str, size_t len)
+{
+    GuiTextWalk walk;
+    gui_text_walk_init(&walk, font, str, len);
+    uint32_t cp = 0;
+    int32_t pos26 = 0;
+    size_t consumed = 0;
+    while (gui_text_walk_next(&walk, &cp, &pos26, &consumed) != nullptr) {
+    }
+    return walk.pen26;
 }
 
 static inline uint8_t effective_color_alpha(uint32_t color)
@@ -421,7 +611,20 @@ static inline const uint8_t *select_gamma_lut(uint32_t fg, uint32_t bg, bool opa
     return nullptr;
 }
 
-static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x, int32_t top_y, const GuiGlyph *glyph,
+// Subpixel phase filter weights for the 4x oversampled atlas. The pen's
+// fractional part is quantized to 1/16 px (16 phases); phase p shifts the
+// sampling window by tf = p/4 subcolumns with a linear crossfade r = (p%4)/4:
+// taps at subcols [4*col - tf - 1 .. 4*col - tf + 3] weighted (r, 1, 1, 1,
+// 1-r) in 1/64 units, so coverage = sum(weights * subcols) >> 8. The baking
+// pad plus the packer's 2 px slot gap keep every tap addressable.
+static const uint8_t s_fir_weights[16][5] = {
+    {0, 64, 64, 64, 64}, {16, 64, 64, 64, 48}, {32, 64, 64, 64, 32}, {48, 64, 64, 64, 16},
+    {0, 64, 64, 64, 64}, {16, 64, 64, 64, 48}, {32, 64, 64, 64, 32}, {48, 64, 64, 64, 16},
+    {0, 64, 64, 64, 64}, {16, 64, 64, 64, 48}, {32, 64, 64, 64, 32}, {48, 64, 64, 64, 16},
+    {0, 64, 64, 64, 64}, {16, 64, 64, 64, 48}, {32, 64, 64, 64, 32}, {48, 64, 64, 64, 16},
+};
+
+static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin26, int32_t top_y, const GuiGlyph *glyph,
                               uint32_t fg, uint32_t bg, int32_t clip_x = 0, int32_t clip_y = 0, int32_t clip_w = -1,
                               int32_t clip_h = -1)
 {
@@ -432,7 +635,18 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
     if (fg_alpha == 0)
         return;
 
-    int32_t dest_x = origin_x + glyph->bearing_x;
+    // Pen plus bearing gives the glyph origin in 26.6. Oversampled fonts
+    // floor to the pixel grid and keep the fraction as the FIR phase;
+    // integer-grid fonts (mono) round to the nearest pixel.
+    int32_t pos26 = origin26 + glyph->bearing_x26;
+    int32_t dest_x;
+    uint32_t phase = 0;
+    if (font->oversample_x > 1u) {
+        dest_x = pos26 >> 6;
+        phase = (uint32_t)(pos26 & 63u) >> 2; // 0..15, 1/16 px steps
+    } else {
+        dest_x = (pos26 + 32) >> 6;
+    }
     int32_t dest_y = top_y + font->ascent - glyph->bearing_y;
     int32_t start_col = 0;
     int32_t start_row = 0;
@@ -465,7 +679,7 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
         return;
 
     uint32_t stride = s->pitch / 4;
-    uint32_t atlas_stride = font->atlas_width;
+    uint32_t atlas_stride = (uint32_t)font->atlas_width * font->oversample_x;
 
     // Linear-light alpha blending. fg/bg are sRGB-encoded; lift channels to
     // linear via LUT, blend by the (linear) coverage fraction, encode back.
@@ -484,14 +698,28 @@ static void draw_single_glyph(Surface *s, const GuiFont *font, int32_t origin_x,
     }
     uint32_t fg_opaque = 0xFF000000u | (fg & 0x00FFFFFFu);
     const uint8_t *gamma = select_gamma_lut(fg, bg, opaque_bg);
+    const uint8_t *weights = s_fir_weights[phase];
+    int32_t tap0 = -((int32_t)(phase >> 2) + 1); // first tap subcolumn offset within the glyph slot
+    bool oversampled = (font->oversample_x > 1u);
 
     for (int32_t row = start_row; row < end_row; row++) {
         uint32_t *dst = &s->buffer[(uint32_t)(dest_y + row) * stride + (uint32_t)(dest_x + start_col)];
         const uint8_t *atlas =
             &font->atlas[(uint32_t)(glyph->atlas_y + row) * atlas_stride + (uint32_t)(glyph->atlas_x + start_col)];
-
         for (int32_t col = start_col; col < end_col; col++) {
-            uint8_t raw_coverage = *atlas++;
+            uint8_t raw_coverage;
+            if (oversampled) {
+                // 5-tap FIR over the subcolumns of this output pixel,
+                // shifted by the phase; the taps stay inside the glyph slot
+                // (baked 1 px pad + packer's 2 px gap).
+                const uint8_t *taps = atlas + (col - start_col) * 4 + tap0;
+                uint32_t acc = (uint32_t)weights[0] * taps[0] + (uint32_t)weights[1] * taps[1] +
+                               (uint32_t)weights[2] * taps[2] + (uint32_t)weights[3] * taps[3] +
+                               (uint32_t)weights[4] * taps[4];
+                raw_coverage = (uint8_t)(acc >> 8);
+            } else {
+                raw_coverage = atlas[col - start_col];
+            }
             uint8_t coverage = gamma ? gamma[raw_coverage] : raw_coverage;
             if (coverage == 0) {
                 dst++;
@@ -533,15 +761,15 @@ static void draw_text_run_clipped(Surface *s, const GuiFont *font, int32_t x, in
     if (!s || !s->buffer || !font || !str)
         return;
 
-    int32_t pen_x = x;
-    for (const char *it = str; *it && *it != '\n'; ++it) {
-        int advance = 0;
-        const GuiGlyph *glyph = resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
-        if (glyph) {
-            draw_single_glyph(s, font, pen_x, y, glyph, fg, bg, clip_x, clip_y, clip_w, clip_h);
-        }
-        pen_x += advance;
-        if (clip_w >= 0 && pen_x >= clip_x + clip_w)
+    GuiTextWalk walk;
+    gui_text_walk_init(&walk, font, str, k_gui_text_scan_limit);
+    uint32_t cp = 0;
+    int32_t pos26 = 0;
+    size_t consumed = 0;
+    const GuiGlyph *glyph;
+    while ((glyph = gui_text_walk_next(&walk, &cp, &pos26, &consumed)) != nullptr) {
+        draw_single_glyph(s, font, x * 64 + pos26, y, glyph, fg, bg, clip_x, clip_y, clip_w, clip_h);
+        if (clip_w >= 0 && (walk.pen26 >> 6) + x >= clip_x + clip_w)
             break;
     }
 }
@@ -646,19 +874,9 @@ int gui_measure_text(const GuiFont *font, const char *str)
 
     size_t len = gui_bounded_line_length(str, k_gui_text_scan_limit);
     if (!font)
-        return fallback_text_width(str);
+        return (int)(len * 8u);
 
-    int width = 0;
-    for (size_t i = 0; i < len; i++) {
-        uint8_t ch = (uint8_t)str[i];
-        if (ch < 128u) {
-            width += font->ascii_advance[ch] > 0 ? font->ascii_advance[ch] : gui_font_max_advance(font);
-        } else {
-            const GuiGlyph *glyph = gui_font_find_glyph(font, ch);
-            width += glyph ? glyph->advance_x : gui_font_max_advance(font);
-        }
-    }
-    return width;
+    return (gui_text_advance26(font, str, len) + 32) >> 6;
 }
 
 void gui_draw_text(Surface *s, const GuiFont *font, int32_t x, int32_t y, const char *str, uint32_t fg, uint32_t bg)
@@ -673,40 +891,28 @@ void gui_draw_text(Surface *s, const GuiFont *font, int32_t x, int32_t y, const 
     size_t remaining = k_gui_text_scan_limit;
 
     while (remaining > 0 && *line_start) {
-        const char *line_end = line_start;
-        size_t line_len = 0;
-        while (line_len < remaining && *line_end && *line_end != '\n') {
-            line_end++;
-            line_len++;
-        }
+        size_t line_len = gui_bounded_line_length(line_start, remaining);
 
         if (line_len > 0) {
             if (paint_bg) {
-                // Fill background
-                int line_width = 0;
-                for (const char *it = line_start; it < line_end; ++it) {
-                    int advance = 0;
-                    resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
-                    line_width += advance;
-                }
+                int line_width = (gui_text_advance26(font, line_start, line_len) + 32) >> 6;
                 if (line_width > 0)
                     gui_fill_rect(s, x, pen_y, line_width, line_height, bg);
             }
 
-            int32_t pen_x = x;
-            for (const char *it = line_start; it < line_end; ++it) {
-                int advance = 0;
-                const GuiGlyph *glyph = resolve_glyph_and_advance(font, (uint8_t)*it, &advance);
-                if (glyph) {
-                    draw_single_glyph(s, font, pen_x, pen_y, glyph, fg, bg);
-                }
-                pen_x += advance;
-            }
+            GuiTextWalk walk;
+            gui_text_walk_init(&walk, font, line_start, line_len);
+            uint32_t cp = 0;
+            int32_t pos26 = 0;
+            size_t consumed = 0;
+            const GuiGlyph *glyph;
+            while ((glyph = gui_text_walk_next(&walk, &cp, &pos26, &consumed)) != nullptr)
+                draw_single_glyph(s, font, x * 64 + pos26, pen_y, glyph, fg, bg);
         }
 
-        if (line_len >= remaining || *line_end == '\0')
+        if (line_len >= remaining || line_start[line_len] == '\0')
             break;
-        line_start = line_end + 1;
+        line_start += line_len + 1;
         remaining -= line_len + 1u;
         pen_y += line_height;
     }
@@ -753,7 +959,6 @@ void gui_draw_mono_cell(Surface *s, const GuiFont *font, int32_t x, int32_t y, i
 
     int32_t line_h = gui_font_line_height(font);
     int32_t top_y = y + (cell_h - line_h) / 2;
-    int32_t origin_x = x;
-    draw_single_glyph(s, font, origin_x, top_y, glyph, fg, bg, x, y, cell_w, cell_h);
+    draw_single_glyph(s, font, x * 64, top_y, glyph, fg, bg, x, y, cell_w, cell_h);
 }
 }
