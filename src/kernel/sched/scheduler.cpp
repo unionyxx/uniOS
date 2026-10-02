@@ -973,6 +973,13 @@ static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 1)
         vmm_switch_address_space(next_cr3);
     }
 
+    // The user FS base is not part of the asm-saved context, so this is the
+    // one choke point that arms the target's TLS: every dispatch — a
+    // thread's first run included — reloads it from the Process. Kernel
+    // tasks carry fs_base 0, which also clears a stale user FS when a core
+    // parks on idle. The bootstrap switch in scheduler_enter_idle targets
+    // the idle task on a core whose FS is still 0, so it needs no write.
+    cpu_set_user_fs_base(current_proc()->fs_base);
     switch_to_task(prev, current_proc());
     scheduler_unlock_after_switch();
 }
