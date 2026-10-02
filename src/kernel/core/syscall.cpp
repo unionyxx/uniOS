@@ -1403,6 +1403,11 @@ static bool exec_terminate_thread_group(Process *leader)
     uint64_t new_pml4_phys = reinterpret_cast<uint64_t>(new_pml4) - vmm_get_hhdm_offset();
     vmm_switch_address_space(reinterpret_cast<uint64_t *>(new_pml4_phys));
 
+    // The exec'ing thread returns to user through the syscall return path,
+    // not through the context-switch choke point, so the new thread pointer
+    // must be loaded here or fs still names the dead image's TCB.
+    cpu_set_user_fs_base(p->fs_base);
+
     if (old_pml4)
         vmm_free_address_space(old_pml4);
 
