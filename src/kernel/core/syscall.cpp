@@ -101,6 +101,20 @@ static constexpr int SOCKET_INDEX_MASK = (1 << SOCKET_KIND_SHIFT) - 1;
     return false;
 }
 
+[[nodiscard]] int64_t sys_socket_state(uint64_t handle)
+{
+    int kind = 0;
+    int sock = -1;
+    if (!socket_decode_handle(static_cast<int>(handle), &kind, &sock))
+        return -9; // -EBADF
+    if (kind == SOCKET_KIND_UDP)
+        return udp_slot_in_use(sock) ? NET_SOCK_UDP_OPEN : -9;
+    if (!tcp_slot_in_use(sock))
+        return -9; // -EBADF
+    // TcpState's enum order matches NET_TCP_* 1:1 (both count up from CLOSED).
+    return tcp_get_state(sock);
+}
+
 static uint64_t g_random_state = 0x7F4A7C15D39E2B41ULL;
 
 [[nodiscard]] static uint64_t read_tsc_counter()
@@ -3197,6 +3211,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         }
         case SYS_NET_STATUS:
             return static_cast<uint64_t>(sys_net_status(reinterpret_cast<NetStatus *>(arg1)));
+        case SYS_SOCKET_STATE:
+            return static_cast<uint64_t>(sys_socket_state(arg1));
         default:
             DEBUG_WARN("Unknown syscall: %d", syscall_num);
             return static_cast<uint64_t>(-1);

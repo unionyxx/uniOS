@@ -34,6 +34,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 extern "C" void signal_check(SyscallFrame *frame);
 extern "C" void signal_send_current(int sig);
 
+[[nodiscard]] int64_t sys_socket_state(uint64_t handle);
+
 [[nodiscard]] int64_t kernel_exec(const char *path);
 [[nodiscard]] bool is_file_open(const char *filename);
 void shm_cleanup_process(struct Process *proc);

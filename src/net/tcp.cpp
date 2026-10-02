@@ -1020,6 +1020,16 @@ TcpState tcp_get_state(int sock)
     return state;
 }
 
+bool tcp_slot_in_use(int sock)
+{
+    if (sock < 0 || sock >= TCP_MAX_SOCKETS)
+        return false;
+    uint64_t flags = spinlock_acquire_irqsave(&sockets[sock].lock);
+    bool in_use = sockets[sock].in_use;
+    spinlock_release_irqrestore(&sockets[sock].lock, flags);
+    return in_use;
+}
+
 void tcp_poll()
 {
     for (int i = 0; i < TCP_MAX_SOCKETS; i++) {

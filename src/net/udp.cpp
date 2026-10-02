@@ -193,6 +193,16 @@ int udp_socket()
     return -1;
 }
 
+bool udp_slot_in_use(int sock)
+{
+    if (sock < 0 || sock >= UDP_MAX_SOCKETS)
+        return false;
+    uint64_t flags = spinlock_acquire_irqsave(&udp_table_lock);
+    bool in_use = sockets[sock].in_use;
+    spinlock_release_irqrestore(&udp_table_lock, flags);
+    return in_use;
+}
+
 bool udp_bind(int sock, uint16_t port)
 {
     if (sock < 0 || sock >= UDP_MAX_SOCKETS) {

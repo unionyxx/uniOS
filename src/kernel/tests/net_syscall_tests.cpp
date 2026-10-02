@@ -4,7 +4,9 @@
 #include <kernel/mm/vma.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/net/net.h>
+#include <kernel/net/tcp.h>
 #include <kernel/process.h>
+#include <kernel/syscall.h>
 #include <libk/kstring.h>
 #include <uapi/syscalls_ext.h>
 
@@ -69,4 +71,30 @@ KTEST(net_syscall_status_fills_struct)
     current->page_table = orig_page_table;
     current->vma_list = orig_vma_list;
     current->vma_count = orig_vma_count;
+}
+
+KTEST(net_syscall_socket_state_rejects_bad_handles)
+{
+    // High bits set but neither a UDP nor a TCP kind with a valid index.
+    KTEST_EXPECT_EQ(sys_socket_state(0xFFFF), static_cast<int64_t>(-9)); // -EBADF
+    // TCP kind (2) with an index beyond TCP_MAX_SOCKETS (32).
+    KTEST_EXPECT_EQ(sys_socket_state((2u << 12) | 32u), static_cast<int64_t>(-9));
+    // UDP kind (1) with an index beyond UDP_MAX_SOCKETS.
+    KTEST_EXPECT_EQ(sys_socket_state((1u << 12) | 16u), static_cast<int64_t>(-9));
+}
+
+KTEST(net_syscall_socket_state_reports_closed_tcp)
+{
+    const int sock = tcp_socket();
+    KTEST_EXPECT(sock >= 0);
+    if (sock < 0)
+        return;
+
+    // SOCKET_KIND_TCP is 2; a fresh slot sits in TCP_CLOSED.
+    const uint64_t handle = (2u << 12) | static_cast<uint64_t>(sock);
+    KTEST_EXPECT_EQ(sys_socket_state(handle), static_cast<int64_t>(NET_TCP_CLOSED));
+
+    tcp_close(sock);
+    // After close the slot is reset; the handle decodes to an unused slot.
+    KTEST_EXPECT_EQ(sys_socket_state(handle), static_cast<int64_t>(-9));
 }

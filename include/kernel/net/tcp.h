@@ -147,3 +147,4 @@ int tcp_send(int sock, const void *data, uint16_t length);
 int tcp_recv(int sock, void *buffer, uint16_t max_len);
 void tcp_close(int sock);
 TcpState tcp_get_state(int sock);
+bool tcp_slot_in_use(int sock);

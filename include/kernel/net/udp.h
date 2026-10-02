@@ -42,6 +42,7 @@ int udp_socket();
 bool udp_bind(int sock, uint16_t port);
 bool udp_sendto(int sock, uint32_t dst_ip, uint16_t dst_port, const void *data, uint16_t length);
 int udp_recvfrom(int sock, void *buffer, uint16_t max_len, uint32_t *src_ip, uint16_t *src_port);
+bool udp_slot_in_use(int sock);
 void udp_close(int sock);
 
 #ifdef __cplusplus

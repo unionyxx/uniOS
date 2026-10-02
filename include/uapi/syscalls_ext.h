@@ -31,6 +31,21 @@ typedef struct thread_attr
 #define NET_NIC_E1000 1
 #define NET_NIC_RTL8139 2
 
+/* Socket states for SYS_SOCKET_STATE. NET_TCP_* values mirror the kernel
+ * TcpState order so the dispatcher maps 1:1. */
+#define NET_TCP_CLOSED 0
+#define NET_TCP_LISTEN 1
+#define NET_TCP_SYN_SENT 2
+#define NET_TCP_SYN_RECEIVED 3
+#define NET_TCP_ESTABLISHED 4
+#define NET_TCP_FIN_WAIT_1 5
+#define NET_TCP_FIN_WAIT_2 6
+#define NET_TCP_CLOSE_WAIT 7
+#define NET_TCP_CLOSING 8
+#define NET_TCP_LAST_ACK 9
+#define NET_TCP_TIME_WAIT 10
+#define NET_SOCK_UDP_OPEN 11
+
 typedef struct NetStatus
 {
     uint32_t ip; /* host order, LSB = first octet; 0 when unconfigured */
