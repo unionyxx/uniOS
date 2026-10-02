@@ -22,10 +22,13 @@ enter_user_mode:
 
     ; Set up user data segment selectors (0x18 | 3 = 0x1B)
     ; New GDT order: 3=Data, 4=Code
+    ; FS is deliberately left alone: loading a selector rewrites the hidden
+    ; descriptor and its flat base, which would wipe the thread pointer the
+    ; scheduler just armed. In long mode a null FS selector with a non-zero
+    ; FS base (set via wrfsbase/FS_BASE MSR) addresses fine.
     mov ax, 0x1B        ; User data selector
     mov ds, ax
     mov es, ax
-    mov fs, ax
 
     ; Build iretq stack frame (in reverse order):
     push 0x1B           ; SS (user data selector: GDT index 3 | RPL 3)
