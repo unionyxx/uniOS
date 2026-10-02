@@ -102,6 +102,14 @@ struct Process
     uint64_t last_run_time;
     uint64_t block_start_time;
 
+    // Thread-group state: leader_pid is the process's own pid for leaders
+    // and plain processes, the leader's pid for threads created by
+    // sys_thread_create. exit() group-kills every live member.
+    uint64_t leader_pid;
+    uint64_t user_stack_lo; // recorded thread stack (0 = none)
+    uint64_t user_stack_size;
+    bool thread_detached; // exits route to the kernel-zombie auto-reap
+
     SignalControl signals;
 
     struct Process *children_list;
@@ -134,6 +142,11 @@ extern "C" void switch_to_task(Process *current, Process *next);
 void process_init();
 void process_exit(int32_t status);
 [[nodiscard]] int64_t process_waitpid(int64_t pid, int32_t *status, int options);
+
+// SIGKILL every live member of the caller's thread group (caller excluded,
+// zombies skipped). Wakes blocked members through the signal path; called by
+// process_exit before the caller zombifies.
+void process_group_kill_siblings(Process *self);
 
 void system_reboot();
 void system_poweroff();

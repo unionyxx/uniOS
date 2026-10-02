@@ -1273,6 +1273,7 @@ void scheduler_init()
     proc_canary_stamp(kproc);
 
     kproc->pid = 0;
+    kproc->leader_pid = 0;
     kproc->uid = 0;
     kstring::strncpy(kproc->name, "Kernel", 31);
     kproc->state = ProcessState_Running;
@@ -1324,6 +1325,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     event_init(proc->event_queue);
     proc_canary_stamp(proc);
     proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    proc->leader_pid = proc->pid;
     proc->uid = current_proc() ? current_proc()->uid : 0;
     proc->parent_pid = current_proc() ? current_proc()->pid : 0;
     if (name)
@@ -1407,6 +1409,7 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     event_init(proc->event_queue);
     proc_canary_stamp(proc);
     proc->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    proc->leader_pid = proc->pid;
     proc->uid = current_proc() ? current_proc()->uid : 0;
     proc->parent_pid = current_proc() ? current_proc()->pid : 0;
     if (name)
@@ -1500,6 +1503,7 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     event_init(proc->event_queue);
     proc_canary_stamp(proc);
     proc->pid = 0;
+    proc->leader_pid = 0;
     proc->uid = 0;
     proc->parent_pid = 0;
     if (name)
@@ -1619,6 +1623,7 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     proc_canary_stamp(child);
 
     child->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    child->leader_pid = child->pid;
     child->parent_pid = current_proc()->pid;
     child->uid = current_proc()->uid;
     child->state = ProcessState_Ready;
@@ -1725,10 +1730,40 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     return child_pid;
 }
 
+void process_group_kill_siblings(Process *self)
+{
+    if (!self)
+        return;
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    // exit() ends the whole thread group. The locked signal variant wakes
+    // blocked members atomically under the scheduler lock (an unlocked state
+    // read can race scheduler_wait and lose the wakeup, leaving the sibling
+    // unkillable). Zombies are skipped: their teardown already happened.
+    Process *p = g_proc_list;
+    if (p) {
+        do {
+            if (p != self && p->leader_pid == self->leader_pid && p->state != ProcessState_Zombie)
+                signal_send_locked(p, SIGKILL);
+            p = p->next;
+        } while (p != g_proc_list);
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+}
+
 void process_exit(int32_t status)
 {
     DEBUG_INFO("Process %d (%s) exiting with status %d on cpu%u", current_proc()->pid, current_proc()->name, status,
                cpu_get_local()->cpu_id);
+
+    // exit() from any thread terminates the whole group: signal the siblings
+    // before releasing this member's resources so dying members cannot race
+    // the shared fd-table teardown.
+    process_group_kill_siblings(current_proc());
 
     process_release_private_fds(current_proc());
     shm_cleanup_process(current_proc());
@@ -2003,6 +2038,7 @@ extern "C" void thread_ret();
     proc_canary_stamp(thread);
 
     thread->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_SEQ_CST);
+    thread->leader_pid = parent->leader_pid;
     thread->parent_pid = parent->pid;
     thread->uid = parent->uid;
     thread->state = ProcessState_Ready;

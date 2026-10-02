@@ -519,7 +519,7 @@ void signal_send(Process *p, int sig)
 // the target cannot be reaped between lookup and wake, and the state check +
 // wake happen atomically (an unlocked state read raced scheduler_wait and
 // lost the wakeup, leaving blocked processes unkillable).
-static void signal_send_locked(Process *p, int sig)
+void signal_send_locked(Process *p, int sig)
 {
     if (!p || sig <= 0 || sig > 31)
         return;
