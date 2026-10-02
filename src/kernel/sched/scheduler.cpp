@@ -112,40 +112,48 @@ static inline void proc_list_check_locked(const char *)
 }
 #endif
 
-// Returns true when `target` was fully destroyed, false when it had to be
-// deferred because live threads still share its address space or its
-// embedded vma lock.
-static bool process_free_reaped(Process *target)
+// Drop the fd-table reference a reaped target still holds: normal exits
+// already released it in process_release_private_fds (fdtab is null), but
+// manually-zombified tasks (ktest surgery) reach the reaper with the
+// reference still attached. The table is independently refcounted, so
+// this is safe regardless of the shared-address-space state. Runs with
+// no scheduler lock: the release can reach the VFS.
+static void process_release_reaped_fds(Process *target)
 {
-    if (!target)
-        return true;
-
-    // Release any fd-table reference still attached: normal exits already
-    // dropped it in process_release_private_fds (fdtab is null), but
-    // manually-zombified tasks (ktest surgery) reach the reaper with the
-    // reference still held. The table is independently refcounted, so this
-    // is safe to do before the shared-address-space scan.
     if (target->fdtab) {
         fd_table_release(target->fdtab);
         target->fdtab = nullptr;
     }
+}
 
+// Classify a reaped target. The caller must hold g_sched_lock and must
+// have already unlinked the target from the process list (or popped it
+// from the deferred list) in the SAME critical section: a target that is
+// in no list is invisible to every other scan, and a classify racing an
+// exec address-space swap in that window would read stale pointers and
+// free an address space the exec already freed. A target whose page
+// table, VMA list object or embedded vma lock is still referenced by a
+// live process is parked on the deferred list and returns false; the
+// caller may only free the target once true.
+static bool process_reap_classify_locked(Process *target)
+{
     bool share_page_table = false;
     bool share_vma_list = false;
     bool share_vma_lock = false;
 
-    const uint64_t flags = interrupts_save_disable();
-    spinlock_acquire(&g_sched_lock);
-
-    proc_list_check_locked("free_reaped");
+    proc_list_check_locked("reap_classify");
 
     Process *curr = g_proc_list;
     if (curr) {
         do {
             if (curr != target) {
-                if (curr->page_table == target->page_table)
+                // Null never counts as sharing: an address-space-less
+                // zombie would otherwise match the null page table of
+                // every kernel-mode task and defer forever, leaking its
+                // struct and kernel stack.
+                if (target->page_table && curr->page_table == target->page_table)
                     share_page_table = true;
-                if (curr->vmalist == target->vmalist)
+                if (target->vmalist && curr->vmalist == target->vmalist)
                     share_vma_list = true;
                 // Threads lock VMAs through the leader's EMBEDDED spinlock;
                 // freeing the struct while they do is a use-after-free of
@@ -162,14 +170,15 @@ static bool process_free_reaped(Process *target)
     if (share_page_table || share_vma_list || share_vma_lock) {
         target->queue_next = g_deferred_frees;
         g_deferred_frees = target;
-        spinlock_release(&g_sched_lock);
-        interrupts_restore(flags);
         return false;
     }
 
-    spinlock_release(&g_sched_lock);
-    interrupts_restore(flags);
+    return true;
+}
 
+// Free a classified-unshared reaped target. Runs with no scheduler lock.
+static void process_free_now(Process *target)
+{
     if (target->stack_phys) {
         uintptr_t stack_ptr = target->stack_phys;
         size_t num_pages = KERNEL_STACK_SIZE / 4096;
@@ -189,7 +198,6 @@ static bool process_free_reaped(Process *target)
     }
 
     aligned_free(target);
-    return true;
 }
 
 static void retry_deferred_frees()
@@ -206,11 +214,16 @@ static void retry_deferred_frees()
         }
         g_deferred_frees = target->queue_next;
         target->queue_next = nullptr;
+        // Pop and classify in one hold: a popped-but-unclassified entry
+        // is in no list, invisible to the exec sever walk, and its stale
+        // page-table pointer would re-free a swapped-out address space.
+        const bool freeable = process_reap_classify_locked(target);
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
 
-        if (!process_free_reaped(target))
+        if (!freeable)
             return; // still shared; re-queued — try the rest next pass
+        process_free_now(target);
     }
 }
 
@@ -275,6 +288,39 @@ static Process *detach_kernel_zombie_locked()
     return target;
 }
 
+// Exec support: after the exec'ing member swapped its page table and VMA
+// list head, no LIVE process references the old address space — but the
+// group's dead members (zombies still in the list and deferred reap
+// entries) hold pointers their later frees would follow, re-freeing the
+// address space the exec already freed (and, through the still-shared
+// VmaList object, the LIVE new list). Sever those references under the
+// same scheduler-lock hold as the swap so no reap can classify a member
+// in between. Caller holds g_sched_lock. A null old_pml4 severs nothing:
+// matching on null would hit every kernel-mode task.
+void scheduler_sever_dead_group_references(uint64_t *old_pml4)
+{
+    if (!old_pml4)
+        return;
+
+    Process *curr = g_proc_list;
+    if (curr) {
+        do {
+            if (curr->page_table == old_pml4) {
+                curr->page_table = nullptr;
+                curr->vmalist = nullptr;
+            }
+            curr = curr->next;
+        } while (curr != g_proc_list);
+    }
+
+    for (Process *d = g_deferred_frees; d; d = d->queue_next) {
+        if (d->page_table == old_pml4) {
+            d->page_table = nullptr;
+            d->vmalist = nullptr;
+        }
+    }
+}
+
 static void reap_kernel_zombies()
 {
     retry_deferred_frees();
@@ -282,12 +328,19 @@ static void reap_kernel_zombies()
         const uint64_t flags = interrupts_save_disable();
         spinlock_acquire(&g_sched_lock);
         Process *target = detach_kernel_zombie_locked();
+        // Classify inside the same hold as the detach: a zombie detached
+        // but not yet classified is in no list, invisible to the exec
+        // sever walk, and its stale page-table pointer would re-free an
+        // address space the exec already freed.
+        const bool freeable = target ? process_reap_classify_locked(target) : false;
         spinlock_release(&g_sched_lock);
         interrupts_restore(flags);
         if (!target)
             return;
+        process_release_reaped_fds(target);
         DEBUG_INFO("Reaped detached zombie PID %d", target->pid);
-        process_free_reaped(target);
+        if (freeable)
+            process_free_now(target);
     }
 }
 
@@ -2139,10 +2192,17 @@ void sys_thread_exit(int64_t status)
             }
             proc_list_check_locked("waitpid");
 
+            // Classify inside the same hold that unlinked it: a zombie
+            // unlinked but not yet classified is in no list, invisible to
+            // the exec sever walk, and its stale page-table pointer would
+            // re-free an address space the exec already freed.
+            const bool freeable = process_reap_classify_locked(target);
             spinlock_release(&g_sched_lock);
             interrupts_restore(flags);
 
-            process_free_reaped(target);
+            process_release_reaped_fds(target);
+            if (freeable)
+                process_free_now(target);
             DEBUG_INFO("Reaped zombie PID %d", child_pid);
             return static_cast<int64_t>(child_pid);
         }
@@ -2172,6 +2232,17 @@ void sys_thread_exit(int64_t status)
             spinlock_release(&g_sched_lock);
             interrupts_restore(flags);
             return 0;
+        }
+
+        // A pending fatal signal must break the block: a thread parked
+        // here is otherwise unkillable, which hangs both the exit-group
+        // teardown and a sibling's exec group-kill wait (the signal wake
+        // would just re-park it). The caller is dying anyway; the return
+        // value never reaches user mode.
+        if (scheduler_fatal_signal_pending(current_proc())) {
+            spinlock_release(&g_sched_lock);
+            interrupts_restore(flags);
+            return -1;
         }
 
         if (pid == -1) {

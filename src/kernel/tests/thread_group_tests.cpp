@@ -1276,3 +1276,316 @@ KTEST(thread_create_detached_flag_self_reaps)
     leader->signals.pending = 0;
     leader->page_table = orig_page_table;
 }
+
+// ---- exec from a process with live sibling threads ----
+
+static volatile uint32_t *g_exec_futex_addr;
+
+static void exec_futex_waiter_thread()
+{
+    sys_futex(g_exec_futex_addr, FUTEX_WAIT, 0);
+    while (true) {
+        if (scheduler_fatal_signal_pending(process_get_current()))
+            process_exit(0);
+        scheduler_yield();
+    }
+}
+
+// POSIX: exec terminates all other threads of the process. The members
+// must die BEFORE the address space is swapped, or they keep running on
+// the freed old page tables and the deferred reaper re-frees what the
+// exec already freed. Drives the real SYS_EXEC dispatch end to end from
+// ktest context: the leader gets a private throwaway address space (so
+// the old pml4 is a real freed object observable through its PMM
+// refcount), two members park in a futex on it, and /bin/init.elf is
+// loaded over the group.
+#define EXEC_GROUP_CHECK(cond)                                                                                         \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ktest_record_failure(#cond, __FILE__, __LINE__);                                                           \
+            goto cleanup;                                                                                              \
+        }                                                                                                              \
+    } while (0)
+#define EXEC_GROUP_CHECK_EQ(a, b) EXEC_GROUP_CHECK((a) == (b))
+
+KTEST(exec_from_threaded_group_kills_siblings_first)
+{
+    Process *leader = process_get_current();
+    if (!leader) {
+        ktest_record_failure("leader != nullptr", __FILE__, __LINE__);
+        return;
+    }
+
+    const uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    Spinlock *orig_vma_lock_ptr = leader->vma_lock_ptr;
+    const uint64_t orig_exec_entry = leader->exec_entry;
+    char orig_name[32];
+    kstring::strncpy(orig_name, leader->name, 31);
+
+    // Declared up front: every failure jump must reach cleanup with the
+    // full cleanup set in scope. Everything else lives in the act block
+    // below so the jumps only ever leave scopes, never enter them.
+    bool exec_ok = false;
+    uint64_t *old_pml4 = nullptr;
+    void *page = nullptr;
+    VMA *vma = nullptr;
+    void *stack_a = nullptr;
+    void *stack_b = nullptr;
+    int64_t tid_a = -1;
+    int64_t tid_b = -1;
+
+    // A real old address space (not the shared kernel pml4): the exec
+    // must free it exactly once, and the pml4 frame's refcount observes
+    // both "never freed" and "still referenced".
+    old_pml4 = vmm_create_address_space();
+    {
+        EXEC_GROUP_CHECK(old_pml4 != nullptr);
+        leader->page_table = old_pml4;
+
+        page = pmm_alloc_frame();
+        EXEC_GROUP_CHECK(page != nullptr);
+        Result<void> map = vmm_replace_page_in(old_pml4, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                               PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+        EXEC_GROUP_CHECK(map.ok());
+
+        vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+        EXEC_GROUP_CHECK(vma != nullptr);
+        vma->start = TEST_VADDR;
+        vma->end = TEST_VADDR + 4096;
+        vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+        vma->type = VMAType::Anonymous;
+        vma->next = nullptr;
+        leader->vmalist->head = vma;
+
+        // The futex word and the exec path string share the surgical page.
+        // Write through the physical alias so the stores do not depend on
+        // which page table this core currently has loaded.
+        uint8_t *page_alias = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(page)));
+        g_exec_futex_addr = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+        *reinterpret_cast<volatile uint32_t *>(page_alias) = 0;
+        kstring::strncpy(reinterpret_cast<char *>(page_alias + 0x400), "/bin/init.elf", 31);
+
+        SyscallFrame mock_frame = {};
+        mock_frame.cs = 0x08;
+        mock_frame.ss = 0x10;
+        mock_frame.rflags = 0x202;
+
+        stack_a = malloc(4096);
+        stack_b = malloc(4096);
+        EXEC_GROUP_CHECK(stack_a != nullptr);
+        EXEC_GROUP_CHECK(stack_b != nullptr);
+        void *top_a = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_a) + 4096);
+        void *top_b = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack_b) + 4096);
+
+        tid_a = sys_thread_create(exec_futex_waiter_thread, nullptr, top_a, &mock_frame);
+        tid_b = sys_thread_create(exec_futex_waiter_thread, nullptr, top_b, &mock_frame);
+        EXEC_GROUP_CHECK(tid_a > 0);
+        EXEC_GROUP_CHECK(tid_b > 0);
+
+        // Both members park in the futex wait (queue waits park in
+        // Waiting, not Blocked) before the exec fires.
+        bool a_parked = false, b_parked = false;
+        for (int i = 0; i < 200 && !(a_parked && b_parked); i++) {
+            scheduler_yield();
+            a_parked = word_waiter_parked(tid_a);
+            b_parked = word_waiter_parked(tid_b);
+        }
+        EXEC_GROUP_CHECK(a_parked);
+        EXEC_GROUP_CHECK(b_parked);
+
+        const uint64_t rc = syscall_handler(SYS_EXEC, TEST_VADDR + 0x400, 0, 0, &mock_frame);
+        EXEC_GROUP_CHECK_EQ(rc, 0ULL);
+        exec_ok = true;
+
+        // The siblings were killed and reaped before the swap: gone from
+        // the process list (their structs may still sit on the deferred
+        // list, severed, until the next reap pass).
+        bool a_gone = false, b_gone = false;
+        for (int i = 0; i < 500 && !(a_gone && b_gone); i++) {
+            scheduler_yield();
+            a_gone = process_find_by_pid(static_cast<uint64_t>(tid_a)) == nullptr;
+            b_gone = process_find_by_pid(static_cast<uint64_t>(tid_b)) == nullptr;
+        }
+        EXEC_GROUP_CHECK(a_gone);
+        EXEC_GROUP_CHECK(b_gone);
+
+        // The leader survived, on the new address space (new pml4, new
+        // VMA list, new name from the exec'ed binary).
+        EXEC_GROUP_CHECK(process_get_current() == leader);
+        EXEC_GROUP_CHECK(leader->page_table != old_pml4);
+        EXEC_GROUP_CHECK(leader->page_table != nullptr);
+        EXEC_GROUP_CHECK(leader->vmalist->head != vma);
+        EXEC_GROUP_CHECK(kstring::strcmp(leader->name, "init.elf") == 0);
+
+        // The old address space was freed exactly once: the pml4 frame's
+        // refcount reached zero right here, before any frame can be
+        // reused.
+        const uint64_t old_pml4_frame = reinterpret_cast<uint64_t>(old_pml4) - vmm_get_hhdm_offset();
+        EXEC_GROUP_CHECK_EQ(pmm_get_refcount(reinterpret_cast<void *>(old_pml4_frame)), 0u);
+
+        // Let the reap passes collect the severed sibling structs: every
+        // fd reference they held comes back to the leader alone.
+        for (int i = 0; i < 100; i++)
+            scheduler_yield();
+        EXEC_GROUP_CHECK_EQ(leader->fdtab->refs, 1u);
+    }
+
+cleanup:
+    if (exec_ok) {
+        // Leave the exec'ed page tables before freeing them: this core
+        // still runs on them (kernel half), and the pml4 frame must not
+        // go back to the PMM under a live CR3.
+        vmm_switch_address_space(
+            reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(vmm_get_kernel_pml4()) - vmm_get_hhdm_offset()));
+        vma_free_all(leader->vmalist->head);
+        vmm_free_address_space(leader->page_table);
+    } else {
+        // Failure path: the exec never swapped anything — the members are
+        // still alive on the surgical address space. Kill and drain them
+        // by hand, then undo the surgery.
+        process_group_kill_siblings(leader);
+        for (int i = 0; i < 500; i++) {
+            scheduler_yield();
+            Process *pa = tid_a > 0 ? process_find_by_pid(static_cast<uint64_t>(tid_a)) : nullptr;
+            Process *pb = tid_b > 0 ? process_find_by_pid(static_cast<uint64_t>(tid_b)) : nullptr;
+            if ((pa == nullptr || pa->state == ProcessState_Zombie) &&
+                (pb == nullptr || pb->state == ProcessState_Zombie))
+                break;
+        }
+        int32_t status = 0;
+        if (tid_a > 0)
+            (void)process_waitpid(tid_a, &status, 0);
+        if (tid_b > 0)
+            (void)process_waitpid(tid_b, &status, 0);
+        vmm_switch_address_space(
+            reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(vmm_get_kernel_pml4()) - vmm_get_hhdm_offset()));
+        if (page) {
+            vmm_unmap_page_in(old_pml4, TEST_VADDR);
+            pmm_free_frame(page);
+        }
+        if (old_pml4)
+            vmm_free_address_space(old_pml4);
+        free(vma);
+    }
+    free(stack_a);
+    free(stack_b);
+    leader->signals.pending = 0;
+    leader->page_table = const_cast<uint64_t *>(orig_page_table);
+    leader->vmalist->head = orig_vma_list;
+    leader->vma_lock_ptr = orig_vma_lock_ptr;
+    leader->exec_entry = orig_exec_entry;
+    kstring::strncpy(leader->name, orig_name, 31);
+}
+
+#undef EXEC_GROUP_CHECK
+#undef EXEC_GROUP_CHECK_EQ
+
+// ---- blocking waitpid must be killable ----
+
+static volatile int64_t g_waitpid_ret;
+static volatile int64_t g_waitpid_child_tid;
+static volatile bool g_waitpid_spinner_run;
+
+static void waitpid_spinner_thread()
+{
+    while (g_waitpid_spinner_run)
+        scheduler_yield();
+    sys_thread_exit(0);
+}
+
+static void waitpid_blocker_thread()
+{
+    // The child must be this thread's own: waitpid walks the caller's
+    // children list (the documented join-from-creating-thread limit).
+    SyscallFrame frame = {};
+    frame.cs = 0x08;
+    frame.ss = 0x10;
+    frame.rflags = 0x202;
+
+    void *spin_stack = malloc(4096);
+    void *spin_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(spin_stack) + 4096);
+    g_waitpid_child_tid = sys_thread_create(waitpid_spinner_thread, nullptr, spin_top, &frame);
+
+    int32_t status = 0;
+    g_waitpid_ret = process_waitpid(g_waitpid_child_tid, &status, 0);
+    free(spin_stack);
+    sys_thread_exit(0);
+}
+
+// A thread blocked in waitpid must be SIGKILL-able: the fatal-signal
+// escape breaks the block instead of re-parking forever. Both exec and
+// exit-group wait for every member's death — an unkillable parked waiter
+// hangs them. Red evidence: pre-fix the blocker only returns once its
+// child actually exits, reaping it (a tid, not -1).
+KTEST(waitpid_breaks_on_fatal_signal)
+{
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *block_stack = malloc(4096);
+    KTEST_EXPECT(block_stack != nullptr);
+    void *block_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(block_stack) + 4096);
+
+    g_waitpid_spinner_run = true;
+    g_waitpid_ret = 999; // sentinel: no return yet
+    g_waitpid_child_tid = -1;
+
+    const int64_t block_tid = sys_thread_create(waitpid_blocker_thread, nullptr, block_top, &mock_frame);
+    KTEST_EXPECT(block_tid > 0);
+    if (block_tid <= 0) {
+        free(block_stack);
+        leader->page_table = orig_page_table;
+        return;
+    }
+
+    // Bounded wait for the blocker to park on its child's wait queue.
+    bool parked = false;
+    for (int i = 0; i < 200 && !parked; i++) {
+        scheduler_yield();
+        Process *b = process_find_by_pid(static_cast<uint64_t>(block_tid));
+        parked = b && (b->state == ProcessState_Waiting || b->state == ProcessState_Blocked);
+    }
+    KTEST_EXPECT(parked);
+
+    signal_send(process_find_by_pid(static_cast<uint64_t>(block_tid)), SIGKILL);
+
+    // The blocker must come back instead of sleeping through the signal.
+    bool returned = false;
+    for (int i = 0; i < 500 && !returned; i++) {
+        scheduler_yield();
+        returned = g_waitpid_ret != 999;
+    }
+
+    // Release the child either way: post-fix the blocker has already
+    // returned; pre-fix this is what eventually wakes it, so the red run
+    // drains cleanly instead of parking the blocker forever.
+    g_waitpid_spinner_run = false;
+    bool drained = false;
+    for (int i = 0; i < 500 && !drained; i++) {
+        scheduler_yield();
+        drained = process_find_by_pid(static_cast<uint64_t>(block_tid)) == nullptr &&
+                  process_find_by_pid(static_cast<uint64_t>(g_waitpid_child_tid)) == nullptr;
+    }
+    KTEST_EXPECT(drained);
+
+    int32_t status = 0;
+    (void)process_waitpid(block_tid, &status, 0);
+
+    free(block_stack);
+    leader->signals.pending = 0;
+    leader->page_table = orig_page_table;
+
+    // Assertions last: failures here leave nothing behind.
+    KTEST_EXPECT(returned);
+    KTEST_EXPECT_EQ(g_waitpid_ret, static_cast<int64_t>(-1));
+}

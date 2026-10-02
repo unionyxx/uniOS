@@ -1167,36 +1167,72 @@ static void user_task_wrapper()
     process_exit(-1);
 }
 
-[[nodiscard]] int64_t do_exec(const char *path, SyscallFrame *frame)
+// Terminate the caller's thread group for exec, mirroring exit-group:
+// SIGKILL every live member through the locked signal path, wait for the
+// deaths, then reap the joinable zombies so the deferred-free paths own
+// their stacks and structs. Every kernel wait loop breaks on a pending
+// fatal signal, so parked members reach their deaths on their own.
+// Returns false only when a member wedged past the deadline: the caller
+// must then NOT touch the address space (a live sibling would keep
+// running on freed page tables); the stragglers still die at their next
+// signal delivery.
+static bool exec_terminate_thread_group(Process *leader)
 {
-    Process *p = process_get_current();
-    if (!p)
-        return -1;
+    process_group_kill_siblings(leader);
 
-    {
-        // POSIX semantics: exec terminates all other threads of the process.
-        // Until thread teardown under a live address space is implemented,
-        // refuse instead: swapping the page tables here would leave sibling
-        // threads running on freed page tables (wild faults / cross-process
-        // writes into reused frames).
-        const uint64_t chk_flags = scheduler_big_lock_irqsave();
-        bool has_threads = false;
+    // 1 s wall-clock bound; yielding lets the members run to their deaths
+    // (on UP it is the only thing that does).
+    constexpr uint64_t k_member_death_deadline_ms = 1000;
+    const uint32_t freq = timer_get_frequency();
+    const uint64_t deadline = timer_get_ticks() + (freq != 0 ? (k_member_death_deadline_ms * freq + 999) / 1000
+                                                             : k_member_death_deadline_ms * 1000);
+
+    while (true) {
+        uint64_t zombie_tids[16];
+        size_t zombie_count = 0;
+        bool live_member = false;
+
+        const uint64_t flags = scheduler_big_lock_irqsave();
         Process *scan = scheduler_get_process_list();
         if (scan) {
             do {
-                if (scan != p && scan->page_table == p->page_table) {
-                    has_threads = true;
-                    break;
+                if (scan != leader && scan->leader_pid == leader->leader_pid) {
+                    if (scan->state == ProcessState_Zombie) {
+                        if (zombie_count < sizeof(zombie_tids) / sizeof(zombie_tids[0]))
+                            zombie_tids[zombie_count++] = scan->pid;
+                    } else {
+                        live_member = true;
+                    }
                 }
                 scan = scan->next;
             } while (scan != scheduler_get_process_list());
         }
-        scheduler_big_unlock_irqrestore(chk_flags);
-        if (has_threads) {
-            DEBUG_WARN("exec: refused for pid %lu (shared address space with other threads)", p->pid);
-            return -1;
+        scheduler_big_unlock_irqrestore(flags);
+
+        if (!live_member && zombie_count == 0)
+            return true; // the group is the caller alone
+
+        // Reap the dead members now: the exec'ed image never learns their
+        // tids, so nobody else would collect them. Detached members are
+        // parented to pid 0 — not the caller's children — and belong to
+        // the kernel-zombie reaper, whose passes run on every schedule.
+        for (size_t i = 0; i < zombie_count; i++) {
+            int32_t status = 0;
+            (void)process_waitpid(static_cast<int64_t>(zombie_tids[i]), &status, WNOHANG);
         }
+
+        if (timer_get_ticks() >= deadline)
+            return false;
+
+        scheduler_yield();
     }
+}
+
+[[nodiscard]] static int64_t do_exec(const char *path, SyscallFrame *frame)
+{
+    Process *p = process_get_current();
+    if (!p)
+        return -1;
 
     char k_path[512];
     if (!copy_string_from_user(path, k_path, 511)) {
@@ -1270,14 +1306,52 @@ static void user_task_wrapper()
         return -1;
     }
 
+    // Point of no return for the thread group: POSIX exec terminates all
+    // other threads. The members must die BEFORE the swap — a live
+    // sibling would keep running on the freed old page tables (wild
+    // faults / cross-process writes into reused frames) and would hold
+    // shared VMA/fd references the reaper cannot account for.
+    if (!exec_terminate_thread_group(p)) {
+        if (loader_proc->vmalist->head)
+            vma_free_all(loader_proc->vmalist->head);
+        vma_list_free(loader_proc->vmalist);
+        vmm_free_address_space(new_pml4);
+        aligned_free(loader_proc);
+        DEBUG_WARN("exec: pid %lu members never died; refusing to swap address space", p->pid);
+        return -1;
+    }
+
     uint64_t *old_pml4 = p->page_table;
     VMA *old_vma_list = p->vmalist->head;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
-    p->page_table = new_pml4;
-    p->vmalist->head = loader_proc->vmalist->head;
-    p->exec_entry = entry;
-    spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
+    {
+        // Swap under the scheduler big lock (outermost) with the VMA leaf
+        // nested: the reaper's share classification, thread creation and
+        // the sever walk below all run under the big lock alone, so the
+        // swap and the severing of the dead members' stale references
+        // must be ONE critical section — a reaper running between the two
+        // would classify a just-unlinked member against the old pointers
+        // and free the address space a second time.
+        const uint64_t sched_flags = scheduler_big_lock_irqsave();
+        const uint64_t vma_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
+        p->page_table = new_pml4;
+        p->vmalist->head = loader_proc->vmalist->head;
+        p->exec_entry = entry;
+        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
+
+        // The exec'ing member is now a group of one, exactly like a
+        // forked leader: its own VMA lock (a thread until now borrowed the
+        // group leader's, and that leader is dead), its own group id, and
+        // no recorded user stack — the old mapping went with the old
+        // address space; the new image gets the fresh USER_STACK_TOP.
+        p->vma_lock_ptr = &p->vma_lock;
+        p->leader_pid = p->pid;
+        p->user_stack_lo = 0;
+        p->user_stack_size = 0;
+
+        scheduler_sever_dead_group_references(old_pml4);
+        scheduler_big_unlock_irqrestore(sched_flags);
+    }
 
     loader_proc->vmalist->head = nullptr;
     vma_list_free(loader_proc->vmalist);
@@ -1287,7 +1361,6 @@ static void user_task_wrapper()
     if (old_vma_list)
         vma_free_all(old_vma_list);
 
-    p->exec_entry = entry;
     kstring::strncpy(p->name, kstring::strrchr(k_path, '/') ? kstring::strrchr(k_path, '/') + 1 : k_path, 31);
 
     if (frame) {

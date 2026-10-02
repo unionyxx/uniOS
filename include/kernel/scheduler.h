@@ -50,6 +50,12 @@ void scheduler_big_unlock_irqrestore(uint64_t flags);
 // loops use this to bail out with -EINTR instead of sleeping through kill.
 bool scheduler_fatal_signal_pending(const Process *p);
 
+// Exec support: sever the dead thread group's references to the address
+// space the exec'ing member just swapped away from, so their later frees
+// cannot re-free it. The caller holds g_sched_lock across both the swap
+// and this call; see scheduler.cpp for the full ordering contract.
+void scheduler_sever_dead_group_references(uint64_t *old_pml4);
+
 [[nodiscard]] Process *scheduler_get_process_list();
 
 void scheduler_schedule_elapsed(uint32_t elapsed_jiffies);
