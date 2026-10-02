@@ -210,10 +210,10 @@ int pthread_cond_signal(pthread_cond_t *cond)
 int pthread_cond_broadcast(pthread_cond_t *cond)
 {
     __sync_fetch_and_add(&cond->seq, 1u);
-    /* The kernel futex has no REQUEUE (the uapi constant exists but
-     * sys_futex implements WAIT/WAKE only), so wake every waiter here and
-     * let each re-acquire the mutex through its own contended path - the
-     * end state a requeue would produce, at thundering-herd cost. */
+    /* The kernel futex implements WAIT/WAKE only - no requeue - so wake
+     * every waiter here and let each re-acquire the mutex through its own
+     * contended path: the end state a requeue would produce, at
+     * thundering-herd cost. */
     futex(&cond->seq, FUTEX_WAKE, 0x7FFFFFFFu);
     return 0;
 }

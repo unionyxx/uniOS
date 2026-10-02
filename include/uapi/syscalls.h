@@ -139,7 +139,6 @@
 /* Futex Opcodes */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
-#define FUTEX_REQUEUE 2
 
 /* Epoll Operations & Event Flags */
 #define EPOLL_CTL_ADD 1
