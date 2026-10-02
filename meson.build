@@ -303,6 +303,7 @@ app_sources = {
   'calendar' : ['src/usr/apps/calendar'],
   'calculator' : ['src/usr/apps/calculator'],
   'imageviewer' : ['src/usr/apps/imageviewer'],
+  'threadtest' : ['src/usr/threadtest'],
 }
 
 user_apps = {}
@@ -313,6 +314,7 @@ foreach app_name, search_roots : app_sources
     list_sources,
     search_roots[0],
     '--glob', '*.cpp',
+    '--glob', '*.c',
     check : true,
   ).stdout().strip()
   source_paths = []
@@ -321,7 +323,8 @@ foreach app_name, search_roots : app_sources
   endif
   app_files = files(source_paths)
   app_link_with = [crt0, libc]
-  if app_name != 'shell' and app_name != 'init'
+  # threadtest is a plain-C boot self-test like the shell: no GUI stack.
+  if app_name != 'shell' and app_name != 'init' and app_name != 'threadtest'
     app_link_with += [libapp, libgui]
   endif
   # Heavy libraries linked without --whole-archive: only translation units
@@ -334,6 +337,7 @@ foreach app_name, search_roots : app_sources
     '@0@_objs'.format(app_name),
     app_files,
     include_directories : [kernel_inc, user_inc],
+    c_args : user_c_args,
     cpp_args : user_cpp_args,
   )
 
