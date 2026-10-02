@@ -492,7 +492,15 @@ extern "C" void irq_handler(void *stack_frame)
     // because the EOI already happened.
     if (g_resched_vector != 0 && vector == g_resched_vector) {
         send_interrupt_eoi(vector);
-        scheduler_schedule();
+        // Same guard as the timer path: preempting a task that holds a
+        // spinlock (preempt_count > 0) would strand every other CPU spinning
+        // on that lock; defer to its release instead.
+        Process *curr = process_get_current();
+        if (curr && curr->preempt_count > 0) {
+            curr->preempt_pending = 1;
+        } else {
+            scheduler_schedule();
+        }
         return;
     }
 

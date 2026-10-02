@@ -1530,14 +1530,16 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     child->fpu_initialized = true;
     spinlock_init(&child->fd_lock);
 
-    spinlock_acquire(&current_proc()->fd_lock);
+    // irqsave: fd_lock is an IRQ-touched leaf, and a raw acquire here let the
+    // resched IPI (and any future IRQ path taking fd_lock) preempt mid-copy.
+    uint64_t fd_flags = spinlock_acquire_irqsave(&current_proc()->fd_lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         child->fd_table[i] = current_proc()->fd_table[i];
         if (child->fd_table[i].used && child->fd_table[i].vnode) {
             __sync_fetch_and_add(&child->fd_table[i].vnode->ref_count, 1);
         }
     }
-    spinlock_release(&current_proc()->fd_lock);
+    spinlock_release_irqrestore(&current_proc()->fd_lock, fd_flags);
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
 
@@ -1815,6 +1817,13 @@ void process_exit(int32_t status)
         }
 
         if (pid == -1) {
+            // POSIX: blocking wait for ANY child with no children is ECHILD,
+            // not an unresolvable sleep (nothing would ever wake us).
+            if (!current_proc()->children_list) {
+                spinlock_release(&g_sched_lock);
+                interrupts_restore(flags);
+                return -1; // ECHILD
+            }
             current_proc()->state = ProcessState_Waiting;
             current_proc()->wait_for_pid = 0;
         } else {
