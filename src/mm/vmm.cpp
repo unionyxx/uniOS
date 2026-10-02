@@ -16,7 +16,7 @@ STATIC_ASSERT(offsetof(Process, fpu_state) == 64, "Process::fpu_state offset mis
 STATIC_ASSERT(offsetof(Process, pid) == 4160, "Process::pid offset mismatch");
 STATIC_ASSERT(offsetof(Process, sp) == 4216, "Process::sp offset mismatch");
 STATIC_ASSERT(offsetof(Process, page_table) == 4240, "Process::page_table offset mismatch");
-STATIC_ASSERT(offsetof(Process, vma_list) == 8456, "Process::vma_list offset mismatch");
+STATIC_ASSERT(offsetof(Process, vma_list) == 4360, "Process::vma_list offset mismatch");
 
 using kstring::memcpy;
 
@@ -384,7 +384,7 @@ enum class MapSlotMode
 // present slot fails instead of silently leaking the previously mapped frame;
 // in Replace mode the entry is overwritten in place.
 [[nodiscard]] static Result<void> map_page_core(uint64_t *target_pml4, uint64_t virt, uint64_t phys, uint64_t flags,
-                                                  MapSlotMode mode)
+                                                MapSlotMode mode)
 {
     if (virt >= KERNEL_STACK_TOP && (flags & PTE_USER))
         panic("vmm: kernel address with PTE_USER");
@@ -1174,8 +1174,7 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
         kstring::memcpy(dst_virt, src_virt, 4096);
 
         // COW: overwrite the read-only mapping with the private copy.
-        if (!vmm_replace_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags)
-                 .ok()) {
+        if (!vmm_replace_page_in(curr->page_table, page_vaddr, reinterpret_cast<uint64_t>(new_frame), map_flags).ok()) {
             pmm_free_frame(new_frame);
             spinlock_release_irqrestore(curr->vma_lock_ptr, sl_flags);
             fault_cpu->fault_depth--;

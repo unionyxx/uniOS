@@ -25,7 +25,7 @@ static int test_find_free_fd(Process *p)
     if (!p)
         return -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used)
+        if (!p->fdtab->fds[i].used)
             return i;
     }
     return -1;
@@ -307,15 +307,15 @@ KTEST(extended_syscalls_epoll)
 
     int read_fd = test_find_free_fd(p);
     KTEST_EXPECT(read_fd >= 0);
-    p->fd_table[read_fd].used = true;
-    p->fd_table[read_fd].vnode = pipe_get_vnode(pipe_id, false);
-    p->fd_table[read_fd].flags = 0;
+    p->fdtab->fds[read_fd].used = true;
+    p->fdtab->fds[read_fd].vnode = pipe_get_vnode(pipe_id, false);
+    p->fdtab->fds[read_fd].flags = 0;
 
     int write_fd = test_find_free_fd(p);
     KTEST_EXPECT(write_fd >= 0);
-    p->fd_table[write_fd].used = true;
-    p->fd_table[write_fd].vnode = pipe_get_vnode(pipe_id, true);
-    p->fd_table[write_fd].flags = 0;
+    p->fdtab->fds[write_fd].used = true;
+    p->fdtab->fds[write_fd].vnode = pipe_get_vnode(pipe_id, true);
+    p->fdtab->fds[write_fd].flags = 0;
 
     user_ev->events = EPOLLIN;
     user_ev->data.fd = read_fd;
@@ -416,9 +416,9 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
     if (f.epfd < 3 || f.pipe_id < 0 || f.read_fd < 0)
         return false;
 
-    p->fd_table[f.read_fd].used = true;
-    p->fd_table[f.read_fd].vnode = pipe_get_vnode(f.pipe_id, false);
-    p->fd_table[f.read_fd].flags = 0;
+    p->fdtab->fds[f.read_fd].used = true;
+    p->fdtab->fds[f.read_fd].vnode = pipe_get_vnode(f.pipe_id, false);
+    p->fdtab->fds[f.read_fd].flags = 0;
 
     f.user_ev->events = EPOLLIN;
     f.user_ev->data.fd = f.read_fd;
@@ -637,7 +637,7 @@ KTEST(extended_syscalls_fd_transfer)
     int64_t trunc_res = sys_ftruncate(static_cast<int>(fd), 8192);
     KTEST_EXPECT_EQ(trunc_res, 0);
 
-    VNode *node = p->fd_table[fd].vnode;
+    VNode *node = p->fdtab->fds[fd].vnode;
     KTEST_EXPECT(node != nullptr);
     KTEST_EXPECT_EQ(node->size, 8192ULL);
 
@@ -645,8 +645,8 @@ KTEST(extended_syscalls_fd_transfer)
     int64_t transferred_fd = sys_fd_transfer(p->pid, static_cast<int>(fd));
     KTEST_EXPECT(transferred_fd >= 3);
     KTEST_EXPECT(transferred_fd != fd);
-    KTEST_EXPECT(p->fd_table[transferred_fd].used);
-    KTEST_EXPECT_EQ(p->fd_table[transferred_fd].vnode, node);
+    KTEST_EXPECT(p->fdtab->fds[transferred_fd].used);
+    KTEST_EXPECT_EQ(p->fdtab->fds[transferred_fd].vnode, node);
 
     // Clean up both FDs
     int close_res1 = vfs_close(static_cast<int>(fd));

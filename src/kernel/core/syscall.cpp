@@ -486,7 +486,7 @@ void shm_cleanup_process(Process *proc)
     if (!p)
         return -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used)
+        if (!p->fdtab->fds[i].used)
             return i;
     }
     return -1;
@@ -912,7 +912,7 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     // Respect redirected FDs (e.g. pipes) even for stdin
-    if (p->fd_table[fd].used && p->fd_table[fd].vnode) {
+    if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode) {
         char stack_buf[1024];
         char *kbuf = stack_buf;
         if (count > 1024) {
@@ -988,7 +988,7 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     // Respect redirected FDs (e.g. pipes) even for stdout/stderr
-    if (p->fd_table[fd].used && p->fd_table[fd].vnode) {
+    if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode) {
         char stack_buf[1024];
         char *kbuf = stack_buf;
         if (count > 1024) {
@@ -1113,32 +1113,32 @@ extern "C" [[noreturn]] void asm_iret_to_user(const InterruptFrame *frame);
         return static_cast<uint64_t>(-1);
 
     if (oldfd == newfd) {
-        uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-        bool used = p->fd_table[oldfd].used;
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+        uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+        bool used = p->fdtab->fds[oldfd].used;
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return used ? static_cast<uint64_t>(newfd) : static_cast<uint64_t>(-1);
     }
 
     VNode *to_close = nullptr;
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[oldfd].used) {
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[oldfd].used) {
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return static_cast<uint64_t>(-1);
     }
 
-    if (p->fd_table[newfd].used) {
-        to_close = p->fd_table[newfd].vnode;
-        p->fd_table[newfd].used = false;
-        p->fd_table[newfd].flags = 0;
-        p->fd_table[newfd].vnode = nullptr;
+    if (p->fdtab->fds[newfd].used) {
+        to_close = p->fdtab->fds[newfd].vnode;
+        p->fdtab->fds[newfd].used = false;
+        p->fdtab->fds[newfd].flags = 0;
+        p->fdtab->fds[newfd].vnode = nullptr;
     }
 
-    p->fd_table[newfd] = p->fd_table[oldfd];
-    if (p->fd_table[newfd].vnode) {
-        p->fd_table[newfd].vnode->ref_count++;
+    p->fdtab->fds[newfd] = p->fdtab->fds[oldfd];
+    if (p->fdtab->fds[newfd].vnode) {
+        p->fdtab->fds[newfd].vnode->ref_count++;
     }
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     if (to_close) {
         vfs_close_vnode(to_close);
@@ -1560,21 +1560,21 @@ extern "C" int64_t sys_memfd_create(const char *name, unsigned int flags)
         return -1;
     }
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
     int fd = -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used) {
+        if (!p->fdtab->fds[i].used) {
             fd = i;
-            p->fd_table[i].used = true;
-            p->fd_table[i].flags = 0;
-            kstring::zero_memory(p->fd_table[i].reserved, sizeof(p->fd_table[i].reserved));
-            p->fd_table[i].vnode = node;
-            p->fd_table[i].offset = 0;
-            p->fd_table[i].dir_pos = 0;
+            p->fdtab->fds[i].used = true;
+            p->fdtab->fds[i].flags = 0;
+            kstring::zero_memory(p->fdtab->fds[i].reserved, sizeof(p->fdtab->fds[i].reserved));
+            p->fdtab->fds[i].vnode = node;
+            p->fdtab->fds[i].offset = 0;
+            p->fdtab->fds[i].dir_pos = 0;
             break;
         }
     }
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     if (fd == -1) {
         vfs_close_vnode(node);
@@ -1590,15 +1590,15 @@ extern "C" int64_t sys_ftruncate(int fd, uint64_t size)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -9; // -EBADF
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return -9; // -EBADF
     }
 
-    VNode *node = p->fd_table[fd].vnode;
+    VNode *node = p->fdtab->fds[fd].vnode;
     __sync_fetch_and_add(&node->ref_count, 1);
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     int64_t res = -22; // -EINVAL
     if (node->ops->truncate) {
@@ -1621,9 +1621,9 @@ extern "C" int64_t sys_lseek(int fd, int64_t offset, int whence)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -9; // -EBADF
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    const bool valid = p->fd_table[fd].used && p->fd_table[fd].vnode;
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    const bool valid = p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode;
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
     if (!valid)
         return -9; // -EBADF
 
@@ -1639,13 +1639,13 @@ static uint64_t sys_fsize(int fd)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return static_cast<uint64_t>(-1);
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
         return static_cast<uint64_t>(-1);
     }
-    const uint64_t size = p->fd_table[fd].vnode->size;
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    const uint64_t size = p->fdtab->fds[fd].vnode->size;
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
     return size;
 }
 
@@ -1675,34 +1675,34 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
 
     uint64_t sl_flags = 0;
     if (current == target) {
-        sl_flags = spinlock_acquire_irqsave(&current->fd_lock);
+        sl_flags = spinlock_acquire_irqsave(&current->fdtab->lock);
     } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-        sl_flags = spinlock_acquire_irqsave(&current->fd_lock);
-        spinlock_acquire(&target->fd_lock);
+        sl_flags = spinlock_acquire_irqsave(&current->fdtab->lock);
+        spinlock_acquire(&target->fdtab->lock);
     } else {
-        sl_flags = spinlock_acquire_irqsave(&target->fd_lock);
-        spinlock_acquire(&current->fd_lock);
+        sl_flags = spinlock_acquire_irqsave(&target->fdtab->lock);
+        spinlock_acquire(&current->fdtab->lock);
     }
 
-    if (!current->fd_table[fd].used || !current->fd_table[fd].vnode) {
+    if (!current->fdtab->fds[fd].used || !current->fdtab->fds[fd].vnode) {
         if (current == target) {
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-            spinlock_release(&target->fd_lock);
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release(&target->fdtab->lock);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else {
-            spinlock_release(&current->fd_lock);
-            spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+            spinlock_release(&current->fdtab->lock);
+            spinlock_release_irqrestore(&target->fdtab->lock, sl_flags);
         }
         scheduler_big_unlock_irqrestore(sched_flags);
         return -9; // -EBADF
     }
 
-    VNode *node = current->fd_table[fd].vnode;
+    VNode *node = current->fdtab->fds[fd].vnode;
 
     int target_fd = -1;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!target->fd_table[i].used) {
+        if (!target->fdtab->fds[i].used) {
             target_fd = i;
             break;
         }
@@ -1710,30 +1710,30 @@ extern "C" int64_t sys_fd_transfer(uint64_t target_pid, int fd)
 
     if (target_fd == -1) {
         if (current == target) {
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-            spinlock_release(&target->fd_lock);
-            spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+            spinlock_release(&target->fdtab->lock);
+            spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
         } else {
-            spinlock_release(&current->fd_lock);
-            spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+            spinlock_release(&current->fdtab->lock);
+            spinlock_release_irqrestore(&target->fdtab->lock, sl_flags);
         }
         scheduler_big_unlock_irqrestore(sched_flags);
         return -24; // -EMFILE
     }
 
-    target->fd_table[target_fd] = current->fd_table[fd];
-    target->fd_table[target_fd].used = true;
+    target->fdtab->fds[target_fd] = current->fdtab->fds[fd];
+    target->fdtab->fds[target_fd].used = true;
     __sync_fetch_and_add(&node->ref_count, 1);
 
     if (current == target) {
-        spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
     } else if (reinterpret_cast<uintptr_t>(current) < reinterpret_cast<uintptr_t>(target)) {
-        spinlock_release(&target->fd_lock);
-        spinlock_release_irqrestore(&current->fd_lock, sl_flags);
+        spinlock_release(&target->fdtab->lock);
+        spinlock_release_irqrestore(&current->fdtab->lock, sl_flags);
     } else {
-        spinlock_release(&current->fd_lock);
-        spinlock_release_irqrestore(&target->fd_lock, sl_flags);
+        spinlock_release(&current->fdtab->lock);
+        spinlock_release_irqrestore(&target->fdtab->lock, sl_flags);
     }
 
     scheduler_big_unlock_irqrestore(sched_flags);
@@ -1769,43 +1769,43 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             if (!p)
                 return static_cast<uint64_t>(-1);
 
-            // All fd-table mutations happen under fd_lock: an unlocked
+            // All fd-table mutations happen under the table lock: an unlocked
             // allocation here raced close/dup2/fd_transfer in sibling threads.
-            const uint64_t pipe_flags = spinlock_acquire_irqsave(&p->fd_lock);
+            const uint64_t pipe_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
             int fd1 = find_free_fd(p);
             if (fd1 < 0) {
-                spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+                spinlock_release_irqrestore(&p->fdtab->lock, pipe_flags);
                 return static_cast<uint64_t>(-1);
             }
-            p->fd_table[fd1].used = true;
+            p->fdtab->fds[fd1].used = true;
             int fd2 = find_free_fd(p);
             if (fd2 < 0) {
-                p->fd_table[fd1].used = false;
-                spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+                p->fdtab->fds[fd1].used = false;
+                spinlock_release_irqrestore(&p->fdtab->lock, pipe_flags);
                 return static_cast<uint64_t>(-1);
             }
-            p->fd_table[fd2].used = true;
-            spinlock_release_irqrestore(&p->fd_lock, pipe_flags);
+            p->fdtab->fds[fd2].used = true;
+            spinlock_release_irqrestore(&p->fdtab->lock, pipe_flags);
 
             int pipe_id = pipe_create();
             if (pipe_id < 0) {
-                const uint64_t clr_flags = spinlock_acquire_irqsave(&p->fd_lock);
-                p->fd_table[fd1].used = false;
-                p->fd_table[fd2].used = false;
-                spinlock_release_irqrestore(&p->fd_lock, clr_flags);
+                const uint64_t clr_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+                p->fdtab->fds[fd1].used = false;
+                p->fdtab->fds[fd2].used = false;
+                spinlock_release_irqrestore(&p->fdtab->lock, clr_flags);
                 return static_cast<uint64_t>(-1);
             }
 
-            const uint64_t set_flags = spinlock_acquire_irqsave(&p->fd_lock);
-            p->fd_table[fd1].vnode = pipe_get_vnode(pipe_id, false);
-            p->fd_table[fd1].flags = 0;
-            p->fd_table[fd1].offset = 0;
-            p->fd_table[fd1].dir_pos = 0;
-            p->fd_table[fd2].vnode = pipe_get_vnode(pipe_id, true);
-            p->fd_table[fd2].flags = 0;
-            p->fd_table[fd2].offset = 0;
-            p->fd_table[fd2].dir_pos = 0;
-            spinlock_release_irqrestore(&p->fd_lock, set_flags);
+            const uint64_t set_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+            p->fdtab->fds[fd1].vnode = pipe_get_vnode(pipe_id, false);
+            p->fdtab->fds[fd1].flags = 0;
+            p->fdtab->fds[fd1].offset = 0;
+            p->fdtab->fds[fd1].dir_pos = 0;
+            p->fdtab->fds[fd2].vnode = pipe_get_vnode(pipe_id, true);
+            p->fdtab->fds[fd2].flags = 0;
+            p->fdtab->fds[fd2].offset = 0;
+            p->fdtab->fds[fd2].dir_pos = 0;
+            spinlock_release_irqrestore(&p->fdtab->lock, set_flags);
 
             STAC();
             reinterpret_cast<int *>(arg1)[0] = fd1;
@@ -1887,12 +1887,12 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
 
             VNode *memfd_node = nullptr;
             if (fd >= 0 && fd < MAX_OPEN_FILES) {
-                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
-                if (p->fd_table[fd].used && p->fd_table[fd].vnode && is_memfd_vnode(p->fd_table[fd].vnode)) {
-                    memfd_node = p->fd_table[fd].vnode;
+                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+                if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode && is_memfd_vnode(p->fdtab->fds[fd].vnode)) {
+                    memfd_node = p->fdtab->fds[fd].vnode;
                     __sync_fetch_and_add(&memfd_node->ref_count, 1);
                 }
-                spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+                spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
             }
 
             uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();

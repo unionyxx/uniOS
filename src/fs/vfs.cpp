@@ -78,8 +78,8 @@ static VNode *vfs_find_open_vnode_for(const VNode *like_node)
         Process *curr = start;
         do {
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
-                if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
-                    VNode *other = curr->fd_table[i].vnode;
+                if (curr->fdtab->fds[i].used && curr->fdtab->fds[i].vnode) {
+                    VNode *other = curr->fdtab->fds[i].vnode;
                     if (other != like_node && other->ref_count > 0 && vfs_is_same_file(other, like_node)) {
                         result = other;
                         break;
@@ -853,24 +853,24 @@ int vfs_open(const char *path, int flags, uint16_t mode)
         return -1;
     }
 
-    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fd_lock);
+    uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!p->fd_table[i].used) {
-            p->fd_table[i].used = true;
-            p->fd_table[i].flags = guarded_mount ? FD_FLAG_STORAGE_GUARDED : 0;
+        if (!p->fdtab->fds[i].used) {
+            p->fdtab->fds[i].used = true;
+            p->fdtab->fds[i].flags = guarded_mount ? FD_FLAG_STORAGE_GUARDED : 0;
             if (guarded_mount && write_like)
-                p->fd_table[i].flags |= FD_FLAG_STORAGE_GUARDED_WRITE;
+                p->fdtab->fds[i].flags |= FD_FLAG_STORAGE_GUARDED_WRITE;
             if (flags & O_APPEND)
-                p->fd_table[i].flags |= FD_FLAG_APPEND;
-            kstring::zero_memory(p->fd_table[i].reserved, sizeof(p->fd_table[i].reserved));
-            p->fd_table[i].vnode = node;
-            p->fd_table[i].offset = (flags & O_APPEND) ? node->size : 0;
-            p->fd_table[i].dir_pos = 0;
-            spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+                p->fdtab->fds[i].flags |= FD_FLAG_APPEND;
+            kstring::zero_memory(p->fdtab->fds[i].reserved, sizeof(p->fdtab->fds[i].reserved));
+            p->fdtab->fds[i].vnode = node;
+            p->fdtab->fds[i].offset = (flags & O_APPEND) ? node->size : 0;
+            p->fdtab->fds[i].dir_pos = 0;
+            spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
             return i;
         }
     }
-    spinlock_release_irqrestore(&p->fd_lock, sl_flags);
+    spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
 
     vfs_close_vnode(node);
     return -1;
@@ -882,17 +882,17 @@ int vfs_close(int fd)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    uint64_t flags = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used) {
-        spinlock_release_irqrestore(&p->fd_lock, flags);
+    uint64_t flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used) {
+        spinlock_release_irqrestore(&p->fdtab->lock, flags);
         return -1;
     }
 
-    VNode *node = p->fd_table[fd].vnode;
-    p->fd_table[fd].used = false;
-    p->fd_table[fd].flags = 0;
-    p->fd_table[fd].vnode = nullptr;
-    spinlock_release_irqrestore(&p->fd_lock, flags);
+    VNode *node = p->fdtab->fds[fd].vnode;
+    p->fdtab->fds[fd].used = false;
+    p->fdtab->fds[fd].flags = 0;
+    p->fdtab->fds[fd].vnode = nullptr;
+    spinlock_release_irqrestore(&p->fdtab->lock, flags);
 
     vfs_close_vnode(node);
     return 0;
@@ -906,15 +906,15 @@ int64_t vfs_read(int fd, void *buf, uint64_t size)
 
     // Snapshot the descriptor and pin the vnode under fd_lock: a concurrent
     // close in another thread must not free the node mid-read.
-    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+    uint64_t fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
         return -1;
     }
-    FileDescriptor desc = p->fd_table[fd];
+    FileDescriptor desc = p->fdtab->fds[fd];
     VNode *vn = desc.vnode;
     __sync_fetch_and_add(&vn->ref_count, 1);
-    spinlock_release_irqrestore(&p->fd_lock, fl);
+    spinlock_release_irqrestore(&p->fdtab->lock, fl);
 
     int64_t res = -1;
     if (!vn->ops->read) {
@@ -967,10 +967,10 @@ int64_t vfs_read(int fd, void *buf, uint64_t size)
     }
 
     if (res >= 0) {
-        fl = spinlock_acquire_irqsave(&p->fd_lock);
-        if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
-            p->fd_table[fd].offset = desc.offset;
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+        fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+        if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode == vn)
+            p->fdtab->fds[fd].offset = desc.offset;
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
     }
     vfs_close_vnode(vn);
     return res;
@@ -987,8 +987,8 @@ static void vfs_sync_file_size_locked(VNode *like_node, uint64_t new_size)
         Process *curr = start;
         do {
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
-                if (curr->fd_table[i].used && curr->fd_table[i].vnode) {
-                    VNode *other = curr->fd_table[i].vnode;
+                if (curr->fdtab->fds[i].used && curr->fdtab->fds[i].vnode) {
+                    VNode *other = curr->fdtab->fds[i].vnode;
                     if (other != like_node && other->ref_count > 0 && vfs_is_same_file(other, like_node)) {
                         other->size = new_size;
                     }
@@ -1006,15 +1006,15 @@ int64_t vfs_write(int fd, const void *buf, uint64_t size)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+    uint64_t fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
         return -1;
     }
-    FileDescriptor desc = p->fd_table[fd];
+    FileDescriptor desc = p->fdtab->fds[fd];
     VNode *vn = desc.vnode;
     __sync_fetch_and_add(&vn->ref_count, 1);
-    spinlock_release_irqrestore(&p->fd_lock, fl);
+    spinlock_release_irqrestore(&p->fdtab->lock, fl);
 
     int64_t res = -1;
     if (!vn->ops->write) {
@@ -1100,10 +1100,10 @@ int64_t vfs_write(int fd, const void *buf, uint64_t size)
     }
 
     if (res >= 0) {
-        fl = spinlock_acquire_irqsave(&p->fd_lock);
-        if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
-            p->fd_table[fd].offset = desc.offset;
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+        fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+        if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode == vn)
+            p->fdtab->fds[fd].offset = desc.offset;
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
     }
     vfs_close_vnode(vn);
     return res;
@@ -1115,15 +1115,15 @@ int64_t vfs_seek(int fd, int64_t offset, int whence)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+    uint64_t fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
         return -1;
     }
-    FileDescriptor desc = p->fd_table[fd];
+    FileDescriptor desc = p->fdtab->fds[fd];
     VNode *vn = desc.vnode;
     __sync_fetch_and_add(&vn->ref_count, 1);
-    spinlock_release_irqrestore(&p->fd_lock, fl);
+    spinlock_release_irqrestore(&p->fdtab->lock, fl);
 
     int64_t new_offset = (int64_t)desc.offset;
     if (whence == SEEK_SET)
@@ -1135,10 +1135,10 @@ int64_t vfs_seek(int fd, int64_t offset, int whence)
 
     if (new_offset >= 0) {
         desc.offset = static_cast<uint64_t>(new_offset);
-        fl = spinlock_acquire_irqsave(&p->fd_lock);
-        if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
-            p->fd_table[fd].offset = desc.offset;
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+        fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+        if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode == vn)
+            p->fdtab->fds[fd].offset = desc.offset;
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
     }
     vfs_close_vnode(vn);
     return new_offset < 0 ? -1 : new_offset;
@@ -1150,25 +1150,25 @@ int vfs_readdir(int fd, char *name_out)
     if (!p || fd < 0 || fd >= MAX_OPEN_FILES)
         return -1;
 
-    uint64_t fl = spinlock_acquire_irqsave(&p->fd_lock);
-    if (!p->fd_table[fd].used || !p->fd_table[fd].vnode) {
-        spinlock_release_irqrestore(&p->fd_lock, fl);
+    uint64_t fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+    if (!p->fdtab->fds[fd].used || !p->fdtab->fds[fd].vnode) {
+        spinlock_release_irqrestore(&p->fdtab->lock, fl);
         return -1;
     }
-    FileDescriptor desc = p->fd_table[fd];
+    FileDescriptor desc = p->fdtab->fds[fd];
     VNode *vn = desc.vnode;
     __sync_fetch_and_add(&vn->ref_count, 1);
-    spinlock_release_irqrestore(&p->fd_lock, fl);
+    spinlock_release_irqrestore(&p->fdtab->lock, fl);
 
     int res = -1;
     if (vn->ops->readdir && ((desc.flags & FD_FLAG_STORAGE_GUARDED) == 0 || storage_reads_allowed())) {
         res = vn->ops->readdir(vn, desc.dir_pos, name_out);
         if (res == 0) {
             desc.dir_pos++;
-            fl = spinlock_acquire_irqsave(&p->fd_lock);
-            if (p->fd_table[fd].used && p->fd_table[fd].vnode == vn)
-                p->fd_table[fd].dir_pos = desc.dir_pos;
-            spinlock_release_irqrestore(&p->fd_lock, fl);
+            fl = spinlock_acquire_irqsave(&p->fdtab->lock);
+            if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode == vn)
+                p->fdtab->fds[fd].dir_pos = desc.dir_pos;
+            spinlock_release_irqrestore(&p->fdtab->lock, fl);
         }
     }
     vfs_close_vnode(vn);
@@ -1407,8 +1407,8 @@ bool is_file_open(const char *path)
         const Process *curr = start;
         do {
             for (int i = 0; i < MAX_OPEN_FILES; i++) {
-                if (curr->fd_table[i].used && curr->fd_table[i].vnode &&
-                    vfs_is_same_file(curr->fd_table[i].vnode, target)) {
+                if (curr->fdtab->fds[i].used && curr->fdtab->fds[i].vnode &&
+                    vfs_is_same_file(curr->fdtab->fds[i].vnode, target)) {
                     found = true;
                     break;
                 }

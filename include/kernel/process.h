@@ -30,6 +30,22 @@ struct Context
 
 constexpr size_t FPU_STATE_SIZE = 4096; // Increased to 4K for safety
 
+// Shared, refcounted file-descriptor table. Fork deep-copies the entries
+// (per-vnode refs bumped); threads created by sys_thread_create share the
+// leader's table live, so fd operations in one thread are visible to all
+// siblings. The table is freed when its last holder exits.
+struct FdTable
+{
+    alignas(64) Spinlock lock;
+    uint64_t refs;
+    FileDescriptor fds[MAX_OPEN_FILES];
+};
+
+[[nodiscard]] FdTable *fd_table_alloc(bool stdio_marks = true);
+[[nodiscard]] FdTable *fd_table_copy(FdTable *src);
+[[nodiscard]] FdTable *fd_table_share(FdTable *t);
+void fd_table_release(FdTable *t);
+
 struct Process
 {
     // === Fields accessed by assembly (PROC_* in process.asm) ===
@@ -69,8 +85,7 @@ struct Process
     uint8_t priority;
     uint8_t _pad_priority[7]; // Explicit padding to force 8-byte alignment
 
-    alignas(64) Spinlock fd_lock;
-    FileDescriptor fd_table[MAX_OPEN_FILES];
+    FdTable *fdtab;
 
     alignas(64) Spinlock vma_lock;
     VMA *vma_list;

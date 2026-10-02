@@ -103,6 +103,16 @@ static bool process_free_reaped(Process *target)
     if (!target)
         return true;
 
+    // Release any fd-table reference still attached: normal exits already
+    // dropped it in process_release_private_fds (fdtab is null), but
+    // manually-zombified tasks (ktest surgery) reach the reaper with the
+    // reference still held. The table is independently refcounted, so this
+    // is safe to do before the shared-address-space scan.
+    if (target->fdtab) {
+        fd_table_release(target->fdtab);
+        target->fdtab = nullptr;
+    }
+
     bool share_page_table = false;
     bool share_vma_list = false;
     bool share_vma_lock = false;
@@ -261,30 +271,99 @@ static void reap_kernel_zombies()
     }
 }
 
+FdTable *fd_table_alloc(bool stdio_marks)
+{
+    auto *t = static_cast<FdTable *>(aligned_alloc(64, sizeof(FdTable)));
+    if (!t)
+        return nullptr;
+    kstring::zero_memory(t, sizeof(FdTable));
+    spinlock_init(&t->lock);
+    t->refs = 1;
+    if (stdio_marks) {
+        // Slots 0/1/2 are the stdin/stdout/stderr placeholders handled by
+        // the sys_read/sys_write special cases.
+        t->fds[0].used = true;
+        t->fds[1].used = true;
+        t->fds[2].used = true;
+    }
+    return t;
+}
+
+FdTable *fd_table_copy(FdTable *src)
+{
+    if (!src)
+        return nullptr;
+    auto *t = fd_table_alloc(false);
+    if (!t)
+        return nullptr;
+
+    // irqsave: the table lock is an IRQ-touched leaf, and a raw acquire here
+    // let the resched IPI (and any future IRQ path taking it) preempt
+    // mid-copy.
+    uint64_t flags = spinlock_acquire_irqsave(&src->lock);
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        t->fds[i] = src->fds[i];
+        if (t->fds[i].used && t->fds[i].vnode)
+            __sync_fetch_and_add(&t->fds[i].vnode->ref_count, 1);
+    }
+    spinlock_release_irqrestore(&src->lock, flags);
+    return t;
+}
+
+FdTable *fd_table_share(FdTable *t)
+{
+    if (!t)
+        return nullptr;
+    uint64_t flags = spinlock_acquire_irqsave(&t->lock);
+    t->refs++;
+    spinlock_release_irqrestore(&t->lock, flags);
+    return t;
+}
+
+void fd_table_release(FdTable *t)
+{
+    if (!t)
+        return;
+
+    // A concurrent sys_fd_transfer from another process may still be
+    // installing fds into this table while it dies; detach under the table
+    // lock and drop the vnode references outside of it (fs close can do
+    // real work).
+    VNode *nodes[MAX_OPEN_FILES];
+    int node_count = 0;
+    bool final = false;
+
+    uint64_t flags = spinlock_acquire_irqsave(&t->lock);
+    if (t->refs > 0)
+        t->refs--;
+    final = (t->refs == 0);
+    if (final) {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (!t->fds[i].used)
+                continue;
+            if (t->fds[i].vnode && node_count < MAX_OPEN_FILES)
+                nodes[node_count++] = t->fds[i].vnode;
+            t->fds[i].used = false;
+            t->fds[i].vnode = nullptr;
+        }
+    }
+    spinlock_release_irqrestore(&t->lock, flags);
+
+    if (!final)
+        return;
+
+    for (int i = 0; i < node_count; i++)
+        vfs_close_vnode(nodes[i]);
+    aligned_free(t);
+}
+
 static void process_release_private_fds(Process *proc)
 {
     if (!proc)
         return;
-
-    // A concurrent sys_fd_transfer from another process may still be
-    // installing fds into this table while it dies; detach under fd_lock and
-    // drop the vnode references outside of it (fs close can do real work).
-    VNode *nodes[MAX_OPEN_FILES];
-    int node_count = 0;
-
-    uint64_t sl_flags = spinlock_acquire_irqsave(&proc->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!proc->fd_table[i].used)
-            continue;
-        if (proc->fd_table[i].vnode && node_count < MAX_OPEN_FILES)
-            nodes[node_count++] = proc->fd_table[i].vnode;
-        proc->fd_table[i].used = false;
-        proc->fd_table[i].vnode = nullptr;
-    }
-    spinlock_release_irqrestore(&proc->fd_lock, sl_flags);
-
-    for (int i = 0; i < node_count; i++)
-        vfs_close_vnode(nodes[i]);
+    FdTable *t = proc->fdtab;
+    proc->fdtab = nullptr;
+    fd_table_release(t);
 }
 
 #define NUM_PRIORITY_LEVELS 3
@@ -1204,11 +1283,7 @@ void scheduler_init()
     kproc->stack_base = nullptr;
 
     kproc->priority = 2;
-    spinlock_init(&kproc->fd_lock);
-
-    for (auto &fd : kproc->fd_table)
-        fd.used = false;
-    kproc->fd_table[0].used = kproc->fd_table[1].used = kproc->fd_table[2].used = true;
+    kproc->fdtab = fd_table_alloc();
 
     init_fpu_state(kproc->fpu_state);
     kproc->fpu_initialized = true;
@@ -1259,13 +1334,9 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     proc->last_run_time = timer_get_ticks();
     proc->cwd[0] = '/';
     proc->cwd[1] = '\0';
-    spinlock_init(&proc->fd_lock);
+    proc->fdtab = fd_table_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
-
-    for (auto &fd : proc->fd_table)
-        fd.used = false;
-    proc->fd_table[0].used = proc->fd_table[1].used = proc->fd_table[2].used = true;
 
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
@@ -1346,13 +1417,9 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     proc->last_run_time = timer_get_ticks();
     proc->cwd[0] = '/';
     proc->cwd[1] = '\0';
-    spinlock_init(&proc->fd_lock);
+    proc->fdtab = fd_table_alloc();
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
-
-    for (auto &fd : proc->fd_table)
-        fd.used = false;
-    proc->fd_table[0].used = proc->fd_table[1].used = proc->fd_table[2].used = true;
 
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
@@ -1440,11 +1507,9 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     proc->state = ProcessState_Ready;
     proc->priority = NUM_PRIORITY_LEVELS - 1; // IDLE class: never preempts real work
     proc->time_slice = 0;
-    spinlock_init(&proc->fd_lock);
+    proc->fdtab = fd_table_alloc(false);
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
-    for (auto &fd : proc->fd_table)
-        fd.used = false;
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
     proc->next = proc;
@@ -1564,18 +1629,11 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     save_fpu_state(current_proc()->fpu_state);
     kstring::memcpy(child->fpu_state, current_proc()->fpu_state, FPU_STATE_SIZE);
     child->fpu_initialized = true;
-    spinlock_init(&child->fd_lock);
 
-    // irqsave: fd_lock is an IRQ-touched leaf, and a raw acquire here let the
-    // resched IPI (and any future IRQ path taking fd_lock) preempt mid-copy.
-    uint64_t fd_flags = spinlock_acquire_irqsave(&current_proc()->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        child->fd_table[i] = current_proc()->fd_table[i];
-        if (child->fd_table[i].used && child->fd_table[i].vnode) {
-            __sync_fetch_and_add(&child->fd_table[i].vnode->ref_count, 1);
-        }
-    }
-    spinlock_release_irqrestore(&current_proc()->fd_lock, fd_flags);
+    // Fork semantics: the child gets its own table (entries copied, per-vnode
+    // refs bumped under the table's irqsave leaf lock).
+    child->fdtab = fd_table_copy(current_proc()->fdtab);
+
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
 
@@ -1956,15 +2014,9 @@ extern "C" void thread_ret();
     kstring::memcpy(thread->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
     thread->fpu_initialized = true;
 
-    spinlock_init(&thread->fd_lock);
-    spinlock_acquire(&parent->fd_lock);
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        thread->fd_table[i] = parent->fd_table[i];
-        if (thread->fd_table[i].used && thread->fd_table[i].vnode) {
-            __sync_fetch_and_add(&thread->fd_table[i].vnode->ref_count, 1);
-        }
-    }
-    spinlock_release(&parent->fd_lock);
+    // Thread semantics: share the leader's table live (open/close in this
+    // thread is visible to all siblings), no entry copying.
+    thread->fdtab = fd_table_share(parent->fdtab);
 
     thread->cursor_x = parent->cursor_x;
     thread->cursor_y = parent->cursor_y;

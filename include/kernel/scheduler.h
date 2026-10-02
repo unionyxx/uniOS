@@ -41,7 +41,7 @@ struct Process *process_find_by_pid_locked(uint64_t pid);
 void scheduler_wake_for_signal_locked(Process *p);
 
 // Direct access to the scheduler big lock for those find-and-act sequences.
-// Interrupts are disabled while held. Leaf locks (fd_lock, pipe, epoll) may
+// Interrupts are disabled while held. Leaf locks (the shared fd table lock, pipe, epoll) may
 // be taken underneath; the reverse order is forbidden.
 uint64_t scheduler_big_lock_irqsave();
 void scheduler_big_unlock_irqrestore(uint64_t flags);
@@ -75,8 +75,7 @@ void scheduler_note_epoll_deadline(uint64_t deadline_ticks);
 // the producer's later wake finding this task queued, false positives just
 // re-run the caller's scan loop.
 typedef bool (*scheduler_wait_recheck_fn)(void *ctx);
-void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck,
-                               void *ctx);
+void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_recheck_fn recheck, void *ctx);
 
 // Wake up to `count` waiters from q (count == 0 wakes all), taking g_sched_lock
 // around the whole traversal so signal-driven queue removals cannot interleave.
