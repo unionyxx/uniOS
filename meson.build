@@ -748,6 +748,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--success', 'cond=PASS',
       '--success', 'join=PASS',
       '--success', 'detach=PASS',
+      '--success', 'tls=PASS',
     ]
   endif
   qemu_smoke_fail_args = [
@@ -763,6 +764,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--fail', 'cond=FAIL',
       '--fail', 'join=FAIL',
       '--fail', 'detach=FAIL',
+      '--fail', 'tls=FAIL',
     ]
   endif
 
