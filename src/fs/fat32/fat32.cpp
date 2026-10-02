@@ -264,6 +264,8 @@ static void fat32_write_entry(FAT32Filesystem *fs, uint32_t cluster, uint32_t va
     free(sector_buf);
 }
 
+static void fat32_free_chain(FAT32Filesystem *fs, uint32_t cluster);
+
 static uint32_t fat32_allocate_cluster(FAT32Filesystem *fs, uint32_t last_cluster)
 {
     if (!fs || fs->cluster_count == 0)
@@ -284,11 +286,16 @@ static uint32_t fat32_allocate_cluster(FAT32Filesystem *fs, uint32_t last_cluste
 
             uint32_t cluster_size = fs->bytes_per_sector * fs->sectors_per_cluster;
             uint8_t *zero = static_cast<uint8_t *>(malloc(cluster_size));
-            if (zero) {
-                kstring::zero_memory(zero, cluster_size);
-                fs->dev->write_blocks(fs->dev, cluster_to_lba(fs, cluster), fs->sectors_per_cluster, zero);
-                free(zero);
+            if (!zero) {
+                // Handing out an unzeroed cluster would let a seek-past-EOF
+                // read disclose the previous owner's disk contents. Fail the
+                // allocation instead (the caller unwinds the chain).
+                fat32_free_chain(fs, cluster);
+                return 0x0FFFFFFF;
             }
+            kstring::zero_memory(zero, cluster_size);
+            fs->dev->write_blocks(fs->dev, cluster_to_lba(fs, cluster), fs->sectors_per_cluster, zero);
+            free(zero);
             fs->next_free_cluster = cluster + 1;
             if (fs->next_free_cluster >= fs->cluster_count + 2)
                 fs->next_free_cluster = 2;

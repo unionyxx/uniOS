@@ -593,6 +593,7 @@ void vfs_resolve_relative_path(const char *cwd, const char *path, char *out)
     int depth = 0;
     char copy[512];
     kstring::strncpy(copy, temp_path, 511);
+    copy[511] = '\0'; // strncpy does not terminate when the source fills n
 
     char *tok = copy;
     if (*tok == '/')
@@ -649,6 +650,7 @@ void vfs_resolve_relative_path(const char *cwd, const char *path, char *out)
 
     char path_copy[512];
     kstring::strncpy(path_copy, rel_path, 511);
+    path_copy[511] = '\0'; // strncpy does not terminate when the source fills n
 
     char *name = path_copy;
     char *next = nullptr;
@@ -1336,6 +1338,13 @@ int vfs_rmdir(const char *path)
 int vfs_rename(const char *oldpath, const char *newpath)
 {
     if ((vfs_path_is_storage_guarded(oldpath) || vfs_path_is_storage_guarded(newpath)) && !storage_writes_allowed())
+        return -1;
+
+    // Renaming an open file rewrites its directory entry slot: the open fd's
+    // cached entry index would then mutate whatever entry reuses the slot
+    // (on FAT32, silently corrupting an unrelated file's size/first cluster).
+    // Refuse while open, exactly like unlink does.
+    if (is_file_open(oldpath))
         return -1;
 
     char old_parent_path[512], new_parent_path[512];
