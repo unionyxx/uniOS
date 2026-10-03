@@ -66,7 +66,8 @@ Source SVG files live under `appicons/`. The icon generation tool renders fixed 
 ```sh
 python3 tools/appicon_rasterize.py \
     --source-root appicons \
-    --output-root rootfs/usr/share/appicons
+    --output-root rootfs/usr/share/appicons \
+    --sizes 16 20 24 32 48 64 128 256 512
 ```
 
 The UI glyph set uses the same tool against the `glyphs/` SVG sources, rasterized at the glyph size ladder (16-40 px, covering every UI scale of the 16 px base glyph):

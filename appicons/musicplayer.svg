@@ -8,11 +8,11 @@
 <path d="M192 0H64C28.6538 0 0 28.6538 0 64V192C0 227.346 28.6538 256 64 256H192C227.346 256 256 227.346 256 192V64C256 28.6538 227.346 0 192 0Z" fill="url(#overlay_grad)"/>
 <path d="M192 1.5H64C29.4822 1.5 1.5 29.4822 1.5 64V192C1.5 226.518 29.4822 254.5 64 254.5H192C226.518 254.5 254.5 226.518 254.5 192V64C254.5 29.4822 226.518 1.5 192 1.5Z" stroke="white" stroke-opacity="0.2" stroke-width="3"/>
 <g filter="url(#shadow)">
-<ellipse cx="84" cy="170" rx="21" ry="15" transform="rotate(-18 84 170)" fill="white" fill-opacity="0.96"/>
-<ellipse cx="168" cy="170" rx="21" ry="15" transform="rotate(-18 168 170)" fill="white" fill-opacity="0.96"/>
-<path d="M102 164V92" stroke="white" stroke-opacity="0.96" stroke-width="14" stroke-linecap="round"/>
-<path d="M186 164V92" stroke="white" stroke-opacity="0.96" stroke-width="14" stroke-linecap="round"/>
-<path d="M95 76H193V102H95Z" fill="white" fill-opacity="0.96"/>
+<ellipse cx="84" cy="176" rx="27" ry="20" fill="white" fill-opacity="0.96"/>
+<ellipse cx="172" cy="176" rx="27" ry="20" fill="white" fill-opacity="0.96"/>
+<path d="M84 165V90" stroke="white" stroke-opacity="0.96" stroke-width="18"/>
+<path d="M172 165V90" stroke="white" stroke-opacity="0.96" stroke-width="18"/>
+<path d="M75 60H181V90H75Z" fill="white" fill-opacity="0.96"/>
 </g>
 </g>
 </g>
