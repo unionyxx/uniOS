@@ -12,7 +12,7 @@ External programs are resolved as `/bin/<name>.elf` (falling back to `/bin/<name
 - **Text / pipes**: `echo`, `wc`, `head`, `tail`, `grep`, `sort`, `uniq`, `rev`, `tac`, `nl`, `tr`.
 - **System info**: `mem`, `kheap`, `ps`, `uptime`, `date`, `version`, `uname`, `sysinfo`, `cpuinfo`, `dmesg`, `storage`.
 - **Networking**: `resolve`, `ifconfig` (live NIC/IP/gateway/DNS via `SYS_NET_STATUS`), `ping <host> [count]` (real ICMP echo via `SYS_PING`, 4 probes by default, per-probe RTT and min/avg/max stats), `dhcp` (force a DHCP renew via `SYS_NET_RENEW`), `fetch <url> [outfile|-]` (HTTP/1.0 GET over TCP; saves to `/data/Downloads/<basename>` by default, `-` streams to stdout; only `Content-Length` framing is honored — chunked responses are rejected; a connection that stops sending for 15 seconds fails the fetch; no TLS).
-- **Audio**: `sound` (kernel parser), `play` (userspace WAV parser).
+- **Audio**: `sound` (kernel parser), `play` (userspace playback; the file is probed with libmedia's `media_audio_probe`, then written through `sound_config`/`sound_write`).
 - **Scripting / session**: `run`, `source`, `set`, `unset`, `alias`, `unalias`, `read`, `test`, `expr`, `time`, `sleep`, `env`, `history`, `which`, `type`, `random`, `true`, `false`, `quiet`.
 - **Process / power**: `kill`, `reboot`, `poweroff`, `help`, `clear`, `exit`.
 

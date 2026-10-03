@@ -2,8 +2,9 @@
 #include <stdlib.h>
 #include <uapi/sysinfo.h>
 
+#include "../libmedia/media_audio.h"
+#include "log.h"
 #include "shell_internal.h"
-#include "wav.h"
 
 void cmd_help()
 {
@@ -1945,20 +1946,52 @@ void cmd_play(const char *filename)
     char resolved[256];
     shell_resolve_path(filename, resolved);
 
-    uint8_t *data = NULL;
-    uint32_t data_size = 0;
-    uint32_t sample_rate = 0;
-    uint32_t channels = 0;
-    uint8_t *buffer = NULL;
-
-    if (wav_open(resolved, &data, &data_size, &sample_rate, &channels, &buffer)) {
-        printf("Playing %s: %u Hz, %u channels, %u bytes\n", resolved, sample_rate, channels, data_size);
-        sound_config(sample_rate, (uint8_t)channels, 16);
-        sound_write(data, data_size);
-        // We can't free buffer yet if sound_write is async, but currently it's sync in the kernel call.
-        // Actually sound_play in kernel starts DMA.
-        // For now, let's just leave it allocated to be safe.
+    int fd = open(resolved, O_RDONLY);
+    if (fd < 0) {
+        LOG_ERROR("play", "%s: open failed", resolved);
+        return;
     }
+
+    int64_t file_size = fsize(fd);
+    if (file_size < 0) {
+        close(fd);
+        LOG_ERROR("play", "%s: failed to stat wav file", resolved);
+        return;
+    }
+    if (file_size == 0) {
+        close(fd);
+        LOG_ERROR("play", "%s: invalid or corrupted wav file", resolved);
+        return;
+    }
+
+    uint8_t *data = (uint8_t *)malloc((size_t)file_size);
+    if (!data) {
+        close(fd);
+        LOG_ERROR("play", "%s: out of memory", resolved);
+        return;
+    }
+
+    int64_t bytes_read = read(fd, data, (size_t)file_size);
+    close(fd);
+    if (bytes_read != file_size) {
+        free(data);
+        LOG_ERROR("play", "%s: failed to read wav file", resolved);
+        return;
+    }
+
+    struct media_audio_info info;
+    if (!media_audio_probe(data, (size_t)bytes_read, (uint64_t)file_size, &info)) {
+        free(data);
+        return;
+    }
+
+    printf("Playing %s: %u Hz, %u channels, %llu bytes\n", resolved, info.sample_rate, info.channels,
+           (unsigned long long)info.data_size);
+    // sound_write is synchronous in the kernel, so the buffer is safe to free
+    // once it returns.
+    sound_config(info.sample_rate, (uint8_t)info.channels, 16);
+    sound_write(data + info.data_start, (uint32_t)info.data_size);
+    free(data);
 }
 
 void cmd_alias(const char *args)

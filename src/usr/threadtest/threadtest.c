@@ -1,5 +1,5 @@
 // threadtest.elf - boot-launched userspace pthread self-test (debug builds).
-// The six scenarios map 1:1 onto the summary line the smoke suite greps, and
+// The seven scenarios map 1:1 onto the summary line the smoke suite greps, and
 // that summary is the ONLY log line containing '=': its field tokens are the
 // unambiguous serial markers. Every scenario is deterministic - the timedwait
 // cycles anchor each producer delay to the consumer's announced park instead
@@ -11,6 +11,7 @@
 #include <uapi/fs.h>
 #include <uapi/tcb.h>
 
+#include "../libmedia/media_audio.h"
 #include "log.h"
 #include "pthread.h"
 #include "unistd.h"
@@ -576,6 +577,163 @@ static bool scenario_tls(void)
     return true;
 }
 
+/* ---- wavprobe: media_audio_probe checked against hand-packed WAV byte
+ * streams. Headers are assembled with explicit little-endian packing helpers
+ * (no struct casts over the buffer), so the scenario pins the byte contract
+ * itself: RIFF/WAVE magic, the PCM fmt fields, the data-chunk scan, the
+ * payload bounds check against file_size (a header window smaller than the
+ * file must still probe), and out untouched on rejection. */
+
+#define WAV_HEADER_BYTES 44
+#define WAV_PAYLOAD_BYTES 2048
+#define WAV_FILE_BYTES (WAV_HEADER_BYTES + WAV_PAYLOAD_BYTES)
+#define WAV_STEREO_RATE 44100
+#define WAV_MONO_RATE 22050
+
+static void wav_put_u16le(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+
+static void wav_put_u32le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static void wav_put_magic(uint8_t *p, const char magic[4])
+{
+    p[0] = (uint8_t)magic[0];
+    p[1] = (uint8_t)magic[1];
+    p[2] = (uint8_t)magic[2];
+    p[3] = (uint8_t)magic[3];
+}
+
+/* Pack a canonical 44-byte PCM WAV header: 12-byte RIFF descriptor, 16-byte
+ * fmt chunk, then the 8-byte data chunk header. The payload starts at byte
+ * 44 and its contents never matter to the probe. */
+static void wav_pack_header(uint8_t *buf, uint16_t format, uint16_t channels, uint32_t rate, uint16_t bits,
+                            uint32_t data_bytes)
+{
+    wav_put_magic(buf + 0, "RIFF");
+    wav_put_u32le(buf + 4, 36 + data_bytes);
+    wav_put_magic(buf + 8, "WAVE");
+    wav_put_magic(buf + 12, "fmt ");
+    wav_put_u32le(buf + 16, 16);
+    wav_put_u16le(buf + 20, format);
+    wav_put_u16le(buf + 22, channels);
+    wav_put_u32le(buf + 24, rate);
+    wav_put_u32le(buf + 28, rate * (uint32_t)channels * ((uint32_t)bits / 8));
+    wav_put_u16le(buf + 32, (uint16_t)((uint32_t)channels * ((uint32_t)bits / 8)));
+    wav_put_u16le(buf + 34, bits);
+    wav_put_magic(buf + 36, "data");
+    wav_put_u32le(buf + 40, data_bytes);
+}
+
+static bool wavprobe_check_accept(const char *name, const uint8_t *data, size_t size, uint64_t file_size,
+                                  const struct media_audio_info *expect)
+{
+    struct media_audio_info info = {0};
+    if (!media_audio_probe(data, size, file_size, &info)) {
+        LOG_ERROR(LOG_SCOPE, "scenario wavprobe: %s was rejected", name);
+        return false;
+    }
+    if (info.sample_rate != expect->sample_rate || info.channels != expect->channels ||
+        info.bits_per_sample != expect->bits_per_sample || info.data_start != expect->data_start ||
+        info.data_size != expect->data_size) {
+        LOG_ERROR(LOG_SCOPE,
+                  "scenario wavprobe: %s probed %u Hz, %u channels, %u bits, start %llu, size %llu; expected "
+                  "%u Hz, %u channels, %u bits, start %llu, size %llu",
+                  name, info.sample_rate, info.channels, info.bits_per_sample, (unsigned long long)info.data_start,
+                  (unsigned long long)info.data_size, expect->sample_rate, expect->channels, expect->bits_per_sample,
+                  (unsigned long long)expect->data_start, (unsigned long long)expect->data_size);
+        return false;
+    }
+    return true;
+}
+
+/* Every reject case also pins the untouched-out contract: the probe must
+ * never write the output structure on failure. */
+static bool wavprobe_check_reject(const char *name, const uint8_t *data, size_t size, uint64_t file_size)
+{
+    struct media_audio_info info;
+    info.sample_rate = 0xDEADBEEFu;
+    info.channels = 0xDEADu;
+    info.bits_per_sample = 0xBEEFu;
+    info.data_start = 0xDEADBEEFull;
+    info.data_size = 0xFEEDFACEull;
+    if (media_audio_probe(data, size, file_size, &info)) {
+        LOG_ERROR(LOG_SCOPE, "scenario wavprobe: %s was accepted", name);
+        return false;
+    }
+    if (info.sample_rate != 0xDEADBEEFu || info.channels != 0xDEADu || info.bits_per_sample != 0xBEEFu ||
+        info.data_start != 0xDEADBEEFull || info.data_size != 0xFEEDFACEull) {
+        LOG_ERROR(LOG_SCOPE, "scenario wavprobe: %s rejected but wrote the output structure", name);
+        return false;
+    }
+    return true;
+}
+
+static bool scenario_wavprobe(void)
+{
+    static uint8_t wav[WAV_FILE_BYTES];
+    for (uint32_t i = 0; i < WAV_PAYLOAD_BYTES; i++)
+        wav[WAV_HEADER_BYTES + i] = (uint8_t)i;
+
+    /* valid stereo 44100 Hz 16-bit, payload 2048 */
+    wav_pack_header(wav, 1, 2, WAV_STEREO_RATE, 16, WAV_PAYLOAD_BYTES);
+    struct media_audio_info expect = {WAV_STEREO_RATE, 2, 16, WAV_HEADER_BYTES, WAV_PAYLOAD_BYTES};
+    if (!wavprobe_check_accept("a stereo stream", wav, WAV_FILE_BYTES, WAV_FILE_BYTES, &expect))
+        return false;
+
+    /* 10-byte truncated buffer, file_size 10 */
+    uint8_t tiny[10];
+    for (int i = 0; i < 10; i++)
+        tiny[i] = (uint8_t)('A' + i);
+    wav_put_magic(tiny, "RIFF");
+    if (!wavprobe_check_reject("a 10-byte buffer", tiny, 10, 10))
+        return false;
+
+    /* RIFF magic but WAVX instead of WAVE */
+    wav_pack_header(wav, 1, 2, WAV_STEREO_RATE, 16, WAV_PAYLOAD_BYTES);
+    wav_put_magic(wav + 8, "WAVX");
+    if (!wavprobe_check_reject("a WAVX magic", wav, WAV_FILE_BYTES, WAV_FILE_BYTES))
+        return false;
+
+    /* fmt audio format code 3 (IEEE float) */
+    wav_pack_header(wav, 3, 2, WAV_STEREO_RATE, 16, WAV_PAYLOAD_BYTES);
+    if (!wavprobe_check_reject("a float format code", wav, WAV_FILE_BYTES, WAV_FILE_BYTES))
+        return false;
+
+    /* bits_per_sample 8 */
+    wav_pack_header(wav, 1, 2, WAV_STEREO_RATE, 8, WAV_PAYLOAD_BYTES);
+    if (!wavprobe_check_reject("8-bit samples", wav, WAV_FILE_BYTES, WAV_FILE_BYTES))
+        return false;
+
+    /* valid mono 22050 Hz, payload 1024 (payload ends exactly at EOF) */
+    wav_pack_header(wav, 1, 1, WAV_MONO_RATE, 16, 1024);
+    struct media_audio_info mono = {WAV_MONO_RATE, 1, 16, WAV_HEADER_BYTES, 1024};
+    if (!wavprobe_check_accept("a mono stream", wav, WAV_HEADER_BYTES + 1024, WAV_HEADER_BYTES + 1024, &mono))
+        return false;
+
+    /* data_size = file_size, so the payload would run past EOF */
+    wav_pack_header(wav, 1, 2, WAV_STEREO_RATE, 16, WAV_FILE_BYTES);
+    if (!wavprobe_check_reject("an over-long payload", wav, WAV_FILE_BYTES, WAV_FILE_BYTES))
+        return false;
+
+    /* streaming contract: only a 64-byte header window while file_size stays
+     * the full size - parsing reads stay in the window, the bounds check
+     * uses the file size */
+    wav_pack_header(wav, 1, 2, WAV_STEREO_RATE, 16, WAV_PAYLOAD_BYTES);
+    if (!wavprobe_check_accept("a 64-byte header window", wav, 64, WAV_FILE_BYTES, &expect))
+        return false;
+
+    return true;
+}
+
 int main(void)
 {
     const bool create_ok = scenario_create();
@@ -584,10 +742,12 @@ int main(void)
     const bool join_ok = scenario_join();
     const bool detach_ok = scenario_detach();
     const bool tls_ok = scenario_tls();
+    const bool wavprobe_ok = scenario_wavprobe();
 
-    LOG_INFO(LOG_SCOPE, "thread self-test summary: create=%s mutex=%s cond=%s join=%s detach=%s tls=%s",
+    LOG_INFO(LOG_SCOPE, "thread self-test summary: create=%s mutex=%s cond=%s join=%s detach=%s tls=%s wavprobe=%s",
              create_ok ? "PASS" : "FAIL", mutex_ok ? "PASS" : "FAIL", cond_ok ? "PASS" : "FAIL",
-             join_ok ? "PASS" : "FAIL", detach_ok ? "PASS" : "FAIL", tls_ok ? "PASS" : "FAIL");
+             join_ok ? "PASS" : "FAIL", detach_ok ? "PASS" : "FAIL", tls_ok ? "PASS" : "FAIL",
+             wavprobe_ok ? "PASS" : "FAIL");
 
-    return (create_ok && mutex_ok && cond_ok && join_ok && detach_ok && tls_ok) ? 0 : 1;
+    return (create_ok && mutex_ok && cond_ok && join_ok && detach_ok && tls_ok && wavprobe_ok) ? 0 : 1;
 }

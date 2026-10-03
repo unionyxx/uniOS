@@ -243,7 +243,6 @@ libc = static_library(
     'src/usr/libc/string.c',
     'src/usr/libc/stdio.c',
     'src/usr/libc/socket.c',
-    'src/usr/libc/wav.c',
     'src/usr/libc/log.c',
     'src/usr/libc/math.c',
     'src/usr/libc/pthread.c',
@@ -278,6 +277,7 @@ libapp = static_library(
 libmedia = static_library(
   'uni_libmedia',
   [
+    'src/usr/libmedia/media_audio.c',
     'src/usr/libmedia/media_image.cpp',
     'src/usr/libmedia/png_codec.cpp',
     'src/usr/libmedia/jpeg_codec.cpp',
@@ -286,6 +286,7 @@ libmedia = static_library(
     'src/usr/libmedia/qoi_codec.cpp',
   ],
   include_directories : [kernel_inc, user_inc],
+  c_args : user_c_args,
   cpp_args : user_cpp_args,
 )
 
@@ -330,7 +331,7 @@ foreach app_name, search_roots : app_sources
   # Heavy libraries linked without --whole-archive: only translation units
   # that resolve undefined symbols are pulled into the final binary.
   app_link_with_lazy = []
-  if app_name == 'imageviewer' or app_name == 'files'
+  if app_name == 'imageviewer' or app_name == 'files' or app_name == 'shell' or app_name == 'threadtest'
     app_link_with_lazy += [libmedia]
   endif
   app_archive = static_library(
@@ -749,6 +750,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--success', 'join=PASS',
       '--success', 'detach=PASS',
       '--success', 'tls=PASS',
+      '--success', 'wavprobe=PASS',
     ]
     # The boot teardown audit task's verdict line: proves every kernel
     # task created during boot was reaped and freed.
@@ -774,6 +776,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       # Idle-loop poll-stage irq leak: the debug probe in kmain warns once
       # per offending stage and recovers; a leak must fail, not hang.
       '--fail', 'idle: interrupts disabled',
+      '--fail', 'wavprobe=FAIL',
     ]
   endif
 
