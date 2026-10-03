@@ -40,7 +40,7 @@ struct DockIconAsset
 static constexpr DockItem k_dock_items[] = {
     {"Files", "/bin/files.elf", "F", "files", 0xFFEAF0F8},
     {"Image Viewer", "/bin/imageviewer.elf", "I", "imageviewer", 0xFF7C3AED},
-    {"Music", "/bin/musicplayer.elf", "M", "musicplayer", 0xFF6D28D9},
+    {"Music", "/bin/musicplayer.elf", "M", "musicplayer", 0xFF4F46E5},
     {"Latitude", "/bin/latitude.elf", "L", "latitude", 0xFF26323F},
     {"Terminal", "/bin/terminal.elf", ">", "terminal", 0xFF151A22},
     {"Calculator", "/bin/calculator.elf", "C", "calculator", 0xFF4A90E2},
