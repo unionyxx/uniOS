@@ -305,6 +305,7 @@ app_sources = {
   'calendar' : ['src/usr/apps/calendar'],
   'calculator' : ['src/usr/apps/calculator'],
   'imageviewer' : ['src/usr/apps/imageviewer'],
+  'musicplayer' : ['src/usr/apps/musicplayer'],
   'threadtest' : ['src/usr/threadtest'],
 }
 

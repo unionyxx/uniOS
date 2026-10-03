@@ -443,6 +443,13 @@ static bool name_is_image(const char *name)
            suffix_match_icase(name, ".bmp") || suffix_match_icase(name, ".gif") || suffix_match_icase(name, ".qoi");
 }
 
+static bool name_is_audio(const char *name)
+{
+    if (!name)
+        return false;
+    return suffix_match_icase(name, ".wav");
+}
+
 static bool path_equals(const char *a, const char *b)
 {
     return a && b && strcmp(a, b) == 0;
@@ -1623,7 +1630,9 @@ static void files_draw_table_row(Surface *win, const Rect *r, const FileRow *row
     bool show_type = type_x >= name_min_end;
 
     if (show_type) {
-        const char *type_label = row->is_dir ? "Directory" : (name_is_image(row->name) ? "Image" : "File");
+        const char *type_label =
+            row->is_dir ? "Directory"
+                        : (name_is_image(row->name) ? "Image" : (name_is_audio(row->name) ? "Audio" : "File"));
         int type_w = gui_measure_text(gui_font_default(), type_label);
         int type_align_x = type_x + type_col_w - type_w;
         if (type_align_x < type_x)
@@ -1640,7 +1649,9 @@ static void files_draw_table_row(Surface *win, const Rect *r, const FileRow *row
     }
 
     GuiGlyphKind glyph =
-        row->is_dir ? GUI_GLYPH_FOLDER : (name_is_image(row->name) ? GUI_GLYPH_FILE_IMAGE : GUI_GLYPH_FILE_TEXT);
+        row->is_dir ? GUI_GLYPH_FOLDER
+                    : (name_is_image(row->name) ? GUI_GLYPH_FILE_IMAGE
+                                                : (name_is_audio(row->name) ? GUI_GLYPH_FILE : GUI_GLYPH_FILE_TEXT));
     gui_draw_glyph(win, icon_x, r->y + (r->h - icon_size) / 2, icon_size, glyph,
                    selected ? g_gui_style.accent : g_gui_style.text_dim);
 
@@ -1948,6 +1959,28 @@ static void open_in_image_viewer(AppState *state, const FileRow *row)
     set_status(state, msg);
 }
 
+static void open_in_music_player(AppState *state, const FileRow *row)
+{
+    if (!state || !row)
+        return;
+    if (!gui_open_request_submit(row->path)) {
+        set_status(state, "Open request failed");
+        return;
+    }
+    int pid = fork();
+    if (pid == 0) {
+        exec("/bin/musicplayer.elf");
+        exit(1);
+    }
+    if (pid < 0) {
+        set_status(state, "Launch failed");
+        return;
+    }
+    char msg[sizeof(state->status)];
+    snprintf(msg, sizeof(msg), "Opening %s", row->name);
+    set_status(state, msg);
+}
+
 static void activate_row(AppState *state, int index)
 {
     if (state->volume_home) {
@@ -1962,6 +1995,8 @@ static void activate_row(AppState *state, int index)
     if (!state->rows[index].is_dir) {
         if (name_is_image(state->rows[index].name))
             open_in_image_viewer(state, &state->rows[index]);
+        else if (name_is_audio(state->rows[index].name))
+            open_in_music_player(state, &state->rows[index]);
         state->needs_redraw = true;
         return;
     }
