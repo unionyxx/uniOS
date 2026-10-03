@@ -40,6 +40,9 @@ Generated artifacts live in the build directory. Never hand-edit them; they are 
 | `efi.img` | `tools/build_efi_image.py --mode fat` | FAT32 EFI system partition image |
 | `boot.img` | `tools/build_efi_image.py --mode disk` | Raw disk: ESP + writable `UNI_DATA` FAT32 partition |
 | `uniOS.iso` | `tools/create_iso.py` | UEFI-bootable ISO9660 image |
+| `rootfs/Music/demo.wav` | `tools/gen_demo_track.py` (target `demo-track`) | Deterministic 10 s 44.1 kHz stereo 16-bit PCM demo chime |
+
+The demo track is synthesized from a fixed note schedule with no RNG, so the WAV is byte-identical on every rebuild; it is staged into the read-only image (never committed) and regenerable on the host with `python3 tools/gen_demo_track.py --output <file>`.
 
 See [Boot images](images.md) for the on-disk layouts.
 

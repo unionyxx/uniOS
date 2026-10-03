@@ -42,6 +42,7 @@ create_iso = files('tools/create_iso.py')[0]
 build_efi_image = files('tools/build_efi_image.py')[0]
 qemu_smoke = files('tools/qemu_smoke.py')[0]
 wallpaper_package = files('tools/wallpaper_package.py')[0]
+demo_track_script = files('tools/gen_demo_track.py')[0]
 docs_site = files('tools/docs_site.py')[0]
 linker_script = files('linker.ld')[0]
 user_linker_script = files('src/usr/user.ld')[0]
@@ -401,9 +402,23 @@ default_wallpaper = custom_target(
 
 stage_overlays += ['--overlay', 'usr/share/wallpapers/default.uowp', default_wallpaper]
 
+demo_track = custom_target(
+  'demo-track',
+  input : [demo_track_script],
+  output : 'demo.wav',
+  command : [
+    py,
+    demo_track_script,
+    '--output',
+    '@OUTPUT@',
+  ],
+)
+
+stage_overlays += ['--overlay', 'Music/demo.wav', demo_track]
+
 rootfs_stamp = custom_target(
   'stage-rootfs',
-  input : user_app_targets + [default_wallpaper],
+  input : user_app_targets + [default_wallpaper, demo_track],
   output : 'rootfs.stamp',
   command : [
     py,

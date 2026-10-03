@@ -29,4 +29,5 @@ NUL.exe
 
 # Generated runtime assets
 rootfs/bin/
+rootfs/Music/
 rootfs/usr/share/wallpapers/default.uowp
