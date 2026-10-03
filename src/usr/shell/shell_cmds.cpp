@@ -1987,11 +1987,14 @@ void cmd_play(const char *filename)
 
     printf("Playing %s: %u Hz, %u channels, %llu bytes\n", resolved, info.sample_rate, info.channels,
            (unsigned long long)info.data_size);
-    // sound_write is synchronous in the kernel, so the buffer is safe to free
-    // once it returns.
+    // The legacy whole-buffer path retains the user pointer: only the first
+    // card DMA ring is copied synchronously, and the idle loop's sound_poll()
+    // refills the card from this buffer for the whole playback, so the buffer
+    // must stay allocated (process exit reclaims it). Payloads beyond the
+    // first ring already fault today because the idle task pumps on kernel
+    // page tables - a pre-existing kernel issue, not this command's to fix.
     sound_config(info.sample_rate, (uint8_t)info.channels, 16);
     sound_write(data + info.data_start, (uint32_t)info.data_size);
-    free(data);
 }
 
 void cmd_alias(const char *args)
