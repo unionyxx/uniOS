@@ -694,6 +694,30 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     }
 #endif
 
+#ifdef DEBUG
+    // IRQ-leak probe for the idle loop: which polled stage returns with
+    // interrupts disabled. 1=input, 2=net, 3=sound, 4=yield. Printed once per
+    // stage when the idle loop catches IF=0 right after it, then re-enabled
+    // so the boot keeps going and the leak stays visible in the log.
+    static uint32_t g_dbg_leak_reported = 0;
+    auto dbg_poll_check = [](uint32_t stage) {
+        if (!interrupts_enabled()) {
+            if ((g_dbg_leak_reported & (1u << stage)) == 0) {
+                g_dbg_leak_reported |= 1u << stage;
+                DEBUG_WARN("idle: interrupts disabled by poll stage %u (leak)", stage);
+            }
+            asm volatile("sti" ::: "memory");
+        }
+    };
+#define DBG_POLL(stage, call)                                                                                          \
+    do {                                                                                                               \
+        (call);                                                                                                        \
+        dbg_poll_check(stage);                                                                                         \
+    } while (0)
+#else
+#define DBG_POLL(stage, call) (call)
+#endif
+
     asm volatile("sti" ::: "memory");
     scheduler_yield();
 
@@ -703,15 +727,15 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     uint32_t poll_counter = 0;
     while (true) {
         if (++poll_counter >= 10) {
-            input_poll();
-            net_poll();
+            DBG_POLL(1, input_poll());
+            DBG_POLL(2, net_poll());
             poll_counter = 0;
         }
         // Audio DMA refills and stream bookkeeping. Cheap no-op when no
         // playback is active; blocking sound writers rely on this pump.
-        sound_poll();
+        DBG_POLL(3, sound_poll());
 
-        scheduler_yield();
+        DBG_POLL(4, scheduler_yield());
         asm volatile("hlt");
     }
 }

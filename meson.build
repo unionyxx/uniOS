@@ -771,6 +771,9 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--fail', 'detach=FAIL',
       '--fail', 'tls=FAIL',
       '--fail', 'task teardown audit: FAIL',
+      # Idle-loop poll-stage irq leak: the debug probe in kmain warns once
+      # per offending stage and recovers; a leak must fail, not hang.
+      '--fail', 'idle: interrupts disabled',
     ]
   endif
 
