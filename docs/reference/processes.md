@@ -73,7 +73,7 @@ Defined signals: SIGHUP 1, SIGINT 2, SIGQUIT 3, SIGILL 4, SIGTRAP 5, SIGABRT 6, 
 Delivery:
 
 - `SYS_KILL` finds the target under the scheduler lock (lookup-while-reap safe) and checks uid (root, self, or same uid). Signal 0 is an existence check.
-- A pending bit is OR'd into the target's signal mask and blocking states are interrupted.
+- A pending bit is OR'd into the target's signal mask and blocking states are interrupted. Every delivery path takes the scheduler big lock (irqsave) around the pending set + state + wake, so a sender can never lose the wake of a target that is between its condition check and its wait-queue push; the unlocked readers left in the signal path (the target's own `signal_check`/fatal rechecks) read bits that senders only ever set.
 - Signals are checked on every return to ring 3 — after syscalls and after interrupts that interrupted user mode.
 - Default-fatal signals (SIGINT/SIGTERM/SIGQUIT/SIGKILL/SIGSEGV) exit the whole thread group with a negative signal-number status.
 - Custom handlers run on the user stack with a saved context (interrupt frame + FPU state + magic). `SYS_SIGRETURN` validates the magic, forces user CS/SS, sanitizes RFLAGS, restores FPU state with masked MXCSR/xstate bits, and returns via `iretq`.

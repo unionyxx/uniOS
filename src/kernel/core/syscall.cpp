@@ -509,11 +509,19 @@ void signal_send(Process *p, int sig)
 {
     if (!p || sig <= 0 || sig > 31)
         return;
-    // Atomic: sender may run on another core while the target dequeues signals.
-    __sync_or_and_fetch(&p->signals.pending, 1ULL << sig);
-    if (p->state == ProcessState_Waiting || p->state == ProcessState_Blocked) {
-        scheduler_wake_process(p);
-    }
+    // Take the big lock irqsave and reuse the locked delivery: the pending
+    // set, the state read and the wake are then atomic against the target's
+    // scheduler_wait queue push (an unlocked state read can see Running
+    // while the target is between its condition check and the push, lose
+    // the wake, and leave a blocked target unkillable). irqsave, not plain
+    // acquire, because the PS/2 IRQ path reaches this through
+    // signal_send_current; the big lock is always the outermost lock.
+    const uint64_t flags = scheduler_big_lock_irqsave();
+    signal_send_locked(p, sig);
+    scheduler_big_unlock_irqrestore(flags);
+    // Like sys_kill: a cross-core wake needs the resched IPI to reach parked
+    // idle cores this tick instead of the next (no-op on UP).
+    scheduler_notify_idle_cpus();
 }
 
 // Variant for cross-process delivery: the caller holds the scheduler lock so
@@ -610,6 +618,10 @@ extern "C" void signal_check(SyscallFrame *frame)
     Process *p = process_get_current();
     if (!p || p->signals.pending == 0)
         return;
+    // Unlocked pending reads below are safe by construction: this runs on
+    // the target itself (post-syscall trampoline), and senders only ever
+    // SET bits (atomics below test-and-clear them), so a set racing this
+    // loop is either consumed here or on the next trampoline return.
     for (int i = 1; i < 32; i++) {
         // Atomic test-and-clear so a cross-core signal_send cannot be lost.
         if (__sync_fetch_and_and(&p->signals.pending, ~(1ULL << i)) & (1ULL << i)) {

@@ -1232,6 +1232,11 @@ void scheduler_wake_process(Process *p)
 // Fatal-signal escape hatch for kernel wait loops: a pending SIGKILL-class
 // default-fatal signal should break an otherwise endless block instead of
 // being delivered only when some unrelated event wakes the process.
+// The pending read is unlocked by design: every caller either is the waiter
+// itself re-checking between its condition scan and its park (racing
+// senders only SET bits, so a late bit just wins on the next check or the
+// queued recheck inside scheduler_wait_rechecked), or already holds
+// g_sched_lock while scanning targets.
 bool scheduler_fatal_signal_pending(const Process *p)
 {
     if (!p)
