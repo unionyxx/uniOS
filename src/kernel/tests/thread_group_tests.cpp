@@ -1740,7 +1740,11 @@ cleanup:
     g_gate_race_stacks = nullptr;
     free(creator_stack);
     free(race_stacks);
-    free(vma);
+    // On the success path the exec's vma_free_all already released the old
+    // list's nodes - including this test's surgical VMA. Only the refusal
+    // path still owns it.
+    if (!exec_ok)
+        free(vma);
     leader->signals.pending = 0;
     leader->page_table = const_cast<uint64_t *>(orig_page_table);
     leader->vmalist->head = orig_vma_list;
