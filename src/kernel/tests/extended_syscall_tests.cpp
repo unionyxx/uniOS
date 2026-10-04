@@ -220,6 +220,15 @@ KTEST(extended_syscalls_futex)
         scheduler_yield();
     }
 
+    // A count of 0 is literal, POSIX-style: it wakes no waiter at all.
+    {
+        int64_t woken0 = sys_futex(uval, FUTEX_WAKE, 0);
+        KTEST_EXPECT_EQ(woken0, 0);
+        Process *waiter = process_find_by_pid(static_cast<uint64_t>(thread_pid));
+        KTEST_EXPECT(waiter != nullptr);
+        KTEST_EXPECT(waiter->state == ProcessState_Blocked || waiter->state == ProcessState_Waiting);
+    }
+
     // Wake the waiter thread
     int64_t woken = sys_futex(uval, FUTEX_WAKE, 1);
     KTEST_EXPECT_EQ(woken, 1);

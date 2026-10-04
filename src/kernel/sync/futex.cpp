@@ -199,6 +199,12 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
 
         return 0;
     } else if (op == FUTEX_WAKE) {
+        // POSIX-literal count: 0 wakes none. The wake-all-on-0 behavior it
+        // replaces was a silent deviation that nothing in tree exercised
+        // (no caller passes 0), but it would eat a caller's "wake nothing"
+        // probe and wake the word's every waiter instead.
+        if (val == 0)
+            return 0;
         uint64_t flags = spinlock_acquire_irqsave(&bucket->lock);
         // Word-matched wake: the count is spent on waiters parked on this
         // exact physical word, not on bucket neighbours parked on other

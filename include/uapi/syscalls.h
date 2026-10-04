@@ -140,7 +140,7 @@
 #define SYS_THREAD_EXIT 297
 #define SYS_THREAD_DETACH 298
 
-/* Futex Opcodes */
+/* Futex Opcodes (FUTEX_WAKE's count is literal: 0 wakes no waiter). */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 
