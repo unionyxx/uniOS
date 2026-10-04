@@ -435,8 +435,10 @@ KTEST(extended_syscalls_epoll)
     p->fdtab->fds[write_fd].vnode = pipe_get_vnode(pipe_id, true);
     p->fdtab->fds[write_fd].flags = 0;
 
+    KSTAC();
     user_ev->events = EPOLLIN;
     user_ev->data.fd = read_fd;
+    KCLAC();
     int64_t res = sys_epoll_ctl(static_cast<int>(epfd), EPOLL_CTL_ADD, read_fd, user_ev);
     KTEST_EXPECT_EQ(res, 0);
 
@@ -458,8 +460,14 @@ KTEST(extended_syscalls_epoll)
 
     res = sys_epoll_wait(static_cast<int>(epfd), user_events, 2, 0);
     KTEST_EXPECT_EQ(res, 1);
-    KTEST_EXPECT_EQ(user_events[0].data.fd, read_fd);
-    KTEST_EXPECT((user_events[0].events & EPOLLIN) != 0);
+    int32_t ev_fd = 0;
+    uint32_t ev_events = 0;
+    KSTAC();
+    ev_fd = user_events[0].data.fd;
+    ev_events = user_events[0].events;
+    KCLAC();
+    KTEST_EXPECT_EQ(ev_fd, read_fd);
+    KTEST_EXPECT((ev_events & EPOLLIN) != 0);
 
     char buf[4];
     int64_t read_bytes = pipe_read(pipe_id, buf, 4);
@@ -536,8 +544,10 @@ static bool epoll_block_fixture_setup(Process *p, EpollBlockFixture &f)
     p->fdtab->fds[f.read_fd].vnode = pipe_get_vnode(f.pipe_id, false);
     p->fdtab->fds[f.read_fd].flags = 0;
 
+    KSTAC();
     f.user_ev->events = EPOLLIN;
     f.user_ev->data.fd = f.read_fd;
+    KCLAC();
     return sys_epoll_ctl(static_cast<int>(f.epfd), EPOLL_CTL_ADD, f.read_fd, f.user_ev) == 0;
 }
 
@@ -622,8 +632,14 @@ KTEST(extended_syscalls_epoll_wake)
     int64_t r = sys_epoll_wait(static_cast<int>(f.epfd), f.user_events, 2, 5000);
     KTEST_EXPECT_EQ(r, 1);
     if (r == 1) {
-        KTEST_EXPECT_EQ(f.user_events[0].data.fd, f.read_fd);
-        KTEST_EXPECT((f.user_events[0].events & EPOLLIN) != 0);
+        int32_t ev_fd = 0;
+        uint32_t ev_events = 0;
+        KSTAC();
+        ev_fd = f.user_events[0].data.fd;
+        ev_events = f.user_events[0].events;
+        KCLAC();
+        KTEST_EXPECT_EQ(ev_fd, f.read_fd);
+        KTEST_EXPECT((ev_events & EPOLLIN) != 0);
     }
 
     // Reap the writer thread: it shares the test's throwaway VMA list and
@@ -694,11 +710,14 @@ KTEST(extended_syscalls_memfd)
     KTEST_EXPECT(mmap_res != static_cast<uint64_t>(-1));
 
     volatile char *shared_ptr = reinterpret_cast<volatile char *>(mmap_res);
-    KTEST_EXPECT(kstring::strcmp(const_cast<char *>(shared_ptr), test_str) == 0);
-
+    int shared_initial = 1;
+    KSTAC();
+    shared_initial = kstring::strcmp(const_cast<char *>(shared_ptr), test_str);
     shared_ptr[0] = 'y';
     shared_ptr[1] = 'o';
     shared_ptr[2] = 'u';
+    KCLAC();
+    KTEST_EXPECT_EQ(shared_initial, 0);
 
     seek_res = vfs_seek(static_cast<int>(fd), 0, SEEK_SET);
     KTEST_EXPECT_EQ(seek_res, 0);
@@ -714,13 +733,17 @@ KTEST(extended_syscalls_memfd)
     KTEST_EXPECT(p_mmap_res != mmap_res);
 
     volatile char *private_ptr = reinterpret_cast<volatile char *>(p_mmap_res);
-    KTEST_EXPECT(kstring::strcmp(const_cast<char *>(private_ptr), "youlo Memfd!") == 0);
-
+    int private_initial = 1;
+    int shared_after = 1;
+    KSTAC();
+    private_initial = kstring::strcmp(const_cast<char *>(private_ptr), "youlo Memfd!");
     private_ptr[0] = 'H';
     private_ptr[1] = 'e';
     private_ptr[2] = 'l';
-
-    KTEST_EXPECT(kstring::strcmp(const_cast<char *>(shared_ptr), "youlo Memfd!") == 0);
+    shared_after = kstring::strcmp(const_cast<char *>(shared_ptr), "youlo Memfd!");
+    KCLAC();
+    KTEST_EXPECT_EQ(private_initial, 0);
+    KTEST_EXPECT_EQ(shared_after, 0);
 
     seek_res = vfs_seek(static_cast<int>(fd), 0, SEEK_SET);
     KTEST_EXPECT_EQ(seek_res, 0);
@@ -803,9 +826,11 @@ KTEST(extended_syscalls_vma_split_unmap)
 
     // Write to all 3 pages
     volatile char *ptr = reinterpret_cast<volatile char *>(mmap_res);
+    KSTAC();
     ptr[0] = 'a';
     ptr[4096] = 'b';
     ptr[8192] = 'c';
+    KCLAC();
 
     // Unmap the middle page (offset 4096, length 4096)
     int64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_res + 4096, 4096, 0, &frame);
@@ -814,7 +839,11 @@ KTEST(extended_syscalls_vma_split_unmap)
     // First page should still be present
     uint64_t phys0 = vmm_virt_to_phys_in(p->page_table, mmap_res);
     KTEST_EXPECT(phys0 != 0);
-    KTEST_EXPECT_EQ(ptr[0], 'a');
+    char first = 0;
+    KSTAC();
+    first = ptr[0];
+    KCLAC();
+    KTEST_EXPECT_EQ(first, 'a');
 
     // Middle page should be unmapped
     uint64_t phys1 = vmm_virt_to_phys_in(p->page_table, mmap_res + 4096);
@@ -823,7 +852,11 @@ KTEST(extended_syscalls_vma_split_unmap)
     // Third page should still be present
     uint64_t phys2 = vmm_virt_to_phys_in(p->page_table, mmap_res + 8192);
     KTEST_EXPECT(phys2 != 0);
-    KTEST_EXPECT_EQ(ptr[8192], 'c');
+    char third = 0;
+    KSTAC();
+    third = ptr[8192];
+    KCLAC();
+    KTEST_EXPECT_EQ(third, 'c');
 
     // Clean up: unmap first and third pages
     munmap_res = syscall_handler(SYS_MUNMAP, mmap_res, 4096, 0, &frame);
@@ -868,9 +901,11 @@ KTEST(extended_syscalls_mmap_offset)
     KTEST_EXPECT(mmap_full != static_cast<uint64_t>(-1));
 
     volatile char *full_ptr = reinterpret_cast<volatile char *>(mmap_full);
+    KSTAC();
     full_ptr[0] = 'X';
     full_ptr[4096] = 'Y';
     full_ptr[8192] = 'Z';
+    KCLAC();
 
     // Unmap the initial full mapping
     int64_t munmap_res = syscall_handler(SYS_MUNMAP, mmap_full, 12288, 0, &frame);
@@ -887,8 +922,14 @@ KTEST(extended_syscalls_mmap_offset)
     KTEST_EXPECT(mmap_offset != static_cast<uint64_t>(-1));
 
     volatile char *offset_ptr = reinterpret_cast<volatile char *>(mmap_offset);
-    KTEST_EXPECT_EQ(offset_ptr[0], 'Y');    // page 1 content
-    KTEST_EXPECT_EQ(offset_ptr[4096], 'Z'); // page 2 content
+    char page1 = 0;
+    char page2 = 0;
+    KSTAC();
+    page1 = offset_ptr[0];    // page 1 content
+    page2 = offset_ptr[4096]; // page 2 content
+    KCLAC();
+    KTEST_EXPECT_EQ(page1, 'Y');
+    KTEST_EXPECT_EQ(page2, 'Z');
 
     // Clean up
     munmap_res = syscall_handler(SYS_MUNMAP, mmap_offset, 8192, 0, &frame);
@@ -1001,21 +1042,28 @@ KTEST(extended_syscalls_signal_context)
         // frames, so reconstructing field addresses from one translated
         // physical base would assume the mapping is physically contiguous.
         // The ktest runs in kernel context on the mapping's own page tables
-        // (page_table surgery above), and SMAP stays disabled, so a direct
-        // read sees exactly what the interrupted user thread would see. The
-        // trampoline is pushed at RSP; the SignalContext starts at RSP + 8.
+        // (page_table surgery above), so a direct read sees exactly what
+        // the interrupted user thread would see — a raw user-page access,
+        // guarded like every other test-side one. The trampoline is pushed
+        // at RSP; the SignalContext starts at RSP + 8.
         uint64_t tramp_phys = vmm_virt_to_phys(tf.frame.rsp);
         SIG_CTX_CHECK(tramp_phys != 0);
-        uint64_t *tramp_val = reinterpret_cast<uint64_t *>(tf.frame.rsp);
-        SIG_CTX_CHECK_EQ(*tramp_val, 0x7890ULL);
-
         uint64_t ctx_phys = vmm_virt_to_phys(tf.frame.rsp + 8);
         SIG_CTX_CHECK(ctx_phys != 0);
 
+        uint64_t tramp_val = 0;
         TestSignalContext *u_ctx = reinterpret_cast<TestSignalContext *>(tf.frame.rsp + 8);
-        SIG_CTX_CHECK_EQ(u_ctx->frame.rax, 0xAAABBBULL);
-        SIG_CTX_CHECK_EQ(u_ctx->old_mask, 0x112233ULL);
-        SIG_CTX_CHECK_EQ(u_ctx->magic, TEST_SIG_CONTEXT_MAGIC);
+        uint64_t u_rax = 0, u_old_mask = 0, u_magic = 0;
+        KSTAC();
+        tramp_val = *reinterpret_cast<volatile uint64_t *>(tf.frame.rsp);
+        u_rax = u_ctx->frame.rax;
+        u_old_mask = u_ctx->old_mask;
+        u_magic = u_ctx->magic;
+        KCLAC();
+        SIG_CTX_CHECK_EQ(tramp_val, 0x7890ULL);
+        SIG_CTX_CHECK_EQ(u_rax, 0xAAABBBULL);
+        SIG_CTX_CHECK_EQ(u_old_mask, 0x112233ULL);
+        SIG_CTX_CHECK_EQ(u_magic, TEST_SIG_CONTEXT_MAGIC);
 
         // Now simulate userspace returning from the signal handler:
         // The trampoline would execute SYS_SIGRETURN.
