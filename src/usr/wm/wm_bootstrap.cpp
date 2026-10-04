@@ -256,6 +256,14 @@ Registry *wm_bootstrap()
                      static_cast<int>(g_screen.height - dock_h - shell_dock_bottom_inset()), dock_w, dock_h, "Dock",
                      &registry->windows[1].damage, &registry->windows[1], true);
 
+    // Publish the work area (screen minus menubar and dock) once, at
+    // bootstrap: apps center their initial window placement against it.
+    const int work_h = static_cast<int>(g_screen.height) - menubar_h - wm_dock_reserved_h();
+    registry->work_x = 0;
+    registry->work_y = static_cast<uint32_t>(menubar_h);
+    registry->work_w = g_screen.width;
+    registry->work_h = static_cast<uint32_t>(work_h > 0 ? work_h : 0);
+
     syscall1(SYS_SET_QUIET, 1);
     smp_wmb();
 

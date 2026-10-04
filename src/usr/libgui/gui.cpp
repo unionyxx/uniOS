@@ -1620,8 +1620,29 @@ Surface gui_register_window_ex(const char *title, uint32_t w, uint32_t h, uint32
     WindowEntry *win_entry = &g_registry->windows[win_idx];
     memset(win_entry, 0, sizeof(*win_entry));
     win_entry->shm_id = WIN_SHM_RESERVED;
-    win_entry->x = 100 + (win_idx * 40);
-    win_entry->y = 100 + (win_idx * 40);
+    // Initial placement: centered in the WM's published work area (before
+    // the WM publishes, fall back to a conservative default), with a small
+    // per-window cascade so stacked windows stay distinguishable.
+    int area_x = 0, area_y = 0, area_w = 1152, area_h = 748;
+    if (g_registry->work_w > 0 && g_registry->work_h > 0) {
+        area_x = static_cast<int>(g_registry->work_x);
+        area_y = static_cast<int>(g_registry->work_y);
+        area_w = static_cast<int>(g_registry->work_w);
+        area_h = static_cast<int>(g_registry->work_h);
+    }
+    const int cascade = static_cast<int>(static_cast<uint32_t>(win_idx) % 6u) * 20;
+    int place_x = area_x + (area_w - static_cast<int>(w)) / 2 + cascade;
+    int place_y = area_y + (area_h - static_cast<int>(h)) / 2 + cascade;
+    if (place_x + static_cast<int>(w) > area_x + area_w)
+        place_x = area_x + area_w - static_cast<int>(w);
+    if (place_x < area_x)
+        place_x = area_x;
+    if (place_y + static_cast<int>(h) > area_y + area_h)
+        place_y = area_y + area_h - static_cast<int>(h);
+    if (place_y < area_y)
+        place_y = area_y;
+    win_entry->x = place_x;
+    win_entry->y = place_y;
     win_entry->w = static_cast<int>(w);
     win_entry->h = static_cast<int>(h);
     win_entry->restore_x = win_entry->x;

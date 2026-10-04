@@ -240,6 +240,10 @@ typedef struct Registry
 
     volatile uint32_t window_count;
     WindowEntry windows[MAX_WINDOWS];
+
+    // Work area (screen minus menubar and dock), published by the WM at
+    // bootstrap so apps can center their initial window placement.
+    volatile uint32_t work_x, work_y, work_w, work_h;
 } Registry;
 
 typedef enum
