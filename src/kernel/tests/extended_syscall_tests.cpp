@@ -1,4 +1,3 @@
-#include <kernel/user_ptr.h>
 #include <kernel/fs/pipe.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/ktest.h>
@@ -14,6 +13,7 @@
 #include <kernel/sync/mutex.h>
 #include <kernel/syscall.h>
 #include <kernel/time/timer.h>
+#include <kernel/user_ptr.h>
 #include <libk/kstd.h>
 #include <libk/kstring.h>
 #include <uapi/syscalls.h>
