@@ -1436,6 +1436,13 @@ KTEST(exec_from_threaded_group_kills_siblings_first)
         EXEC_GROUP_CHECK_EQ(rc, 0ULL);
         exec_ok = true;
 
+        // The dying members' exit cascade group-signaled the exec'ing thread
+        // (each killed member's process_exit group-kills its survivors). A
+        // user-mode exec'er delivers that pending SIGKILL at the syscall
+        // trampoline and the fresh image dies before its first instruction,
+        // so the exec swap must leave the survivor's pending mask clean.
+        EXEC_GROUP_CHECK_EQ(leader->signals.pending, 0ULL);
+
         // The siblings were killed and reaped before the swap: gone from
         // the process list (their structs may still sit on the deferred
         // list, severed, until the next reap pass).

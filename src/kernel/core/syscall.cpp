@@ -1391,6 +1391,15 @@ static bool exec_terminate_thread_group(Process *leader)
         // same way: the fresh TCB at fs_base is all this thread has now.
         p->tls_lo = 0;
         p->tls_len = 0;
+        // Drop any signal the old group's death cascade left pending on the
+        // survivor: each killed member's process_exit group-signals its
+        // surviving members, so the exec'ing thread carries a SIGKILL aimed
+        // at the OLD image — delivered at the syscall trampoline it would
+        // kill the fresh image before its first instruction. Clearing under
+        // the same big-lock hold as the swap means no sender can land in
+        // between; anything sent after the swap targets the new image and
+        // is delivered to it legitimately.
+        p->signals.pending = 0;
 
         scheduler_sever_dead_group_references(old_pml4);
         scheduler_big_unlock_irqrestore(sched_flags);
