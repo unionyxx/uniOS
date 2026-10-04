@@ -2937,17 +2937,22 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_SOUND_WRITE: {
             if (!validate_user_ptr(reinterpret_cast<const void *>(arg1), static_cast<size_t>(arg2), false))
                 return static_cast<uint64_t>(-1);
-            if (sound_stream_active()) {
-                // Streaming mode: block until every byte is queued in the
-                // kernel ring. Returns the byte count on success.
-                int64_t written = sound_stream_write(reinterpret_cast<const void *>(arg1), static_cast<uint32_t>(arg2));
-                if (written < 0)
-                    return static_cast<uint64_t>(-1);
-                return static_cast<uint64_t>(written);
-            }
-            sound_play(reinterpret_cast<uint8_t *>(const_cast<void *>(reinterpret_cast<const void *>(arg1))),
-                       static_cast<uint32_t>(arg2));
-            return 0;
+            // Streaming-only: with no stream open the write fails instead
+            // of silently falling into legacy whole-buffer playback — a
+            // writer whose stream was just stopped (seek/stop/another
+            // opener) must observe the failure, not blast a raw chunk
+            // through the whole-buffer path. Whole-file playback belongs
+            // to SYS_SOUND_PLAY.
+            if (!sound_stream_active())
+                return static_cast<uint64_t>(-1);
+            // Blocks until every byte is queued in the kernel ring.
+            // Returns the byte count on success; any failure (stream
+            // stopped under the writer, fatal signal) folds to the
+            // classic-call -1.
+            int64_t written = sound_stream_write(reinterpret_cast<const void *>(arg1), static_cast<uint32_t>(arg2));
+            if (written < 0)
+                return static_cast<uint64_t>(-1);
+            return static_cast<uint64_t>(written);
         }
         case SYS_SOUND_CONFIG: {
             // arg1: sample_rate, arg2: channels, arg3: bits_per_sample

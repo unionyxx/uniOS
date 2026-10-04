@@ -74,13 +74,13 @@ Futex: `FUTEX_WAIT(uaddr, expected, timeout_ms)` takes a relative timeout in mil
 
 | # | Name | Purpose |
 | --- | --- | --- |
-| 205-207 | `SYS_SOUND_PLAY/WRITE/CONFIG` | File playback, raw PCM push, stream format |
+| 205-207 | `SYS_SOUND_PLAY/WRITE/CONFIG` | `PLAY`: file playback via the kernel parser. `WRITE`: streaming PCM push (fails without an open stream). `CONFIG`: card format |
 | 282 | `SYS_SOUND_STREAM_OPEN` | Open streaming playback (rate, channels, 16-bit); stops previous playback |
-| 283 | `SYS_SOUND_STREAM_END` | No more stream data; drain queued PCM then auto-close |
+| 283 | `SYS_SOUND_STREAM_END` | No more stream data; drain queued PCM then auto-close (immediately when nothing was queued) |
 | 284 | `SYS_SOUND_STOP` | Abort the stream and stop the card |
 | 285 | `SYS_SOUND_PAUSE` | Pause stream playback (idempotent; latches if DMA has not started) |
 | 286 | `SYS_SOUND_RESUME` | Resume stream playback (idempotent; clears a latched pause) |
-| 287 | `SYS_SOUND_STATUS` | Fill `sound_status` (`uapi/sound.h`): played/queued bytes, format, flags (`paused` includes the latch) |
+| 287 | `SYS_SOUND_STATUS` | Fill `sound_status` (`uapi/sound.h`): played/queued bytes, format, flags (`paused` includes the latch, `owned` marks the caller's own stream) |
 | 288 | `SYS_SOUND_VOLUME` | Card master volume 0-100 |
 | 208 | `SYS_FB_INFO` | Framebuffer geometry |
 | 209 | `SYS_FB_MMAP` | Map the framebuffer at `0x200000000` (WC) |

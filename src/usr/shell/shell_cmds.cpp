@@ -1987,14 +1987,32 @@ void cmd_play(const char *filename)
 
     printf("Playing %s: %u Hz, %u channels, %llu bytes\n", resolved, info.sample_rate, info.channels,
            (unsigned long long)info.data_size);
-    // The legacy whole-buffer path retains the user pointer: only the first
-    // card DMA ring is copied synchronously, and the idle loop's sound_poll()
-    // refills the card from this buffer for the whole playback, so the buffer
-    // must stay allocated (process exit reclaims it). Payloads beyond the
-    // first ring already fault today because the idle task pumps on kernel
-    // page tables - a pre-existing kernel issue, not this command's to fix.
-    sound_config(info.sample_rate, (uint8_t)info.channels, 16);
-    sound_write(data + info.data_start, (uint32_t)info.data_size);
+    // Streaming path: the kernel ring owns the PCM, so the buffer is
+    // fully queued (blocking while the ring is full) and the card keeps
+    // draining after the command returns. This replaces the legacy
+    // whole-buffer push, which retained the user pointer and faulted on
+    // payloads past the first card DMA ring.
+    if (sound_stream_open(info.sample_rate, (uint32_t)info.channels, 16) != 0) {
+        LOG_ERROR("play", "%s: no audio device or bad format", resolved);
+        free(data);
+        return;
+    }
+    const uint32_t frame = (uint32_t)info.channels * 2u;
+    uint64_t left = info.data_size - info.data_size % frame;
+    const uint8_t *p = data + info.data_start;
+    while (left > 0) {
+        uint32_t chunk = left > 0x100000u ? 0x100000u : (uint32_t)left;
+        int64_t written = sound_write(p, chunk);
+        if (written < 0) {
+            LOG_ERROR("play", "%s: stream stopped while playing", resolved);
+            break;
+        }
+        p += written;
+        left -= (uint64_t)written;
+    }
+    if (left == 0)
+        sound_stream_end();
+    free(data);
 }
 
 void cmd_alias(const char *args)

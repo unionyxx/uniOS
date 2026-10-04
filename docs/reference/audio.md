@@ -16,10 +16,10 @@ Userspace decodes audio and pushes PCM instead of buffering whole files (`src/dr
 | Call | Behavior |
 | --- | --- |
 | `SYS_SOUND_STREAM_OPEN(rate, channels, 16)` | Stops any current playback, configures the card, opens the stream. 16-bit only; 1 or 2 channels. |
-| `SYS_SOUND_WRITE(data, size)` | With a stream open, blocks until every byte is queued in the ring. Classic-call ABI: any streaming failure (stream stopped under the writer, fatal signal) returns `-1`; the kernel's internal `-EPIPE`/`-EINTR` distinction is not observable in userspace. Without a stream open, legacy whole-buffer playback. |
-| `SYS_SOUND_STREAM_END` | No more data; drain what is queued, then auto-close. |
+| `SYS_SOUND_WRITE(data, size)` | With a stream open, blocks until every byte is queued in the ring. Classic-call ABI: any streaming failure (stream stopped under the writer, fatal signal) returns `-1`; the kernel's internal `-EPIPE`/`-EINTR` distinction is not observable in userspace. Without a stream open it fails (`-1`) instead of falling back to whole-buffer playback — raw-buffer playback belongs to `SYS_SOUND_PLAY`. |
+| `SYS_SOUND_STREAM_END` | No more data; drain what is queued, then auto-close. A stream that never queued data and never started DMA is closed immediately: it is drained by definition. |
 | `SYS_SOUND_STOP` / `SYS_SOUND_PAUSE` / `SYS_SOUND_RESUME` | Transport control; pause/resume are idempotent. A pause arriving while the card is not yet clocking the ring (pre-fill window, transient underrun stop) is latched in the stream and honored by the next DMA start, so it is never silently dropped. |
-| `SYS_SOUND_STATUS` | Fills `sound_status` (`include/uapi/sound.h`): played/queued bytes in source format, state flags. |
+| `SYS_SOUND_STATUS` | Fills `sound_status` (`include/uapi/sound.h`): played/queued bytes in source format, state flags, and `owned` — whether the stream belongs to the calling process's group (the stream is single and global; another opener resets yours). |
 | `SYS_SOUND_VOLUME(level)` | Card master volume, 0-100. |
 
 Mechanics:
@@ -54,5 +54,5 @@ Mechanics:
 | Command / call | Route |
 | --- | --- |
 | `sound <file>` (shell) | `SYS_SOUND_PLAY` — kernel-side parser picks WAV/MP3/PCM |
-| `play <file>` (shell) | Userspace WAV parser, then `SYS_SOUND_CONFIG` + `SYS_SOUND_WRITE` raw PCM |
-| libgui/app code | `sound_config(rate, channels, 16)` then `sound_write(data, size)` |
+| `play <file>` (shell) | Userspace WAV parser, then `SYS_SOUND_STREAM_OPEN` + `SYS_SOUND_WRITE` + `SYS_SOUND_STREAM_END` through the streaming ring (payload floored to whole sample frames) |
+| musicplayer / app code | `SYS_SOUND_STREAM_OPEN` + `SYS_SOUND_WRITE` + `SYS_SOUND_STREAM_END`, transport via `SYS_SOUND_STATUS`/`PAUSE`/`RESUME`/`STOP` |

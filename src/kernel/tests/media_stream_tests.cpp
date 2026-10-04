@@ -93,6 +93,18 @@ KTEST(media_sound_stream_api)
         sound_stream_stop();
         KTEST_EXPECT(!sound_stream_active());
         KTEST_EXPECT_EQ(sound_stream_write(pcm, 64), -32);
+        // An ended stream with nothing queued and DMA never started is
+        // drained by definition: END closes it immediately instead of
+        // leaving an open stream that no pump transition will ever close
+        // (a zero-payload source used to hang the drain forever).
+        KTEST_EXPECT(sound_stream_open(44100, 2, 16));
+        sound_status st2 = {};
+        KTEST_EXPECT(sound_stream_status(&st2));
+        KTEST_EXPECT_EQ(st2.active, 1);
+        // Kernel-context streams (owner 0) are never reported user-owned.
+        KTEST_EXPECT_EQ(st2.owned, 0);
+        sound_stream_end();
+        KTEST_EXPECT(!sound_stream_active());
         // The card-present branch ran: the smoke-audio suite matches this
         // marker to prove the sound assertions were not skipped.
         DEBUG_SUCCESS("soundstream ktest: PASS");

@@ -491,8 +491,18 @@ int64_t sound_stream_write(const void *data, uint32_t len)
 void sound_stream_end()
 {
     uint64_t flags = spinlock_acquire_irqsave(&g_stream.lock);
-    if (g_stream.open)
+    if (g_stream.open) {
         g_stream.ended = true;
+        // Nothing queued and DMA never started: fully drained by
+        // definition (zero-payload sources), so close now instead of
+        // leaving a stream open that no pump transition will ever close.
+        if (!g_stream.dma_started && g_stream.count == 0) {
+            stream_reset_locked();
+            spinlock_release_irqrestore(&g_stream.lock, flags);
+            scheduler_wake_all(&g_stream.space_wait);
+            return;
+        }
+    }
     spinlock_release_irqrestore(&g_stream.lock, flags);
 }
 
@@ -578,6 +588,7 @@ bool sound_stream_status(struct sound_status *out)
     const bool dma_started = g_stream.dma_started;
     const bool ended = g_stream.ended;
     const bool pause_latched = g_stream.pause_requested;
+    const uint64_t owner = g_stream.owner_leader;
     const uint32_t src_frame = stream_src_frame();
     const uint32_t dst_frame = stream_dst_frame();
     const uint64_t played_card = g_stream.played_card_bytes;
@@ -594,8 +605,14 @@ bool sound_stream_status(struct sound_status *out)
     // A pause requested before DMA started is real state the caller must
     // see, not a transient to hide: report the latch.
     out->paused = (open && (dma_started ? sound_is_paused() : pause_latched)) ? 1 : 0;
+    // Ownership is judged against the caller's thread group so a player
+    // can tell its own stream from one another app opened (single stream:
+    // a foreign open resets ours). Owner 0 is the kernel's own
+    // (ktest/legacy) stream and is never user-owned.
+    Process *caller = process_get_current();
+    out->owned = (owner != 0 && caller && owner == caller->leader_pid) ? 1 : 0;
     out->card_present = sound_available ? 1 : 0;
-    out->reserved[0] = out->reserved[1] = out->reserved[2] = 0;
+    out->reserved[0] = out->reserved[1] = 0;
     return true;
 }
 
