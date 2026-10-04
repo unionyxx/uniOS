@@ -684,6 +684,12 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
   qemu_serial_stdio = ['-serial', 'stdio']
   qemu_headless = ['-serial', 'stdio', '-display', 'none']
   qemu_no_reboot = ['-no-reboot']
+  # Test boots run hermetic: -snapshot redirects every writable drive to a
+  # throwaway overlay, so parallel suite invocations (meson runs tests
+  # concurrently) cannot fight over the write lock on the shared boot.img,
+  # and no test boot persists state into the image a later boot would see.
+  # Interactive run targets keep writing the real image.
+  qemu_test_hermetic = ['-snapshot']
 
   # SMP variants: default run/smoke targets remain single-core.
   qemu_smp2 = ['-smp', '2']
@@ -829,7 +835,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       smoke_qemu_timeout,
     ] + qemu_smoke_success_args + qemu_smoke_fail_args + [
       '--',
-    ] + qemu_base_command + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    ] + qemu_base_command + qemu_disk_boot_command + qemu_headless + qemu_no_reboot + qemu_test_hermetic,
     depends : [boot_disk],
     suite : 'smoke',
     timeout : smoke_qemu_test_timeout,
@@ -845,7 +851,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       smoke_smp_qemu_timeout,
     ] + qemu_smoke_success_args + qemu_smoke_fail_args + [
       '--',
-    ] + qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    ] + qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot + qemu_test_hermetic,
     depends : [boot_disk],
     suite : 'smoke-smp',
     timeout : smoke_smp_test_timeout,
@@ -867,7 +873,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       'soundstream ktest: PASS',
     ] + qemu_smoke_fail_args + [
       '--',
-    ] + qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    ] + qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_headless + qemu_no_reboot + qemu_test_hermetic,
     depends : [boot_disk],
     suite : 'smoke-audio',
     timeout : smoke_qemu_test_timeout,
@@ -912,7 +918,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       smoke_smp_qemu_timeout,
     ] + qemu_smoke_net_args + qemu_smoke_fail_args + [
       '--',
-    ] + qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    ] + qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_headless + qemu_no_reboot + qemu_test_hermetic,
     depends : [boot_disk],
     suite : 'smoke-net',
     timeout : smoke_smp_test_timeout,
@@ -929,7 +935,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       'SMP scheduler ready on 4 CPUs',
     ] + qemu_smoke_success_args + qemu_smoke_fail_args + [
       '--',
-    ] + qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    ] + qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot + qemu_test_hermetic,
     depends : [boot_disk],
     suite : 'smoke-smp4',
     timeout : smoke_smp4_test_timeout,
@@ -941,7 +947,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     command : [py, qemu_smoke, '--timeout', '180', '--hold', '5', '--repeat', '4',
                '--success', 'SMP scheduler ready on 4 CPUs', '--success', 'ktest suite passed',
                '--fail', 'ktest suite failed', '--fail', 'KERNEL PANIC', '--'] +
-              qemu_base_command + qemu_audio_silent + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+              qemu_base_command + qemu_audio_silent + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot + qemu_test_hermetic,
   )
 endif
 

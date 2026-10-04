@@ -62,7 +62,7 @@ meson test -C build/debug --suite smoke-net
 
 `tools/smoke_net.py` starts a host-side `http.server` on `127.0.0.1:8931` (slirp maps the guest's `10.0.2.2` to host loopback), boots the debug image with an e1000 NIC, and asserts the debug net self-test summary line printed after `net_init()`: `arp=PASS` (slirp answers ARP for the gateway), `ping=PASS` (slirp answers ICMP echo), and `http=PASS` (the self-test downloads `/hello.txt` over TCP and checks the marker bytes). The DNS leg is informational — host-resolver dependent — and never gates. Net markers exist only in debug builds, so in a release tree the suite reduces to the desktop-frame marker.
 
-Timeouts scale with the machine: Linux without KVM access runs under TCG with much larger budgets (CI grants the runner KVM access and falls back to TCG when `/dev/kvm` is unusable).
+Timeouts scale with the machine: Linux without KVM access runs under TCG with much larger budgets (CI grants the runner KVM access and falls back to TCG when `/dev/kvm` is unusable). Test boots pass QEMU `-snapshot`, so every suite's writes land in a throwaway overlay: suites can run concurrently in one `meson test` invocation without fighting over the boot image's write lock, and no test boot leaks state into `boot.img`.
 
 ## What to Run When
 
