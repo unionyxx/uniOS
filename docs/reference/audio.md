@@ -42,7 +42,8 @@ Mechanics:
 
 `src/drivers/sound/hda/hda.cpp` (PCI class 0x04 / subclass 0x03), MMIO BAR0:
 
-- Controller reset, STATESTS codec scan, CORB/RIRB command rings (256 entries each) for codec verbs, plus an immediate-command path for QEMU.
+- Controller reset, STATESTS codec scan, CORB/RIRB command rings (256 entries each) for codec verbs.
+- Known limitation: the CORB/RIRB exchange times out against QEMU's `intel-hda` (no codec response ever lands in the RIRB, so `hda_init` gives up at `failed to find codec`); the QEMU run targets therefore attach an AC97 card. Verified working in QEMU: AC97; HDA is untested against real hardware.
 - Codec/widget tree discovery: AFG nodes, pin/mixer/output widgets, EAPD, amplifier gain setup.
 - Playback and recording streams (output stream chosen after input streams); per-node channel volume.
 

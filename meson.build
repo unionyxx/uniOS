@@ -666,22 +666,20 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
   # Interactive boots get a sound card so the desktop's audio path is
   # exercisable; the default `none` backend keeps QEMU host-independent
   # (silent but fully functional). run-audio swaps in pulseaudio to listen.
-  # The smoke suite stays NIC- and sound-free for deterministic CI.
+  # The smoke suite stays NIC- and sound-free for deterministic CI. The
+  # card is AC97: the HDA driver's codec verb exchange times out against
+  # QEMU's intel-hda today (see the audio reference page).
   qemu_audio_silent = [
     '-audiodev',
     'driver=none,id=snd0',
     '-device',
-    'intel-hda',
-    '-device',
-    'hda-duplex,audiodev=snd0',
+    'AC97,audiodev=snd0',
   ]
   qemu_audio_pa = [
     '-audiodev',
     'driver=pa,id=snd0',
     '-device',
-    'intel-hda',
-    '-device',
-    'hda-duplex,audiodev=snd0',
+    'AC97,audiodev=snd0',
   ]
   qemu_serial_stdio = ['-serial', 'stdio']
   qemu_headless = ['-serial', 'stdio', '-display', 'none']
