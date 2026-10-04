@@ -1191,6 +1191,18 @@ static void user_task_wrapper()
 // signal delivery.
 static bool exec_terminate_thread_group(Process *leader)
 {
+    // Gate the window BEFORE the first kill scan: a thread published to the
+    // list after the scan survives unsignaled, then runs on the old address
+    // space after the swap (wild faults into freed frames) or wedges the
+    // death deadline into a spurious exec refusal. sys_thread_create
+    // refuses members of a gated group with -11; the swap critical section
+    // in do_exec (or the refusal return below) drops the gate.
+    {
+        const uint64_t gate_flags = scheduler_big_lock_irqsave();
+        leader->exec_in_progress = true;
+        scheduler_big_unlock_irqrestore(gate_flags);
+    }
+
     process_group_kill_siblings(leader);
 
     // 1 s wall-clock bound; yielding lets the members run to their deaths
@@ -1350,6 +1362,13 @@ static bool exec_terminate_thread_group(Process *leader)
         vma_list_free(loader_proc->vmalist);
         vmm_free_address_space(new_pml4);
         aligned_free(loader_proc);
+        // The group lives on (the exec was refused): drop the create gate
+        // so the surviving members can spawn threads again.
+        {
+            const uint64_t gate_flags = scheduler_big_lock_irqsave();
+            p->exec_in_progress = false;
+            scheduler_big_unlock_irqrestore(gate_flags);
+        }
         DEBUG_WARN("exec: pid %lu members never died; refusing to swap address space", p->pid);
         return -1;
     }
@@ -1391,6 +1410,9 @@ static bool exec_terminate_thread_group(Process *leader)
         // same way: the fresh TCB at fs_base is all this thread has now.
         p->tls_lo = 0;
         p->tls_len = 0;
+        // The teardown window is over: the old members are dead and the new
+        // image is a group of one, so thread creation is legal again.
+        p->exec_in_progress = false;
         // Drop any signal the old group's death cascade left pending on the
         // survivor: each killed member's process_exit group-signals its
         // surviving members, so the exec'ing thread carries a SIGKILL aimed

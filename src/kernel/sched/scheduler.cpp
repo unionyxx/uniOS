@@ -2587,6 +2587,32 @@ static void thread_create_unwind(Process *thread)
 
     const uint64_t pub_flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
+
+    // Refuse while an exec is tearing this group down: a thread published
+    // after the kill scan survives unsignaled and would run on the freed
+    // old address space after the swap. The scan, this gate and the flag
+    // drop all serialize on g_sched_lock, so a create either lands before
+    // the scan (and dies with the group) or sees the gate and refuses.
+    {
+        bool gated = false;
+        Process *scan = g_proc_list;
+        if (scan) {
+            do {
+                if (scan->exec_in_progress && scan->leader_pid == parent->leader_pid) {
+                    gated = true;
+                    break;
+                }
+                scan = scan->next;
+            } while (scan != g_proc_list);
+        }
+        if (gated) {
+            spinlock_release(&g_sched_lock);
+            interrupts_restore(pub_flags);
+            thread_create_unwind(thread);
+            return -11; // -EAGAIN: the group is being replaced
+        }
+    }
+
     g_proc_tail->next = thread;
     g_proc_tail = thread;
     thread->next = g_proc_list;

@@ -1526,6 +1526,232 @@ cleanup:
 #undef EXEC_GROUP_CHECK
 #undef EXEC_GROUP_CHECK_EQ
 
+// ---- thread creation must be gated while exec tears the group down ----
+
+#define GATE_CHECK(cond)                                                                                               \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ktest_record_failure(#cond, __FILE__, __LINE__);                                                           \
+            goto cleanup;                                                                                              \
+        }                                                                                                              \
+    } while (0)
+#define GATE_CHECK_EQ(a, b) GATE_CHECK((a) == (b))
+
+static void gate_parked_thread()
+{
+    sys_futex(g_group_futex_addr, FUTEX_WAIT, 0);
+    while (true) {
+        if (scheduler_fatal_signal_pending(process_get_current()))
+            sys_thread_exit(0);
+        scheduler_yield();
+    }
+}
+
+static void gate_race_child_entry()
+{
+    sys_thread_exit(0);
+}
+
+static volatile bool g_gate_race_run = true;
+static uint8_t *g_gate_race_stacks = nullptr;
+static SyscallFrame g_gate_race_frame;
+
+// Hammers thread creates against the group while the leader execs: every
+// create must either land before the kill scan (the member then dies with
+// the group) or be refused with -11 while the gate is up. The fatal-signal
+// check inside the loop is what lets the teardown's SIGKILL collect the
+// creator instead of waiting out the exec's death deadline.
+static void gate_race_creator_thread()
+{
+    for (int i = 0; g_gate_race_run && i < 2000; i++) {
+        if (scheduler_fatal_signal_pending(process_get_current()))
+            sys_thread_exit(0);
+        const int slot = i % 64;
+        void *top = g_gate_race_stacks + static_cast<size_t>(slot + 1) * 4096;
+        (void)sys_thread_create(gate_race_child_entry, nullptr, top, &g_gate_race_frame, 0, 0, THREAD_DETACHED);
+        scheduler_yield();
+    }
+    while (true) {
+        if (scheduler_fatal_signal_pending(process_get_current()))
+            sys_thread_exit(0);
+        scheduler_yield();
+    }
+}
+
+KTEST(exec_gates_thread_create_during_teardown)
+{
+    Process *leader = process_get_current();
+    if (!leader) {
+        ktest_record_failure("leader != nullptr", __FILE__, __LINE__);
+        return;
+    }
+
+    const uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    Spinlock *orig_vma_lock_ptr = leader->vma_lock_ptr;
+    const uint64_t orig_exec_entry = leader->exec_entry;
+    char orig_name[32];
+    kstring::strncpy(orig_name, leader->name, 31);
+
+    bool exec_ok = false;
+    uint64_t *old_pml4 = nullptr;
+    void *page = nullptr;
+    VMA *vma = nullptr;
+    void *creator_stack = nullptr;
+    void *race_stacks = nullptr;
+    int64_t parked_tid = -1;
+    int64_t creator_tid = -1;
+
+    {
+        old_pml4 = vmm_create_address_space();
+        GATE_CHECK(old_pml4 != nullptr);
+        leader->page_table = old_pml4;
+
+        page = pmm_alloc_frame();
+        GATE_CHECK(page != nullptr);
+        GATE_CHECK(vmm_replace_page_in(old_pml4, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                       PTE_PRESENT | PTE_USER | PTE_WRITABLE)
+                       .ok());
+
+        vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+        GATE_CHECK(vma != nullptr);
+        vma->start = TEST_VADDR;
+        vma->end = TEST_VADDR + 4096;
+        vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+        vma->type = VMAType::Anonymous;
+        vma->next = nullptr;
+        leader->vmalist->head = vma;
+
+        uint8_t *page_alias = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(page)));
+        g_group_futex_addr = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+        *reinterpret_cast<volatile uint32_t *>(page_alias) = 0;
+        kstring::strncpy(reinterpret_cast<char *>(page_alias + 0x400), "/bin/init.elf", 31);
+
+        SyscallFrame mock_frame = {};
+        mock_frame.cs = 0x08;
+        mock_frame.ss = 0x10;
+        mock_frame.rflags = 0x202;
+
+        creator_stack = malloc(4096);
+        race_stacks = malloc(64 * 4096);
+        GATE_CHECK(creator_stack != nullptr);
+        GATE_CHECK(race_stacks != nullptr);
+        g_gate_race_stacks = static_cast<uint8_t *>(race_stacks);
+        g_gate_race_frame = mock_frame;
+        void *creator_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(creator_stack) + 4096);
+
+        // The gate: while any member of the caller's group carries
+        // exec_in_progress, a create must refuse instead of publishing a
+        // thread that would survive the kill scan.
+        leader->exec_in_progress = true;
+        GATE_CHECK_EQ(sys_thread_create(gate_parked_thread, nullptr, creator_top, &mock_frame), int64_t(-11));
+        leader->exec_in_progress = false;
+
+        // Control: with the gate down, the same create succeeds; drain the
+        // parked control thread afterwards so the fixture is proven.
+        parked_tid = sys_thread_create(gate_parked_thread, nullptr, creator_top, &mock_frame);
+        GATE_CHECK(parked_tid > 0);
+        {
+            Process *child = process_find_by_pid(static_cast<uint64_t>(parked_tid));
+            GATE_CHECK(child != nullptr);
+            scheduler_remove_from_ready_queue(child);
+            child->state = ProcessState_Zombie;
+            if (child->tls_lo != 0) {
+                (void)munmap_process_range(child, child->tls_lo, child->tls_len);
+                child->tls_lo = 0;
+                child->tls_len = 0;
+            }
+            child->vmalist = nullptr;
+            child->page_table = nullptr;
+            int32_t status = 0;
+            GATE_CHECK_EQ(process_waitpid(parked_tid, &status, 0), parked_tid);
+            parked_tid = -1;
+        }
+
+        // Race: a member hammers creates while the leader execs. The exec
+        // must succeed (not be refused by a straggler the kill scan missed)
+        // and the group must end up as the leader alone.
+        g_gate_race_run = true;
+        creator_tid = sys_thread_create(gate_race_creator_thread, nullptr, creator_top, &mock_frame);
+        GATE_CHECK(creator_tid > 0);
+        for (int i = 0; i < 20; i++)
+            scheduler_yield();
+
+        const uint64_t rc = syscall_handler(SYS_EXEC, TEST_VADDR + 0x400, 0, 0, &mock_frame);
+        GATE_CHECK_EQ(rc, 0ULL);
+        exec_ok = true;
+        g_gate_race_run = false;
+
+        bool members_gone = false;
+        for (int i = 0; i < 500 && !members_gone; i++) {
+            scheduler_yield();
+            members_gone = true;
+            Process *scan = scheduler_get_process_list();
+            if (scan) {
+                do {
+                    if (scan != leader && scan->leader_pid == leader->pid && scan->state != ProcessState_Zombie)
+                        members_gone = false;
+                    scan = scan->next;
+                } while (scan != scheduler_get_process_list());
+            }
+        }
+        GATE_CHECK(members_gone);
+        GATE_CHECK_EQ(leader->signals.pending, 0ULL);
+        GATE_CHECK(!leader->exec_in_progress);
+    }
+
+cleanup:
+    g_gate_race_run = false;
+    leader->exec_in_progress = false;
+    if (parked_tid > 0) {
+        Process *leftover = process_find_by_pid(static_cast<uint64_t>(parked_tid));
+        if (leftover)
+            signal_send(leftover, SIGKILL);
+        for (int i = 0; i < 500; i++) {
+            if (process_find_by_pid(static_cast<uint64_t>(parked_tid)) == nullptr)
+                break;
+            scheduler_yield();
+        }
+    }
+    if (creator_tid > 0) {
+        Process *leftover = process_find_by_pid(static_cast<uint64_t>(creator_tid));
+        if (leftover)
+            signal_send(leftover, SIGKILL);
+        for (int i = 0; i < 500; i++) {
+            if (process_find_by_pid(static_cast<uint64_t>(creator_tid)) == nullptr)
+                break;
+            scheduler_yield();
+        }
+    }
+    if (exec_ok) {
+        vmm_switch_address_space(
+            reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(vmm_get_kernel_pml4()) - vmm_get_hhdm_offset()));
+        vma_free_all(leader->vmalist->head);
+        vmm_free_address_space(leader->page_table);
+    } else if (old_pml4) {
+        process_group_kill_siblings(leader);
+        for (int i = 0; i < 500; i++)
+            scheduler_yield();
+        vmm_switch_address_space(
+            reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(vmm_get_kernel_pml4()) - vmm_get_hhdm_offset()));
+        vmm_unmap_page_in(old_pml4, TEST_VADDR);
+        vmm_free_address_space(old_pml4);
+    }
+    g_gate_race_stacks = nullptr;
+    free(creator_stack);
+    free(race_stacks);
+    free(vma);
+    leader->signals.pending = 0;
+    leader->page_table = const_cast<uint64_t *>(orig_page_table);
+    leader->vmalist->head = orig_vma_list;
+    leader->vma_lock_ptr = orig_vma_lock_ptr;
+    leader->exec_entry = orig_exec_entry;
+    kstring::strncpy(leader->name, orig_name, 31);
+}
+
+#undef GATE_CHECK
+#undef GATE_CHECK_EQ
+
 // ---- blocking waitpid must be killable ----
 
 static volatile int64_t g_waitpid_ret;

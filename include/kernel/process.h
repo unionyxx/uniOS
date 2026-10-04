@@ -136,6 +136,14 @@ struct Process
     bool thread_detached; // detached at exit: routes to the kernel-zombie auto-reap
     bool timed_wake;      // woken by the deadline walker (futex timeouts)
 
+    // Set while this member's group is being exec-terminated (the window
+    // from exec_terminate_thread_group's first kill scan to the
+    // address-space swap): sys_thread_create refuses new members of that
+    // group with -11 so a late-published thread cannot outlive the scan
+    // and run on the freed old address space, or wedge the exec's death
+    // deadline into a spurious refusal. Guarded by g_sched_lock.
+    bool exec_in_progress;
+
     // Physical address of the 32-bit futex word this process is parked on
     // (page + word offset). Valid only while queued on a futex bucket's
     // wait_queue: set under the bucket lock before the park, read by
