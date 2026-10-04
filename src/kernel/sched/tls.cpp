@@ -48,7 +48,11 @@ uint64_t tls_install(Process *proc, const void *template_src, uint64_t tls_size,
     if (tls_align != 0 && (tls_align & (tls_align - 1)) != 0)
         return 0;
 
-    const uint64_t align = tls_align > 16 ? tls_align : 16;
+    // The linker's TPOFF offsets round the block up to p_align ALONE (ld
+    // and lld both do; the old 16 floor here shifted every __thread
+    // variable below its link-time offset for any p_align < 16 image).
+    // p_align 0 (degenerate) rounds like 1.
+    const uint64_t align = tls_align > 1 ? tls_align : 1;
     const uint64_t padded = (tls_size + align - 1) & ~(align - 1);
     const uint64_t map_len = (padded + sizeof(UniTcb) + kTlsPage - 1) & ~(kTlsPage - 1);
 
@@ -102,9 +106,15 @@ uint64_t tls_install(Process *proc, const void *template_src, uint64_t tls_size,
     tcb.self = fs_base;
     tcb.tid = proc->pid;
 
+    // The linker's TPOFF offsets run against the PADDED size: the template
+    // lands at [fs_base - padded, fs_base - padded + tls_size) and the
+    // alignment gap sits directly below the TCB, zero by the fresh frames.
+    // Placing the template at fs_base - tls_size instead shifts every
+    // __thread variable below the gap whenever tls_size is not a multiple
+    // of the alignment - silent variable corruption.
     const bool installed =
         mapped == map_len &&
-        (tls_size == 0 || tls_write_user_range(target_pml4, fs_base - tls_size, template_src, tls_size)) &&
+        (tls_size == 0 || tls_write_user_range(target_pml4, fs_base - padded, template_src, tls_size)) &&
         tls_write_user_range(target_pml4, fs_base, &tcb, sizeof(tcb));
 
     if (!installed) {

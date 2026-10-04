@@ -76,6 +76,105 @@ KTEST(tls_install_block_and_tcb)
     tls_test_teardown(p, start, 4096);
 }
 
+// The linker's TPOFF places the static TLS block against the PADDED size:
+// template at [fs - padded, fs - padded + memsz), the alignment gap
+// adjacent to the TCB. A memsz that is not a multiple of p_align must
+// therefore put the template at fs - padded, not fs - memsz.
+KTEST(tls_install_alignment_gap_lands_below_the_tcb)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+    if (!p)
+        return;
+
+    constexpr uint64_t kSize = 0x104; // not a multiple of 16
+    constexpr uint64_t kAlign = 16;
+    constexpr uint64_t kPadded = 0x110;
+    static uint8_t image[kSize];
+    for (uint32_t i = 0; i < kSize; i++)
+        image[i] = static_cast<uint8_t>(i * 13 + 9);
+
+    const uint64_t start = tls_install(p, image, kSize, kAlign);
+    KTEST_EXPECT(start != 0);
+    if (start == 0)
+        return;
+
+    const uint64_t fs = p->fs_base;
+    KTEST_EXPECT_EQ(fs, start + kPadded);
+
+    // Template at [fs - padded, fs - padded + memsz): byte for byte.
+    const uint8_t *block = tls_direct_read(p, fs - kPadded);
+    KTEST_EXPECT(block != nullptr);
+    if (block) {
+        bool match = true;
+        for (uint32_t i = 0; i < kSize; i++) {
+            if (block[i] != image[i]) {
+                match = false;
+                break;
+            }
+        }
+        KTEST_EXPECT(match);
+    }
+
+    // The alignment gap [fs - (padded - memsz), fs) is zeros: fresh frames,
+    // never template bytes.
+    const uint8_t *gap = tls_direct_read(p, fs - (kPadded - kSize));
+    KTEST_EXPECT(gap != nullptr);
+    if (gap) {
+        bool zero = true;
+        for (uint64_t i = 0; i < kPadded - kSize; i++) {
+            if (gap[i] != 0) {
+                zero = false;
+                break;
+            }
+        }
+        KTEST_EXPECT(zero);
+    }
+
+    tls_test_teardown(p, start, 4096);
+}
+
+// The block's padding must round to p_align ALONE, matching the linker's
+// TPOFF offsets: the old 16 floor here placed an align-4 block one 8-byte
+// shift below every link-time offset, silently corrupting all its
+// __thread variables.
+KTEST(tls_install_honors_p_align_below_16)
+{
+    Process *p = process_get_current();
+    KTEST_EXPECT(p != nullptr);
+    if (!p)
+        return;
+
+    constexpr uint64_t kSize = 8;
+    constexpr uint64_t kAlign = 4;
+    static uint8_t image[kSize] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+
+    const uint64_t start = tls_install(p, image, kSize, kAlign);
+    KTEST_EXPECT(start != 0);
+    if (start == 0)
+        return;
+
+    // roundup(8, 4) is 8, never 16: fs sits exactly one block above the
+    // mapping start and the template fills [fs - 8, fs) with no gap.
+    const uint64_t fs = p->fs_base;
+    KTEST_EXPECT_EQ(fs, start + kSize);
+
+    const uint8_t *block = tls_direct_read(p, fs - kSize);
+    KTEST_EXPECT(block != nullptr);
+    if (block) {
+        bool match = true;
+        for (uint32_t i = 0; i < kSize; i++) {
+            if (block[i] != image[i]) {
+                match = false;
+                break;
+            }
+        }
+        KTEST_EXPECT(match);
+    }
+
+    tls_test_teardown(p, start, 4096);
+}
+
 KTEST(tls_install_tcb_only)
 {
     Process *p = process_get_current();

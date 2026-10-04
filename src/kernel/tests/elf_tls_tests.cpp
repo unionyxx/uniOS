@@ -273,7 +273,9 @@ KTEST(elf_install_tls_clones_template_and_tcb)
     const uint64_t fs = loader->fs_base;
     KTEST_EXPECT(fs != 0);
 
-    // Block: file-carried prefix byte for byte, zero tail.
+    // Block: file-carried prefix byte for byte, zero tail. align 4 rounds
+    // memsz 12 up to exactly 12 - no gap - so the template occupies
+    // [fs - memsz, fs) and abuts the TCB.
     const uint8_t *block = direct_read(loader, fs - k_tls_memsz);
     KTEST_EXPECT(block != nullptr);
     if (block) {
