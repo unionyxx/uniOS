@@ -338,11 +338,104 @@ KTEST(elf_tls_info_rejects_kernel_half_vaddr)
     TlsElf e;
     make_tls_image(e);
     e.tls.p_vaddr = 0xFFFF800000000000ULL + k_tls_offset;
-    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&e), sizeof(e), &off, &memsz, &align, &vaddr, &filesz));
+    KTEST_EXPECT(
+        !elf_tls_info(reinterpret_cast<const uint8_t *>(&e), sizeof(e), &off, &memsz, &align, &vaddr, &filesz));
 
     TlsElf spans = e;
     spans.tls.p_vaddr = 0xFFFF800000000000ULL - 8; // just below the kernel half
-    spans.tls.p_memsz = 16;                      // vaddr + memsz crosses into it
-    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&spans), sizeof(spans), &off, &memsz, &align, &vaddr,
-                               &filesz));
+    spans.tls.p_memsz = 16;                        // vaddr + memsz crosses into it
+    KTEST_EXPECT(
+        !elf_tls_info(reinterpret_cast<const uint8_t *>(&spans), sizeof(spans), &off, &memsz, &align, &vaddr, &filesz));
+}
+
+// One policy for a present-but-invalid PT_TLS: the parse names the
+// offending field and the exec-side install refuses the image. Absence is
+// not malformation - an image with no PT_TLS keeps the TCB-only install.
+KTEST(elf_tls_info_names_the_malformed_field)
+{
+    uint64_t off = 0, memsz = 0, align = 0, vaddr = 0, filesz = 0;
+    ElfTlsMalform malform = ElfTlsMalform::FileszOverMemsz;
+
+    TlsElf e;
+    make_tls_image(e);
+    const uint8_t *image = reinterpret_cast<const uint8_t *>(&e);
+
+    KTEST_EXPECT(elf_tls_info(image, sizeof(e), &off, &memsz, &align, &vaddr, &filesz, &malform));
+    KTEST_EXPECT_EQ(static_cast<int>(malform), static_cast<int>(ElfTlsMalform::None));
+
+    TlsElf absent = e;
+    absent.tls.p_type = PT_NULL;
+    malform = ElfTlsMalform::FileszOverMemsz;
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&absent), sizeof(absent), &off, &memsz, &align, &vaddr,
+                               &filesz, &malform));
+    KTEST_EXPECT_EQ(static_cast<int>(malform), static_cast<int>(ElfTlsMalform::None));
+
+    TlsElf bad = e;
+    bad.tls.p_filesz = bad.tls.p_memsz + 1;
+    malform = ElfTlsMalform::None;
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&bad), sizeof(bad), &off, &memsz, &align, &vaddr,
+                               &filesz, &malform));
+    KTEST_EXPECT_EQ(static_cast<int>(malform), static_cast<int>(ElfTlsMalform::FileszOverMemsz));
+
+    bad = e;
+    bad.tls.p_offset = sizeof(TlsElf) - k_tls_filesz + 1;
+    malform = ElfTlsMalform::None;
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&bad), sizeof(bad), &off, &memsz, &align, &vaddr,
+                               &filesz, &malform));
+    KTEST_EXPECT_EQ(static_cast<int>(malform), static_cast<int>(ElfTlsMalform::OffsetBounds));
+
+    bad = e;
+    bad.tls.p_vaddr = 0xFFFF800000000000ULL + k_tls_offset;
+    malform = ElfTlsMalform::None;
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&bad), sizeof(bad), &off, &memsz, &align, &vaddr,
+                               &filesz, &malform));
+    KTEST_EXPECT_EQ(static_cast<int>(malform), static_cast<int>(ElfTlsMalform::VaddrBounds));
+
+    // Non-power-of-two p_align used to pass the parse and hard-fail deep
+    // inside tls_install; it is a malformed template like the rest.
+    bad = e;
+    bad.tls.p_align = 3;
+    malform = ElfTlsMalform::None;
+    KTEST_EXPECT(!elf_tls_info(reinterpret_cast<const uint8_t *>(&bad), sizeof(bad), &off, &memsz, &align, &vaddr,
+                               &filesz, &malform));
+    KTEST_EXPECT_EQ(static_cast<int>(malform), static_cast<int>(ElfTlsMalform::AlignNotPowerOfTwo));
+}
+
+// The exec-side install refuses a malformed PT_TLS instead of silently
+// degrading to a TCB-only install (filesz over memsz did exactly that).
+KTEST(elf_install_tls_refuses_malformed_image)
+{
+    TlsElf e;
+    make_tls_image(e);
+    e.tls.p_filesz = e.tls.p_memsz + 1;
+
+    Process *loader = scratch_loader();
+    KTEST_EXPECT(loader != nullptr);
+    if (!loader)
+        return;
+
+    KTEST_EXPECT(elf_load_user(reinterpret_cast<const uint8_t *>(&e), sizeof(e), loader) == k_load_vaddr);
+    KTEST_EXPECT(!elf_install_tls(loader, reinterpret_cast<const uint8_t *>(&e), sizeof(e)));
+    // Refused, not degraded: nothing was installed.
+    KTEST_EXPECT_EQ(loader->fs_base, 0ULL);
+
+    scratch_loader_free(loader);
+
+    // A bad p_align refuses too, at the parse now instead of inside
+    // tls_install.
+    TlsElf align_bad;
+    make_tls_image(align_bad);
+    align_bad.tls.p_align = 3;
+
+    loader = scratch_loader();
+    KTEST_EXPECT(loader != nullptr);
+    if (!loader)
+        return;
+
+    KTEST_EXPECT(elf_load_user(reinterpret_cast<const uint8_t *>(&align_bad), sizeof(align_bad), loader) ==
+                 k_load_vaddr);
+    KTEST_EXPECT(!elf_install_tls(loader, reinterpret_cast<const uint8_t *>(&align_bad), sizeof(align_bad)));
+    KTEST_EXPECT_EQ(loader->fs_base, 0ULL);
+
+    scratch_loader_free(loader);
 }

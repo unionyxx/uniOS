@@ -51,6 +51,7 @@ The kernel maps one region per thread (see [Processes — Thread-Local Storage](
 - Layout: alignment padding, the static TLS block — `PT_TLS` `p_memsz` bytes ending exactly at the thread pointer, so variables sit at negative offsets from it (a 4-byte block lands at `fs_base - 4`) — and the 16-byte `UniTcb` (`include/uapi/tcb.h`) above it. The thread pointer (the fs base) is the TCB's address: `fs:0` holds `self`, the TCB's own address, and `fs:8` holds `tid`, the thread's kernel pid.
 - Every thread has a TCB — an image with no `__thread` variables still gets a TCB-only mapping — so `fs:0` is valid in every user thread.
 - Threads start from the image's initializers: the `.tdata` bytes form the `PT_TLS` template the kernel clones per thread, with the `.tbss` tail zero-filled. Values written by one thread are never visible to another; a thread's values survive fork (the block is COW-shared with the child).
+- A *present but malformed* `PT_TLS` (p_filesz over p_memsz, template bytes outside the image, a vaddr leaving the user half, or a non-power-of-two p_align) refuses the exec with a serial line naming the field — absence degrades to the TCB-only install, malformation is a broken image and never silently strips the app's `__thread` storage.
 - `pthread_self` loads `fs:0` and returns the TCB `tid` field — no syscall — valid in every thread by the always-TCB invariant.
 
 Limits: no `pthread_key_*` (thread-specific data) and no per-thread `errno` — both deliberately absent until a consumer exists; the raw-negative-error convention covers callers today.

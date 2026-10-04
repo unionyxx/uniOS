@@ -2002,10 +2002,11 @@ bool g_ktest_fail_vma_list_alloc = false;
             kstring::copy_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(fresh_frame))),
                                  reinterpret_cast<void *>(vmm_phys_to_virt(shared_frame)), 4096);
             const uint64_t tcb_flags = vmm_get_page_flags_in(child->page_table, tcb_page) | PTE_WRITABLE;
-            if (vmm_replace_page_in(child->page_table, tcb_page, reinterpret_cast<uint64_t>(fresh_frame), tcb_flags).ok()) {
+            if (vmm_replace_page_in(child->page_table, tcb_page, reinterpret_cast<uint64_t>(fresh_frame), tcb_flags)
+                    .ok()) {
                 pmm_refcount_dec(reinterpret_cast<void *>(shared_frame));
-                UniTcb *tcb = reinterpret_cast<UniTcb *>(
-                    vmm_phys_to_virt(reinterpret_cast<uint64_t>(fresh_frame)) + (child->fs_base & 0xFFFULL));
+                UniTcb *tcb = reinterpret_cast<UniTcb *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(fresh_frame)) +
+                                                         (child->fs_base & 0xFFFULL));
                 tcb->tid = child->pid;
             } else {
                 pmm_free_frame(fresh_frame);
@@ -2550,14 +2551,17 @@ static void thread_create_unwind(Process *thread)
     uint8_t *tls_bounce = nullptr;
     if (parent->tls_template_size != 0) {
         tls_bounce = static_cast<uint8_t *>(malloc(parent->tls_template_size));
-        if (tls_bounce && !safe_copy_from_user(tls_bounce, reinterpret_cast<const void *>(parent->tls_template_va),
-                                               parent->tls_template_size)) {
-            free(tls_bounce);
-            tls_bounce = nullptr;
-        }
         if (!tls_bounce) {
             thread_create_unwind(thread);
-            return -12; // -ENOMEM
+            return -12; // -ENOMEM: the bounce buffer allocation failed
+        }
+        if (!safe_copy_from_user(tls_bounce, reinterpret_cast<const void *>(parent->tls_template_va),
+                                 parent->tls_template_size)) {
+            free(tls_bounce);
+            thread_create_unwind(thread);
+            // -EFAULT: the recorded template VAs are not readable - a bad
+            // template, not a shortage of memory.
+            return -14;
         }
     }
     const uint64_t tls_lo = tls_install(thread, tls_bounce, parent->tls_template_size, parent->tls_align);

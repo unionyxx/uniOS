@@ -53,6 +53,18 @@ struct Process;
 [[nodiscard]] uint64_t elf_load(const uint8_t *data, uint64_t size, Process *proc);
 [[nodiscard]] uint64_t elf_load_user(const uint8_t *data, uint64_t size, Process *proc);
 
+/* Why a present-but-invalid PT_TLS was rejected; the exec refusal's serial
+ * line names the field from this. None covers both a usable PT_TLS and an
+ * absent one — absence is not malformation. */
+enum class ElfTlsMalform
+{
+    None,
+    FileszOverMemsz,
+    OffsetBounds,
+    VaddrBounds,
+    AlignNotPowerOfTwo,
+};
+
 /* Walk a 64-bit little-endian ELF image's program headers for PT_TLS. On a
  * hit whose file bytes ([p_offset, p_offset + p_filesz)) stay inside the
  * image, return true with the segment's p_offset/p_memsz/p_align; the two
@@ -60,9 +72,12 @@ struct Process;
  * inside a mapped PT_LOAD) and p_filesz (the file-carried prefix of the
  * block; [filesz, memsz) is the zero-filled .tbss tail). Return false —
  * with every output zeroed — when the image has no PT_TLS or is truncated
- * or malformed (same identity and phdr-table rules as elf_validate). */
+ * or malformed (same identity and phdr-table rules as elf_validate); the
+ * optional malformed out says WHICH field of a present PT_TLS was invalid
+ * (image-level failures report None — elf_validate owns those). */
 [[nodiscard]] bool elf_tls_info(const uint8_t *image, uint64_t size, uint64_t *template_offset, uint64_t *memsz,
-                                uint64_t *align, uint64_t *template_vaddr = nullptr, uint64_t *filesz = nullptr);
+                                uint64_t *align, uint64_t *template_vaddr = nullptr, uint64_t *filesz = nullptr,
+                                ElfTlsMalform *malformed = nullptr);
 
 /* Install a freshly loaded image's TLS into the loader's brand-new address
  * space (its pml4 need not be on CR3 — the copy goes through the kernel

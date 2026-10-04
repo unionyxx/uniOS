@@ -97,7 +97,7 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
 }
 
 [[nodiscard]] bool elf_tls_info(const uint8_t *data, uint64_t size, uint64_t *template_offset, uint64_t *memsz,
-                                uint64_t *align, uint64_t *template_vaddr, uint64_t *filesz)
+                                uint64_t *align, uint64_t *template_vaddr, uint64_t *filesz, ElfTlsMalform *malformed)
 {
     if (template_offset)
         *template_offset = 0;
@@ -109,6 +109,8 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
         *template_vaddr = 0;
     if (filesz)
         *filesz = 0;
+    if (malformed)
+        *malformed = ElfTlsMalform::None;
     if (!data || !template_offset || !memsz || !align)
         return false;
 
@@ -140,20 +142,40 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
         // Same sanity rules elf_validate applies to PT_LOAD: the file bytes
         // must stay inside the image and filesz must not exceed memsz —
         // the exec path memcpy's filesz bytes out of the image and sizes
-        // its bounce buffer by memsz.
-        if (phdr[i].p_filesz > phdr[i].p_memsz)
+        // its bounce buffer by memsz. A violation of a PRESENT PT_TLS is
+        // reported through the malformed out so the exec refusal can name
+        // the field; image-level failures (truncated table, bad identity)
+        // stay None — elf_validate owns those.
+        if (phdr[i].p_filesz > phdr[i].p_memsz) {
+            if (malformed)
+                *malformed = ElfTlsMalform::FileszOverMemsz;
             return false;
+        }
         uint64_t file_end = 0;
-        if (add_overflow_u64(phdr[i].p_offset, phdr[i].p_filesz, &file_end) || file_end > size)
+        if (add_overflow_u64(phdr[i].p_offset, phdr[i].p_filesz, &file_end) || file_end > size) {
+            if (malformed)
+                *malformed = ElfTlsMalform::OffsetBounds;
             return false;
+        }
         // The recorded vaddr becomes the clone source for sys_thread_create
         // (safe_copy_from_user, a fault-fixup walk): without a user-half
         // bound a crafted header points the clone at the kernel's mapped
         // half and copies kernel memory into a user TLS block.
         constexpr uint64_t kKernelHalfFloor = 0xFFFF800000000000ULL;
         uint64_t template_end = 0;
-        if (add_overflow_u64(phdr[i].p_vaddr, phdr[i].p_memsz, &template_end) || template_end > kKernelHalfFloor)
+        if (add_overflow_u64(phdr[i].p_vaddr, phdr[i].p_memsz, &template_end) || template_end > kKernelHalfFloor) {
+            if (malformed)
+                *malformed = ElfTlsMalform::VaddrBounds;
             return false;
+        }
+        // A non-power-of-two p_align cannot position the block under the
+        // thread pointer; report it here so the refusal names the field
+        // instead of failing deep inside tls_install.
+        if (phdr[i].p_align != 0 && (phdr[i].p_align & (phdr[i].p_align - 1)) != 0) {
+            if (malformed)
+                *malformed = ElfTlsMalform::AlignNotPowerOfTwo;
+            return false;
+        }
         *template_offset = phdr[i].p_offset;
         *memsz = phdr[i].p_memsz;
         *align = phdr[i].p_align;
@@ -166,10 +188,37 @@ static constexpr uint64_t k_user_address_limit = 0x0000800000000000ULL;
     return false;
 }
 
+[[nodiscard]] static const char *elf_tls_malform_field(ElfTlsMalform malform)
+{
+    switch (malform) {
+        case ElfTlsMalform::FileszOverMemsz:
+            return "p_filesz exceeds p_memsz";
+        case ElfTlsMalform::OffsetBounds:
+            return "p_offset + p_filesz leaves the image";
+        case ElfTlsMalform::VaddrBounds:
+            return "p_vaddr + p_memsz leaves the user half";
+        case ElfTlsMalform::AlignNotPowerOfTwo:
+            return "p_align is not a power of two";
+        case ElfTlsMalform::None:
+            break;
+    }
+    return "none";
+}
+
 [[nodiscard]] bool elf_install_tls(Process *proc, const uint8_t *image, uint64_t image_size)
 {
     uint64_t offset = 0, memsz = 0, align = 0, vaddr = 0, filesz = 0;
-    if (!elf_tls_info(image, image_size, &offset, &memsz, &align, &vaddr, &filesz)) {
+    ElfTlsMalform malform = ElfTlsMalform::None;
+    if (!elf_tls_info(image, image_size, &offset, &memsz, &align, &vaddr, &filesz, &malform)) {
+        if (malform != ElfTlsMalform::None) {
+            // One policy for every malformed PT_TLS: refuse the exec and
+            // name the field on serial. The old split silently degraded
+            // filesz/offset/vaddr violations to a TCB-only install (an app
+            // mysteriously without __thread storage) while a bad p_align
+            // hard-failed inside tls_install with no field named.
+            DEBUG_ERROR("exec: refusing image with malformed PT_TLS: %s", elf_tls_malform_field(malform));
+            return false;
+        }
         // No usable PT_TLS: outputs are zeroed, so this is the TCB-only
         // install of the always-TCB invariant.
         memsz = 0;
