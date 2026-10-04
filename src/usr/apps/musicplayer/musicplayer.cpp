@@ -49,7 +49,9 @@ struct PlayerState
     bool initialized;
     bool card_present;
     bool seek_too_large_logged;
-    uint64_t last_pos; // payload bytes played, kept across DONE/STOPPED
+    uint64_t last_pos;           // payload bytes played, kept across DONE/STOPPED
+    uint64_t last_seen_played;   // idle poll: stream played_bytes at last repaint
+    PlayerPhase last_seen_phase; // idle poll: phase at last repaint
     WidgetButton play;
     WidgetButton stop;
     WidgetButton demo;
@@ -131,6 +133,7 @@ void *feeder_thread(void *arg)
     uint64_t payload_end = local.data_start + local.data_size;
     bool stream_mine = false;
     bool first_open = true;
+    bool eof_signalled = false;
 
 reopen:
     if (sound_stream_open(local.sample_rate, local.channels, local.bits_per_sample) != 0) {
@@ -141,6 +144,7 @@ reopen:
         return nullptr;
     }
     stream_mine = true;
+    eof_signalled = false;
     lseek(fd, (int64_t)offset, SEEK_SET);
     pthread_mutex_lock(&st->lock);
     st->stream_base = offset;
@@ -179,15 +183,30 @@ reopen:
         pthread_mutex_unlock(&st->lock);
 
         if (offset >= payload_end) {
-            if (stream_mine) {
-                sound_stream_end();
-                stream_mine = false;
+            if (!eof_signalled) {
+                eof_signalled = true;
+                if (stream_mine) {
+                    sound_stream_end();
+                    stream_mine = false;
+                }
             }
-            pthread_mutex_lock(&st->lock);
-            st->phase = PH_DONE;
-            pthread_mutex_unlock(&st->lock);
-            LOG_INFO("musicplayer", "done");
-            goto out;
+            // The kernel ring holds more than most tracks: EOF of the reads
+            // is not the end of the audio. Poll the drain inside the main
+            // loop so the transport stays live (timer, pause, seek) until
+            // the card has actually played everything - the kernel
+            // auto-closes an ended, fully drained stream, which is the
+            // completion signal here.
+            struct sound_status status;
+            const bool stream_alive = sound_status(&status) == 0 && status.active;
+            if (!stream_alive) {
+                pthread_mutex_lock(&st->lock);
+                st->phase = PH_DONE;
+                pthread_mutex_unlock(&st->lock);
+                LOG_INFO("musicplayer", "done");
+                goto out;
+            }
+            sleep_ms(40);
+            continue;
         }
 
         uint64_t want = payload_end - offset;
@@ -264,6 +283,7 @@ void player_start(PlayerState *st)
     st->error_msg[0] = '\0';
     pthread_mutex_unlock(&st->lock);
     st->last_pos = 0; // UI-only: the new track starts at zero
+    st->last_seen_played = ~(uint64_t)0;
 
     if (pthread_create(&st->feeder, nullptr, feeder_thread, st) == 0) {
         st->feeder_alive = true;
@@ -520,9 +540,10 @@ void musicplayer_draw(App *app, Surface *canvas)
 
     y += gap;
 
-    // Transport row: Play/Pause + Stop.
-    int play_w = gui_scaled_metric(96);
-    int stop_w = gui_scaled_metric(80);
+    // Transport row: Play/Pause + Stop, equal-width so the pair reads as
+    // one control cluster.
+    int play_w = gui_scaled_metric(88);
+    int stop_w = gui_scaled_metric(88);
     int row_w = play_w + gui_space_1() + stop_w;
     int row_x = view_x + (view_w - row_w) / 2;
     st->play.rect = gui_rect_make(row_x, y, play_w, control_h);
@@ -546,6 +567,30 @@ void musicplayer_draw(App *app, Surface *canvas)
     // Volume slider: system registry value, card register writes only.
     st->volume.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, gui_app_slider_h());
     widget_slider_draw(canvas, &st->volume, "Volume", 100);
+}
+
+void musicplayer_idle(App *app)
+{
+    // The app draws only on invalidation, so playback progress would freeze
+    // on the last input-driven frame. Repaint when the stream position
+    // advances (or the feeder flips the phase with no input involved).
+    PlayerState *st = (PlayerState *)app_user(app);
+    if (!st->card_present)
+        return;
+    PlayerSnapshot snap = take_snapshot(st);
+    if (snap.phase != st->last_seen_phase) {
+        st->last_seen_phase = snap.phase;
+        app_invalidate_all(app);
+    }
+    if (snap.phase != PH_PLAYING)
+        return;
+    struct sound_status status;
+    if (sound_status(&status) != 0 || !status.active)
+        return;
+    if (status.played_bytes != st->last_seen_played) {
+        st->last_seen_played = status.played_bytes;
+        app_invalidate_all(app);
+    }
 }
 
 void musicplayer_event(App *app, const Event *ev)
@@ -706,6 +751,7 @@ extern "C" int main()
     config.idle_ms = 33;
     config.on_draw = musicplayer_draw;
     config.on_event = musicplayer_event;
+    config.on_idle = musicplayer_idle;
     config.on_menus = musicplayer_menus;
 
     int code = app_run(&config, &st);
