@@ -420,7 +420,6 @@ static void deferred_boot_services_task()
     else
         BOOT_LOG("/bin/threadtest.elf queued as pid %lu", static_cast<uint64_t>(threadtest_pid));
 #endif
-    sound_init();
     mount_removable_volumes();
     boot_timing_log("deferred services ready");
 }
@@ -617,6 +616,11 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
 
     ahci_init();
     ata_init();
+    // Sound is a plain PCI driver like the storage ones and needs nothing
+    // the deferred services provide; initializing it here means the debug
+    // ktest suite below runs with the card present (the stream tests
+    // otherwise always skip their card-dependent branch).
+    sound_init();
     partition_scan_all();
     boot_splash_set_progress(84);
 

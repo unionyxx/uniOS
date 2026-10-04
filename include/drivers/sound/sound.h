@@ -44,6 +44,11 @@ bool sound_stream_open(uint32_t sample_rate, uint32_t channels, uint32_t bits_pe
 int64_t sound_stream_write(const void *data, uint32_t len);
 void sound_stream_end();
 void sound_stream_stop();
+// Transport pause/resume against the stream (not just the card): a pause
+// arriving before DMA started is latched and honored by the next start, so
+// pausing during the pre-fill window cannot be silently dropped.
+void sound_stream_pause();
+void sound_stream_resume();
 
 // Stops the kernel stream ring when the process group that opened it has
 // fully exited, so a dead owner cannot leave the card clocking audio.

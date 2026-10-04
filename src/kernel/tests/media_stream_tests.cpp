@@ -78,8 +78,23 @@ KTEST(media_sound_stream_api)
         KTEST_EXPECT_EQ(st.sample_rate, 44100u);
         KTEST_EXPECT_EQ(st.queued_bytes, 64u);
 
+        // A pause requested during the pre-fill window (no DMA yet) must
+        // latch instead of being dropped: the stream reports paused and
+        // the deferred DMA start honors it after resume.
+        sound_stream_pause();
+        KTEST_EXPECT(sound_stream_status(&st));
+        KTEST_EXPECT_EQ(st.active, 1);
+        KTEST_EXPECT_EQ(st.paused, 1);
+        KTEST_EXPECT_EQ(st.playing, 0);
+        sound_stream_resume();
+        KTEST_EXPECT(sound_stream_status(&st));
+        KTEST_EXPECT_EQ(st.paused, 0);
+
         sound_stream_stop();
         KTEST_EXPECT(!sound_stream_active());
         KTEST_EXPECT_EQ(sound_stream_write(pcm, 64), -32);
+        // The card-present branch ran: the smoke-audio suite matches this
+        // marker to prove the sound assertions were not skipped.
+        DEBUG_SUCCESS("soundstream ktest: PASS");
     }
 }

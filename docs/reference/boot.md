@@ -81,11 +81,11 @@ The kernel entry point `_start` is a C++ function (`src/kernel/core/kmain.cpp`) 
 7. C++ global constructors, PAT setup, kernel page protections (`.text` RX, `.rodata` RO+NX, `.data` RW+NX).
 8. ACPI init (RSDP, FADT, MADT), PIC remap + mask, APIC init (LAPIC + IOAPIC, timer calibration).
 9. Event queues and futex init, framebuffer remapped as write-combining, double buffering enabled, display init, scheduler init, BSP idle task.
-10. Drivers: PS/2 keyboard/mouse, PIT fallback timer, PCI, display late init, RTC, USB + USB HID, USB storage settle, AHCI, ATA, partition scan.
+10. Drivers: PS/2 keyboard/mouse, PIT fallback timer, PCI, display late init, RTC, USB + USB HID, USB storage settle, AHCI, ATA, sound, partition scan.
 11. Filesystems: VFS init, uniFS mounted as `/`, `/data` and `/vol` ensured, persistent `UNI_DATA` volume mounted (3 phases, see [Filesystems](filesystems.md)).
 12. Debug builds: `ktest_run_all()`.
 13. `smp_init()` — application processors are brought up (see [SMP](smp.md)).
-14. Deferred tasks: `DeferredInit` (networking, sound, removable volume mounts) and `InitLaunch` (`kernel_exec("/bin/init.elf")`).
+14. Deferred tasks: `DeferredInit` (networking, removable volume mounts) and `InitLaunch` (`kernel_exec("/bin/init.elf")`).
 15. The BSP idle loop polls input and network between `hlt`s.
 
 ## Logging

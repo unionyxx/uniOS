@@ -304,6 +304,10 @@ struct SoundStreamState
     bool ended;       // writer promised no more data; drain then auto-close
     bool dma_started; // card is clocking data out of the ring
     bool start_requested;
+    // Transport pause latched while the card is not clocking our ring yet
+    // (pre-fill window, transient underrun stop). sound_poll honors it
+    // before starting DMA so a pause issued during buffering is not lost.
+    bool pause_requested;
     uint8_t *ring; // allocated once at boot, kept for the system lifetime
     uint32_t read_pos;
     uint32_t write_pos;
@@ -369,6 +373,7 @@ void stream_reset_locked()
     g_stream.ended = false;
     g_stream.dma_started = false;
     g_stream.start_requested = false;
+    g_stream.pause_requested = false;
     g_stream.read_pos = 0;
     g_stream.write_pos = 0;
     g_stream.count = 0;
@@ -504,6 +509,43 @@ void sound_stream_stop()
     scheduler_wake_all(&g_stream.space_wait);
 }
 
+void sound_stream_pause()
+{
+    bool pause_card = false;
+    uint64_t flags = spinlock_acquire_irqsave(&g_stream.lock);
+    if (g_stream.open) {
+        if (g_stream.dma_started && sound_is_playing() && !sound_is_paused()) {
+            pause_card = true;
+        } else if (!sound_is_paused()) {
+            // The card is not clocking our ring right now (pre-fill window
+            // or a transient underrun stop): latch the request so the next
+            // DMA start honors it. A pause that only ran the card path
+            // would be silently lost here once playback begins.
+            g_stream.pause_requested = true;
+        }
+        // Card already paused: idempotent no-op.
+    }
+    spinlock_release_irqrestore(&g_stream.lock, flags);
+
+    if (pause_card)
+        sound_pause();
+}
+
+void sound_stream_resume()
+{
+    bool resume_card = false;
+    uint64_t flags = spinlock_acquire_irqsave(&g_stream.lock);
+    if (g_stream.open) {
+        g_stream.pause_requested = false;
+        if (g_stream.dma_started && sound_is_paused())
+            resume_card = true;
+    }
+    spinlock_release_irqrestore(&g_stream.lock, flags);
+
+    if (resume_card)
+        sound_resume();
+}
+
 bool sound_stream_active()
 {
     uint64_t flags = spinlock_acquire_irqsave(&g_stream.lock);
@@ -535,6 +577,7 @@ bool sound_stream_status(struct sound_status *out)
     const bool open = g_stream.open;
     const bool dma_started = g_stream.dma_started;
     const bool ended = g_stream.ended;
+    const bool pause_latched = g_stream.pause_requested;
     const uint32_t src_frame = stream_src_frame();
     const uint32_t dst_frame = stream_dst_frame();
     const uint64_t played_card = g_stream.played_card_bytes;
@@ -548,7 +591,9 @@ bool sound_stream_status(struct sound_status *out)
     out->queued_bytes = dst_frame ? queued_card * src_frame / dst_frame : 0;
     out->active = open ? 1 : 0;
     out->playing = (open && dma_started && !ended && sound_is_playing() && !sound_is_paused()) ? 1 : 0;
-    out->paused = (open && dma_started && sound_is_paused()) ? 1 : 0;
+    // A pause requested before DMA started is real state the caller must
+    // see, not a transient to hide: report the latch.
+    out->paused = (open && (dma_started ? sound_is_paused() : pause_latched)) ? 1 : 0;
     out->card_present = sound_available ? 1 : 0;
     out->reserved[0] = out->reserved[1] = out->reserved[2] = 0;
     return true;
@@ -612,7 +657,7 @@ void sound_poll()
                 }
             }
         }
-        if (!g_stream.dma_started && !g_stream.start_requested &&
+        if (!g_stream.dma_started && !g_stream.start_requested && !g_stream.pause_requested &&
             (g_stream.count >= STREAM_START_THRESHOLD || (g_stream.ended && g_stream.count > 0))) {
             g_stream.start_requested = true;
             start_now = true;
@@ -629,11 +674,17 @@ void sound_poll()
 
         flags = spinlock_acquire_irqsave(&g_stream.lock);
         g_stream.start_requested = false;
+        bool pause_pending = false;
         if (g_stream.open) {
             g_stream.dma_started = true;
             g_stream.last_driver_played = 0;
+            // A pause requested while the start sequence ran must not be
+            // lost to the card flags the start just overwrote.
+            pause_pending = g_stream.pause_requested;
         }
         spinlock_release_irqrestore(&g_stream.lock, flags);
+        if (pause_pending)
+            sound_pause();
     }
 
     __sync_lock_release(&pump_busy);

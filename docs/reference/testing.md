@@ -46,6 +46,14 @@ meson test -C build/debug --suite smoke-smp4    # 4 cores; also requires "SMP sc
 meson compile -C build/debug smp-soak           # repeated 4-core boots, sessions held briefly
 ```
 
+The audio suite boots with the silent AC97 card attached so the ktest sound branch actually runs:
+
+```sh
+meson test -C build/debug --suite smoke-audio
+```
+
+The ktest `media_sound_stream_api` card-present branch (stream open/write/status, pause-latch during the pre-fill window, stop) prints `soundstream ktest: PASS`, which gates this suite; the plain smoke suite boots without a sound card, so the branch is skipped there and the marker is absent. In a release tree the suite reduces to the plain boot markers.
+
 The network suite boots with slirp user networking and is a real E2E exercise of the stack:
 
 ```sh
@@ -61,6 +69,7 @@ Timeouts scale with the machine: Linux without KVM access runs under TCG with mu
 - **Boot / kernel start / display / init changes**: must boot in QEMU (serial + graphical) and pass the smoke suite.
 - **Storage / `/data` changes**: exercise a path that mounts the FAT32 `UNI_DATA` volume (the default `boot.img` run does this).
 - **Network stack changes**: `--suite smoke-net` (DHCP, ARP, ICMP, TCP download E2E).
+- **Sound / streaming playback changes**: `--suite smoke-audio` (ktest stream lifecycle incl. the pause latch, on the AC97 card).
 - **Scheduler / SMP changes**: the SMP suites, plus `smp-soak` for scheduling work.
 - **Thread / pthread changes**: the plain smoke suite — the debug threadtest markers assert the pthread surface end-to-end.
 - **Anything touching docs build**: `meson compile -C build/debug wiki` (strict link checking fails on broken references).

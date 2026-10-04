@@ -3386,15 +3386,13 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
         case SYS_SOUND_PAUSE: {
             if (!sound_is_initialized() || !sound_stream_active())
                 return static_cast<uint64_t>(-22); // -EINVAL
-            if (sound_is_playing() && !sound_is_paused())
-                sound_pause();
+            sound_stream_pause();
             return 0;
         }
         case SYS_SOUND_RESUME: {
             if (!sound_is_initialized() || !sound_stream_active())
                 return static_cast<uint64_t>(-22); // -EINVAL
-            if (sound_is_playing() && sound_is_paused())
-                sound_resume();
+            sound_stream_resume();
             return 0;
         }
         case SYS_SOUND_STATUS: {

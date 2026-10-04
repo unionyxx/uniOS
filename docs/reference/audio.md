@@ -18,14 +18,14 @@ Userspace decodes audio and pushes PCM instead of buffering whole files (`src/dr
 | `SYS_SOUND_STREAM_OPEN(rate, channels, 16)` | Stops any current playback, configures the card, opens the stream. 16-bit only; 1 or 2 channels. |
 | `SYS_SOUND_WRITE(data, size)` | With a stream open, blocks until every byte is queued in the ring. Classic-call ABI: any streaming failure (stream stopped under the writer, fatal signal) returns `-1`; the kernel's internal `-EPIPE`/`-EINTR` distinction is not observable in userspace. Without a stream open, legacy whole-buffer playback. |
 | `SYS_SOUND_STREAM_END` | No more data; drain what is queued, then auto-close. |
-| `SYS_SOUND_STOP` / `SYS_SOUND_PAUSE` / `SYS_SOUND_RESUME` | Transport control; pause/resume are idempotent. |
+| `SYS_SOUND_STOP` / `SYS_SOUND_PAUSE` / `SYS_SOUND_RESUME` | Transport control; pause/resume are idempotent. A pause arriving while the card is not yet clocking the ring (pre-fill window, transient underrun stop) is latched in the stream and honored by the next DMA start, so it is never silently dropped. |
 | `SYS_SOUND_STATUS` | Fills `sound_status` (`include/uapi/sound.h`): played/queued bytes in source format, state flags. |
 | `SYS_SOUND_VOLUME(level)` | Card master volume, 0-100. |
 
 Mechanics:
 
-- The dispatcher ring is 2 MiB. DMA starts once a full card ring (1 MiB = 32 x 32 KiB) is queued, so playback never begins with silence; `STREAM_START_THRESHOLD` gates this. A stream end with less queued flushes immediately.
-- The drivers run in `stream_mode`: BDL refills pull from the ring through a refill callback instead of a fixed source buffer. An exhausted ring pads silence and the card stops when the last real byte is consumed; the dispatcher restarts the card when enough new data is queued (underrun recovery) or closes the stream after a drained `STREAM_END`.
+- The dispatcher ring is 2 MiB. DMA starts once a full card ring (1 MiB = 32 x 32 KiB) is queued, so playback never begins with silence; `STREAM_START_THRESHOLD` gates this. A stream end with less queued flushes immediately. A latched pause defers the start until resume.
+- The drivers run in `stream_mode`: BDL refills pull from the ring through a refill callback instead of a fixed source buffer. An exhausted ring pads silence and the card stops when the last real byte is consumed; the dispatcher restarts the card when enough new data is queued (underrun recovery) or closes the stream after a drained `STREAM_END`. Restarts also honor a pause latched while the card was stopped.
 - The stream records the group that opened it (leader pid). When that group fully exits, the kernel stops the stream and wakes blocked writers — a dead owner cannot leave the card clocking audio (serial marker: `sound: stopping the stream an exited process left open`).
 - An ended stream auto-closes only when its ring is fully drained: a pause during the final drain also stops the card transiently, and that must not close the stream while data is still queued.
 - AC97 DMAs stereo pairs, so mono streams are upmixed to stereo in the dispatcher; HDA passes the source channel count through.

@@ -851,6 +851,28 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     timeout : smoke_smp_test_timeout,
   )
 
+  # Opt-in audio smoke: meson test -C build/debug --suite smoke-audio
+  # Boots with the silent AC97 card attached so the ktest soundstream
+  # branch actually runs; its PASS marker gates this suite. In a release
+  # tree the marker never prints, so the test reduces to the plain boot.
+  test(
+    'qemu-smoke-audio',
+    py,
+    args : [
+      qemu_smoke,
+      '--timeout',
+      smoke_qemu_timeout,
+    ] + qemu_smoke_success_args + [
+      '--success',
+      'soundstream ktest: PASS',
+    ] + qemu_smoke_fail_args + [
+      '--',
+    ] + qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+    depends : [boot_disk],
+    suite : 'smoke-audio',
+    timeout : smoke_qemu_test_timeout,
+  )
+
   # Network smoke: meson test -C build/debug --suite smoke-net
   # Boots with slirp user networking against a host-side HTTP server
   # (tools/smoke_net.py) and asserts the debug net self-test summary:

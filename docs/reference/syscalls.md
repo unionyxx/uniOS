@@ -78,9 +78,9 @@ Futex: `FUTEX_WAIT(uaddr, expected, timeout_ms)` takes a relative timeout in mil
 | 282 | `SYS_SOUND_STREAM_OPEN` | Open streaming playback (rate, channels, 16-bit); stops previous playback |
 | 283 | `SYS_SOUND_STREAM_END` | No more stream data; drain queued PCM then auto-close |
 | 284 | `SYS_SOUND_STOP` | Abort the stream and stop the card |
-| 285 | `SYS_SOUND_PAUSE` | Pause stream playback (idempotent) |
-| 286 | `SYS_SOUND_RESUME` | Resume stream playback (idempotent) |
-| 287 | `SYS_SOUND_STATUS` | Fill `sound_status` (`uapi/sound.h`): played/queued bytes, format, flags |
+| 285 | `SYS_SOUND_PAUSE` | Pause stream playback (idempotent; latches if DMA has not started) |
+| 286 | `SYS_SOUND_RESUME` | Resume stream playback (idempotent; clears a latched pause) |
+| 287 | `SYS_SOUND_STATUS` | Fill `sound_status` (`uapi/sound.h`): played/queued bytes, format, flags (`paused` includes the latch) |
 | 288 | `SYS_SOUND_VOLUME` | Card master volume 0-100 |
 | 208 | `SYS_FB_INFO` | Framebuffer geometry |
 | 209 | `SYS_FB_MMAP` | Map the framebuffer at `0x200000000` (WC) |
