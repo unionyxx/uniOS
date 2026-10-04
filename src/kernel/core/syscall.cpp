@@ -64,6 +64,11 @@ static Spinlock g_shm_lock = SPINLOCK_INIT;
 static constexpr uint64_t SHM_BASE = 0x300000000ULL;
 static constexpr uint64_t SHM_SLOT_SIZE = 0x1000000ULL;
 
+uint64_t shm_slot_address(int id)
+{
+    return SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
+}
+
 #define STDIN_FD 0
 #define STDOUT_FD 1
 #define STDERR_FD 2
@@ -309,7 +314,7 @@ static bool shm_unmap_from_process(Process *p, int id)
     if (!p || id < 0 || id >= 64 || !p->page_table)
         return false;
 
-    const uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
+    const uint64_t virt_start = shm_slot_address(id);
 
     uint64_t sl_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
     VMA *mapping = vma_find(p->vmalist->head, virt_start);
@@ -3259,7 +3264,7 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             spinlock_release_irqrestore(&g_shm_lock, sl_flags);
 
             // Fixed-offset mapping for SHM to avoid VMA list walking races
-            uint64_t virt_start = SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
+            uint64_t virt_start = shm_slot_address(id);
 
             uint64_t vma_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
             VMA *existing = vma_find(p->vmalist->head, virt_start);

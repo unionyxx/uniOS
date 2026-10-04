@@ -48,3 +48,5 @@ void signal_send_locked(Process *p, int sig);
 [[nodiscard]] int64_t kernel_exec(const char *path);
 [[nodiscard]] bool is_file_open(const char *filename);
 void shm_cleanup_process(struct Process *proc);
+// Virtual address of shm slot `id` (the fixed-offset SHM area base).
+uint64_t shm_slot_address(int id);

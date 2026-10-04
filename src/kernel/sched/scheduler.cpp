@@ -1,4 +1,5 @@
 #include <drivers/acpi/acpi.h>
+#include <drivers/sound/sound.h>
 #include <kernel/arch/x86_64/gdt.h>
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/arch/x86_64/serial.h>
@@ -2236,7 +2237,40 @@ void sys_thread_exit(int64_t status)
         process_group_kill_siblings(current_proc());
 
     process_release_private_fds(current_proc());
-    shm_cleanup_process(current_proc());
+
+    // Shm regions and the sound stream belong to the GROUP, not to the
+    // member: a member-only pthread exit must keep them mapped. The first
+    // GUI app with a worker thread crashed here — its feeder's exit ran the
+    // group teardown and stripped the WM registry mapping the UI thread
+    // still used. Decide under the big lock whether this exit ends the
+    // group, but run the cleanups outside it (they take leaf locks and may
+    // TLB-shootdown). The decision must precede this member's zombie
+    // marking so a sibling exiting concurrently sees it as the last member
+    // and inherits the cleanup; exit() always cleans unconditionally.
+    bool group_dead = group_kill;
+    if (!group_dead) {
+        bool any_live = false;
+        const uint64_t count_flags = interrupts_save_disable();
+        spinlock_acquire(&g_sched_lock);
+        Process *scan = g_proc_list;
+        if (scan) {
+            do {
+                if (scan != current_proc() && scan->leader_pid == current_proc()->leader_pid &&
+                    scan->state != ProcessState_Zombie) {
+                    any_live = true;
+                    break;
+                }
+                scan = scan->next;
+            } while (scan != g_proc_list);
+        }
+        spinlock_release(&g_sched_lock);
+        interrupts_restore(count_flags);
+        group_dead = !any_live;
+    }
+    if (group_dead) {
+        shm_cleanup_process(current_proc());
+        sound_release_group(current_proc()->leader_pid);
+    }
 
     const uint64_t flags = interrupts_save_disable();
     (void)flags;

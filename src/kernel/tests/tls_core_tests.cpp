@@ -389,6 +389,101 @@ KTEST(tls_exit_unmaps)
     leader->vmalist->head = orig_vma_list;
 }
 
+KTEST(thread_exit_keeps_group_shm)
+{
+    // A member-only pthread exit must not run the group's shm teardown: the
+    // mappings belong to the group's shared address space. The first GUI app
+    // with a worker thread crashed here — its feeder's exit stripped the WM
+    // registry mapping the UI thread still dereferenced. The group dies with
+    // its last live member; until then every shm mapping must survive.
+    Process *leader = process_get_current();
+    KTEST_EXPECT(leader != nullptr);
+
+    uint64_t *orig_page_table = leader->page_table;
+    VMA *orig_vma_list = leader->vmalist->head;
+    if (!leader->page_table)
+        leader->page_table = vmm_get_kernel_pml4();
+
+    void *page = pmm_alloc_frame();
+    KTEST_EXPECT(page != nullptr);
+    Result<void> map = vmm_replace_page_in(leader->page_table, TEST_VADDR, reinterpret_cast<uint64_t>(page),
+                                           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(map.ok());
+    g_tls_park_word = reinterpret_cast<volatile uint32_t *>(TEST_VADDR);
+    *g_tls_park_word = 0;
+
+    // Fake the park word's mapping (the futex read pins it via the VMA list)
+    // plus an app-style Shared mapping at a real shm slot address — exactly
+    // what the buggy exit path removed from the shared list.
+    VMA *vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(vma != nullptr);
+    vma->start = TEST_VADDR;
+    vma->end = TEST_VADDR + kUserPage;
+    vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    vma->type = VMAType::Anonymous;
+    vma->is_cow = false;
+    vma->next = nullptr;
+
+    const uint64_t slot = shm_slot_address(9);
+    VMA *shm_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(shm_vma != nullptr);
+    shm_vma->start = slot;
+    shm_vma->end = slot + kUserPage;
+    shm_vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    shm_vma->type = VMAType::Shared;
+    shm_vma->is_cow = false;
+    shm_vma->next = vma;
+    leader->vmalist->head = shm_vma;
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    void *stack = malloc(kUserPage);
+    KTEST_EXPECT(stack != nullptr);
+    void *top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + kUserPage);
+
+    const int64_t tid = sys_thread_create(tls_parked_exiter, nullptr, top, &mock_frame);
+    KTEST_EXPECT(tid > 0);
+
+    bool parked = false;
+    for (int i = 0; i < 200 && !parked; i++) {
+        scheduler_yield();
+        Process *t = process_find_by_pid(static_cast<uint64_t>(tid));
+        parked = t && (t->state == ProcessState_Blocked || t->state == ProcessState_Waiting);
+    }
+    KTEST_EXPECT(parked);
+
+    // Wake it: SYS_THREAD_EXIT runs its member teardown on the way out.
+    KTEST_EXPECT_EQ(sys_futex(g_tls_park_word, FUTEX_WAKE, 1), 1);
+
+    bool gone = false;
+    for (int i = 0; i < 500 && !gone; i++) {
+        scheduler_yield();
+        Process *t = process_find_by_pid(static_cast<uint64_t>(tid));
+        gone = !t || t->state == ProcessState_Zombie;
+    }
+    KTEST_EXPECT(gone);
+
+    // The member exited while the group (this ktest leader) still lives:
+    // the Shared mapping must still be in the group's VMA list. Pre-fix
+    // this failed — the exit path ran the group shm cleanup unconditionally.
+    KTEST_EXPECT(vma_find(leader->vmalist->head, slot) != nullptr);
+
+    int32_t status = 0;
+    (void)process_waitpid(tid, &status, 0);
+
+    free(stack);
+    vmm_unmap_page_in(leader->page_table, TEST_VADDR);
+    pmm_free_frame(page);
+    free(shm_vma);
+    free(vma);
+    leader->signals.pending = 0;
+    leader->page_table = orig_page_table;
+    leader->vmalist->head = orig_vma_list;
+}
+
 static void tls_fork_child_park()
 {
     sys_futex(g_tls_park_word, FUTEX_WAIT, 0);
