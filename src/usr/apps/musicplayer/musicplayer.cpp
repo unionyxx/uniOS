@@ -260,6 +260,7 @@ void player_start(PlayerState *st)
     st->info_valid = false;
     st->error_msg[0] = '\0';
     pthread_mutex_unlock(&st->lock);
+    st->last_pos = 0; // UI-only: the new track starts at zero
 
     if (pthread_create(&st->feeder, nullptr, feeder_thread, st) == 0) {
         st->feeder_alive = true;
@@ -415,9 +416,9 @@ void musicplayer_draw(App *app, Surface *canvas)
 
     // Poll the stream position (transport syscalls are UI-owned; the status
     // struct is a kernel-side snapshot and needs no lock). The last position
-    // is kept so DONE/STOPPED keep showing where playback ended.
+    // is kept so DONE/STOPPED keep showing where playback ended; the clamp
+    // also bounds a stale last_pos until the new track's first poll lands.
     uint64_t played_rel = st->last_pos;
-    bool have_position = false;
     if (snap.phase == PH_PLAYING || snap.phase == PH_PAUSED) {
         struct sound_status status;
         if (sound_status(&status) == 0 && status.active && snap.info_valid) {
@@ -427,12 +428,11 @@ void musicplayer_draw(App *app, Surface *canvas)
             pthread_mutex_unlock(&st->lock);
             if (base >= snap.info.data_start)
                 played_rel = base + status.played_bytes - snap.info.data_start;
-            if (played_rel > snap.info.data_size)
-                played_rel = snap.info.data_size;
             st->last_pos = played_rel;
-            have_position = true;
         }
     }
+    if (snap.info_valid && played_rel > snap.info.data_size)
+        played_rel = snap.info.data_size;
 
     // Column layout, centered in the view area.
     int title_h = gui_font_line_height(gui_font_title());
@@ -469,7 +469,7 @@ void musicplayer_draw(App *app, Surface *canvas)
         snprintf(time_line, sizeof(time_line), "No audio device detected");
     } else if (snap.info_valid) {
         char cur[16], total[16];
-        uint64_t played_sec = have_position ? pcm_seconds(&snap.info, played_rel) : 0;
+        uint64_t played_sec = pcm_seconds(&snap.info, played_rel);
         format_time(cur, sizeof(cur), played_sec);
         format_time(total, sizeof(total), pcm_seconds(&snap.info, snap.info.data_size));
         if (snap.phase == PH_PAUSED)
@@ -507,7 +507,7 @@ void musicplayer_draw(App *app, Surface *canvas)
     st->seek.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, control_h);
     if (!st->seek.dragging) {
         if (seek_usable)
-            st->seek.value = have_position ? (uint32_t)played_rel : 0;
+            st->seek.value = (uint32_t)played_rel;
         else
             st->seek.value = 0;
     }
