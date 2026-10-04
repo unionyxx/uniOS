@@ -7,6 +7,7 @@
 #include <kernel/net/tcp.h>
 #include <kernel/process.h>
 #include <kernel/syscall.h>
+#include <kernel/user_ptr.h>
 #include <libk/kstring.h>
 #include <uapi/syscalls_ext.h>
 
@@ -52,15 +53,21 @@ KTEST(net_syscall_status_fills_struct)
     current->vmalist->head = vma;
 
     NetStatus *out = reinterpret_cast<NetStatus *>(TEST_VADDR);
+    KSTAC();
     kstring::zero_memory(out, sizeof(NetStatus));
+    KCLAC();
     int64_t res = sys_net_status(out);
     KTEST_EXPECT_EQ(res, 0);
+    NetStatus status;
+    KSTAC();
+    status = *out;
+    KCLAC();
     // ktest context: deferred services (net_init) have not run yet.
-    KTEST_EXPECT_EQ(out->nic, static_cast<uint8_t>(NET_NIC_NONE));
-    KTEST_EXPECT_EQ(out->link_up, 0);
-    KTEST_EXPECT_EQ(out->configured, 0);
-    KTEST_EXPECT_EQ(out->ip, 0u);
-    KTEST_EXPECT_EQ(out->gateway, 0u);
+    KTEST_EXPECT_EQ(status.nic, static_cast<uint8_t>(NET_NIC_NONE));
+    KTEST_EXPECT_EQ(status.link_up, 0);
+    KTEST_EXPECT_EQ(status.configured, 0);
+    KTEST_EXPECT_EQ(status.ip, 0u);
+    KTEST_EXPECT_EQ(status.gateway, 0u);
 
     vmm_unmap_page_in(current->page_table, TEST_VADDR);
     pmm_free_frame(page);

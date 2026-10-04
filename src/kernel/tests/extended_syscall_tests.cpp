@@ -1,3 +1,4 @@
+#include <kernel/user_ptr.h>
 #include <kernel/fs/pipe.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/ktest.h>
@@ -67,7 +68,9 @@ KTEST(extended_syscalls_futex)
         current->page_table, test_vaddr, reinterpret_cast<uint64_t>(futex_phys), PTE_PRESENT | PTE_USER | PTE_WRITABLE);
     KTEST_EXPECT(futex_map.ok());
     volatile uint32_t *uval = reinterpret_cast<volatile uint32_t *>(test_vaddr);
+    KSTAC();
     *uval = 42;
+    KCLAC();
 
     VMA *futex_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
     KTEST_EXPECT(futex_vma != nullptr);
@@ -98,7 +101,9 @@ KTEST(extended_syscalls_futex)
     KTEST_EXPECT_EQ(res, 0); // nobody waiting
 
     // Test actual blocking and waking to ensure the futex lock is correctly released
+    KSTAC();
     *uval = 0;
+    KCLAC();
     g_test_futex_addr = uval;
     void *stack = malloc(4096);
     KTEST_EXPECT(stack != nullptr);
