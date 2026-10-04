@@ -16,7 +16,7 @@ Userspace decodes audio and pushes PCM instead of buffering whole files (`src/dr
 | Call | Behavior |
 | --- | --- |
 | `SYS_SOUND_STREAM_OPEN(rate, channels, 16)` | Stops any current playback, configures the card, opens the stream. 16-bit only; 1 or 2 channels. |
-| `SYS_SOUND_WRITE(data, size)` | With a stream open, blocks until every byte is queued in the ring (`-EPIPE` if the stream was stopped, `-EINTR` on fatal signal). Without a stream open, legacy whole-buffer playback. |
+| `SYS_SOUND_WRITE(data, size)` | With a stream open, blocks until every byte is queued in the ring. Classic-call ABI: any streaming failure (stream stopped under the writer, fatal signal) returns `-1`; the kernel's internal `-EPIPE`/`-EINTR` distinction is not observable in userspace. Without a stream open, legacy whole-buffer playback. |
 | `SYS_SOUND_STREAM_END` | No more data; drain what is queued, then auto-close. |
 | `SYS_SOUND_STOP` / `SYS_SOUND_PAUSE` / `SYS_SOUND_RESUME` | Transport control; pause/resume are idempotent. |
 | `SYS_SOUND_STATUS` | Fills `sound_status` (`include/uapi/sound.h`): played/queued bytes in source format, state flags. |
