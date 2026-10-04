@@ -48,7 +48,7 @@ See [Boot images](images.md) for the on-disk layouts.
 
 ## Run Targets
 
-All run targets boot `boot.img` in QEMU unless noted. The QEMU machine is `q35` on Linux and `pc` on Windows; display is `virtio-vga` at 1920x1080 with 512 MiB RAM.
+All run targets boot `boot.img` in QEMU unless noted. The QEMU machine is `q35` on Linux and `pc` on Windows; display is `virtio-vga` at 1920x1080 with 512 MiB RAM. Interactive run targets attach an `intel-hda` controller with an `hda-duplex` codec on the `none` audiodev (sound card present, host-silent); the smoke suite stays sound-free for deterministic CI.
 
 | Target | Description |
 | --- | --- |
@@ -61,6 +61,7 @@ All run targets boot `boot.img` in QEMU unless noted. The QEMU machine is `q35` 
 | `run-qemu-full` | USB devices + network + serial |
 | `run-esp-usb` | Boot `efi.img` from an emulated USB stick |
 | `run-smp` / `run-smp4` | 2-core / 4-core boots (default targets are single-core) |
+| `run-audio` | Like `run-serial`, but the HDA codec runs on the pulseaudio backend so audio is audible; swap the `qemu_audio_pa` driver for `sdl`/`alsa` when the host lacks a pa server |
 
 Suffix variants exist for most targets (`-serial`, `-headless`).
 

@@ -662,6 +662,27 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     '-device',
     'e1000,netdev=net0',
   ]
+
+  # Interactive boots get a sound card so the desktop's audio path is
+  # exercisable; the default `none` backend keeps QEMU host-independent
+  # (silent but fully functional). run-audio swaps in pulseaudio to listen.
+  # The smoke suite stays NIC- and sound-free for deterministic CI.
+  qemu_audio_silent = [
+    '-audiodev',
+    'driver=none,id=snd0',
+    '-device',
+    'intel-hda',
+    '-device',
+    'hda-duplex,audiodev=snd0',
+  ]
+  qemu_audio_pa = [
+    '-audiodev',
+    'driver=pa,id=snd0',
+    '-device',
+    'intel-hda',
+    '-device',
+    'hda-duplex,audiodev=snd0',
+  ]
   qemu_serial_stdio = ['-serial', 'stdio']
   qemu_headless = ['-serial', 'stdio', '-display', 'none']
   qemu_no_reboot = ['-no-reboot']
@@ -673,79 +694,84 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
   run_target(
     'run-qemu',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_disk_boot_command,
+    command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command,
   )
   run_target(
     'run-qemu-serial',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_disk_boot_command + qemu_serial_stdio,
+    command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_serial_stdio,
   )
   run_target(
     'run-qemu-headless',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_disk_boot_command + qemu_headless,
+    command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_headless,
   )
   run_target(
     'run-qemu-usb',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_usb_devices + qemu_disk_boot_command,
+    command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_disk_boot_command,
   )
   run_target(
     'run-qemu-usb-serial',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_usb_devices + qemu_disk_boot_command + qemu_serial_stdio,
+    command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_disk_boot_command + qemu_serial_stdio,
   )
   run_target(
     'run-qemu-net',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_net_devices + qemu_disk_boot_command,
+    command : qemu_base_command + qemu_audio_silent + qemu_net_devices + qemu_disk_boot_command,
   )
   run_target(
     'run-qemu-net-serial',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio,
+    command : qemu_base_command + qemu_audio_silent + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio,
   )
   run_target(
     'run-qemu-full',
     depends : [boot_disk],
-    command : qemu_base_command + qemu_usb_devices + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio,
+    command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio,
   )
   run_target(
     'run-qemu-esp-usb',
     depends : [efi_system_image],
-    command : qemu_base_command + qemu_usb_devices + qemu_esp_usb_boot_command,
+    command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_esp_usb_boot_command,
   )
   run_target(
     'run-qemu-esp-usb-serial',
     depends : [efi_system_image],
-    command : qemu_base_command + qemu_usb_devices + qemu_esp_usb_boot_command + qemu_serial_stdio,
+    command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_esp_usb_boot_command + qemu_serial_stdio,
   )
   run_target(
     'run-qemu-esp-usb-headless',
     depends : [efi_system_image],
-    command : qemu_base_command + qemu_usb_devices + qemu_esp_usb_boot_command + qemu_headless,
+    command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_esp_usb_boot_command + qemu_headless,
   )
 
   # Default interactive runs are networked (slirp user networking); the
   # smoke suite's headless target stays NIC-free so default CI is
   # deterministic. Use run-qemu / run-disk for NIC-free interactive boots.
   run_target('run', depends : [boot_disk],
-             command : qemu_base_command + qemu_net_devices + qemu_disk_boot_command)
+             command : qemu_base_command + qemu_audio_silent + qemu_net_devices + qemu_disk_boot_command)
   run_target('run-serial', depends : [boot_disk],
-             command : qemu_base_command + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio)
-  run_target('run-headless', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command + qemu_headless)
-  run_target('run-disk', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command)
-  run_target('run-disk-serial', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command + qemu_serial_stdio)
-  run_target('run-disk-headless', depends : [boot_disk], command : qemu_base_command + qemu_disk_boot_command + qemu_headless)
-  run_target('run-usb', depends : [boot_disk], command : qemu_base_command + qemu_usb_devices + qemu_usb_boot_command)
-  run_target('run-usb-serial', depends : [boot_disk], command : qemu_base_command + qemu_usb_devices + qemu_usb_boot_command + qemu_serial_stdio)
-  run_target('run-usb-headless', depends : [boot_disk], command : qemu_base_command + qemu_usb_devices + qemu_usb_boot_command + qemu_headless)
+             command : qemu_base_command + qemu_audio_silent + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio)
+  run_target('run-headless', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_headless)
+  run_target('run-disk', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command)
+  run_target('run-disk-serial', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_serial_stdio)
+  run_target('run-disk-headless', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_disk_boot_command + qemu_headless)
+  run_target('run-usb', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_usb_boot_command)
+  run_target('run-usb-serial', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_usb_boot_command + qemu_serial_stdio)
+  run_target('run-usb-headless', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_usb_devices + qemu_usb_boot_command + qemu_headless)
 
-  run_target('run-smp', depends : [boot_disk], command : qemu_base_command + qemu_smp2 + qemu_disk_boot_command)
-  run_target('run-smp-serial', depends : [boot_disk], command : qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_serial_stdio)
-  run_target('run-smp-headless', depends : [boot_disk], command : qemu_base_command + qemu_smp2 + qemu_disk_boot_command + qemu_headless)
-  run_target('run-smp4', depends : [boot_disk], command : qemu_base_command + qemu_smp4 + qemu_disk_boot_command)
-  run_target('run-smp4-serial', depends : [boot_disk], command : qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_serial_stdio)
+  run_target('run-smp', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_smp2 + qemu_disk_boot_command)
+  run_target('run-smp-serial', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_smp2 + qemu_disk_boot_command + qemu_serial_stdio)
+  run_target('run-smp-headless', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_smp2 + qemu_disk_boot_command + qemu_headless)
+  run_target('run-smp4', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_smp4 + qemu_disk_boot_command)
+  run_target('run-smp4-serial', depends : [boot_disk], command : qemu_base_command + qemu_audio_silent + qemu_smp4 + qemu_disk_boot_command + qemu_serial_stdio)
+  # Audible interactive boot: same as run-serial but the HDA codec runs on
+  # the pulseaudio backend, so the demo track is actually heard. Swap the
+  # audiodev for sdl/alsa in this list when the host lacks a pa server.
+  run_target('run-audio', depends : [boot_disk],
+             command : qemu_base_command + qemu_audio_pa + qemu_net_devices + qemu_disk_boot_command + qemu_serial_stdio)
 
   qemu_smoke_success_args = [
     '--success',
@@ -895,7 +921,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
     command : [py, qemu_smoke, '--timeout', '180', '--hold', '5', '--repeat', '4',
                '--success', 'SMP scheduler ready on 4 CPUs', '--success', 'ktest suite passed',
                '--fail', 'ktest suite failed', '--fail', 'KERNEL PANIC', '--'] +
-              qemu_base_command + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
+              qemu_base_command + qemu_audio_silent + qemu_smp4 + qemu_disk_boot_command + qemu_headless + qemu_no_reboot,
   )
 endif
 

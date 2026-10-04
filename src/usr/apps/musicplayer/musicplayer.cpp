@@ -434,23 +434,31 @@ void musicplayer_draw(App *app, Surface *canvas)
     if (snap.info_valid && played_rel > snap.info.data_size)
         played_rel = snap.info.data_size;
 
-    // Column layout, centered in the view area.
+    // Column layout, centered in the view area. Sliders use the height the
+    // slider widget is drawn for (label row + track); button-height rects
+    // make the label, percent and knob overlap.
     int title_h = gui_font_line_height(gui_font_title());
     int line_h = gui_line_height();
     int control_h = gui_app_control_h();
-    int control_row = gui_app_control_h() + gui_space_1() * 2;
+    int control_row = control_h + gui_space_1() * 2;
+    int slider_row = gui_app_slider_h() + gui_space_1() * 2;
     int gap = gui_space_2();
     int column_w = view_w < gui_scaled_metric(420) ? view_w - gui_scaled_metric(32) : gui_scaled_metric(380);
     if (column_w < gui_scaled_metric(200))
         column_w = gui_scaled_metric(200);
 
+    // A track is only seekable while its payload fits the slider's uint32;
+    // oversized tracks hide the slider and log once.
     bool seek_usable = snap.info_valid && snap.info.data_size > 0 && snap.info.data_size <= 0xFFFFFFFFu;
     if (snap.info_valid && snap.info.data_size > 0xFFFFFFFFu && !st->seek_too_large_logged) {
         st->seek_too_large_logged = true;
         LOG_INFO("musicplayer", "seek disabled: track too large");
     }
 
-    int rows = title_h + line_h + control_row + control_row + (snap.error_msg[0] ? line_h : 0);
+    int rows = title_h + line_h + (snap.error_msg[0] ? line_h : 0);
+    if (st->card_present) {
+        rows += control_row + (seek_usable ? slider_row : 0) + slider_row;
+    }
     int y = header_h + (view_h - rows) / 2;
     if (y < header_h)
         y = header_h;
@@ -483,13 +491,18 @@ void musicplayer_draw(App *app, Surface *canvas)
     }
     draw_centered_text(canvas, gui_font_default(), y, time_line,
                        snap.error_msg[0] ? g_gui_style.text : g_gui_style.text_muted);
-    y += line_h + gap;
+    y += line_h + gui_space_1();
     if (snap.error_msg[0]) {
         // Reserved row: surface mid-play errors (read failed) that the time
         // row cannot show once info is valid.
         draw_centered_text(canvas, gui_font_default(), y, snap.error_msg, g_gui_style.text);
         y += line_h + gui_space_1();
     }
+
+    if (!st->card_present)
+        return; // no transport, nothing to control
+
+    y += gap;
 
     // Transport row: Play/Pause + Stop.
     int play_w = gui_scaled_metric(96);
@@ -504,19 +517,18 @@ void musicplayer_draw(App *app, Surface *canvas)
     y += control_row + gui_space_2();
 
     // Seek slider: value in payload bytes, live-tracked unless dragging.
-    st->seek.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, control_h);
-    if (!st->seek.dragging) {
-        if (seek_usable)
+    // Hidden until a seekable track exists - an inert slider with a stuck
+    // zero reads as broken, not as empty.
+    if (seek_usable) {
+        st->seek.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, gui_app_slider_h());
+        if (!st->seek.dragging)
             st->seek.value = (uint32_t)played_rel;
-        else
-            st->seek.value = 0;
+        widget_slider_draw(canvas, &st->seek, "Seek", (uint32_t)snap.info.data_size);
+        y += slider_row;
     }
-    widget_slider_draw(canvas, &st->seek, seek_usable ? "Seek" : "Seek (disabled)",
-                       seek_usable ? (uint32_t)snap.info.data_size : 100);
-    y += control_row + gui_space_2();
 
     // Volume slider: system registry value, card register writes only.
-    st->volume.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, control_h);
+    st->volume.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, gui_app_slider_h());
     widget_slider_draw(canvas, &st->volume, "Volume", 100);
 }
 
