@@ -44,6 +44,10 @@ bool sound_stream_open(uint32_t sample_rate, uint32_t channels, uint32_t bits_pe
 int64_t sound_stream_write(const void *data, uint32_t len);
 void sound_stream_end();
 void sound_stream_stop();
+
+// Stops the kernel stream ring when the process group that opened it has
+// fully exited, so a dead owner cannot leave the card clocking audio.
+void sound_release_group(uint64_t leader_pid);
 bool sound_stream_active();
 bool sound_stream_status(struct sound_status *out);
 

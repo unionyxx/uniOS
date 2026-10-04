@@ -126,7 +126,10 @@ void sound_set_bits_per_sample(uint8_t bits_per_sample)
         return hda_set_bits_per_sample(bits_per_sample);
     }
 
-    DEBUG_WARN("not available on ac97");
+    // AC97 DMAs 16-bit frames, period: asking for the native value is a
+    // silent no-op, anything else is genuinely ignored.
+    if (bits_per_sample != 16)
+        DEBUG_WARN("not available on ac97");
 }
 
 void sound_set_sample_rate(uint32_t sample_rate)
@@ -310,6 +313,7 @@ struct SoundStreamState
     uint8_t dst_channels;        // what the card DMAs (AC97 upmixes mono to stereo)
     uint64_t played_card_bytes;  // consumed by the card, card-format bytes
     uint32_t last_driver_played; // driver counter at previous poll
+    uint64_t owner_leader;       // leader_pid of the group that opened the stream
 };
 
 SoundStreamState g_stream = {SPINLOCK_INIT, {nullptr, nullptr}};
@@ -370,6 +374,7 @@ void stream_reset_locked()
     g_stream.count = 0;
     g_stream.played_card_bytes = 0;
     g_stream.last_driver_played = 0;
+    g_stream.owner_leader = 0;
 }
 
 } // namespace
@@ -410,6 +415,7 @@ bool sound_stream_open(uint32_t sample_rate, uint32_t channels, uint32_t bits_pe
     g_stream.rate = sample_rate;
     g_stream.src_channels = static_cast<uint8_t>(channels);
     g_stream.dst_channels = dst_channels;
+    g_stream.owner_leader = process_get_current() ? process_get_current()->leader_pid : 0;
     spinlock_release_irqrestore(&g_stream.lock, flags);
     return true;
 }
@@ -506,6 +512,20 @@ bool sound_stream_active()
     return active;
 }
 
+void sound_release_group(uint64_t leader_pid)
+{
+    // Owner 0 is the kernel's own (ktest/legacy) stream: never released here.
+    if (leader_pid == 0)
+        return;
+    uint64_t flags = spinlock_acquire_irqsave(&g_stream.lock);
+    bool stop = g_stream.open && g_stream.owner_leader == leader_pid;
+    spinlock_release_irqrestore(&g_stream.lock, flags);
+    if (!stop)
+        return;
+    DEBUG_WARN("sound: stopping the stream an exited process left open");
+    sound_stream_stop();
+}
+
 bool sound_stream_status(struct sound_status *out)
 {
     if (!out)
@@ -579,7 +599,10 @@ void sound_poll()
 
             if (was_playing && !now_playing) {
                 g_stream.dma_started = false;
-                if (g_stream.ended) {
+                // Only a fully drained ring may auto-close: a pause during
+                // the final drain also stops the card transiently, and
+                // closing then would kill playback with data still queued.
+                if (g_stream.ended && g_stream.count == 0) {
                     // Fully drained: auto-close so waiters/players move on.
                     stream_reset_locked();
                     spinlock_release_irqrestore(&g_stream.lock, flags);

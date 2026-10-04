@@ -26,6 +26,8 @@ Mechanics:
 
 - The dispatcher ring is 2 MiB. DMA starts once a full card ring (1 MiB = 32 x 32 KiB) is queued, so playback never begins with silence; `STREAM_START_THRESHOLD` gates this. A stream end with less queued flushes immediately.
 - The drivers run in `stream_mode`: BDL refills pull from the ring through a refill callback instead of a fixed source buffer. An exhausted ring pads silence and the card stops when the last real byte is consumed; the dispatcher restarts the card when enough new data is queued (underrun recovery) or closes the stream after a drained `STREAM_END`.
+- The stream records the group that opened it (leader pid). When that group fully exits, the kernel stops the stream and wakes blocked writers — a dead owner cannot leave the card clocking audio (serial marker: `sound: stopping the stream an exited process left open`).
+- An ended stream auto-closes only when its ring is fully drained: a pause during the final drain also stops the card transiently, and that must not close the stream while data is still queued.
 - AC97 DMAs stereo pairs, so mono streams are upmixed to stereo in the dispatcher; HDA passes the source channel count through.
 - Writers block on a wait queue while the ring is full and are woken by the refill path, so playback never depends on holding a whole decoded file in memory. Blocking writers rely on the idle-loop pump advancing the card.
 
