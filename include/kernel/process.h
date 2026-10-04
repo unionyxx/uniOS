@@ -128,9 +128,10 @@ struct Process
     // blocks die with the address space, so theirs stay 0).
     uint64_t fs_base;
     uint64_t tls_template_va;
-    uint64_t tls_template_size; // PT_TLS p_memsz; 0 = image has no TLS
-    uint64_t tls_align;         // PT_TLS p_align; 0 = image has no TLS
-    uint64_t tls_lo;            // this thread's TLS mapping (0 = none)
+    uint64_t tls_template_size;   // PT_TLS p_memsz; 0 = image has no TLS
+    uint64_t tls_template_filesz; // PT_TLS p_filesz; file-backed prefix, tail is zero
+    uint64_t tls_align;           // PT_TLS p_align; 0 = image has no TLS
+    uint64_t tls_lo;              // this thread's TLS mapping (0 = none)
     uint64_t tls_len;
 
     bool thread_detached; // detached at exit: routes to the kernel-zombie auto-reap

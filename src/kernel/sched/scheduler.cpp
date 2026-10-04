@@ -1966,6 +1966,7 @@ bool g_ktest_fail_vma_list_alloc = false;
     child->fs_base = current_proc()->fs_base;
     child->tls_template_va = current_proc()->tls_template_va;
     child->tls_template_size = current_proc()->tls_template_size;
+    child->tls_template_filesz = current_proc()->tls_template_filesz;
     child->tls_align = current_proc()->tls_align;
 
     // Clone under the address-space lock: sibling threads may mmap/munmap or
@@ -2556,13 +2557,21 @@ static void thread_create_unwind(Process *thread)
             return -12; // -ENOMEM: the bounce buffer allocation failed
         }
         if (!safe_copy_from_user(tls_bounce, reinterpret_cast<const void *>(parent->tls_template_va),
-                                 parent->tls_template_size)) {
+                                 parent->tls_template_filesz)) {
             free(tls_bounce);
             thread_create_unwind(thread);
             // -EFAULT: the recorded template VAs are not readable - a bad
             // template, not a shortage of memory.
             return -14;
         }
+        // The .tbss tail never crosses the user boundary: those VAs are
+        // defined as zeros, and ld/lld do not advance the location counter
+        // past .tbss, so they alias whatever section follows (or fall
+        // outside the RW PT_LOAD) - reading them would fault or pick up
+        // live .bss bytes as the template. Mirror the exec path's bounce:
+        // copy the file-backed prefix, zero the tail.
+        kstring::zero_memory(tls_bounce + parent->tls_template_filesz,
+                             parent->tls_template_size - parent->tls_template_filesz);
     }
     const uint64_t tls_lo = tls_install(thread, tls_bounce, parent->tls_template_size, parent->tls_align);
     free(tls_bounce);
@@ -2580,6 +2589,7 @@ static void thread_create_unwind(Process *thread)
     // thread created by this thread clones nothing and faults on __thread.
     thread->tls_template_va = parent->tls_template_va;
     thread->tls_template_size = parent->tls_template_size;
+    thread->tls_template_filesz = parent->tls_template_filesz;
     thread->tls_align = parent->tls_align;
 
     kstring::strncpy(thread->name, parent->name, 24);
@@ -2612,6 +2622,18 @@ static void thread_create_unwind(Process *thread)
         if (gated) {
             spinlock_release(&g_sched_lock);
             interrupts_restore(pub_flags);
+            // The TLS block was installed (and its VMA published to the
+            // shared list) before the publication gate: drain it exactly
+            // like sys_thread_exit does, or the mapping leaks with the
+            // refused thread - and the exec's old-address-space teardown
+            // would then walk a VMA whose frames it does not own.
+            if (thread->tls_lo != 0) {
+                if (!munmap_process_range(thread, thread->tls_lo, thread->tls_len)) {
+                    KLOG(LogModule::Sched, LogLevel::Error, "thread create gate: tls unmap refused; mapping leaks");
+                }
+                thread->tls_lo = 0;
+                thread->tls_len = 0;
+            }
             thread_create_unwind(thread);
             return -11; // -EAGAIN: the group is being replaced
         }

@@ -447,6 +447,14 @@ static bool scenario_detach(void)
 
 static __thread uint32_t tls_counter;             /* zero in every thread */
 static __thread uint32_t tls_canary = TLS_CANARY; /* nonzero template image */
+/* Sizes .tdata to exactly one page: the user linker script aligns .tdata
+ * to 4096, so the template ends ON a page boundary and the .tbss tail
+ * (tls_counter) starts exactly there - the layout where an uncovered
+ * .tbss leaves its VAs unmapped and thread creation fails with -12. The
+ * canary and pad both sit in .tdata; the size accounts for the linker's
+ * 16-byte alignment of the array after the 4-byte canary. The zero tail
+ * reading zero in every worker is the regression pin. */
+static __thread uint8_t tls_page_pad[4096 - 16] = {1};
 
 static pthread_mutex_t g_tls_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_tls_cond = PTHREAD_COND_INITIALIZER;
@@ -456,6 +464,7 @@ static volatile int g_tls_completed;
 static pthread_t g_tls_self_seen[TLS_THREADS];
 static int g_tls_tcb_bad[TLS_THREADS];
 static int g_tls_canary_bad[TLS_THREADS];
+static int g_tls_pad_bad[TLS_THREADS];
 
 static void *tls_worker(void *arg)
 {
@@ -466,6 +475,7 @@ static void *tls_worker(void *arg)
     g_tls_self_seen[idx] = pthread_self();
     g_tls_tcb_bad[idx] = (tcb->self != (uint64_t)(uintptr_t)tcb) || (tcb->tid != pthread_self());
     g_tls_canary_bad[idx] = (tls_canary != TLS_CANARY);
+    g_tls_pad_bad[idx] = (tls_page_pad[0] != 1);
 
     for (uint32_t i = 0; i < TLS_INCS; i++)
         tls_counter++;
@@ -485,6 +495,7 @@ static bool scenario_tls(void)
         g_tls_self_seen[i] = 0;
         g_tls_tcb_bad[i] = 0;
         g_tls_canary_bad[i] = 0;
+        g_tls_pad_bad[i] = 0;
     }
 
     UniTcb *tcb;
@@ -546,6 +557,10 @@ static bool scenario_tls(void)
         }
         if (g_tls_canary_bad[i] != 0) {
             LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d's tls canary was not its initial value", i);
+            return false;
+        }
+        if (g_tls_pad_bad[i] != 0) {
+            LOG_ERROR(LOG_SCOPE, "scenario tls: worker %d's page pad byte was not its initial value", i);
             return false;
         }
     }

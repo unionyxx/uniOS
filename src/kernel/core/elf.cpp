@@ -437,21 +437,23 @@ static void rollback_loaded_page(uint64_t *target_pml4, uint64_t vaddr, uint64_t
     }
 
     // Record the image's TLS facts for the exec / boot-launch install that
-    // follows. The PT_TLS template lands inside a PT_LOAD (the linker
-    // places .tdata/.tbss within the writable segment), so p_vaddr is
-    // already mapped and its .tbss tail zero-filled by the loop above; the
-    // exec path copies the template from the image buffer instead. No
-    // PT_TLS -> all zero, matching an absent template. Set unconditionally:
-    // a loader copied from a live process carries the OLD image's values.
+    // follows. Only the file-backed prefix [p_vaddr, p_vaddr + p_filesz)
+    // is ever read back: the exec path copies from this image buffer, and
+    // thread creations walk the live user space. The .tbss tail VAs are
+    // never read - see the template clone in sys_thread_create. No PT_TLS
+    // -> all zero, matching an absent template. Set unconditionally: a
+    // loader copied from a live process carries the OLD image's values.
     if (proc) {
         uint64_t t_offset = 0, t_memsz = 0, t_align = 0, t_vaddr = 0, t_filesz = 0;
         if (elf_tls_info(data, size, &t_offset, &t_memsz, &t_align, &t_vaddr, &t_filesz)) {
             proc->tls_template_va = t_vaddr;
             proc->tls_template_size = t_memsz;
+            proc->tls_template_filesz = t_filesz;
             proc->tls_align = t_align;
         } else {
             proc->tls_template_va = 0;
             proc->tls_template_size = 0;
+            proc->tls_template_filesz = 0;
             proc->tls_align = 0;
         }
     }

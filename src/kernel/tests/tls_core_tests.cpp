@@ -167,6 +167,7 @@ KTEST(tls_template_clone)
     const uint64_t orig_fs_base = leader->fs_base;
     const uint64_t orig_template_va = leader->tls_template_va;
     const uint64_t orig_template_size = leader->tls_template_size;
+    const uint64_t orig_template_filesz = leader->tls_template_filesz;
     const uint64_t orig_align = leader->tls_align;
     if (!leader->page_table)
         leader->page_table = vmm_get_kernel_pml4();
@@ -211,6 +212,7 @@ KTEST(tls_template_clone)
 
     leader->tls_template_va = TEST_TEMPLATE_VADDR;
     leader->tls_template_size = kTemplateBytes;
+    leader->tls_template_filesz = kTemplateBytes;
     leader->tls_align = kTemplateAlign;
 
     SyscallFrame mock_frame = {};
@@ -246,6 +248,7 @@ KTEST(tls_template_clone)
         // fault on its first __thread access.
         KTEST_EXPECT_EQ(thread->tls_template_va, TEST_TEMPLATE_VADDR);
         KTEST_EXPECT_EQ(thread->tls_template_size, kTemplateBytes);
+        KTEST_EXPECT_EQ(thread->tls_template_filesz, kTemplateBytes);
         KTEST_EXPECT_EQ(thread->tls_align, kTemplateAlign);
 
         // The clone's block [fs_base - size, fs_base) holds the template
@@ -285,6 +288,7 @@ KTEST(tls_template_clone)
     leader->fs_base = orig_fs_base;
     leader->tls_template_va = orig_template_va;
     leader->tls_template_size = orig_template_size;
+    leader->tls_template_filesz = orig_template_filesz;
     leader->tls_align = orig_align;
 
     free(stack);
@@ -421,6 +425,7 @@ KTEST(tls_fork_copies_fields)
     const uint64_t orig_fs_base = leader->fs_base;
     const uint64_t orig_template_va = leader->tls_template_va;
     const uint64_t orig_template_size = leader->tls_template_size;
+    const uint64_t orig_template_filesz = leader->tls_template_filesz;
     const uint64_t orig_align = leader->tls_align;
     const uint64_t orig_tls_lo = leader->tls_lo;
     const uint64_t orig_tls_len = leader->tls_len;
@@ -475,19 +480,20 @@ KTEST(tls_fork_copies_fields)
         TLS_FORK_CHECK(tls_lo != 0);
         leader->tls_template_va = TEST_VADDR;
         leader->tls_template_size = kTemplateBytes;
+        leader->tls_template_filesz = kTemplateBytes;
         leader->tls_align = kTemplateAlign;
         leader->tls_lo = tls_lo;
         leader->tls_len = kUserPage;
 
-    SyscallFrame fork_frame = {};
-    fork_frame.rip = reinterpret_cast<uint64_t>(tls_fork_child_park);
-    // Same mock-frame contract as the thread tests: a kernel cs and a
-    // stack pointer that points at a real scratch buffer, so the child's
-    // entry lands on a writable stack whichever way iretq loads rsp.
-    fork_frame.rsp = reinterpret_cast<uint64_t>(page_alias) + kUserPage;
-    fork_frame.cs = 0x08;
-    fork_frame.ss = 0x10;
-    fork_frame.rflags = 0x202;
+        SyscallFrame fork_frame = {};
+        fork_frame.rip = reinterpret_cast<uint64_t>(tls_fork_child_park);
+        // Same mock-frame contract as the thread tests: a kernel cs and a
+        // stack pointer that points at a real scratch buffer, so the child's
+        // entry lands on a writable stack whichever way iretq loads rsp.
+        fork_frame.rsp = reinterpret_cast<uint64_t>(page_alias) + kUserPage;
+        fork_frame.cs = 0x08;
+        fork_frame.ss = 0x10;
+        fork_frame.rflags = 0x202;
 
         child_pid = process_fork(&fork_frame);
         TLS_FORK_CHECK(child_pid != static_cast<uint64_t>(-1));
@@ -502,18 +508,19 @@ KTEST(tls_fork_copies_fields)
         TLS_FORK_CHECK_EQ(child->fs_base, leader->fs_base);
         TLS_FORK_CHECK_EQ(child->tls_template_va, leader->tls_template_va);
         TLS_FORK_CHECK_EQ(child->tls_template_size, leader->tls_template_size);
+        TLS_FORK_CHECK_EQ(child->tls_template_filesz, leader->tls_template_filesz);
         TLS_FORK_CHECK_EQ(child->tls_align, leader->tls_align);
         TLS_FORK_CHECK_EQ(child->tls_lo, 0ULL);
         TLS_FORK_CHECK_EQ(child->tls_len, 0ULL);
         TLS_FORK_CHECK_EQ(child->leader_pid, child_pid);
 
-    // The inherited thread pointer stays valid in the COW'd copy: the
-    // child's space resolves it to the same self-consistent TCB bytes.
-    // (The inherited TCB still carries the parent's tid — exec re-stamps
-    // it for the new leader; fork's contract is the field copy only.)
-    const UniTcb *tcb = reinterpret_cast<const UniTcb *>(tls_direct_read(child, child->fs_base));
-    TLS_FORK_CHECK(tcb != nullptr);
-    TLS_FORK_CHECK_EQ(tcb->self, child->fs_base);
+        // The inherited thread pointer stays valid in the COW'd copy: the
+        // child's space resolves it to the same self-consistent TCB bytes.
+        // (The inherited TCB still carries the parent's tid — exec re-stamps
+        // it for the new leader; fork's contract is the field copy only.)
+        const UniTcb *tcb = reinterpret_cast<const UniTcb *>(tls_direct_read(child, child->fs_base));
+        TLS_FORK_CHECK(tcb != nullptr);
+        TLS_FORK_CHECK_EQ(tcb->self, child->fs_base);
 
         bool child_parked = false;
         for (int i = 0; i < 200 && !child_parked; i++) {
@@ -546,6 +553,7 @@ cleanup:
     leader->fs_base = orig_fs_base;
     leader->tls_template_va = orig_template_va;
     leader->tls_template_size = orig_template_size;
+    leader->tls_template_filesz = orig_template_filesz;
     leader->tls_align = orig_align;
     leader->tls_lo = orig_tls_lo;
     leader->tls_len = orig_tls_len;

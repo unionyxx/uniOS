@@ -1394,6 +1394,7 @@ static bool exec_terminate_thread_group(Process *leader)
         p->fs_base = loader_proc->fs_base;
         p->tls_template_va = loader_proc->tls_template_va;
         p->tls_template_size = loader_proc->tls_template_size;
+        p->tls_template_filesz = loader_proc->tls_template_filesz;
         p->tls_align = loader_proc->tls_align;
         spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
 
@@ -1567,6 +1568,7 @@ static bool exec_terminate_thread_group(Process *leader)
     child->fs_base = loader_proc->fs_base;
     child->tls_template_va = loader_proc->tls_template_va;
     child->tls_template_size = loader_proc->tls_template_size;
+    child->tls_template_filesz = loader_proc->tls_template_filesz;
     child->tls_align = loader_proc->tls_align;
     if (child->fs_base != 0) {
         const uint64_t tcb_phys = vmm_virt_to_phys_in(new_pml4, child->fs_base);

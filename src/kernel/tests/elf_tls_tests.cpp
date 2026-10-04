@@ -187,9 +187,9 @@ void scratch_loader_free(Process *loader)
 } // namespace
 
 // The loader records the image's TLS facts after mapping the segments:
-// template va/size/align for a TLS-carrying image, all zero without one.
-// A loader copied from a live process would carry the old image's values,
-// so the zeroing must be explicit.
+// template va/size/filesz/align for a TLS-carrying image, all zero without
+// one. A loader copied from a live process would carry the old image's
+// values, so the zeroing must be explicit.
 KTEST(elf_load_user_records_tls_facts)
 {
     TlsElf e;
@@ -203,12 +203,14 @@ KTEST(elf_load_user_records_tls_facts)
     // Stale facts like a memcpy'd loader would hold: must be overwritten.
     loader->tls_template_va = 0xDEAD0000;
     loader->tls_template_size = 0xEE;
+    loader->tls_template_filesz = 0xED;
     loader->tls_align = 0x77;
 
     const uint64_t entry = elf_load_user(reinterpret_cast<const uint8_t *>(&e), sizeof(e), loader);
     KTEST_EXPECT(entry == k_load_vaddr);
     KTEST_EXPECT_EQ(loader->tls_template_va, k_tls_vaddr);
     KTEST_EXPECT_EQ(loader->tls_template_size, k_tls_memsz);
+    KTEST_EXPECT_EQ(loader->tls_template_filesz, k_tls_filesz);
     KTEST_EXPECT_EQ(loader->tls_align, k_tls_align);
 
     scratch_loader_free(loader);
@@ -223,11 +225,13 @@ KTEST(elf_load_user_records_tls_facts)
         return;
     loader->tls_template_va = 0xDEAD0000;
     loader->tls_template_size = 0xEE;
+    loader->tls_template_filesz = 0xED;
     loader->tls_align = 0x77;
 
     KTEST_EXPECT(elf_load_user(reinterpret_cast<const uint8_t *>(&absent), sizeof(absent), loader) == k_load_vaddr);
     KTEST_EXPECT_EQ(loader->tls_template_va, 0ULL);
     KTEST_EXPECT_EQ(loader->tls_template_size, 0ULL);
+    KTEST_EXPECT_EQ(loader->tls_template_filesz, 0ULL);
     KTEST_EXPECT_EQ(loader->tls_align, 0ULL);
 
     scratch_loader_free(loader);
