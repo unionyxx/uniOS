@@ -58,6 +58,8 @@ Jacobson/Karels: first sample seeds `srtt` with `rttvar = sample/2`; thereafter 
 
 In-order only: a segment is accepted when it covers the expected edge; covered prefixes are skipped; bytes append to the 64 KiB ring until full (excess dropped). Out-of-order and duplicate segments are dropped and re-ACKed — those duplicate ACKs drive the peer's fast retransmit. ACKs are immediate (no delayed ACK). The advertised window is the constant 65535 and never shrinks, even when the receive ring is full.
 
+Locking: `tcp_receive()` takes `tcp_sockets_lock` (irqsave) for the socket lookup, nests the per-socket lock inside it, then closes the global pair early so segment processing runs under the socket lock alone. The socket lock — and the SYN-accept clone's lock — must be released with the *function-entry* irq state (the flags the global pair saved), never with flags captured inside the nested section: those describe IF=0, and restoring them last leaks interrupts-disabled out of `net_poll()`, parking the idle loop in `hlt` forever (the whole-system freeze behind issue #24).
+
 ## Timers
 
 `tcp_poll()` (run from `net_poll()`):

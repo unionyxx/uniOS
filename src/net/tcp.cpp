@@ -526,10 +526,16 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
 
     uint64_t global_flags = spinlock_acquire_irqsave(&tcp_sockets_lock);
     TcpSocket *sock = tcp_find_socket(src_ip, src_port, dst_port);
-    uint64_t sock_flags = 0;
     if (sock) {
-        sock_flags = spinlock_acquire_irqsave(&sock->lock);
+        // Flags deliberately discarded: see the release comment below.
+        (void)spinlock_acquire_irqsave(&sock->lock);
     }
+    // The sock lock nests INSIDE the global lock, so the flags it saved
+    // describe the IF=0 inner state; the global pair closes first, and
+    // releasing the sock lock with its own stale flags would restore IF=0
+    // on the way out — a leaked disabled-IRQ state that froze the whole
+    // poll path (net_poll returned with interrupts off and the idle loop
+    // hlt'd forever). Both sock-lock releases use the ENTRY state instead.
     spinlock_release_irqrestore(&tcp_sockets_lock, global_flags);
 
     if (!sock) {
@@ -550,7 +556,9 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
         // spoofed/off-window segment tears down the connection.
         if (sock->state != TCP_LISTEN && seq == sock->ack_num)
             tcp_socket_reset(sock);
-        spinlock_release_irqrestore(&sock->lock, sock_flags);
+        // Entry state, not sock_flags — see the comment at the sock-lock
+        // acquisition above.
+        spinlock_release_irqrestore(&sock->lock, global_flags);
         return;
     }
 
@@ -568,7 +576,9 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
                 }
                 if (new_idx >= 0) {
                     TcpSocket *new_sock = &sockets[new_idx];
-                    uint64_t new_flags = spinlock_acquire_irqsave(&new_sock->lock);
+                    // Flags discarded — the release uses the entry state;
+                    // see the comment at the sock-lock acquisition.
+                    (void)spinlock_acquire_irqsave(&new_sock->lock);
                     spinlock_release_irqrestore(&tcp_sockets_lock, g_flags);
 
                     tcp_socket_reset(new_sock);
@@ -588,7 +598,11 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
                                       0,    tcpcc::INITIAL_RTO_MS};
 
                     tcp_transmit(new_sock, new_sock->ctrl.flags, new_sock->ctrl.seq_num, new_sock->ack_num, nullptr, 0);
-                    spinlock_release_irqrestore(&new_sock->lock, new_flags);
+                    // Entry state, not new_flags: the global pair above
+                    // already closed — releasing with the nested flags
+                    // would restore IF=0 here (same leak as the sock lock
+                    // at function exit).
+                    spinlock_release_irqrestore(&new_sock->lock, g_flags);
 
                     DEBUG_INFO("tcp: SYN received, sent SYN-ACK");
                 } else {
@@ -730,7 +744,7 @@ void tcp_receive(const void *data, uint16_t length, uint32_t src_ip, uint32_t ds
             break;
     }
 
-    spinlock_release_irqrestore(&sock->lock, sock_flags);
+    spinlock_release_irqrestore(&sock->lock, global_flags);
     (void)dst_ip;
 }
 
