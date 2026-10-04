@@ -1091,9 +1091,14 @@ void scheduler_wait_rechecked(WaitQueue *q, Spinlock *lock, scheduler_wait_reche
         current_proc()->state = ProcessState_Running;
         current_proc()->on_cpu = true;
         spinlock_release(&g_sched_lock);
-        interrupts_restore(flags);
+        // Re-acquire the leaf BEFORE restoring interrupts, mirroring the
+        // normal path's order above: every caller today enters with IF=0,
+        // but the first caller that arrives with interrupts enabled must
+        // not run a window with IRQs on while the wait-queue state is only
+        // half restored.
         if (lock)
             spinlock_acquire(lock);
+        interrupts_restore(flags);
         return;
     }
 
