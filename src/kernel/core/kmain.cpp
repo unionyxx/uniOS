@@ -438,6 +438,57 @@ static void launch_init_task()
     boot_timing_log("init queued");
 }
 
+#ifdef DEBUG
+// Per-boot teardown audit (debug builds only): every kernel-mode task
+// boot created (DeferredInit, InitLaunch, NetSelfTest) must exit AND be
+// reaped, and the deferred-free list must hold no kernel-mode zombie —
+// exactly the leak class the null guards in process_reap_classify_locked
+// closed, where a reaped kernel task's null page table matched every
+// other kernel task's null and its struct plus kernel stack parked
+// forever. Each scheduler_yield() pumps a kernel-zombie reap pass, so
+// waiting also drives the deferred retries. A survivor set that stops
+// changing for kStuckMs (survivors drain by exiting; a slow-but-alive
+// task keeps the same name until it exits) is a wedged teardown: print
+// the survivors and FAIL rather than waiting out the smoke timeout.
+static void task_teardown_audit_task()
+{
+    const uint64_t self_pid = process_get_current() ? process_get_current()->pid : 0;
+    constexpr uint64_t kStuckMs = 60000;
+
+    uint64_t deferred_total = 0;
+    uint64_t deferred_kernel = 0;
+    uint64_t remaining = 0;
+    char survivors[160] = {0};
+    char prev_survivors[160] = {0};
+
+    scheduler_debug_teardown_state(self_pid, &deferred_total, &deferred_kernel, &remaining, survivors,
+                                   sizeof(survivors));
+    kstring::strncpy(prev_survivors, survivors, sizeof(prev_survivors) - 1);
+    uint64_t stuck_deadline = timer_get_ticks() + timer_ms_to_ticks(kStuckMs);
+
+    while (deferred_kernel != 0 || remaining != 0) {
+        scheduler_yield();
+        scheduler_debug_teardown_state(self_pid, &deferred_total, &deferred_kernel, &remaining, survivors,
+                                       sizeof(survivors));
+        if (kstring::strcmp(survivors, prev_survivors) != 0) {
+            kstring::strncpy(prev_survivors, survivors, sizeof(prev_survivors) - 1);
+            stuck_deadline = timer_get_ticks() + timer_ms_to_ticks(kStuckMs);
+        } else if (timer_get_ticks() >= stuck_deadline) {
+            DEBUG_WARN("task teardown audit: wedged (deferred_total=%llu deferred_kernel=%llu survivors: %s)",
+                       (unsigned long long)deferred_total, (unsigned long long)deferred_kernel,
+                       survivors[0] != '\0' ? survivors : "none");
+            DEBUG_WARN("task teardown audit: FAIL");
+            process_exit(0);
+        }
+    }
+
+    DEBUG_WARN("task teardown audit: deferred_total=%llu deferred_kernel=0 remaining_kernel_tasks=0 pmm_free_kib=%llu",
+               (unsigned long long)deferred_total, (unsigned long long)(pmm_get_free_memory() / 1024));
+    DEBUG_WARN("task teardown audit: PASS");
+    process_exit(0);
+}
+#endif
+
 extern "C" void __stack_chk_guard_init();
 
 extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
@@ -631,6 +682,17 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     } else {
         BOOT_ERROR("failed to create InitLaunch task");
     }
+#ifdef DEBUG
+    // Debug-only, like the ktest suite: audits that every kernel task
+    // boot created is fully torn down (issue #31). Created last so every
+    // task it audits exists; the audit's PASS line is a smoke marker.
+    if (Process *audit = scheduler_create_task_deferred(task_teardown_audit_task, "TeardownAudit")) {
+        audit->priority = 2;
+        scheduler_enqueue_task(audit);
+    } else {
+        BOOT_ERROR("failed to create TeardownAudit task");
+    }
+#endif
 
     asm volatile("sti" ::: "memory");
     scheduler_yield();

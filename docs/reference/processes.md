@@ -64,7 +64,7 @@ Each user thread owns one anonymous RW mapping holding its static TLS block and 
 
 `sys_thread_exit(status)` (`SYS_THREAD_EXIT`) runs the same common path minus the group kill, after unmapping the thread's recorded stack range and TLS mapping, each strictly while on the kernel stack (a refused unmap leaks the mapping and logs at error level). The exit status travels through the `int32_t` channel — fatal-signal deaths carry `-signum`, and `pthread_join` collects only values that fit.
 
-`SYS_WAIT4` supports specific pids, any-child (`-1`), and `WNOHANG`. Reaping frees the kernel stack, address space, and VMAs — except when the page table, VMA list, or VMA lock is still shared with live threads; such zombies are parked on a deferred-free list and retried on every reap pass. A waitpid that finds the child in its children list but not in the global process list refuses the reap (the entry was already detached) instead of freeing a possibly deferred or dangling struct. Kernel-parented zombies are reaped automatically.
+`SYS_WAIT4` supports specific pids, any-child (`-1`), and `WNOHANG`. Reaping frees the kernel stack, address space, and VMAs — except when the page table, VMA list, or vma lock is still shared with live threads; such zombies are parked on a deferred-free list (a debug-maintained list length is read by the boot teardown audit) and retried on every reap pass. A waitpid that finds the child in its children list but not in the global process list refuses the reap (the entry was already detached) instead of freeing a possibly deferred or dangling struct. Kernel-parented zombies are reaped automatically.
 
 ## Signals
 

@@ -750,6 +750,11 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--success', 'detach=PASS',
       '--success', 'tls=PASS',
     ]
+    # The boot teardown audit task's verdict line: proves every kernel
+    # task created during boot was reaped and freed.
+    qemu_smoke_success_args += [
+      '--success', 'task teardown audit: PASS',
+    ]
   endif
   qemu_smoke_fail_args = [
     '--fail',
@@ -765,6 +770,7 @@ if qemu.found() and ovmf_code != '' and fs.exists(ovmf_code)
       '--fail', 'join=FAIL',
       '--fail', 'detach=FAIL',
       '--fail', 'tls=FAIL',
+      '--fail', 'task teardown audit: FAIL',
     ]
   endif
 

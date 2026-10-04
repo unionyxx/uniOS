@@ -71,6 +71,13 @@ extern "C" void scheduler_unlock_after_switch();
 static Process *g_deferred_frees = nullptr;
 
 #ifdef DEBUG
+// Current deferred-list length, maintained at the push (classify) and the
+// pop (retry) so the boot teardown audit task can prove nothing parks
+// forever. Debug builds only.
+static uint64_t g_deferred_frees_count = 0;
+#endif
+
+#ifdef DEBUG
 static constexpr uint64_t k_proc_canary = 0x5AFECA7A11CED0ULL;
 
 static inline void proc_canary_stamp(Process *p)
@@ -187,6 +194,9 @@ static bool process_reap_classify_locked(Process *target)
     if (share_page_table || share_vma_list || share_vma_lock) {
         target->queue_next = g_deferred_frees;
         g_deferred_frees = target;
+#ifdef DEBUG
+        g_deferred_frees_count++;
+#endif
         return false;
     }
 
@@ -237,6 +247,9 @@ static void retry_deferred_frees()
         }
         g_deferred_frees = target->queue_next;
         target->queue_next = nullptr;
+#ifdef DEBUG
+        g_deferred_frees_count--;
+#endif
         // Pop and classify in one hold: a popped-but-unclassified entry
         // is in no list, invisible to the exec sever walk, and its stale
         // page-table pointer would re-free a swapped-out address space.
@@ -249,6 +262,65 @@ static void retry_deferred_frees()
         process_free_now(target);
     }
 }
+
+#ifdef DEBUG
+// Teardown audit support (debug builds): a snapshot for the boot teardown
+// audit task. deferred_kernel_tasks counts parked kernel-mode zombies
+// (pid != 0, no page table) — the exact leak class the null guards in
+// process_reap_classify_locked closed, where a kernel task's nulls matched
+// every other kernel task's nulls and its struct plus kernel stack parked
+// forever; a parked user-thread zombie sharing its live group is healthy
+// and does not count. deferred_total reports the maintained counter (all
+// entries, user ones included) for the audit's serial line. remaining_
+// kernel_tasks counts kernel-mode processes still in the list (any state
+// — a zombie awaiting reap is not done) other than the caller. survivors
+// lists the remaining names, comma-separated, truncated at the capacity.
+void scheduler_debug_teardown_state(uint64_t except_pid, uint64_t *deferred_total, uint64_t *deferred_kernel_tasks,
+                                    uint64_t *remaining_kernel_tasks, char *survivors, uint64_t survivors_cap)
+{
+    uint64_t deferred_kernel = 0;
+    uint64_t remaining = 0;
+    uint64_t used = 0;
+
+    if (survivors && survivors_cap > 0)
+        survivors[0] = '\0';
+
+    const uint64_t flags = interrupts_save_disable();
+    spinlock_acquire(&g_sched_lock);
+
+    for (const Process *d = g_deferred_frees; d; d = d->queue_next)
+        if (d->pid != 0 && d->page_table == nullptr)
+            deferred_kernel++;
+
+    if (g_proc_list) {
+        Process *curr = g_proc_list;
+        do {
+            if (curr->pid != 0 && curr->page_table == nullptr && curr->pid != except_pid) {
+                remaining++;
+                if (survivors && survivors_cap > used + 1) {
+                    if (used > 0 && survivors_cap > used + 2)
+                        survivors[used++] = ',';
+                    const char *name = curr->name[0] != '\0' ? curr->name : "?";
+                    for (uint64_t i = 0; name[i] != '\0' && used + 1 < survivors_cap; i++)
+                        survivors[used++] = name[i];
+                    survivors[used] = '\0';
+                }
+            }
+            curr = curr->next;
+        } while (curr != g_proc_list);
+    }
+
+    spinlock_release(&g_sched_lock);
+    interrupts_restore(flags);
+
+    if (deferred_total)
+        *deferred_total = g_deferred_frees_count;
+    if (deferred_kernel_tasks)
+        *deferred_kernel_tasks = deferred_kernel;
+    if (remaining_kernel_tasks)
+        *remaining_kernel_tasks = remaining;
+}
+#endif
 
 static Process *detach_kernel_zombie_locked()
 {

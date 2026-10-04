@@ -21,14 +21,16 @@ meson test -C build/debug --suite smoke --print-errorlogs
 
 The harness (`tools/qemu_smoke.py`) boots `boot.img` headless with serial on stdio and enforces:
 
-- Success markers: `first desktop frame submitted` (always) and `ktest suite passed` (debug builds).
-- Failure markers: `ktest suite failed`, `KERNEL PANIC`.
+- Success markers: `first desktop frame submitted` (always), `ktest suite passed` and `task teardown audit: PASS` (debug builds).
+- Failure markers: `ktest suite failed`, `KERNEL PANIC`, and `task teardown audit: FAIL` (debug builds).
 
 Debug builds also run a userspace thread self-test: the deferred boot-services task `kernel_exec`s `/bin/threadtest.elf` (plain C, `crt0 + libc`, no GUI) after the net self-test spawn. It exercises create (with cross-thread fd visibility), mutex, condvar (timedwait timeout cycles), join, detach, and tls scenarios, exits nonzero when any scenario fails, and prints one serial summary line:
 
 `thread self-test summary: create=PASS mutex=PASS cond=PASS join=PASS detach=PASS tls=PASS`
 
 The tls scenario pins the per-thread contract end-to-end: four workers each run 5000 increments on their own `__thread` counter and return 5000 through the exit channel (a shared block would split the 20000 increments), the main thread's counter must stay zero, a nonzero-initialized `__thread` canary must read its initial value in every thread (a block shifted against the link-time TPOFF corrupts initialized variables), and the TCB at `fs:0` must self-identify and carry the `pthread_self` tid.
+
+Debug boots also run a kernel task teardown audit: the `TeardownAudit` task (created after `DeferredInit`/`InitLaunch`) waits for every kernel-mode task boot created to exit **and** be reaped, and for the deferred-free list to hold no kernel-mode zombie — the leak class where a reaped kernel task's null page table once matched every other kernel task's null and its struct plus kernel stack parked forever. Each of its `scheduler_yield()` calls pumps a reap pass, so waiting also drives the deferred retries. It prints `task teardown audit: PASS` with the deferred and free-memory accounting once settled, or `task teardown audit: FAIL` after 60 s without progress (a slow-but-alive task keeps the survivor set changing; only a wedged teardown is stuck long enough to trip it).
 
 The suite's pass condition is not the full sentence: it greps the six field tokens — debug-gated success markers `create=PASS`, `mutex=PASS`, `cond=PASS`, `join=PASS`, `detach=PASS`, `tls=PASS` (one per scenario, like the ktest marker) plus failure markers on the `=FAIL` spellings of the same fields. The tokens are substrings matched anywhere in the serial log, and they appear only in the summary line (the app's per-scenario log lines use spaces, never `=`), so they need no line anchoring. In a release tree the markers do not exist, so the suite reduces to the desktop-frame marker. The app is also runnable from the shell.
 

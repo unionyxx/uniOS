@@ -128,3 +128,14 @@ void preempt_enable();
 void scheduler_enter_idle(Process *idle);
 // Broadcasts a resched IPI so idle cores pull newly-ready work.
 void scheduler_notify_idle_cpus();
+
+#ifdef DEBUG
+// Boot teardown audit (debug builds): snapshot for the audit task in
+// kmain — total deferred list length (maintained counter), parked
+// kernel-mode zombies on it (the leak class of the old null-matching
+// bug), and kernel-mode processes still in the list (any state) other
+// than the caller, whose names fill `survivors` comma-separated. Call
+// with no scheduler leaf held.
+void scheduler_debug_teardown_state(uint64_t except_pid, uint64_t *deferred_total, uint64_t *deferred_kernel_tasks,
+                                    uint64_t *remaining_kernel_tasks, char *survivors, uint64_t survivors_cap);
+#endif

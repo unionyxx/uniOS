@@ -1211,9 +1211,13 @@ static void pi_low_priority_thread()
     }
 
     mutex_unlock(&g_test_mutex);
-    while (true) {
+    // Exit once the test is done asserting (step 3) instead of yielding
+    // forever: the task must not outlive the ktest suite, or the boot
+    // teardown audit waits on it as a never-reaped kernel task.
+    while (g_pi_thread_step != 3) {
         scheduler_yield();
     }
+    process_exit(0);
 }
 
 KTEST(extended_priority_inheritance)
@@ -1244,4 +1248,8 @@ KTEST(extended_priority_inheritance)
 
     mutex_unlock(&g_test_mutex);
     current->priority = orig_priority;
+
+    // Release the helper (step 3): it exits and is auto-reaped, leaving no
+    // kernel task behind for the teardown audit to wait on.
+    g_pi_thread_step = 3;
 }
