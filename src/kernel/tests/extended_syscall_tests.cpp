@@ -20,6 +20,7 @@
 #include <uapi/syscalls_ext.h>
 
 extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot);
+void signal_send(Process *p, int sig);
 
 static int test_find_free_fd(Process *p)
 {
@@ -46,6 +47,103 @@ static void futex_waiter_thread()
     while (true) {
         scheduler_yield();
     }
+}
+
+static volatile int64_t g_timed_futex_ret = 0;
+// Park in a 10 s timed wait: a death that only arrives at the deadline means
+// the fatal-signal recheck is missing from the timed park path. A prompt
+// death (and a -4 return) means the wake/recheck machinery reached the
+// waiter. The ktest runs single-core where a parked waiter is always woken
+// by the signal's state check; the cross-core lost-wake window the recheck
+// closes is exercised by construction - the timed branch now parks through
+// the same scheduler_wait_rechecked as the untimed branch. The entry exits
+// via sys_thread_exit, not process_exit: a member death by group-kill would
+// signal the pid-0 ktest task and poison every later signal-aware wait.
+static void timed_futex_waiter_thread()
+{
+    g_timed_futex_ret = sys_futex(g_test_futex_addr, FUTEX_WAIT, 0, 10000);
+    if (scheduler_fatal_signal_pending(process_get_current()))
+        sys_thread_exit(0);
+    while (true) {
+        scheduler_yield();
+    }
+}
+
+KTEST(extended_syscalls_timed_futex_fatal_signal)
+{
+    Process *current = process_get_current();
+    KTEST_EXPECT(current != nullptr);
+
+    uint64_t *orig_page_table = current->page_table;
+    VMA *orig_vma_list = current->vmalist->head;
+    if (!current->page_table)
+        current->page_table = vmm_get_kernel_pml4();
+
+    const uint64_t test_vaddr = 0x10000000ULL;
+    void *futex_phys = pmm_alloc_frame();
+    KTEST_EXPECT(futex_phys != nullptr);
+    Result<void> futex_map = vmm_replace_page_in(
+        current->page_table, test_vaddr, reinterpret_cast<uint64_t>(futex_phys), PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    KTEST_EXPECT(futex_map.ok());
+    volatile uint32_t *uval = reinterpret_cast<volatile uint32_t *>(test_vaddr);
+    KSTAC();
+    *uval = 0;
+    KCLAC();
+
+    VMA *futex_vma = static_cast<VMA *>(malloc(sizeof(VMA)));
+    KTEST_EXPECT(futex_vma != nullptr);
+    futex_vma->start = test_vaddr;
+    futex_vma->end = test_vaddr + 4096;
+    futex_vma->flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE;
+    futex_vma->type = VMAType::Anonymous;
+    futex_vma->next = nullptr;
+    current->vmalist->head = futex_vma;
+
+    g_test_futex_addr = uval;
+    g_timed_futex_ret = 0;
+    void *stack = malloc(4096);
+    KTEST_EXPECT(stack != nullptr);
+    void *stack_top = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(stack) + 4096);
+
+    SyscallFrame mock_frame = {};
+    mock_frame.cs = 0x08;
+    mock_frame.ss = 0x10;
+    mock_frame.rflags = 0x202;
+
+    int64_t thread_pid = sys_thread_create(timed_futex_waiter_thread, nullptr, stack_top, &mock_frame);
+    KTEST_EXPECT(thread_pid > 0);
+
+    // Wait for the waiter to actually park in the timed futex wait.
+    bool parked = false;
+    for (int i = 0; i < 200 && !parked; i++) {
+        scheduler_yield();
+        Process *t = process_find_by_pid(static_cast<uint64_t>(thread_pid));
+        parked = t && (t->state == ProcessState_Blocked || t->state == ProcessState_Waiting);
+    }
+    KTEST_EXPECT(parked);
+
+    // Kill it mid-wait: the wait must report the interruption (-4) and the
+    // thread must die now, not at its 10 s deadline.
+    Process *waiter = process_find_by_pid(static_cast<uint64_t>(thread_pid));
+    if (waiter)
+        signal_send(waiter, SIGKILL);
+
+    bool gone = false;
+    for (int i = 0; i < 500 && !gone; i++) {
+        scheduler_yield();
+        gone = process_find_by_pid(static_cast<uint64_t>(thread_pid)) == nullptr;
+    }
+    KTEST_EXPECT(gone);
+    KTEST_EXPECT_EQ(g_timed_futex_ret, int64_t(-4)); // -EINTR
+
+    free(stack);
+    g_test_futex_addr = nullptr;
+    vmm_unmap_page_in(current->page_table, test_vaddr);
+    pmm_free_frame(futex_phys);
+    free(futex_vma);
+
+    current->page_table = orig_page_table;
+    current->vmalist->head = orig_vma_list;
 }
 
 KTEST(extended_syscalls_futex)

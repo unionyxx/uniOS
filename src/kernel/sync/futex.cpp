@@ -153,7 +153,16 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
                 // unbounded hang nobody can diagnose in release builds).
                 return -28; // -ENOSPC
             }
-            scheduler_wait(&bucket->wait_queue, &bucket->lock);
+            // Same queued fatal-signal recheck as the untimed branch: on
+            // SMP the signal can land between the pre-wait check above and
+            // the queue push (sender's unlocked state read still sees
+            // Running, so no wake ever comes), and without the recheck a
+            // killed waiter would sleep through its own death until the
+            // deadline the caller picked fires.
+            scheduler_wait_rechecked(
+                &bucket->wait_queue, &bucket->lock,
+                [](void *raw) -> bool { return scheduler_fatal_signal_pending(static_cast<const Process *>(raw)); },
+                current);
             spinlock_release_irqrestore(&bucket->lock, flags);
 
             // The wait ended (wake, timeout or signal): drop the
