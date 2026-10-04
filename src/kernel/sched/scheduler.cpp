@@ -1895,6 +1895,14 @@ void scheduler_yield()
 
 extern "C" void save_fpu_state(uint8_t *fpu_buffer);
 
+#ifdef DEBUG
+// ktest fault injection (fork_tests.cpp): force process_fork's clone
+// allocations to fail on demand so the rollback path is exercised against
+// real resources.
+bool g_ktest_fail_fd_table_copy = false;
+bool g_ktest_fail_vma_list_alloc = false;
+#endif
+
 [[nodiscard]] uint64_t process_fork(SyscallFrame *frame)
 {
     Process *child = static_cast<Process *>(aligned_alloc(64, sizeof(Process)));
@@ -1921,6 +1929,24 @@ extern "C" void save_fpu_state(uint8_t *fpu_buffer);
     // refs bumped under the table's irqsave leaf lock).
     child->fdtab = fd_table_copy(current_proc()->fdtab);
     child->vmalist = vma_list_alloc();
+
+#ifdef DEBUG
+    const bool fd_copy_failed = g_ktest_fail_fd_table_copy || !child->fdtab;
+    const bool vma_alloc_failed = g_ktest_fail_vma_list_alloc || !child->vmalist;
+#else
+    const bool fd_copy_failed = !child->fdtab;
+    const bool vma_alloc_failed = !child->vmalist;
+#endif
+    if (fd_copy_failed || vma_alloc_failed) {
+        // Roll the partial clone back before anything else is taken: release
+        // the fd copy (with its bumped vnode refs) and the VmaList object,
+        // then the struct. Refuse like the other allocation failure paths.
+        process_release_private_fds(child);
+        if (child->vmalist)
+            vma_list_free(child->vmalist);
+        aligned_free(child);
+        return static_cast<uint64_t>(-1);
+    }
 
     child->cursor_x = current_proc()->cursor_x;
     child->cursor_y = current_proc()->cursor_y;
