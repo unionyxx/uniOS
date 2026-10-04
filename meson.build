@@ -415,7 +415,7 @@ demo_track = custom_target(
   ],
 )
 
-stage_overlays += ['--overlay', 'Music/demo.wav', demo_track]
+stage_overlays += ['--overlay', 'usr/share/music/demo.wav', demo_track]
 
 rootfs_stamp = custom_target(
   'stage-rootfs',

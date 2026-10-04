@@ -18,7 +18,7 @@ static constexpr int MAX_VOLUMES = 16;
 // Safety bound on a single directory listing so a hostile or corrupt volume
 // cannot exhaust memory; ordinary directories are far smaller.
 static constexpr int MAX_LIST_ROWS = 100000;
-static constexpr int MAX_PLACES = 6;
+static constexpr int MAX_PLACES = 5;
 static constexpr int FILES_ICON_SIZE_PX = 48;
 
 struct PlaceEntry
@@ -26,22 +26,18 @@ struct PlaceEntry
     const char *label;
     const char *detail;
     const char *path;
-    // /data-backed places need a storage volume (and may be created);
-    // system places live in the read-only root image and never do.
-    bool needs_storage;
 };
 
 static constexpr PlaceEntry k_places[MAX_PLACES] = {
-    {"Home", "User storage", "/data", true},
-    {"Desktop", "Desktop files", "/data/Desktop", true},
-    {"Documents", "Documents", "/data/Documents", true},
-    {"Downloads", "Downloads", "/data/Downloads", true},
-    {"Pictures", "Pictures", "/data/Pictures", true},
-    {"Music", "Demo track", "/Music", false},
+    {"Home", "User storage", "/data"},
+    {"Desktop", "Desktop files", "/data/Desktop"},
+    {"Documents", "Documents", "/data/Documents"},
+    {"Downloads", "Downloads", "/data/Downloads"},
+    {"Pictures", "Pictures", "/data/Pictures"},
 };
 
 static constexpr GuiGlyphKind k_place_glyphs[MAX_PLACES] = {
-    GUI_GLYPH_HOME, GUI_GLYPH_DESKTOP, GUI_GLYPH_DOCUMENTS, GUI_GLYPH_DOWNLOADS, GUI_GLYPH_PICTURES, GUI_GLYPH_VOLUME,
+    GUI_GLYPH_HOME, GUI_GLYPH_DESKTOP, GUI_GLYPH_DOCUMENTS, GUI_GLYPH_DOWNLOADS, GUI_GLYPH_PICTURES,
 };
 
 struct FileRow
@@ -1002,33 +998,27 @@ static void activate_place(AppState *state, int place_index)
     if (!state || place_index < 0 || place_index >= MAX_PLACES)
         return;
     reset_click_tracking(state);
-    const PlaceEntry *place = &k_places[place_index];
-    if (place->needs_storage && state->storage_mode == STORAGE_MODE_OFF) {
+    if (state->storage_mode == STORAGE_MODE_OFF) {
         set_status(state, "Storage is off");
         state->needs_redraw = true;
         return;
     }
     if (place_index > 0) {
         VNodeStat st = {};
-        if (stat(place->path, &st) != 0 || !st.is_dir) {
-            if (!place->needs_storage) {
-                set_status(state, "Folder is unavailable");
-                state->needs_redraw = true;
-                return;
-            }
+        if (stat(k_places[place_index].path, &st) != 0 || !st.is_dir) {
             if (!storage_is_writable(state)) {
                 open_data_home(state);
                 set_status(state, "Folder is unavailable in read-only mode");
                 state->needs_redraw = true;
                 return;
             }
-            if (!ensure_place_directory(state, place->path)) {
+            if (!ensure_place_directory(state, k_places[place_index].path)) {
                 state->needs_redraw = true;
                 return;
             }
         }
     }
-    strncpy(state->current_path, place->path, sizeof(state->current_path) - 1);
+    strncpy(state->current_path, k_places[place_index].path, sizeof(state->current_path) - 1);
     state->current_path[sizeof(state->current_path) - 1] = '\0';
     state->volume_home = false;
     state->active_volume = find_data_volume_index(state);

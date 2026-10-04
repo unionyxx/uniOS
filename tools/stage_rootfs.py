@@ -36,6 +36,9 @@ def main() -> int:
     if not source_rootfs.is_dir():
         raise SystemExit(f"stage_rootfs: source rootfs not found: {source_rootfs}")
 
+    # The build rootfs is fully derived (source copy + overlays): wipe it so
+    # removed or renamed assets do not linger as ghosts in the image.
+    shutil.rmtree(build_rootfs, ignore_errors=True)
     build_rootfs.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_rootfs, build_rootfs, dirs_exist_ok=True)
 

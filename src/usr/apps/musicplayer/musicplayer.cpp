@@ -26,6 +26,8 @@ enum PlayerPhase
 
 constexpr uint64_t PLAYER_SEEK_NONE = UINT64_MAX;
 constexpr uint32_t FEEDER_CHUNK = 65536;
+// Build-time system asset (staged like the wallpaper), not user data.
+constexpr const char *DEMO_TRACK = "/usr/share/music/demo.wav";
 
 struct PlayerState
 {
@@ -50,6 +52,7 @@ struct PlayerState
     uint64_t last_pos; // payload bytes played, kept across DONE/STOPPED
     WidgetButton play;
     WidgetButton stop;
+    WidgetButton demo;
     WidgetSlider seek;
     WidgetSlider volume;
 };
@@ -403,12 +406,25 @@ void musicplayer_draw(App *app, Surface *canvas)
     int view_x = 0;
 
     if (!st->path[0]) {
-        int y = header_h + (view_h - gui_font_line_height(gui_font_title()) - gui_line_height() * 2) / 2;
+        int title_h = gui_font_line_height(gui_font_title());
+        int line_h = gui_line_height();
+        int control_h = gui_app_control_h();
+        int rows = title_h + gui_space_1() + line_h * 2 + (st->card_present ? gui_space_2() + control_h : 0);
+        int y = header_h + (view_h - rows) / 2;
         if (y < header_h)
             y = header_h;
         draw_centered_text(canvas, gui_font_title(), y, "No track open", g_gui_style.text);
-        draw_centered_text(canvas, gui_font_default(), y + gui_font_line_height(gui_font_title()) + gui_space_1(),
-                           "Open audio from Files, or play the demo from /Music.", g_gui_style.text_muted);
+        y += title_h + gui_space_1();
+        draw_centered_text(canvas, gui_font_default(), y, "Open audio from Files, or play the demo.",
+                           g_gui_style.text_muted);
+        y += line_h * 2 + (st->card_present ? gui_space_2() : 0);
+        if (st->card_present) {
+            // The demo track is a system asset; playing it must not depend
+            // on Files exposing a system path next to the user's Home.
+            int demo_w = gui_scaled_metric(120);
+            st->demo.rect = gui_rect_make((view_w - demo_w) / 2, y, demo_w, control_h);
+            widget_button_draw(canvas, &st->demo, "Play Demo", true, true);
+        }
         return;
     }
 
@@ -561,6 +577,7 @@ void musicplayer_event(App *app, const Event *ev)
                 changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
                 changed |= (widget_button_event(&st->play, ev) & WIDGET_CHANGED) != 0;
                 changed |= (widget_button_event(&st->stop, ev) & WIDGET_CHANGED) != 0;
+                changed |= (widget_button_event(&st->demo, ev) & WIDGET_CHANGED) != 0;
                 if (changed)
                     app_invalidate_all(app);
             }
@@ -579,6 +596,7 @@ void musicplayer_event(App *app, const Event *ev)
             // Buttons track the press here so release-to-apply can fire on UP.
             changed |= (widget_button_event(&st->play, ev) & WIDGET_CHANGED) != 0;
             changed |= (widget_button_event(&st->stop, ev) & WIDGET_CHANGED) != 0;
+            changed |= (widget_button_event(&st->demo, ev) & WIDGET_CHANGED) != 0;
             if (changed)
                 app_invalidate_all(app);
             break;
@@ -615,6 +633,13 @@ void musicplayer_event(App *app, const Event *ev)
                 app_invalidate_all(app);
             }
 
+            if (widget_button_event(&st->demo, ev) & WIDGET_CLICKED) {
+                strncpy(st->path, DEMO_TRACK, sizeof(st->path) - 1);
+                st->path[sizeof(st->path) - 1] = '\0';
+                player_start(st);
+                app_invalidate_all(app);
+            }
+
             if (widget_button_event(&st->stop, ev) & WIDGET_CLICKED) {
                 if (snap.phase == PH_PLAYING || snap.phase == PH_PAUSED) {
                     player_stop(st);
@@ -631,6 +656,7 @@ void musicplayer_event(App *app, const Event *ev)
             // every later MOUSE_DOWN (preferences.cpp does the same).
             widget_button_reset(&st->play);
             widget_button_reset(&st->stop);
+            widget_button_reset(&st->demo);
             widget_slider_reset(&st->seek);
             widget_slider_reset(&st->volume);
             app_invalidate_all(app);
