@@ -198,10 +198,16 @@ int widget_slider_event(WidgetSlider *slider, const Event *ev, uint32_t max_valu
 
 void widget_slider_draw(Surface *s, const WidgetSlider *slider, const char *label, uint32_t max_value)
 {
+    widget_slider_draw_ex(s, slider, label, max_value, nullptr);
+}
+
+void widget_slider_draw_ex(Surface *s, const WidgetSlider *slider, const char *label, uint32_t max_value,
+                           const char *value_text)
+{
     if (!s || !slider || gui_rect_is_empty(slider->rect))
         return;
     gui_app_draw_slider(s, slider->rect.x, slider->rect.y, slider->rect.w, slider->rect.h, label, slider->value,
-                        max_value, slider->hovered || slider->dragging);
+                        max_value, slider->hovered || slider->dragging, value_text);
 }
 
 // --- Segmented control ----------------------------------------------------------

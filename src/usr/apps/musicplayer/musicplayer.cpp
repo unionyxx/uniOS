@@ -26,6 +26,9 @@ enum PlayerPhase
 
 constexpr uint64_t PLAYER_SEEK_NONE = UINT64_MAX;
 constexpr uint32_t FEEDER_CHUNK = 65536;
+// Live scrubbing: while the seek slider is dragged, the position is applied
+// at most this often (each apply restarts the kernel stream at the offset).
+constexpr uint64_t SCRUB_INTERVAL_MS = 200;
 // Build-time system asset (staged like the wallpaper), not user data.
 constexpr const char *DEMO_TRACK = "/usr/share/music/demo.wav";
 
@@ -53,6 +56,7 @@ struct PlayerState
     uint64_t last_pos;           // payload bytes played, kept across DONE/STOPPED
     uint64_t last_seen_played;   // idle poll: stream played_bytes at last repaint
     PlayerPhase last_seen_phase; // idle poll: phase at last repaint
+    uint64_t last_scrub_ticks;   // live scrub: last applied seek while dragging
     WidgetButton play;
     WidgetButton stop;
     WidgetButton demo;
@@ -86,7 +90,7 @@ uint64_t pcm_seconds(const media_audio_info *info, uint64_t payload_bytes)
 // The kernel stream is single and global: another app's stream_open resets
 // ours. Ownership is observed through sound_status, never guessed from
 // phases - only our own stream may be torn down or polled for position.
-bool stream_owned(PlayerState *st)
+bool stream_owned()
 {
     struct sound_status status;
     return sound_status(&status) == 0 && status.active && status.owned;
@@ -182,10 +186,8 @@ reopen:
             LOG_INFO("musicplayer", "seek: %u s", (unsigned)pcm_seconds(&local, target - local.data_start));
             // sound_stop is global (single kernel stream): only when the
             // stream is still ours may we tear it down for the restart.
-            if (stream_mine) {
+            if (stream_mine)
                 sound_stop();
-                stream_mine = false;
-            }
             goto reopen;
         }
         pthread_mutex_unlock(&st->lock);
@@ -297,7 +299,7 @@ void player_start(PlayerState *st, uint64_t start_offset)
         st->phase = PH_STOPPED;
         st->seek_to = PLAYER_SEEK_NONE;
         pthread_mutex_unlock(&st->lock);
-        if (stream_owned(st))
+        if (stream_owned())
             sound_stop();
         pthread_cond_signal(&st->cv);
         pthread_join(st->feeder, nullptr);
@@ -376,7 +378,7 @@ void player_stop(PlayerState *st)
         // wakes on the closed stream and exits through the same phase
         // check. A foreign stream (another app took the card) is not ours
         // to stop.
-        if (live && stream_owned(st))
+        if (live && stream_owned())
             sound_stop();
         pthread_cond_signal(&st->cv);
         pthread_join(st->feeder, nullptr);
@@ -412,7 +414,7 @@ void player_seek(PlayerState *st, uint64_t rel_bytes)
     // Break a write blocked on a full ring; the feeder re-reads the state
     // after the failed write and takes the seek branch. Only our own
     // stream may be torn down for the restart.
-    if (stream_owned(st))
+    if (stream_owned())
         sound_stop();
     pthread_cond_signal(&st->cv);
     // Hold the target during the restart so the position display does not
@@ -427,7 +429,7 @@ void player_teardown(PlayerState *st)
     pthread_mutex_lock(&st->lock);
     st->phase = PH_STOPPED;
     pthread_mutex_unlock(&st->lock);
-    if (stream_owned(st))
+    if (stream_owned())
         sound_stop();
     pthread_cond_signal(&st->cv);
     pthread_join(st->feeder, nullptr);
@@ -531,6 +533,7 @@ void musicplayer_draw(App *app, Surface *canvas)
     // showing where playback ended, and a seek holds its target through
     // the restart.
     uint64_t played_rel = st->last_pos;
+    bool stream_clocking = false;
     if (snap.phase == PH_PLAYING || snap.phase == PH_PAUSED) {
         struct sound_status status;
         if (sound_status(&status) == 0 && status.active && status.owned && snap.info_valid) {
@@ -541,6 +544,7 @@ void musicplayer_draw(App *app, Surface *canvas)
             if (base >= snap.info.data_start)
                 played_rel = base + status.played_bytes - snap.info.data_start;
             st->last_pos = played_rel;
+            stream_clocking = status.playing != 0;
         }
     }
     if (snap.info_valid && played_rel > snap.info.data_size)
@@ -567,10 +571,9 @@ void musicplayer_draw(App *app, Surface *canvas)
         LOG_INFO("musicplayer", "seek disabled: track too large");
     }
 
-    int rows = title_h + line_h + (snap.error_msg[0] ? line_h : 0);
-    if (st->card_present) {
-        rows += control_row + (seek_usable ? slider_row : 0) + slider_row;
-    }
+    int rows = title_h + gui_space_1() + line_h + gap;
+    if (st->card_present)
+        rows += (seek_usable ? slider_row : 0) + control_row + slider_row + line_h;
     int y = header_h + (view_h - rows) / 2;
     if (y < header_h)
         y = header_h;
@@ -584,37 +587,39 @@ void musicplayer_draw(App *app, Surface *canvas)
                           g_gui_style.app_bg);
     y += title_h + gui_space_1();
 
-    char time_line[96];
+    // Format line (or the no-card notice: without a card there is no
+    // transport to control, so the layout stops here).
+    char meta_line[64];
     if (!st->card_present) {
-        snprintf(time_line, sizeof(time_line), "No audio device detected");
+        snprintf(meta_line, sizeof(meta_line), "No audio device detected");
     } else if (snap.info_valid) {
-        char cur[16], total[16];
-        uint64_t played_sec = pcm_seconds(&snap.info, played_rel);
-        format_time(cur, sizeof(cur), played_sec);
-        format_time(total, sizeof(total), pcm_seconds(&snap.info, snap.info.data_size));
-        if (snap.phase == PH_PAUSED)
-            snprintf(time_line, sizeof(time_line), "%s / %s   Paused", cur, total);
-        else
-            snprintf(time_line, sizeof(time_line), "%s / %s", cur, total);
-    } else if (snap.error_msg[0]) {
-        snprintf(time_line, sizeof(time_line), "%s", snap.error_msg);
+        snprintf(meta_line, sizeof(meta_line), "%u Hz, %s, 16-bit", snap.info.sample_rate,
+                 snap.info.channels == 1 ? "mono" : "stereo");
     } else {
-        snprintf(time_line, sizeof(time_line), "Loading...");
+        meta_line[0] = '\0';
     }
-    draw_centered_text(canvas, gui_font_default(), y, time_line,
-                       snap.error_msg[0] ? g_gui_style.text : g_gui_style.text_muted);
-    y += line_h + gui_space_1();
-    if (snap.error_msg[0]) {
-        // Reserved row: surface mid-play errors (read failed) that the time
-        // row cannot show once info is valid.
-        draw_centered_text(canvas, gui_font_default(), y, snap.error_msg, g_gui_style.text);
-        y += line_h + gui_space_1();
+    if (meta_line[0]) {
+        draw_centered_text(canvas, gui_font_default(), y, meta_line, g_gui_style.text_muted);
     }
+    y += line_h + gap;
 
     if (!st->card_present)
         return; // no transport, nothing to control
 
-    y += gap;
+    // Seek slider with the position as its readout. While dragging, the
+    // readout follows the dragged position (scrub preview), not the stream.
+    if (seek_usable) {
+        st->seek.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, gui_app_slider_h());
+        if (!st->seek.dragging)
+            st->seek.value = (uint32_t)played_rel;
+        char cur[16], total[16], time_text[40];
+        uint64_t shown_rel = st->seek.dragging ? st->seek.value : played_rel;
+        format_time(cur, sizeof(cur), pcm_seconds(&snap.info, shown_rel));
+        format_time(total, sizeof(total), pcm_seconds(&snap.info, snap.info.data_size));
+        snprintf(time_text, sizeof(time_text), "%s / %s", cur, total);
+        widget_slider_draw_ex(canvas, &st->seek, "Seek", (uint32_t)snap.info.data_size, time_text);
+        y += slider_row;
+    }
 
     // Transport row: Play/Pause + Stop, equal-width so the pair reads as
     // one control cluster.
@@ -629,20 +634,43 @@ void musicplayer_draw(App *app, Surface *canvas)
     widget_button_draw(canvas, &st->stop, "Stop", false, active);
     y += control_row + gui_space_2();
 
-    // Seek slider: value in payload bytes, live-tracked unless dragging.
-    // Hidden until a seekable track exists - an inert slider with a stuck
-    // zero reads as broken, not as empty.
-    if (seek_usable) {
-        st->seek.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, gui_app_slider_h());
-        if (!st->seek.dragging)
-            st->seek.value = (uint32_t)played_rel;
-        widget_slider_draw(canvas, &st->seek, "Seek", (uint32_t)snap.info.data_size);
-        y += slider_row;
-    }
-
     // Volume slider: system registry value, card register writes only.
     st->volume.rect = gui_rect_make(view_x + (view_w - column_w) / 2, y, column_w, gui_app_slider_h());
     widget_slider_draw(canvas, &st->volume, "Volume", 100);
+    y += slider_row + gui_space_1();
+
+    // Status line: transport state or the load/stream error.
+    char status_line[96];
+    uint32_t status_fg = g_gui_style.text_muted;
+    if (snap.error_msg[0]) {
+        snprintf(status_line, sizeof(status_line), "%s", snap.error_msg);
+        status_fg = g_gui_style.text;
+    } else {
+        switch (snap.phase) {
+            case PH_PLAYING:
+                if (!snap.info_valid)
+                    snprintf(status_line, sizeof(status_line), "Opening...");
+                else if (!stream_clocking)
+                    snprintf(status_line, sizeof(status_line), "Buffering...");
+                else
+                    snprintf(status_line, sizeof(status_line), "Playing");
+                break;
+            case PH_PAUSED:
+                snprintf(status_line, sizeof(status_line), "Paused");
+                break;
+            case PH_DONE:
+                snprintf(status_line, sizeof(status_line), "Finished");
+                break;
+            case PH_STOPPED:
+                snprintf(status_line, sizeof(status_line), "Stopped");
+                break;
+            default:
+                status_line[0] = '\0';
+                break;
+        }
+    }
+    if (status_line[0])
+        draw_centered_text(canvas, gui_font_default(), y, status_line, status_fg);
 }
 
 void musicplayer_idle(App *app)
@@ -683,8 +711,17 @@ void musicplayer_event(App *app, const Event *ev)
             // the slider rect until release. Otherwise feed the move for
             // hover tracking only.
             if (st->seek.dragging) {
-                if (seek_enabled)
+                if (seek_enabled) {
                     widget_slider_event(&st->seek, ev, (uint32_t)snap.info.data_size);
+                    // Live scrub: apply the dragged position while
+                    // dragging, throttled - every apply restarts the
+                    // kernel stream at the offset, and the release applies
+                    // the final position.
+                    if (get_ticks() - st->last_scrub_ticks >= SCRUB_INTERVAL_MS) {
+                        st->last_scrub_ticks = get_ticks();
+                        player_seek(st, st->seek.value);
+                    }
+                }
                 app_invalidate_all(app);
             } else if (st->volume.dragging) {
                 if (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED)

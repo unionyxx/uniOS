@@ -2791,7 +2791,7 @@ uint32_t gui_app_slider_value_from_x(int mouse_x, const Rect *track, uint32_t ma
 }
 
 void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *label, uint32_t value, uint32_t max_value,
-                         bool hovered)
+                         bool hovered, const char *value_text)
 {
     if (!s || w <= 0 || h <= 0)
         return;
@@ -2803,14 +2803,17 @@ void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *lab
     const int space_2 = gui_space_2();
     (void)hovered;
 
-    char value_text[16];
-    uint32_t percent = (uint32_t)(((uint64_t)value * 100u + max_value / 2u) / max_value);
-    snprintf(value_text, sizeof(value_text), "%u%%", percent);
+    char percent_text[16];
+    if (!value_text) {
+        uint32_t percent = (uint32_t)(((uint64_t)value * 100u + max_value / 2u) / max_value);
+        snprintf(percent_text, sizeof(percent_text), "%u%%", percent);
+        value_text = percent_text;
+    }
     int label_y = y + space_2;
     int value_w = gui_measure_text(gui_font_default(), value_text);
     gui_draw_text_clipped(s, gui_font_default(), x + space_2, label_y, w - value_w - space_2 * 3, label ? label : "",
                           g_gui_style.text, 0);
-    gui_draw_text_clipped(s, gui_font_default(), x + w - space_2 - value_w, label_y, value_w, value_text,
+    gui_draw_text_clipped(s, gui_font_default(), x + w - space_2 - value_w, label_y, value_w + space_2, value_text,
                           g_gui_style.text_muted, 0);
 
     Rect track = gui_app_slider_track_rect(x, y, w, h);

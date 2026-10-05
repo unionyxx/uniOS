@@ -79,6 +79,10 @@ typedef struct WidgetSlider
 void widget_slider_reset(WidgetSlider *s);
 int widget_slider_event(WidgetSlider *s, const Event *ev, uint32_t max_value);
 void widget_slider_draw(Surface *s, const WidgetSlider *slider, const char *label, uint32_t max_value);
+// value_text overrides the right-aligned percent readout (NULL = percent),
+// e.g. a position readout on a seek slider.
+void widget_slider_draw_ex(Surface *s, const WidgetSlider *slider, const char *label, uint32_t max_value,
+                           const char *value_text);
 
 // --- Segmented control ---------------------------------------------------------
 

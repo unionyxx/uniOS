@@ -392,8 +392,10 @@ void gui_app_draw_toggle_row(Surface *s, int x, int y, int w, int h, GuiGlyphKin
 int gui_app_slider_h(void);
 Rect gui_app_slider_track_rect(int x, int y, int w, int h);
 uint32_t gui_app_slider_value_from_x(int mouse_x, const Rect *track, uint32_t max_value);
+// value_text overrides the right-aligned percent readout (NULL = percent);
+// lets a caller show e.g. a position instead of a percentage.
 void gui_app_draw_slider(Surface *s, int x, int y, int w, int h, const char *label, uint32_t value, uint32_t max_value,
-                         bool hovered);
+                         bool hovered, const char *value_text);
 void gui_app_draw_segmented_choice(Surface *s, int x, int y, int w, int h, const char *const *labels, int count,
                                    int selected, int hovered_index);
 void gui_app_draw_text_field(Surface *s, int x, int y, int w, int h, const char *value, bool focused, bool hovered);
