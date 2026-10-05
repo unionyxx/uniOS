@@ -18,7 +18,7 @@ static constexpr int MAX_VOLUMES = 16;
 // Safety bound on a single directory listing so a hostile or corrupt volume
 // cannot exhaust memory; ordinary directories are far smaller.
 static constexpr int MAX_LIST_ROWS = 100000;
-static constexpr int MAX_PLACES = 5;
+static constexpr int MAX_PLACES = 6;
 static constexpr int FILES_ICON_SIZE_PX = 48;
 
 struct PlaceEntry
@@ -33,11 +33,12 @@ static constexpr PlaceEntry k_places[MAX_PLACES] = {
     {"Desktop", "Desktop files", "/data/Desktop"},
     {"Documents", "Documents", "/data/Documents"},
     {"Downloads", "Downloads", "/data/Downloads"},
+    {"Music", "Music", "/data/Music"},
     {"Pictures", "Pictures", "/data/Pictures"},
 };
 
 static constexpr GuiGlyphKind k_place_glyphs[MAX_PLACES] = {
-    GUI_GLYPH_HOME, GUI_GLYPH_DESKTOP, GUI_GLYPH_DOCUMENTS, GUI_GLYPH_DOWNLOADS, GUI_GLYPH_PICTURES,
+    GUI_GLYPH_HOME, GUI_GLYPH_DESKTOP, GUI_GLYPH_DOCUMENTS, GUI_GLYPH_DOWNLOADS, GUI_GLYPH_MUSIC, GUI_GLYPH_PICTURES,
 };
 
 struct FileRow
@@ -1338,13 +1339,14 @@ enum
     FILES_TYPE_ICON_FOLDER = 0,
     FILES_TYPE_ICON_FILE = 1,
     FILES_TYPE_ICON_IMAGE = 2,
-    FILES_TYPE_ICON_COUNT = 3
+    FILES_TYPE_ICON_AUDIO = 3,
+    FILES_TYPE_ICON_COUNT = 4
 };
 
 static Surface g_type_icons[FILES_TYPE_ICON_COUNT] = {};
 static bool g_type_icon_attempted[FILES_TYPE_ICON_COUNT] = {};
 
-// Per-type thumbnail assets (folder / generic file / image file), loaded once
+// Per-type thumbnail assets (folder / generic file / image / audio), loaded once
 // at icon-view size. Falls back to draw_shape_icon when an asset is missing.
 static const Surface *files_type_icon(int kind)
 {
@@ -1352,7 +1354,7 @@ static const Surface *files_type_icon(int kind)
         return nullptr;
     if (!g_type_icon_attempted[kind]) {
         g_type_icon_attempted[kind] = true;
-        static const char *const names[FILES_TYPE_ICON_COUNT] = {"folder", "file", "file-image"};
+        static const char *const names[FILES_TYPE_ICON_COUNT] = {"folder", "file", "file-image", "file-music"};
         char path[64];
         snprintf(path, sizeof(path), "/usr/share/appicons/%s.uoic", names[kind]);
         if (!gui_load_uoic(path, FILES_ICON_SIZE_PX, (uint32_t)gui_ui_scale_pct(), &g_type_icons[kind]))
@@ -1560,7 +1562,9 @@ static void draw_file_icon_cell(Surface *win, AppState *state, const Rect &cell,
     }
     if (!drew_thumb) {
         int kind = row.is_dir ? FILES_TYPE_ICON_FOLDER
-                              : (name_is_image(row.name) ? FILES_TYPE_ICON_IMAGE : FILES_TYPE_ICON_FILE);
+                              : (name_is_image(row.name)
+                                     ? FILES_TYPE_ICON_IMAGE
+                                     : (name_is_audio(row.name) ? FILES_TYPE_ICON_AUDIO : FILES_TYPE_ICON_FILE));
         const Surface *type_icon = files_type_icon(kind);
         if (type_icon) {
             draw_type_icon(win, type_icon, icon_x, icon_y, icon_size);
@@ -1651,7 +1655,7 @@ static void files_draw_table_row(Surface *win, const Rect *r, const FileRow *row
     GuiGlyphKind glyph =
         row->is_dir ? GUI_GLYPH_FOLDER
                     : (name_is_image(row->name) ? GUI_GLYPH_FILE_IMAGE
-                                                : (name_is_audio(row->name) ? GUI_GLYPH_FILE : GUI_GLYPH_FILE_TEXT));
+                                                : (name_is_audio(row->name) ? GUI_GLYPH_MUSIC : GUI_GLYPH_FILE_TEXT));
     gui_draw_glyph(win, icon_x, r->y + (r->h - icon_size) / 2, icon_size, glyph,
                    selected ? g_gui_style.accent : g_gui_style.text_dim);
 

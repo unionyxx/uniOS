@@ -124,7 +124,7 @@ void ensure_default_user_storage_layout()
     struct StandardDir
     {
         const char *c;
-    } dirs[] = {{"/data/Desktop"}, {"/data/Documents"}, {"/data/Downloads"}, {"/data/Pictures"}};
+    } dirs[] = {{"/data/Desktop"}, {"/data/Documents"}, {"/data/Downloads"}, {"/data/Music"}, {"/data/Pictures"}};
     for (auto d : dirs) {
         if (stat(d.c, &st) == 0 && st.is_dir)
             continue;

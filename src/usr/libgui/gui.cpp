@@ -2354,6 +2354,8 @@ static const char *glyph_asset_name(GuiGlyphKind kind)
             return "copy";
         case GUI_GLYPH_DOWNLOADS:
             return "download";
+        case GUI_GLYPH_MUSIC:
+            return "music";
         case GUI_GLYPH_PICTURES:
             return "image";
         case GUI_GLYPH_ARROW_UP:
