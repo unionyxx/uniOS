@@ -295,15 +295,27 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
             if (ticks_passed >= ticks_to_wait) {
                 break;
             }
-            // The wait queue has no native timeout: arm the tick-driven
-            // deadline so the scheduler wakes us when it expires.
-            scheduler_note_epoll_deadline(start_ticks + ticks_to_wait);
+            // The wait queue has no native timeout: register this waiter's
+            // deadline in the timed-wait registry so the tick walker wakes
+            // us when it expires. The entry is kept until we actually park
+            // (the walker re-checks), so arming before the queue push
+            // cannot lose the timeout. A refused registration must fail
+            // the wait: parking without a deadline would sleep past the
+            // timeout on a quiet system with nothing to wake us — the
+            // futex path fails the same way (-ENOMEM).
+            if (!scheduler_note_epoll_deadline(current, start_ticks + ticks_to_wait)) {
+                num_ready = -12; // -ENOMEM
+                break;
+            }
         }
 
         // Queued sleep with a lost-wakeup guard: if a producer changed pipe
         // state (or an event arrived) between the scan above and the queue
         // push, the recheck sees it and we never sleep. Recheck reads are
-        // lockless atomics by design; see scheduler_wait_rechecked().
+        // lockless atomics by design; see scheduler_wait_rechecked(). The
+        // fatal-signal term mirrors sys_futex: a SIGKILL landing between
+        // the loop's own pending check above and this push would otherwise
+        // sleep through its own death until an unrelated wake.
         struct EpollRecheckCtx
         {
             Process *proc;
@@ -314,6 +326,8 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
             &g_epoll_wait_queue, &inst->lock,
             [](void *raw) -> bool {
                 EpollRecheckCtx *ctx = static_cast<EpollRecheckCtx *>(raw);
+                if (scheduler_fatal_signal_pending(ctx->proc))
+                    return true;
                 if (!event_empty(ctx->proc->event_queue))
                     return true;
                 return pipe_state_generation() != ctx->pipe_gen;
@@ -326,6 +340,12 @@ int64_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int 
         // restoring the caller's flags every subsequent iteration (and the
         // rest of the syscall) would run with IRQs masked.
         interrupts_restore(inst_flags2);
+        // The wait ended (event, pipe wake, signal or the deadline walker):
+        // drop this iteration's registration before the loop can re-arm or
+        // exit, mirroring the futex path's clear. A lingering entry makes
+        // the next arm fail and could mark a later, unrelated blocked wait
+        // of this process as a timeout.
+        scheduler_clear_wake_deadline(current);
     }
 
     vfs_close_vnode(ep_vnode);

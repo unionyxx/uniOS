@@ -66,11 +66,14 @@ struct WaitQueue;
 struct Spinlock;
 void scheduler_wait(WaitQueue *q, Spinlock *lock);
 
-// Sleep queue deadline for timed epoll waits. sys_epoll_wait parks on
-// g_epoll_wait_queue, which has no native timeout; the tick path fires the
-// deadline and wakes the queue.
-void scheduler_note_epoll_deadline(uint64_t deadline_ticks);
-
+// Timed-wait deadline registration for sys_epoll_wait: parks on
+// g_epoll_wait_queue, a queue with no native timeout, so the waiter
+// registers its absolute deadline in the unified timed-wait registry
+// before parking and clears it when the wait ends. Returns false when the
+// registration is refused (entry allocation failure or a duplicate from a
+// missed clear): the caller must fail the wait rather than park without a
+// deadline — nothing else would wake it on a quiet system.
+bool scheduler_note_epoll_deadline(struct Process *p, uint64_t deadline_ticks);
 // Queued sleep with a lost-wakeup guard. The task is pushed onto the wait
 // queue under g_sched_lock first; `recheck` then runs while still holding
 // g_sched_lock. If it returns true, the task never sleeps: the condition
@@ -100,16 +103,19 @@ void scheduler_wake_one(WaitQueue *q);
 struct SyscallFrame;
 [[nodiscard]] int64_t sys_thread_create(void (*entry)(), void *arg, void *stack_top, struct SyscallFrame *frame,
                                         uint64_t stack_lo = 0, uint64_t stack_size = 0, uint64_t flags = 0);
-// Deadline machinery for timed waits on leaf wait queues (futex timeouts):
-// register the earliest wake deadline; the scheduler walker wakes waiters
-// still parked on their queue and marks them timed_wake. Returns false
-// (and arms nothing) when the fixed timed-wait table is full — the caller
-// must fail the wait rather than degrade it to an infinite sleep.
-bool scheduler_note_wake_deadline(struct Process *p, uint64_t deadline_ticks);
-// Drop every timed-wait registration for `p`: the wait that armed it has
-// ended (wake, signal, expiry or thread exit). Registrations must never
-// outlive their wait, or the walker marks an unrelated later wait of the
-// same (or a recycled) Process as timed out.
+// Deadline machinery for timed waits (futex timeouts on their bucket's
+// wait queue, sys_epoll_wait timeouts on g_epoll_wait_queue): the waiter
+// registers the absolute tick deadline before parking and clears the
+// registration on EVERY exit path (wake, signal, timeout, thread exit) —
+// a registration must never outlive its wait, or the walker marks an
+// unrelated later wait of the same (or a recycled) Process as timed out.
+// Entries whose waiter is not parked yet are kept and re-checked on the
+// next tick, so arming before the queue push cannot lose a timeout.
+// Returns false only when this process already holds a live registration
+// (a missing clear on some exit path) or the entry allocation failed —
+// never for capacity.
+bool scheduler_note_wake_deadline(struct Process *p, uint64_t deadline_ticks, bool is_epoll = false);
+// Drop every timed-wait registration for `p` (futex and epoll kinds).
 void scheduler_clear_wake_deadline(struct Process *p);
 void scheduler_remove_from_ready_queue(Process *p);
 void scheduler_boost_process_priority(Process *p, uint8_t new_priority);

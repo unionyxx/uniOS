@@ -1215,7 +1215,7 @@ KTEST(fd_transfer_rejects_zombie_without_fd_table)
     leader->page_table = orig_page_table;
 }
 
-KTEST(futex_timed_wait_table_full_returns_enospc)
+KTEST(futex_timed_wait_registry_scales_past_fixed_table)
 {
     Process *leader = process_get_current();
     KTEST_EXPECT(leader != nullptr);
@@ -1242,9 +1242,9 @@ KTEST(futex_timed_wait_table_full_returns_enospc)
     vma->next = nullptr;
     leader->vmalist->head = vma;
 
-    // Fill every timed-wait slot with far-future registrations on fake
-    // stand-ins: the walker only compares pointers, and a far-future
-    // deadline means it never touches them during the test.
+    // Register far more timed waits than the old fixed table ever held:
+    // the registry is dynamic, so every registration must succeed and a
+    // real timed wait still gets its honest timeout.
     Process *dummies[64];
     size_t placed = 0;
     const uint64_t far = timer_get_ticks() + 1000000000ULL;
@@ -1253,11 +1253,11 @@ KTEST(futex_timed_wait_table_full_returns_enospc)
         if (!scheduler_note_wake_deadline(dummies[placed], far))
             break;
     }
-    KTEST_EXPECT(placed >= 1);
+    KTEST_EXPECT_EQ(placed, 64u);
 
-    // The next timed waiter must get an honest -ENOSPC instead of a
-    // silently dropped timeout (an unbounded hang).
-    KTEST_EXPECT_EQ(sys_futex(word, FUTEX_WAIT, 0, 50), -28);
+    // The next timed waiter must time out normally: no -ENOSPC, no
+    // dropped timeout (an unbounded hang), no -ENOMEM.
+    KTEST_EXPECT_EQ(sys_futex(word, FUTEX_WAIT, 0, 50), -110);
 
     for (size_t i = 0; i <= placed && i < 64; i++)
         scheduler_clear_wake_deadline(dummies[i]);

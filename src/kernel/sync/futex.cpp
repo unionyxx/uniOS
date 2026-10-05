@@ -148,10 +148,13 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
 
             if (!scheduler_note_wake_deadline(current, deadline)) {
                 spinlock_release_irqrestore(&bucket->lock, flags);
-                // The fixed timed-wait table is full: an honest error
-                // beats a wait that silently lost its timeout (an
-                // unbounded hang nobody can diagnose in release builds).
-                return -28; // -ENOSPC
+                // Registration refused: either the entry allocation failed
+                // (real memory shortage) or this process already holds a
+                // live registration (a missing clear on some exit path).
+                // Both are logged at registration; an honest -ENOMEM beats
+                // a wait that silently lost its timeout (an unbounded hang
+                // nobody can diagnose in release builds).
+                return -12; // -ENOMEM
             }
             // Same queued fatal-signal recheck as the untimed branch: on
             // SMP the signal can land between the pre-wait check above and
@@ -217,6 +220,13 @@ int64_t sys_futex(volatile uint32_t *uaddr, int op, uint32_t val, uint64_t timeo
             },
             &word_phys);
         spinlock_release_irqrestore(&bucket->lock, flags);
+        // Notify idle cores strictly AFTER the woken waiters are enqueued
+        // (the wake happens inside scheduler_wake_waiters_under_leaf above,
+        // under g_sched_lock): a parked core must never observe an empty
+        // runqueue and sleep through the new work. Without this, wake
+        // latency on SMP was up to a full tick.
+        if (woken > 0)
+            scheduler_notify_idle_cpus();
         return woken;
     }
 
