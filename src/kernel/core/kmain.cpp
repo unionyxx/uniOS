@@ -658,8 +658,19 @@ extern "C" [[gnu::target("no-sse")]] void _start(BootInfo *boot_info)
     boot_timing_log("kernel critical path ready");
 
 #ifdef DEBUG
+    // ktests park real tasks on timed waits (futex timeouts, the timed-wait
+    // registry); those wake only from tick-driven scheduler passes. The boot
+    // critical path runs with interrupts off, and without the timer IRQ the
+    // tick counter only advances inside the brief post-sti windows of spawned
+    // tasks — a parked waiter with no covering sti window would hang forever.
+    // Every IRQ consumer the tests can reach (APIC, PS/2, xHCI) is registered
+    // by this point, so enable interrupts for the suite; smp_init() has not
+    // run yet, so this stays BSP-local. Interrupts go back off afterwards:
+    // smp_init's bring-up sequence expects to enter with IF=0.
+    asm volatile("sti" ::: "memory");
     ktest_run_all();
     gfx_swap_buffers();
+    asm volatile("cli" ::: "memory");
 #else
     DEBUG_TRACE("kernel tests disabled in release build");
 #endif
