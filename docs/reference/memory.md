@@ -71,6 +71,7 @@ Cross-core invalidation uses an IPI with monotonic sequence acknowledgements (`s
 
 - 8 buckets: 32, 64, 128, 256, 512, 1024, 2048, 4096 bytes. Free blocks live in per-bucket lists; slab pages are tracked in an open-addressed table (65536 slots). When a page's blocks are all free, the page returns to the PMM.
 - Allocations carry a header with size and magic (`0xC0FFEE1234567890`); `free` and `realloc` validate it.
+- `aligned_alloc` plants a 24-byte inner header `{aligned_offset, base, magic}` in the over-allocation; `free` trusts an aligned back-pointer only after a full validation chain (magic, base sanity, exact offset round-trip, live base magic, size spanning) and scrubs the base magic with a freed sentinel on release — recycled blocks can never fake aligned metadata. Any corruption aborts loudly (panic in debug, logged refusal in release), never a misdirected free.
 - Requests larger than one page go straight to contiguous PMM frames at their HHDM address.
 - `heap_init` only zeroes metadata; the heap grows on demand. Global `operator new`/`delete` forward to it.
 - `heap_dump_stats()` walks the free lists and tracked-page table for debugging.

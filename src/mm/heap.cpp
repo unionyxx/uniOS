@@ -2,6 +2,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/panic.h>
 #include <kernel/sync/spinlock.h>
 #include <kernel/terminal.h>
 #include <libk/kstring.h>
@@ -13,6 +14,10 @@ constexpr size_t MAX_BUCKET_SIZE = 4096;
 constexpr int NUM_BUCKETS = 8;
 constexpr uint64_t HEAP_MAGIC = 0xC0FFEE1234567890ULL;
 constexpr uint64_t ALIGNED_MAGIC = 0x12345678C0FFEE00ULL;
+// Scrubbed over HEAP_MAGIC at free time. While a block sits in a free list its
+// magic is this sentinel, so a stale aligned header whose round-trip resolves
+// to it fails the live-base check in heap_resolve_header.
+constexpr uint64_t HEAP_FREED_MAGIC = 0xDEADC0DEDEADBEEFULL;
 
 struct FreeBlock
 {
@@ -23,6 +28,18 @@ struct AllocHeader
 {
     size_t size;
     uint64_t magic;
+};
+
+// Inner header of an aligned allocation, planted in the malloc over-allocation
+// padding directly below the returned pointer p, occupying
+// [p - sizeof(AlignedHeader), p). base and magic deliberately alias the
+// AllocHeader layout (base at p - 16, magic at p - 8) so heap_resolve_header
+// can tell plain and aligned blocks apart from the single probe at p - 8.
+struct AlignedHeader
+{
+    uint64_t aligned_offset; // p - base: the exact round-trip partner
+    uint64_t base;           // user pointer of the underlying malloc block
+    uint64_t magic;          // ALIGNED_MAGIC
 };
 
 static FreeBlock *g_buckets[NUM_BUCKETS];
@@ -70,6 +87,46 @@ static PageSlot g_page_slots[MAX_TRACKED_PAGES];
     return alignment;
 }
 
+#ifdef DEBUG
+// Ktest fault injection: when set, metadata-corruption aborts are reported here
+// instead of panicking, so tests can drive the refuse-never-misroute path. Runs
+// with IRQs disabled but g_heap_lock RELEASED (callers abort after unlocking) —
+// the hook must not touch heap state; record only.
+static void (*g_heap_corruption_hook)(void *ptr, const char *reason);
+#endif
+
+// Corrupt allocation metadata is a kernel bug: panic in debug builds, log and
+// refuse in release (leaking a block is always safer than a misdirected free).
+static void heap_corruption_abort(void *ptr, const char *reason)
+{
+#ifdef DEBUG
+    if (g_heap_corruption_hook) {
+        g_heap_corruption_hook(ptr, reason);
+        return;
+    }
+    DEBUG_ERROR("heap: corrupt allocation metadata at %p: %s", ptr, reason);
+    panic("heap: corrupt allocation metadata (details in log)");
+#else
+    DEBUG_ERROR("heap: corrupt allocation metadata at %p: %s", ptr, reason);
+#endif
+}
+
+#ifdef DEBUG
+void heap_debug_set_corruption_hook(void (*hook)(void *, const char *))
+{
+    g_heap_corruption_hook = hook;
+}
+#endif
+
+// Resolve the AllocHeader owning `user_ptr`, following the aligned-allocation
+// indirection when present. Plain blocks return their own header directly.
+// Aligned blocks must pass the full validation chain — ANY failure is corrupt
+// metadata and aborts; the caller must refuse, never misroute:
+//   1. base is sane: non-null, 16-aligned (every heap user pointer is), below p
+//   2. aligned_offset covers the inner header itself (>= sizeof(AlignedHeader))
+//   3. exact round-trip: base + aligned_offset == p, overflow-free
+//   4. the base block is a live allocation: its AllocHeader carries HEAP_MAGIC
+//      and its span covers p (freed bases carry HEAP_FREED_MAGIC and fail here)
 [[nodiscard]] static AllocHeader *heap_resolve_header(void *user_ptr, void **base_user_ptr_out,
                                                       bool *was_aligned_out = nullptr)
 {
@@ -80,21 +137,33 @@ static PageSlot g_page_slots[MAX_TRACKED_PAGES];
     if (!user_ptr)
         return nullptr;
 
-    AllocHeader *header = reinterpret_cast<AllocHeader *>(user_ptr) - 1;
-    if (header->magic != ALIGNED_MAGIC)
-        return header;
+    AllocHeader *probe = reinterpret_cast<AllocHeader *>(user_ptr) - 1;
+    if (probe->magic != ALIGNED_MAGIC)
+        return probe;
 
-    uintptr_t raw_addr = static_cast<uintptr_t>(header->size);
     uintptr_t user_addr = reinterpret_cast<uintptr_t>(user_ptr);
-    if (raw_addr == 0 || raw_addr >= user_addr)
+    AlignedHeader *inner = reinterpret_cast<AlignedHeader *>(user_addr - sizeof(AlignedHeader));
+    uintptr_t base_addr = inner->base;
+    uintptr_t offset = inner->aligned_offset;
+
+    if (base_addr == 0 || (base_addr & (sizeof(AllocHeader) - 1)) != 0 || base_addr >= user_addr ||
+        offset < sizeof(AlignedHeader) || offset != user_addr - base_addr) {
+        heap_corruption_abort(user_ptr, "aligned header fails base/offset validation");
         return nullptr;
+    }
+
+    AllocHeader *base_header = reinterpret_cast<AllocHeader *>(base_addr) - 1;
+    if (base_header->magic != HEAP_MAGIC || base_header->size < sizeof(AllocHeader) ||
+        base_header->size - sizeof(AllocHeader) < offset) {
+        heap_corruption_abort(user_ptr, "aligned base is not a live allocation");
+        return nullptr;
+    }
 
     if (base_user_ptr_out)
-        *base_user_ptr_out = reinterpret_cast<void *>(raw_addr);
+        *base_user_ptr_out = reinterpret_cast<void *>(base_addr);
     if (was_aligned_out)
         *was_aligned_out = true;
-
-    return reinterpret_cast<AllocHeader *>(raw_addr) - 1;
+    return base_header;
 }
 
 static inline uint32_t hash_page(uint64_t virt)
@@ -281,8 +350,11 @@ void heap_init(void *start, size_t size)
     if (alignment <= 16)
         return malloc(size);
 
+    // Over-allocate for the base AllocHeader, the inner AlignedHeader below the
+    // aligned address, and the alignment slack.
     size_t total = 0;
-    if (add_overflow(size, alignment - 1, &total) || add_overflow(total, sizeof(AllocHeader), &total))
+    if (add_overflow(size, alignment - 1, &total) || add_overflow(total, sizeof(AllocHeader), &total) ||
+        add_overflow(total, sizeof(AlignedHeader), &total))
         return nullptr;
 
     const void *raw = malloc(total);
@@ -290,11 +362,15 @@ void heap_init(void *start, size_t size)
         return nullptr;
 
     uintptr_t raw_addr = reinterpret_cast<uintptr_t>(raw);
-    uintptr_t aligned_addr = (raw_addr + sizeof(AllocHeader) + alignment - 1) & ~(alignment - 1);
+    // Rounding up past sizeof(AlignedHeader) guarantees the inner header at
+    // [aligned_addr - sizeof(AlignedHeader), aligned_addr) stays inside the
+    // base block's user area.
+    uintptr_t aligned_addr = (raw_addr + sizeof(AlignedHeader) + alignment - 1) & ~(alignment - 1);
 
-    AllocHeader *align_header = reinterpret_cast<AllocHeader *>(aligned_addr) - 1;
-    align_header->size = raw_addr;
-    align_header->magic = ALIGNED_MAGIC;
+    AlignedHeader *inner = reinterpret_cast<AlignedHeader *>(aligned_addr - sizeof(AlignedHeader));
+    inner->aligned_offset = aligned_addr - raw_addr;
+    inner->base = raw_addr;
+    inner->magic = ALIGNED_MAGIC;
 
     return reinterpret_cast<void *>(aligned_addr);
 }
@@ -311,16 +387,31 @@ void free(void *ptr)
 
     uint64_t flags = spinlock_acquire_irqsave(&g_heap_lock);
 
-    void *base_user_ptr = ptr;
-    AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr);
-    if (!header || header->magic != HEAP_MAGIC) [[unlikely]] {
+    bool was_aligned = false;
+    AllocHeader *header = heap_resolve_header(ptr, nullptr, &was_aligned);
+    if (!header) [[unlikely]] {
+        // heap_resolve_header already aborted loudly on the failed chain.
         spinlock_release_irqrestore(&g_heap_lock, flags);
-        DEBUG_ERROR("Heap corruption detected at %p", ptr);
+        return;
+    }
+    if (header->magic != HEAP_MAGIC) [[unlikely]] {
+        spinlock_release_irqrestore(&g_heap_lock, flags);
+        heap_corruption_abort(ptr, "block header does not carry HEAP_MAGIC");
         return;
     }
 
+    if (was_aligned) {
+        // Load-bearing scrub: the inner header dies with the free. A recycled
+        // block must never carry a live-looking aligned header, or a stale
+        // interior pointer (base + aligned_offset) would validate fully and
+        // misdirect the free into whatever lives at the base now.
+        AlignedHeader *inner =
+            reinterpret_cast<AlignedHeader *>(reinterpret_cast<uintptr_t>(ptr) - sizeof(AlignedHeader));
+        kstring::zero_memory(inner, sizeof(AlignedHeader));
+    }
+
     size_t size = header->size;
-    header->magic = 0;
+    header->magic = HEAP_FREED_MAGIC;
 
     if (size > MAX_BUCKET_SIZE) {
         size_t pages = size / 4096;
@@ -382,8 +473,14 @@ void free(void *ptr)
         uint64_t flags = spinlock_acquire_irqsave(&g_heap_lock);
         const AllocHeader *header = heap_resolve_header(ptr, &base_user_ptr, &was_aligned);
 
-        if (!header || header->magic != HEAP_MAGIC || header->size < sizeof(AllocHeader)) {
+        if (!header) [[unlikely]] {
+            // heap_resolve_header already aborted loudly on the failed chain.
             spinlock_release_irqrestore(&g_heap_lock, flags);
+            return nullptr;
+        }
+        if (header->magic != HEAP_MAGIC || header->size < sizeof(AllocHeader)) [[unlikely]] {
+            spinlock_release_irqrestore(&g_heap_lock, flags);
+            heap_corruption_abort(ptr, "realloc header failed validation");
             return nullptr;
         }
 
