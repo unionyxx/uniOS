@@ -20,7 +20,7 @@ enum PlayerPhase
     PH_PLAYING, // feeder running, card clocking out samples
     PH_PAUSED,  // feeder parked on the condvar, card paused
     PH_DONE,    // feeder reached EOF and drained
-    PH_STOPPED, // stopped by the user
+    PH_STOPPED, // stopped by the user (or displaced by another app)
     PH_ERROR    // load or stream failed
 };
 
@@ -38,9 +38,10 @@ struct PlayerState
     char path[256];
     media_audio_info info;
     char error_msg[128];
-    uint64_t seek_to;     // absolute file offset, PLAYER_SEEK_NONE = none
-    uint64_t stream_base; // file offset of the first byte queued in the open stream
-    bool info_valid;      // feeder published info under lock
+    uint64_t seek_to;      // absolute file offset, PLAYER_SEEK_NONE = none
+    uint64_t stream_base;  // file offset of the first byte queued in the open stream
+    uint64_t start_offset; // relative payload offset a fresh feeder starts from
+    bool info_valid;       // feeder published info under lock
     bool feeder_alive;
     pthread_t feeder;
 
@@ -80,6 +81,15 @@ uint64_t pcm_seconds(const media_audio_info *info, uint64_t payload_bytes)
     if (frame == 0)
         return 0;
     return payload_bytes / frame;
+}
+
+// The kernel stream is single and global: another app's stream_open resets
+// ours. Ownership is observed through sound_status, never guessed from
+// phases - only our own stream may be torn down or polled for position.
+bool stream_owned(PlayerState *st)
+{
+    struct sound_status status;
+    return sound_status(&status) == 0 && status.active && status.owned;
 }
 
 // Feeder-side helpers (the feeder owns stream_open/write/end; nothing else).
@@ -127,12 +137,13 @@ void *feeder_thread(void *arg)
     pthread_mutex_lock(&st->lock);
     st->info = local;
     st->info_valid = true;
+    uint64_t offset = local.data_start + st->start_offset;
     pthread_mutex_unlock(&st->lock);
 
-    uint64_t offset = local.data_start;
     uint64_t payload_end = local.data_start + local.data_size;
+    if (offset > payload_end)
+        offset = payload_end;
     bool stream_mine = false;
-    bool first_open = true;
     bool eof_signalled = false;
 
 reopen:
@@ -149,10 +160,7 @@ reopen:
     pthread_mutex_lock(&st->lock);
     st->stream_base = offset;
     pthread_mutex_unlock(&st->lock);
-    if (first_open) {
-        first_open = false;
-        LOG_INFO("musicplayer", "play: %s (%u Hz, %u ch)", st->path, local.sample_rate, local.channels);
-    }
+    LOG_INFO("musicplayer", "play: %s (%u Hz, %u ch)", st->path, local.sample_rate, local.channels);
 
     for (;;) {
         pthread_mutex_lock(&st->lock);
@@ -164,13 +172,13 @@ reopen:
         }
         if (st->seek_to != PLAYER_SEEK_NONE) {
             uint64_t target = st->seek_to;
+            st->seek_to = PLAYER_SEEK_NONE;
+            pthread_mutex_unlock(&st->lock);
             if (target < local.data_start)
                 target = local.data_start;
             if (target > payload_end)
                 target = payload_end;
             offset = target;
-            st->seek_to = PLAYER_SEEK_NONE;
-            pthread_mutex_unlock(&st->lock);
             LOG_INFO("musicplayer", "seek: %u s", (unsigned)pcm_seconds(&local, target - local.data_start));
             // sound_stop is global (single kernel stream): only when the
             // stream is still ours may we tear it down for the restart.
@@ -194,15 +202,25 @@ reopen:
             // is not the end of the audio. Poll the drain inside the main
             // loop so the transport stays live (timer, pause, seek) until
             // the card has actually played everything - the kernel
-            // auto-closes an ended, fully drained stream, which is the
+            // auto-closes an ended, fully drained stream (and closes a
+            // never-started empty one immediately), which is the
             // completion signal here.
             struct sound_status status;
-            const bool stream_alive = sound_status(&status) == 0 && status.active;
-            if (!stream_alive) {
+            const bool have_status = sound_status(&status) == 0;
+            const bool displaced = have_status && status.active && !status.owned;
+            const bool drained = !have_status || !status.active;
+            if (displaced || drained) {
                 pthread_mutex_lock(&st->lock);
-                st->phase = PH_DONE;
+                // A seek that raced the drain completion must not be lost
+                // to the terminal phase: re-check under the lock, and let
+                // the loop top consume the pending seek instead.
+                if (st->seek_to != PLAYER_SEEK_NONE) {
+                    pthread_mutex_unlock(&st->lock);
+                    continue;
+                }
+                st->phase = displaced ? PH_STOPPED : PH_DONE;
                 pthread_mutex_unlock(&st->lock);
-                LOG_INFO("musicplayer", "done");
+                LOG_INFO("musicplayer", displaced ? "stream taken over" : "done");
                 goto out;
             }
             sleep_ms(40);
@@ -218,24 +236,21 @@ reopen:
             goto out;
         }
 
-        // Classic syscalls mask every negative return to -1 (there is no
-        // errno channel), so any failure here means the stream was stopped
-        // under us: the kernel's own EPIPE/EINTR distinction is unobservable.
+        // Streaming writes fail only when the stream was closed under us
+        // (stop/seek restart, another opener, owner teardown): the write
+        // syscall no longer has a legacy whole-buffer fallback.
         int64_t written = sound_write(chunk, (uint32_t)nread);
         if (written < 0) {
             pthread_mutex_lock(&st->lock);
             bool seek_pending = (st->seek_to != PLAYER_SEEK_NONE);
-            // A seek carries its own restart; only a bare stop demotes the
-            // phase, or the reopened feeder would exit immediately.
-            if (!seek_pending && st->phase == PH_PLAYING)
+            // A seek carries its own restart; a bare loss demotes the
+            // phase, or a respawned feeder would exit immediately.
+            if (!seek_pending && (st->phase == PH_PLAYING || st->phase == PH_PAUSED))
                 st->phase = PH_STOPPED;
             pthread_mutex_unlock(&st->lock);
             stream_mine = false;
             if (seek_pending)
                 continue; // the seek branch above reopens the stream
-            // UI stop or teardown - or another app took the single stream.
-            // Either way this feeder must not write another byte: without a
-            // stream sound_write falls into the legacy whole-buffer path.
             LOG_INFO("musicplayer", "stream stopped");
             goto out;
         }
@@ -253,23 +268,36 @@ out:
 
 // UI-side actions (the UI thread owns pause/resume/stop/volume/status).
 
-void player_start(PlayerState *st)
+// Byte offsets handed to the player must land on whole PCM sample frames:
+// the kernel stream rejects partial-frame writes, so a slider position or
+// restart offset is floored to the frame size before use.
+uint64_t align_to_frame(const media_audio_info *info, uint64_t rel_bytes)
+{
+    const uint64_t frame = (uint64_t)info->channels * (info->bits_per_sample / 8);
+    if (frame == 0)
+        return rel_bytes;
+    return rel_bytes - rel_bytes % frame;
+}
+
+// Every action decides under one lock hold at action time - a phase
+// snapshot taken at event entry could be stale by the time the click fires.
+
+void player_start(PlayerState *st, uint64_t start_offset)
 {
     if (!st->path[0] || !st->card_present)
         return;
 
     // Reap a feeder that exited on its own (DONE/ERROR); stop one that is
-    // somehow still running before respawning. The phase flip plus signal
-    // also unparks a feeder condvar-waiting in PAUSED, or the join hangs.
+    // still running. The phase flip plus signal also unparks a feeder
+    // condvar-waiting in PAUSED, or the join hangs; a write-blocked one
+    // observes the closed stream instead. Only our own stream may be
+    // stopped - after DONE/ERROR another app may already be playing.
     if (st->feeder_alive) {
         pthread_mutex_lock(&st->lock);
-        PlayerPhase live = st->phase;
         st->phase = PH_STOPPED;
         st->seek_to = PLAYER_SEEK_NONE;
         pthread_mutex_unlock(&st->lock);
-        // Only touch the global stream when the dying feeder could still
-        // own it; on DONE/ERROR another app may already be playing.
-        if (live == PH_PLAYING || live == PH_PAUSED)
+        if (stream_owned(st))
             sound_stop();
         pthread_cond_signal(&st->cv);
         pthread_join(st->feeder, nullptr);
@@ -279,10 +307,12 @@ void player_start(PlayerState *st)
     pthread_mutex_lock(&st->lock);
     st->phase = PH_PLAYING;
     st->seek_to = PLAYER_SEEK_NONE;
+    start_offset = align_to_frame(&st->info, start_offset);
+    st->start_offset = start_offset;
     st->info_valid = false;
     st->error_msg[0] = '\0';
     pthread_mutex_unlock(&st->lock);
-    st->last_pos = 0; // UI-only: the new track starts at zero
+    st->last_pos = start_offset; // UI-only: the new track starts here
     st->last_seen_played = ~(uint64_t)0;
 
     if (pthread_create(&st->feeder, nullptr, feeder_thread, st) == 0) {
@@ -296,38 +326,65 @@ void player_start(PlayerState *st)
     }
 }
 
-void player_pause(PlayerState *st)
+void player_toggle_play(PlayerState *st)
 {
-    pthread_mutex_lock(&st->lock);
-    st->phase = PH_PAUSED;
-    pthread_mutex_unlock(&st->lock);
-    sound_pause();
-    LOG_INFO("musicplayer", "pause");
-}
+    if (!st->path[0] || !st->card_present)
+        return;
 
-void player_resume(PlayerState *st)
-{
+    enum ToggleAction
+    {
+        TOGGLE_PAUSE,
+        TOGGLE_RESUME,
+        TOGGLE_START,
+    } action;
+
     pthread_mutex_lock(&st->lock);
-    st->phase = PH_PLAYING;
+    if (st->phase == PH_PLAYING) {
+        st->phase = PH_PAUSED;
+        action = TOGGLE_PAUSE;
+    } else if (st->phase == PH_PAUSED) {
+        st->phase = PH_PLAYING;
+        action = TOGGLE_RESUME;
+    } else {
+        // EMPTY/DONE/STOPPED/ERROR: (re)start from the beginning.
+        action = TOGGLE_START;
+    }
     pthread_mutex_unlock(&st->lock);
-    sound_resume();
-    pthread_cond_signal(&st->cv);
-    LOG_INFO("musicplayer", "resume");
+
+    if (action == TOGGLE_PAUSE) {
+        sound_pause();
+        LOG_INFO("musicplayer", "pause");
+    } else if (action == TOGGLE_RESUME) {
+        sound_resume();
+        pthread_cond_signal(&st->cv);
+        LOG_INFO("musicplayer", "resume");
+    } else {
+        player_start(st, 0);
+    }
 }
 
 void player_stop(PlayerState *st)
 {
     pthread_mutex_lock(&st->lock);
+    const bool live = (st->phase == PH_PLAYING || st->phase == PH_PAUSED);
     st->phase = PH_STOPPED;
+    st->seek_to = PLAYER_SEEK_NONE;
     pthread_mutex_unlock(&st->lock);
-    sound_stop();
-    // Unpark a feeder waiting in PAUSED; one blocked in sound_write wakes on
-    // -EPIPE and exits through the same phase check.
-    pthread_cond_signal(&st->cv);
+
     if (st->feeder_alive) {
+        // Unpark a feeder waiting in PAUSED; one blocked in sound_write
+        // wakes on the closed stream and exits through the same phase
+        // check. A foreign stream (another app took the card) is not ours
+        // to stop.
+        if (live && stream_owned(st))
+            sound_stop();
+        pthread_cond_signal(&st->cv);
         pthread_join(st->feeder, nullptr);
         st->feeder_alive = false;
     }
+    // A stopped player returns to the start of the track.
+    st->last_pos = 0;
+    st->last_seen_played = ~(uint64_t)0;
     LOG_INFO("musicplayer", "stop");
 }
 
@@ -338,13 +395,29 @@ void player_seek(PlayerState *st, uint64_t rel_bytes)
         pthread_mutex_unlock(&st->lock);
         return;
     }
+    rel_bytes = align_to_frame(&st->info, rel_bytes);
+    if (rel_bytes > st->info.data_size)
+        rel_bytes = st->info.data_size;
     st->seek_to = st->info.data_start + rel_bytes;
+    const bool feeder_live = st->feeder_alive && (st->phase == PH_PLAYING || st->phase == PH_PAUSED);
     pthread_mutex_unlock(&st->lock);
-    // Break a write blocked on a full ring; the feeder re-reads the state on
-    // -EPIPE and takes the seek branch. Also stops the stream for the
-    // restart the feeder performs there.
-    sound_stop();
+
+    if (!feeder_live) {
+        // Finished, stopped or failed: a seek restarts playback at the
+        // offset instead of being a dead control.
+        player_start(st, rel_bytes);
+        return;
+    }
+
+    // Break a write blocked on a full ring; the feeder re-reads the state
+    // after the failed write and takes the seek branch. Only our own
+    // stream may be torn down for the restart.
+    if (stream_owned(st))
+        sound_stop();
     pthread_cond_signal(&st->cv);
+    // Hold the target during the restart so the position display does not
+    // snap back to the pre-seek spot while the ring refills.
+    st->last_pos = rel_bytes;
 }
 
 void player_teardown(PlayerState *st)
@@ -354,7 +427,8 @@ void player_teardown(PlayerState *st)
     pthread_mutex_lock(&st->lock);
     st->phase = PH_STOPPED;
     pthread_mutex_unlock(&st->lock);
-    sound_stop();
+    if (stream_owned(st))
+        sound_stop();
     pthread_cond_signal(&st->cv);
     pthread_join(st->feeder, nullptr);
     st->feeder_alive = false;
@@ -413,7 +487,7 @@ void musicplayer_draw(App *app, Surface *canvas)
             LOG_INFO("musicplayer", "open request: %s", st->open_path);
             strncpy(st->path, st->open_path, sizeof(st->path) - 1);
             st->path[sizeof(st->path) - 1] = '\0';
-            player_start(st);
+            player_start(st, 0);
         } else {
             LOG_INFO("musicplayer", "ready");
         }
@@ -450,14 +524,16 @@ void musicplayer_draw(App *app, Surface *canvas)
 
     PlayerSnapshot snap = take_snapshot(st);
 
-    // Poll the stream position (transport syscalls are UI-owned; the status
-    // struct is a kernel-side snapshot and needs no lock). The last position
-    // is kept so DONE/STOPPED keep showing where playback ended; the clamp
-    // also bounds a stale last_pos until the new track's first poll lands.
+    // Poll the stream position (transport syscalls are UI-owned). Only a
+    // stream that is still ours is a valid position source: a foreign
+    // stream (another app opened one) resets ours, and its numbers would
+    // be garbage here. The last position is kept so DONE/STOPPED keep
+    // showing where playback ended, and a seek holds its target through
+    // the restart.
     uint64_t played_rel = st->last_pos;
     if (snap.phase == PH_PLAYING || snap.phase == PH_PAUSED) {
         struct sound_status status;
-        if (sound_status(&status) == 0 && status.active && snap.info_valid) {
+        if (sound_status(&status) == 0 && status.active && status.owned && snap.info_valid) {
             uint64_t base;
             pthread_mutex_lock(&st->lock);
             base = st->stream_base;
@@ -585,7 +661,7 @@ void musicplayer_idle(App *app)
     if (snap.phase != PH_PLAYING)
         return;
     struct sound_status status;
-    if (sound_status(&status) != 0 || !status.active)
+    if (sound_status(&status) != 0 || !status.active || !status.owned)
         return;
     if (status.played_bytes != st->last_seen_played) {
         st->last_seen_played = status.played_bytes;
@@ -622,7 +698,8 @@ void musicplayer_event(App *app, const Event *ev)
                 changed |= (widget_slider_event(&st->volume, ev, 100) & WIDGET_CHANGED) != 0;
                 changed |= (widget_button_event(&st->play, ev) & WIDGET_CHANGED) != 0;
                 changed |= (widget_button_event(&st->stop, ev) & WIDGET_CHANGED) != 0;
-                changed |= (widget_button_event(&st->demo, ev) & WIDGET_CHANGED) != 0;
+                if (!st->path[0])
+                    changed |= (widget_button_event(&st->demo, ev) & WIDGET_CHANGED) != 0;
                 if (changed)
                     app_invalidate_all(app);
             }
@@ -641,7 +718,8 @@ void musicplayer_event(App *app, const Event *ev)
             // Buttons track the press here so release-to-apply can fire on UP.
             changed |= (widget_button_event(&st->play, ev) & WIDGET_CHANGED) != 0;
             changed |= (widget_button_event(&st->stop, ev) & WIDGET_CHANGED) != 0;
-            changed |= (widget_button_event(&st->demo, ev) & WIDGET_CHANGED) != 0;
+            if (!st->path[0])
+                changed |= (widget_button_event(&st->demo, ev) & WIDGET_CHANGED) != 0;
             if (changed)
                 app_invalidate_all(app);
             break;
@@ -660,36 +738,31 @@ void musicplayer_event(App *app, const Event *ev)
             if (vol_ev & WIDGET_CLICKED)
                 sound_volume(st->volume.value);
 
-            if ((seek_ev & WIDGET_CLICKED) && (snap.phase == PH_PLAYING || snap.phase == PH_PAUSED)) {
+            if ((seek_ev & WIDGET_CLICKED) && seek_enabled) {
                 // Slider max is the payload size, so value is already the
-                // relative byte offset.
+                // relative byte offset. Dead phases restart at the offset.
                 player_seek(st, st->seek.value);
                 app_invalidate_all(app);
             }
 
             if (widget_button_event(&st->play, ev) & WIDGET_CLICKED) {
-                if (snap.phase == PH_PLAYING) {
-                    player_pause(st);
-                } else if (snap.phase == PH_PAUSED) {
-                    player_resume(st);
-                } else {
-                    player_start(st);
-                }
+                player_toggle_play(st);
                 app_invalidate_all(app);
             }
 
-            if (widget_button_event(&st->demo, ev) & WIDGET_CLICKED) {
+            // The demo button exists only in the empty state: its rect
+            // would otherwise stay stale after a track loads and silently
+            // restart the demo on clicks in that area.
+            if (!st->path[0] && widget_button_event(&st->demo, ev) & WIDGET_CLICKED) {
                 strncpy(st->path, DEMO_TRACK, sizeof(st->path) - 1);
                 st->path[sizeof(st->path) - 1] = '\0';
-                player_start(st);
+                player_start(st, 0);
                 app_invalidate_all(app);
             }
 
             if (widget_button_event(&st->stop, ev) & WIDGET_CLICKED) {
-                if (snap.phase == PH_PLAYING || snap.phase == PH_PAUSED) {
-                    player_stop(st);
-                    app_invalidate_all(app);
-                }
+                player_stop(st);
+                app_invalidate_all(app);
             }
             break;
         }
