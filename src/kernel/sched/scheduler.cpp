@@ -221,6 +221,52 @@ static bool process_reap_classify_locked(Process *target)
     return true;
 }
 
+// Kernel stacks live in the VMM's dedicated guard region (vmm.h): one
+// non-present guard page below the 16 PMM frames. stack_base points at the
+// lowest PRESENT page, so rsp0 = stack_base + KERNEL_STACK_SIZE and the
+// canary/bootstrap math are exactly what they were on the old HHDM-mapped
+// stacks. A kernel-mode access below the base faults into the region's
+// #PF check and panics as "kernel stack overflow" (C12).
+//
+// task_kernel_stack_alloc: takes 16 frames from the PMM, maps them into a
+// fresh region slot, and stamps the canary words at stack_base[0..7]
+// (defense in depth behind the guard page). Returns false with nothing
+// taken on failure.
+[[nodiscard]] static bool task_kernel_stack_alloc(Process *proc)
+{
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    void *frames = pmm_alloc_frames(stack_pages);
+    if (!frames)
+        return false;
+    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
+
+    const uint64_t stack_base = vmm_map_kernel_stack(proc->stack_phys);
+    if (stack_base == 0) {
+        for (size_t i = 0; i < stack_pages; i++)
+            pmm_free_frame(reinterpret_cast<void *>(proc->stack_phys + i * 4096));
+        proc->stack_phys = 0;
+        return false;
+    }
+
+    proc->stack_base = reinterpret_cast<uint64_t *>(stack_base);
+    for (size_t i = 0; i < 8; i++)
+        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+    return true;
+}
+
+// Unmaps the region slot (the flush inside completes on every core before
+// the frames return to the PMM — the vmm_free_dma contract) and frees the
+// 16 backing frames.
+static void task_kernel_stack_free(Process *proc)
+{
+    if (!proc->stack_phys)
+        return;
+    vmm_unmap_kernel_stack(reinterpret_cast<uint64_t>(proc->stack_base));
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    for (size_t i = 0; i < stack_pages; i++)
+        pmm_free_frame(reinterpret_cast<void *>(proc->stack_phys + i * 4096));
+}
+
 // Free a classified-unshared reaped target. Runs with no scheduler lock.
 // Non-owners (threads) release only their kernel stack and struct: the
 // page table and VMA list object belong to the group leader.
@@ -228,15 +274,9 @@ static void process_free_now(Process *target)
 {
     const bool owns_address_space = target->vma_lock_ptr == &target->vma_lock;
 
-    if (target->stack_phys) {
-        uintptr_t stack_ptr = target->stack_phys;
-        size_t num_pages = KERNEL_STACK_SIZE / 4096;
-
-        for (size_t i = 0; i < num_pages; i++) {
-            pmm_free_frame(reinterpret_cast<void *>(stack_ptr));
-            stack_ptr += 4096; // Move to the next page frame
-        }
-    }
+    // Guarded by stack_phys: the boot kernel task (pid 0) still runs on the
+    // bootloader's HHDM stack and has no region slot to unmap.
+    task_kernel_stack_free(target);
 
     if (owns_address_space) {
         if (target->page_table)
@@ -1594,9 +1634,7 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *frames = pmm_alloc_frames(stack_pages);
-    if (!frames) {
+    if (!task_kernel_stack_alloc(proc)) {
         // Roll back the fd table and VMA list object taken above along
         // with the struct, mirroring process_fork's partial-clone
         // rollback.
@@ -1607,14 +1645,8 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
         return nullptr;
     }
 
-    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
-    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
-    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
-
-    for (size_t i = 0; i < 8; i++)
-        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
-
-    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+    uint64_t *stack_top =
+        reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(proc->stack_base) + KERNEL_STACK_SIZE);
 
     *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
     *(--stack_top) = reinterpret_cast<uint64_t>(entry);
@@ -1693,9 +1725,7 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *frames = pmm_alloc_frames(stack_pages);
-    if (!frames) {
+    if (!task_kernel_stack_alloc(proc)) {
         // Roll back the fd table and VMA list object taken above along
         // with the struct, mirroring process_fork's partial-clone
         // rollback.
@@ -1706,14 +1736,8 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
         return nullptr;
     }
 
-    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
-    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
-    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
-
-    for (size_t i = 0; i < 8; i++)
-        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
-
-    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+    uint64_t *stack_top =
+        reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(proc->stack_base) + KERNEL_STACK_SIZE);
 
     *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
     *(--stack_top) = reinterpret_cast<uint64_t>(entry);
@@ -1799,9 +1823,7 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     proc->fpu_initialized = true;
     proc->next = proc;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *frames = pmm_alloc_frames(stack_pages);
-    if (!frames) {
+    if (!task_kernel_stack_alloc(proc)) {
         // Roll back the fd table and VMA list object taken above along
         // with the struct, mirroring process_fork's partial-clone
         // rollback.
@@ -1811,16 +1833,12 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
         interrupts_restore(flags);
         return nullptr;
     }
-    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
-    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
-    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
-    for (size_t i = 0; i < 8; i++)
-        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
 
     // Same bootstrap frame as regular tasks: the first switch into the idle
     // task lands in kernel_thread_entry -> kernel_task_wrapper(entry); the
     // idle body never returns.
-    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+    uint64_t *stack_top =
+        reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(proc->stack_base) + KERNEL_STACK_SIZE);
     *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
     *(--stack_top) = reinterpret_cast<uint64_t>(entry);
     for (int i = 0; i < 5; i++)
@@ -2262,9 +2280,7 @@ bool g_ktest_fail_vma_list_alloc = false;
         return static_cast<uint64_t>(-1);
     }
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *stack_phys = pmm_alloc_frames(stack_pages);
-    if (!stack_phys) {
+    if (!task_kernel_stack_alloc(child)) {
         process_release_private_fds(child);
         if (child->vmalist->head)
             vma_free_all(child->vmalist->head);
@@ -2272,29 +2288,23 @@ bool g_ktest_fail_vma_list_alloc = false;
         aligned_free(child);
         return static_cast<uint64_t>(-1);
     }
-    child->stack_phys = reinterpret_cast<uint64_t>(stack_phys);
 
-    uint64_t virt_base = vmm_phys_to_virt(child->stack_phys);
-    child->stack_base = reinterpret_cast<uint64_t *>(virt_base);
+    // The bootstrap writes go through the region VA of the freshly mapped
+    // slot (the frames are the PMM's contiguous stack_phys range).
+    uint64_t stack_top_va = reinterpret_cast<uint64_t>(child->stack_base) + KERNEL_STACK_SIZE;
 
-    uint64_t *hhdm_stack_base = reinterpret_cast<uint64_t *>(virt_base);
-    for (size_t i = 0; i < 8; i++)
-        hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+    stack_top_va -= sizeof(SyscallFrame);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_va);
 
-    uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
-
-    stack_top_hhdm -= sizeof(SyscallFrame);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
-    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm);
-
-    stack_top_hhdm -= sizeof(Context);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(Context) - 1);
-    Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
+    stack_top_va -= sizeof(Context);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(Context) - 1);
+    Context *child_context = reinterpret_cast<Context *>(stack_top_va);
 
     *child_frame = *frame;
     kstring::zero_memory(child_context, sizeof(Context));
     child_context->rip = reinterpret_cast<uint64_t>(fork_ret);
-    child->sp = stack_top_hhdm;
+    child->sp = stack_top_va;
 
     // Capture before publishing: once the child is queued another core can
     // run and exit it (and reap can free the struct) before we return.
@@ -2705,16 +2715,12 @@ void scheduler_sleep_ms(uint64_t ms)
 extern "C" void thread_ret();
 
 // Unwind a half-built thread before its publication: release the fd-table
-// reference, return the kernel stack frames, free the struct.
+// reference, return the kernel stack (region unmap + frames), free the
+// struct. Never called under g_sched_lock.
 static void thread_create_unwind(Process *thread)
 {
     process_release_private_fds(thread);
-    uintptr_t frame_addr = thread->stack_phys;
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    for (size_t i = 0; i < stack_pages; i++) {
-        pmm_free_frame(reinterpret_cast<void *>(frame_addr));
-        frame_addr += 4096;
-    }
+    task_kernel_stack_free(thread);
     aligned_free(thread);
 }
 
@@ -2772,30 +2778,23 @@ static void thread_create_unwind(Process *thread)
     spinlock_init(&thread->vma_lock);
     thread->vma_lock_ptr = parent->vma_lock_ptr;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *kstack_phys = pmm_alloc_frames(stack_pages);
-    if (!kstack_phys) {
+    if (!task_kernel_stack_alloc(thread)) {
         process_release_private_fds(thread);
         aligned_free(thread);
         return -1;
     }
-    thread->stack_phys = reinterpret_cast<uint64_t>(kstack_phys);
-    uint64_t virt_base = vmm_phys_to_virt(thread->stack_phys);
-    thread->stack_base = reinterpret_cast<uint64_t *>(virt_base);
 
-    uint64_t *hhdm_stack_base = reinterpret_cast<uint64_t *>(virt_base);
-    for (size_t i = 0; i < 8; i++)
-        hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+    // The bootstrap writes go through the region VA of the freshly mapped
+    // slot (the frames are the PMM's contiguous stack_phys range).
+    uint64_t stack_top_va = reinterpret_cast<uint64_t>(thread->stack_base) + KERNEL_STACK_SIZE;
 
-    uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
+    stack_top_va -= sizeof(SyscallFrame);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_va);
 
-    stack_top_hhdm -= sizeof(SyscallFrame);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
-    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm);
-
-    stack_top_hhdm -= sizeof(Context);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(Context) - 1);
-    Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
+    stack_top_va -= sizeof(Context);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(Context) - 1);
+    Context *child_context = reinterpret_cast<Context *>(stack_top_va);
 
     kstring::zero_memory(child_frame, sizeof(SyscallFrame));
     child_frame->rip = reinterpret_cast<uint64_t>(entry);
@@ -2807,7 +2806,7 @@ static void thread_create_unwind(Process *thread)
 
     kstring::zero_memory(child_context, sizeof(Context));
     child_context->rip = reinterpret_cast<uint64_t>(thread_ret);
-    thread->sp = stack_top_hhdm;
+    thread->sp = stack_top_va;
 
     // Clone the group's TLS template into the new thread's own block. The
     // template bytes cross the user boundary only through the safe walk
