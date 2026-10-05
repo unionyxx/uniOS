@@ -2,8 +2,6 @@
 #include <drivers/net/e1000/e1000.h>
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/debug.h>
-#include <kernel/mm/heap.h>
-#include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <libk/kstring.h>
 
@@ -90,24 +88,26 @@ static void e1000_read_mac()
 
 [[nodiscard]] static bool e1000_init_rx()
 {
-    void *rx_ring_phys = pmm_alloc_frame();
-    if (!rx_ring_phys) {
+    // Descriptors and buffers live in the DMA window: the NIC gets the
+    // physical address, the driver dereferences the kernel VA.
+    const DMAAllocation rx_ring = vmm_alloc_dma(1);
+    if (!rx_ring.phys) {
         DEBUG_ERROR("e1000: failed to allocate RX ring");
         return false;
     }
 
-    g_e1000.rx_descs_phys = reinterpret_cast<uintptr_t>(rx_ring_phys);
-    g_e1000.rx_descs = reinterpret_cast<e1000_rx_desc *>(vmm_phys_to_virt(g_e1000.rx_descs_phys));
+    g_e1000.rx_descs = reinterpret_cast<e1000_rx_desc *>(rx_ring.virt);
+    g_e1000.rx_descs_phys = rx_ring.phys;
     kstring::zero_memory(g_e1000.rx_descs, E1000_NUM_RX_DESC * sizeof(e1000_rx_desc));
 
     for (int i = 0; i < E1000_NUM_RX_DESC; i++) {
-        void *buf_phys = pmm_alloc_frame();
-        if (!buf_phys) {
+        const DMAAllocation buf = vmm_alloc_dma(1);
+        if (!buf.phys) {
             DEBUG_ERROR("e1000: failed to allocate RX buffer %d", i);
             return false;
         }
-        g_e1000.rx_buffers_phys[i] = reinterpret_cast<uintptr_t>(buf_phys);
-        g_e1000.rx_buffers[i] = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(g_e1000.rx_buffers_phys[i]));
+        g_e1000.rx_buffers[i] = reinterpret_cast<uint8_t *>(buf.virt);
+        g_e1000.rx_buffers_phys[i] = buf.phys;
         g_e1000.rx_descs[i].addr = g_e1000.rx_buffers_phys[i];
     }
 
@@ -125,14 +125,14 @@ static void e1000_read_mac()
 
 [[nodiscard]] static bool e1000_init_tx()
 {
-    void *tx_ring_phys = pmm_alloc_frame();
-    if (!tx_ring_phys) {
+    const DMAAllocation tx_ring = vmm_alloc_dma(1);
+    if (!tx_ring.phys) {
         DEBUG_ERROR("e1000: failed to allocate TX ring");
         return false;
     }
 
-    g_e1000.tx_descs_phys = reinterpret_cast<uintptr_t>(tx_ring_phys);
-    g_e1000.tx_descs = reinterpret_cast<e1000_tx_desc *>(vmm_phys_to_virt(g_e1000.tx_descs_phys));
+    g_e1000.tx_descs = reinterpret_cast<e1000_tx_desc *>(tx_ring.virt);
+    g_e1000.tx_descs_phys = tx_ring.phys;
     kstring::zero_memory(g_e1000.tx_descs, E1000_NUM_TX_DESC * sizeof(e1000_tx_desc));
     for (int i = 0; i < E1000_NUM_TX_DESC; i++)
         g_e1000.tx_descs[i].status = E1000_TXD_STAT_DD;
@@ -254,13 +254,13 @@ bool e1000_send(const void *data, uint16_t length)
         DEBUG_WARN("e1000: tX timeout");
         return false;
     }
-    void *buf_phys = pmm_alloc_frame();
-    if (!buf_phys) {
+    const DMAAllocation buf = vmm_alloc_dma(1);
+    if (!buf.phys) {
         DEBUG_ERROR("e1000: no TX buf memory");
         return false;
     }
-    kstring::memcpy(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uintptr_t>(buf_phys))), data, length);
-    desc->addr = reinterpret_cast<uintptr_t>(buf_phys);
+    kstring::memcpy(reinterpret_cast<void *>(buf.virt), data, length);
+    desc->addr = buf.phys;
     desc->length = length;
     desc->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS;
     desc->status = 0;
@@ -271,16 +271,17 @@ bool e1000_send(const void *data, uint16_t length)
         for (volatile int i = 0; i < 100; i++)
             ;
     if (!(desc->status & E1000_TXD_STAT_DD)) {
-        // The NIC may still be DMA-ing this frame: leaking the page is
-        // deliberate; freeing it would hand memory to someone else while the
-        // DMA is live. The descriptor never reports DD either: retire it
-        // locally so the ring slot is not wedged forever (without this the
-        // first wait above failed on every wrap of the ring).
+        // The NIC may still be DMA-ing this frame: leaking the page (and its
+        // DMA-window mapping) is deliberate; freeing it would hand memory to
+        // someone else while the DMA is live. The descriptor never reports DD
+        // either: retire it locally so the ring slot is not wedged forever
+        // (without this the first wait above failed on every wrap of the
+        // ring).
         desc->status = E1000_TXD_STAT_DD;
         DEBUG_WARN("e1000: TX completion timeout; leaking the frame to stay safe");
         return false;
     }
-    pmm_free_frame(buf_phys);
+    vmm_free_dma(buf);
     return true;
 }
 

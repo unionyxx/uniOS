@@ -76,6 +76,12 @@ struct DMAAllocation
     uint64_t size;
 };
 
+// DMA allocation policy flag (not a PTE flag; vmm_alloc_dma_with_flags strips
+// it before mapping): restrict the physical frames to ZONE_DMA32 (below
+// 4 GiB) for 32-bit-only DMA devices. Allocation fails (all-zero
+// DMAAllocation) rather than handing out high memory.
+constexpr uint64_t VMM_DMA_32BIT = (1ULL << 62);
+
 [[nodiscard]] DMAAllocation vmm_alloc_dma(size_t pages);
 [[nodiscard]] DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags);
 void vmm_free_dma(const DMAAllocation &alloc);

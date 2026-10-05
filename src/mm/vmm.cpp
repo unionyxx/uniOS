@@ -968,7 +968,11 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
     if (pages == 0)
         return alloc;
 
-    void *phys_ptr = pmm_alloc_frames(pages);
+    // VMM_DMA_32BIT is an allocation policy bit, never part of a PTE entry.
+    const bool dma32 = (flags & VMM_DMA_32BIT) != 0;
+    const uint64_t pte_flags = flags & ~VMM_DMA_32BIT;
+
+    void *phys_ptr = dma32 ? pmm_alloc_frames_dma32(pages) : pmm_alloc_frames(pages);
     if (!phys_ptr)
         return alloc;
 
@@ -984,7 +988,7 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
     uint64_t virt_base = dma_alloc_virt_range(size);
 
     for (size_t i = 0; i < pages; i++) {
-        if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys + i * 0x1000, flags)) {
+        if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys + i * 0x1000, pte_flags)) {
             for (size_t j = 0; j < i; j++) {
                 vmm_unmap_page_no_flush_in(g_pml4, virt_base + j * 0x1000);
             }

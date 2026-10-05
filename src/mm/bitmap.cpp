@@ -1,11 +1,9 @@
-#include <kernel/debug.h>
 #include <kernel/mm/bitmap.h>
 
 void Bitmap::init(void *buffer, size_t size_in_bits)
 {
     m_buffer = static_cast<uint8_t *>(buffer);
     m_size = size_in_bits;
-    m_next_free_hint = 0;
 
     size_t size_in_bytes = (size_in_bits + 7) >> 3;
     __builtin_memset(m_buffer, 0, size_in_bytes);
@@ -62,77 +60,58 @@ void Bitmap::set_range(size_t start, size_t count, bool value)
     }
 }
 
-size_t Bitmap::get_hint() const
-{
-    return m_next_free_hint;
-}
-
-size_t Bitmap::find_first_free(size_t start_index) const
+size_t Bitmap::find_first_free(size_t start, size_t end) const
 {
     if (m_size == 0)
         return static_cast<size_t>(-1);
-
-    size_t search_start = (start_index == 0) ? m_next_free_hint : start_index;
-    if (search_start >= m_size)
-        search_start = 0;
-
-    auto scan_range = [&](size_t begin, size_t end) -> size_t {
-        if (begin >= end)
-            return static_cast<size_t>(-1);
-
-        size_t i = begin;
-        while (i < end && (i & 63)) {
-            if (!(*this)[i])
-                return i;
-            i++;
-        }
-
-        const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
-        size_t qword_end = end & ~static_cast<size_t>(63);
-
-        while (i < qword_end) {
-            uint64_t qw = qwords[i >> 6];
-            if (qw != ~0ULL) {
-                return i + __builtin_ctzll(~qw);
-            }
-            i += 64;
-        }
-
-        while (i < end) {
-            if (!(*this)[i])
-                return i;
-            i++;
-        }
-
+    if (end > m_size)
+        end = m_size;
+    if (start >= end)
         return static_cast<size_t>(-1);
-    };
 
-    size_t index = scan_range(search_start, m_size);
-    if (index == static_cast<size_t>(-1) && search_start != 0) {
-        index = scan_range(0, search_start);
+    size_t i = start;
+    while (i < end && (i & 63)) {
+        if (!(*this)[i])
+            return i;
+        i++;
     }
 
-    if (index != static_cast<size_t>(-1)) {
-        m_next_free_hint = (index + 1 < m_size) ? (index + 1) : 0;
+    const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
+    size_t qword_end = end & ~static_cast<size_t>(63);
+
+    while (i < qword_end) {
+        uint64_t qw = qwords[i >> 6];
+        if (qw != ~0ULL)
+            return i + __builtin_ctzll(~qw);
+        i += 64;
     }
 
-    return index;
+    while (i < end) {
+        if (!(*this)[i])
+            return i;
+        i++;
+    }
+
+    return static_cast<size_t>(-1);
 }
 
-size_t Bitmap::find_first_free_sequence(size_t count, size_t start_index) const
+size_t Bitmap::find_first_free_sequence(size_t count, size_t start, size_t end) const
 {
     if (count == 0 || count > m_size)
         return static_cast<size_t>(-1);
-    if (start_index >= m_size)
-        start_index = 0;
+    if (end > m_size)
+        end = m_size;
+    if (start >= end || count > end - start)
+        return static_cast<size_t>(-1);
 
     size_t current_run = 0;
     size_t run_start = static_cast<size_t>(-1);
 
-    size_t i = start_index;
+    // Leading partial qword.
+    size_t i = start;
     size_t qword_start = (i + 63) & ~static_cast<size_t>(63);
-    if (qword_start > m_size)
-        qword_start = m_size;
+    if (qword_start > end)
+        qword_start = end;
 
     while (i < qword_start) {
         if (!(*this)[i]) {
@@ -147,7 +126,7 @@ size_t Bitmap::find_first_free_sequence(size_t count, size_t start_index) const
     }
 
     const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
-    size_t qword_end = m_size & ~static_cast<size_t>(63);
+    size_t qword_end = end & ~static_cast<size_t>(63);
 
     while (i < qword_end) {
         size_t q_idx = i >> 6;
@@ -178,7 +157,8 @@ size_t Bitmap::find_first_free_sequence(size_t count, size_t start_index) const
         }
     }
 
-    while (i < m_size) {
+    // Trailing partial qword.
+    while (i < end) {
         if (!(*this)[i]) {
             if (current_run == 0)
                 run_start = i;
@@ -193,16 +173,21 @@ size_t Bitmap::find_first_free_sequence(size_t count, size_t start_index) const
     return static_cast<size_t>(-1);
 }
 
-size_t Bitmap::find_last_free_sequence(size_t count) const
+size_t Bitmap::find_last_free_sequence(size_t count, size_t start, size_t end) const
 {
     if (count == 0 || count > m_size)
         return static_cast<size_t>(-1);
+    if (end > m_size)
+        end = m_size;
+    if (start >= end || count > end - start)
+        return static_cast<size_t>(-1);
 
     size_t current_run = 0;
-    size_t i = m_size;
+    size_t i = end;
 
-    size_t qword_end = m_size & ~static_cast<size_t>(63);
-    while (i > qword_end) {
+    // Trailing partial qword: bits [qword_end, end), high to low.
+    size_t qword_end = end & ~static_cast<size_t>(63);
+    while (i > qword_end && i > start) {
         i--;
         if (!(*this)[i]) {
             if (++current_run == count)
@@ -212,31 +197,44 @@ size_t Bitmap::find_last_free_sequence(size_t count) const
         }
     }
 
-    if (i > 0) {
+    // Full qwords, high to low, stopping above the qword holding start.
+    size_t low_bound = (start + 63) & ~static_cast<size_t>(63);
+    if (i > low_bound) {
         const uint64_t *qwords = reinterpret_cast<const uint64_t *>(m_buffer);
-        size_t q_idx = i >> 6;
-        while (q_idx > 0) {
-            q_idx--;
+        do {
+            size_t q_idx = (i >> 6) - 1;
             uint64_t qw = qwords[q_idx];
 
             if (qw == 0) {
+                // The run extends below this qword; the highest `count`-bit
+                // window of it ends at the run's top edge, i.e. i + (run - 64).
                 current_run += 64;
-                if (current_run >= count) {
+                if (current_run >= count)
                     return (q_idx << 6) + (current_run - count);
-                }
             } else if (qw == ~0ULL) {
                 current_run = 0;
             } else {
                 for (int bit = 63; bit >= 0; bit--) {
                     if (!(qw & (1ULL << bit))) {
-                        if (++current_run == count) {
+                        if (++current_run == count)
                             return (q_idx << 6) + bit;
-                        }
                     } else {
                         current_run = 0;
                     }
                 }
             }
+            i -= 64;
+        } while (i > low_bound);
+    }
+
+    // Leading partial qword: bits [start, low_bound), high to low.
+    while (i > start) {
+        i--;
+        if (!(*this)[i]) {
+            if (++current_run == count)
+                return i;
+        } else {
+            current_run = 0;
         }
     }
 

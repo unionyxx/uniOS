@@ -23,8 +23,10 @@ Memory management lives in `src/mm/` and `src/arch/x86_64/mm/`. The kernel runs 
 
 - 4 KiB frames, 1 bit per frame (set = used), plus a `uint16_t` refcount per frame.
 - All frames start reserved; `USABLE` ranges are freed, then the bitmap/refcount frames and frame 0 are re-reserved.
-- `pmm_alloc_frame()` returns a **zeroed** physical frame (zeroing happens through the HHDM mapping).
-- `pmm_alloc_frames(count)` allocates physically contiguous frames from the top of memory downward, keeping low RAM free for DMA-sensitive uses.
+- Frames are classified into two zones derived at init: `ZONE_DMA32` (below 4 GiB) and `ZONE_NORMAL` (the rest). The single bitmap/refcount arrays still back both (per-zone locks and magazines are future work).
+- `pmm_alloc_frame()` returns a **zeroed** physical frame from ZONE_NORMAL, falling back to ZONE_DMA32 when NORMAL is exhausted (order-0 only).
+- `pmm_alloc_frames(count)` allocates physically contiguous frames top-down from ZONE_NORMAL; while NORMAL exists it never falls back to DMA32 (contiguous DMA32 runs are protected for 32-bit devices) and failure logs and returns null. On machines with no RAM above 4 GiB, DMA32 is the only zone and is scanned.
+- `pmm_alloc_frame_dma32()` / `pmm_alloc_frames_dma32(count)` allocate strictly below 4 GiB and never fall back to high memory; 32-bit-only devices (RTL8139, AC97) must use these via `vmm_alloc_dma_with_flags(..., VMM_DMA_32BIT)`, and attach fails when the zone cannot satisfy the request.
 - Refcounts power copy-on-write and shared mappings: `pmm_refcount_inc` panics on a free frame; `pmm_refcount_dec` frees at zero; invalid frees are reported, not silent.
 - Stats: `pmm_get_free_memory()`, `pmm_get_total_memory()` feed the `mem` shell command and `SYS_GETMEMINFO`.
 
@@ -41,7 +43,7 @@ Key operations:
 
 - `vmm_create_address_space`: fresh PML4 with kernel entries 256-511 copied.
 - `vmm_clone_address_space` (fork): kernel half shared, user half deep-copied with leaf refcount bumps; writable non-shared pages are write-protected in **both** spaces (copy-on-write).
-- `vmm_map_mmio` / `vmm_alloc_dma`: mappings from the MMIO/DMA window with batched invalidation. `vmm_free_dma` performs a full TLB shootdown **before** frames return to the pool, so no remote core can keep DMAing into a reused frame.
+- `vmm_map_mmio` / `vmm_alloc_dma` / `vmm_alloc_dma_with_flags`: mappings from the MMIO/DMA window with batched invalidation; `VMM_DMA_32BIT` routes the frame allocation to ZONE_DMA32 for 32-bit-only devices. `vmm_free_dma` performs a full TLB shootdown **before** frames return to the pool, so no remote core can keep DMAing into a reused frame.
 - Unmap/rollback ordering invariant: PTEs are cleared under the per-mm VMA lock with no flush; the lock is dropped first, then one batched `vmm_invalidate_tlb_range` runs, then futex waiters on freed frames are notified, then frames return to the PMM. No cross-core shootdown ever runs under the VMA lock — a sibling thread faulting on the range spins on that lock with IRQs off and could never take the shootdown IPI.
 - `vmm_remap_framebuffer`: replaces the loader's WB mappings in place with WC+shared.
 - `vmm_protect_kernel`: `.text` read+execute, `.rodata`/`.requests` read-only+NX, `.data` through `__kernel_end` writable+NX.
