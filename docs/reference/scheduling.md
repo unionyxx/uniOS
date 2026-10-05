@@ -34,6 +34,10 @@ Each core has a private idle task (pid 0) that is never inserted into the runque
 
 The switch path compares the next task's page table against the CR3 actually loaded on this core (`PerCpu.current_cr3_phys`) — not against the previous task's — because `process_exit()` switches to kernel page tables before scheduling while a runnable sibling thread may share the dying task's page table. It then updates the TSS rsp0 and calls the assembly switch (`src/arch/x86_64/boot/process.asm`), which saves callee-saved registers, the kernel stack pointer, and the FPU state (4 KiB xsave area at a fixed offset in `Process`).
 
+## Timekeeping
+
+`src/kernel/time/timekeeping.cpp` provides `timekeeping_monotonic_ns()`: one ordered TSC read (RDTSCP when present, else LFENCE+RDTSC) plus per-CPU offset and scale. Tiers, feature-detected at init: invariant+TSC_ADJUST-synced TSC (offsets from TSC_ADJUST deltas), invariant-but-unsynced TSC (offsets sandwiched against the ACPI PM timer each tick), or tick-derived fallback when the TSC is unusable. `timekeeping_monotonic_ns_clamped(last)` exists for migration-safe reads (phase 3 wiring). The jiffy tick remains the scheduler's clock in this phase.
+
 ## Timers and Time
 
 - Primary tick: LAPIC timer in periodic mode, calibrated once on the BSP against a PIT channel 2 one-shot 10 ms window (divide-by-16). The BSP runs it at 1000 Hz; APs program the calibrated count multiplied by the AP divisor (10), so they take scheduling interrupts at 100 Hz and report 10 jiffies per interrupt. Newly-ready work still reaches idle cores promptly through the RESCHED IPI.
