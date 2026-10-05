@@ -247,13 +247,18 @@ bool xhci_init()
         if (pci_enable_msix(&pci_dev, &g_xhci_msix)) {
             uint8_t xhci_vector = idt_allocate_free_vector();
             if (xhci_vector && irq_register_vector_handler(xhci_vector, xhci_irq_handler, nullptr)) {
-                extern uint32_t apic_get_current_id();
-                msix_set_entry(&g_xhci_msix, 0, xhci_vector, static_cast<uint8_t>(apic_get_current_id()));
+                // Destination comes from the IRQ affinity policy (round-robin
+                // over online CPUs), not the registering CPU.
+                msix_set_entry(&g_xhci_msix, 0, xhci_vector, static_cast<uint8_t>(irq_next_destination_apic()));
                 msix_unmask_vector(&g_xhci_msix, 0);
 
                 g_xhci_using_message_interrupts = true;
                 g_xhci_irq = 0; // IRQ not used for MSI-X
                 KLOG(LogModule::Usb, LogLevel::Info, "xHCI using MSI-X (Vector %d)", xhci_vector);
+            } else if (xhci_vector) {
+                // Registration failed: give the allocated vector back rather
+                // than leaking it.
+                idt_free_vector(xhci_vector);
             }
         }
     }

@@ -83,3 +83,12 @@ uint8_t idt_allocate_free_vector()
     }
     return 0;
 }
+
+void idt_free_vector(uint8_t vector)
+{
+    // Companion to idt_allocate_free_vector for failed registrations: the
+    // caller must already have removed any handler/IDT descriptor wiring it
+    // installed; this only releases the allocation bit.
+    if (vector >= 48 && vector != 0x80)
+        g_vector_used[vector] = false;
+}

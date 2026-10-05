@@ -241,6 +241,9 @@ bool irq_register_isa_handler(uint8_t irq, IrqVectorHandler handler, void *ctx)
         // GSI to 8 bits: on chipsets whose ISO chain maps IRQ0->GSI2 and
         // IRQ2->GSI9, registering IRQ 0 re-resolved GSI 2 back to GSI 9 and
         // programmed the wrong pin.
+        // Destination-CPU selection also lives inside ioapic_set_entry:
+        // round-robin over CPUs online at registration time, with ISA IRQ 0
+        // (PIT) and IRQ 2 (cascade) pinned to the BSP.
         ioapic_set_entry(irq, vector);
         return true;
     }
@@ -382,6 +385,14 @@ void apic_enable_this_core()
 // transition back to xAPIC mode (disable the APIC, clear the EXT bit, then
 // re-enable). Some CPUs only allow this via reset, so treat it as best-effort
 // and warn loudly if x2APIC stays on.
+//
+// Device-IRQ destinations (IOAPIC redirection high dwords, MSI/MSI-X
+// addresses) are 8-bit physical APIC IDs sourced from PerCpu::apic_id
+// (CPUID/MADT; cpu_init fills the BSP slot, smp start_ap the AP slots) — the
+// round-robin policy in ioapic.cpp writes them into the physical-destination
+// fields. This forced downgrade to xAPIC mode is what keeps those encodings
+// valid, so it must run before any IOAPIC/MSI programming (it is the first
+// thing apic_init does).
 static void apic_force_xapic_mode()
 {
     constexpr uint32_t kIa32ApicBase = 0x1B;
