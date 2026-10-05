@@ -2,7 +2,6 @@
 #include <drivers/net/rtl8139/rtl8139.h>
 #include <kernel/arch/x86_64/io.h>
 #include <kernel/debug.h>
-#include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <libk/kstring.h>
 
@@ -101,24 +100,27 @@ bool rtl8139_init()
             ;
     }
     rtl8139_read_mac();
-    void *rx_phys = pmm_alloc_frames(3);
-    if (!rx_phys) {
+    // The RTL8139 is a 32-bit-only DMA device: every buffer it is handed must
+    // live below 4 GiB (VMM_DMA_32BIT), and the driver dereferences it through
+    // the DMA-window kernel VA, not the HHDM mapping.
+    const DMAAllocation rx_dma = vmm_alloc_dma_with_flags(3, PTE_UC | VMM_DMA_32BIT);
+    if (!rx_dma.phys) {
         DEBUG_ERROR("rtl8139: rX allocation failed");
         return false;
     }
-    g_rtl8139.rx_buffer_phys = reinterpret_cast<uintptr_t>(rx_phys);
-    g_rtl8139.rx_buffer = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(g_rtl8139.rx_buffer_phys));
+    g_rtl8139.rx_buffer = reinterpret_cast<uint8_t *>(rx_dma.virt);
+    g_rtl8139.rx_buffer_phys = rx_dma.phys;
     g_rtl8139.rx_offset = 0;
     kstring::zero_memory(g_rtl8139.rx_buffer, RTL_RX_BUFFER_SIZE);
     rtl_outl(RTL_REG_RXBUF, static_cast<uint32_t>(g_rtl8139.rx_buffer_phys));
     for (int i = 0; i < 4; i++) {
-        void *tx_phys = pmm_alloc_frame();
-        if (!tx_phys) {
+        const DMAAllocation tx_dma = vmm_alloc_dma_with_flags(1, PTE_UC | VMM_DMA_32BIT);
+        if (!tx_dma.phys) {
             DEBUG_ERROR("rtl8139: tX %d allocation failed", i);
             return false;
         }
-        g_rtl8139.tx_buffers_phys[i] = reinterpret_cast<uintptr_t>(tx_phys);
-        g_rtl8139.tx_buffers[i] = reinterpret_cast<uint8_t *>(vmm_phys_to_virt(g_rtl8139.tx_buffers_phys[i]));
+        g_rtl8139.tx_buffers[i] = reinterpret_cast<uint8_t *>(tx_dma.virt);
+        g_rtl8139.tx_buffers_phys[i] = tx_dma.phys;
     }
     g_rtl8139.tx_cur = 0;
     rtl_outw(RTL_REG_IMR, 0x0000);

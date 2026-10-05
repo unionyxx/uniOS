@@ -69,6 +69,23 @@ uint64_t shm_slot_address(int id)
     return SHM_BASE + (uint64_t)((uint32_t)id) * SHM_SLOT_SIZE;
 }
 
+#ifdef DEBUG
+// ktest fault-injection + observability hooks (debug builds only). The PMM
+// itself stays free of test hooks; the mmap map path checks the counters at
+// its own allocation sites.
+// Arm the Nth pmm frame allocation inside the SYS_MMAP install path to fail.
+uint64_t g_mmap_debug_fail_after = 0;
+// Frames handed to futex_notify_freed_frames by the rollback/OOM paths here.
+uint64_t g_mmap_debug_notify_frames = 0;
+// Last completed rollback phase: 1 = PTEs cleared under the vma lock,
+// 2 = lock released + range invalidated, 3 = waiters notified, 4 = frames
+// released. A completed rollback must read 4.
+uint64_t g_mmap_debug_rollback_seq = 0;
+// Force munmap's heap journal allocation to fail so the zero-allocation
+// fallback path runs.
+uint64_t g_munmap_debug_oom = 0;
+#endif
+
 #define STDIN_FD 0
 #define STDOUT_FD 1
 #define STDERR_FD 2
@@ -392,23 +409,61 @@ bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     // after the unlock - never shoot down under a lock another core may be
     // spinning on with interrupts disabled.
     const size_t num_pages = length / 4096;
-    uint64_t *freed_phys = static_cast<uint64_t *>(malloc(num_pages * sizeof(uint64_t)));
+    uint64_t *freed_phys = nullptr;
+#ifdef DEBUG
+    if (!g_munmap_debug_oom)
+#endif
+        freed_phys = static_cast<uint64_t *>(malloc(num_pages * sizeof(uint64_t)));
 
     if (!freed_phys) {
-        // No scratch memory: slow path. Clear and free under one continuous
-        // lock hold (releasing mid-walk would let a fresh mmap re-use the
-        // just-holed range and have its PTEs stolen). Futex waiters on these
-        // frames are NOT woken in this OOM-only fallback; the fast path
-        // always notifies.
-        for (uint64_t virt = addr; virt < end_addr; virt += 4096) {
-            uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
-            if (!phys)
-                continue;
-            vmm_unmap_page_in(p->page_table, virt);
-            pmm_free_frame(reinterpret_cast<void *>(phys));
-        }
+        // Heap exhausted (or the ktest hook forced it): zero-allocation
+        // fallback. The range is torn down in fixed stack-buffer chunks,
+        // each chunk with the fast path's ordering - clear under the lock
+        // with no flush, release, ONE batched invalidate, futex notify,
+        // then free - so no shootdown and no frame release ever happens
+        // under the vma lock. Re-acquiring the lock per chunk opens a
+        // window where a fresh mmap re-uses the just-holed range; the
+        // per-page VMA check spares such a mapping, because walking it
+        // would steal the fresh mapping's PTEs and frames - the exact
+        // hazard one continuous hold prevents on the fast path.
+        constexpr size_t k_oom_chunk_pages = 32;
+        uint64_t chunk_frames[k_oom_chunk_pages];
         spinlock_release_irqrestore(p->vma_lock_ptr, sl_flags);
-        vmm_invalidate_tlb_range(addr, num_pages);
+        for (uint64_t chunk = addr; chunk < end_addr;) {
+            const uint64_t pages_left = (end_addr - chunk) / 4096;
+            const uint64_t chunk_pages =
+                pages_left < k_oom_chunk_pages ? pages_left : static_cast<uint64_t>(k_oom_chunk_pages);
+            const uint64_t chunk_end = chunk + chunk_pages * 4096;
+            size_t freed_count = 0;
+            uint64_t chunk_flags = spinlock_acquire_irqsave(p->vma_lock_ptr);
+            for (uint64_t virt = chunk; virt < chunk_end; virt += 4096) {
+                if (vma_find(p->vmalist->head, virt))
+                    continue;
+                uint64_t phys = vmm_virt_to_phys_in(p->page_table, virt);
+                if (!phys)
+                    continue;
+                vmm_unmap_page_no_flush(p->page_table, virt);
+                chunk_frames[freed_count++] = phys;
+            }
+            spinlock_release_irqrestore(p->vma_lock_ptr, chunk_flags);
+            if (freed_count > 0) {
+                vmm_invalidate_tlb_range(chunk, chunk_pages);
+#ifdef DEBUG
+                g_mmap_debug_rollback_seq = 2;
+#endif
+                futex_notify_freed_frames(chunk_frames, freed_count);
+#ifdef DEBUG
+                g_mmap_debug_notify_frames += freed_count;
+                g_mmap_debug_rollback_seq = 3;
+#endif
+                for (size_t i = 0; i < freed_count; i++)
+                    pmm_free_frame(reinterpret_cast<void *>(chunk_frames[i]));
+#ifdef DEBUG
+                g_mmap_debug_rollback_seq = 4;
+#endif
+            }
+            chunk = chunk_end;
+        }
         return true;
     }
 
@@ -428,6 +483,9 @@ bool munmap_process_range(Process *p, uint64_t addr, size_t length)
     // to the PMM: once recycled, a new owner's futex would inherit (and
     // cross-wake) the stale waiters otherwise.
     futex_notify_freed_frames(freed_phys, freed_count);
+#ifdef DEBUG
+    g_mmap_debug_notify_frames += freed_count;
+#endif
     for (size_t i = 0; i < freed_count; i++)
         pmm_free_frame(reinterpret_cast<void *>(freed_phys[i]));
     free(freed_phys);
@@ -1759,6 +1817,314 @@ extern "C" int64_t sys_mprotect(void *addr, size_t len, int prot)
     return 0;
 }
 
+// Rollback journal for sys_mmap: records the physical frame behind every
+// PTE the install loop publishes, so a mid-install failure can release the
+// frames only AFTER the vma lock is dropped and the one batched shootdown
+// completed. A chunk is a single PMM frame (511 entries plus a link slot),
+// so journal growth never needs contiguous memory and cannot fail while
+// any non-contiguous frame remains - a large mapping must never fail
+// because its bookkeeping did.
+struct MmapRollbackJournal
+{
+    uint64_t head_phys;
+    uint64_t cur_phys;
+    uint64_t *cur_virt;
+    size_t used;  // entries filled in the current chunk
+    size_t total; // entries appended overall
+};
+
+static constexpr size_t k_journal_chunk_entries = 511;
+
+[[nodiscard]] static bool mmap_journal_append(MmapRollbackJournal *journal, uint64_t phys)
+{
+    if (!journal->cur_phys) {
+        uint64_t first = reinterpret_cast<uint64_t>(pmm_alloc_frame());
+        if (!first)
+            return false;
+        journal->head_phys = first;
+        journal->cur_phys = first;
+        journal->cur_virt = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(first));
+        journal->used = 0;
+    } else if (journal->used == k_journal_chunk_entries) {
+        uint64_t next = reinterpret_cast<uint64_t>(pmm_alloc_frame());
+        if (!next)
+            return false;
+        journal->cur_virt[k_journal_chunk_entries] = next;
+        journal->cur_phys = next;
+        journal->cur_virt = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(next));
+        journal->used = 0;
+    }
+    journal->cur_virt[journal->used++] = phys;
+    journal->total++;
+    return true;
+}
+
+static void mmap_journal_release_chunks(MmapRollbackJournal *journal)
+{
+    uint64_t chunk = journal->head_phys;
+    while (chunk) {
+        uint64_t *entries = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(chunk));
+        uint64_t next = entries[k_journal_chunk_entries];
+        pmm_free_frame(reinterpret_cast<void *>(chunk));
+        chunk = next;
+    }
+    journal->head_phys = 0;
+    journal->cur_phys = 0;
+    journal->cur_virt = nullptr;
+    journal->used = 0;
+    journal->total = 0;
+}
+
+// The SYS_MMAP install path's frame source. In debug builds this is also
+// the fault-injection point for the rollback ktests (pmm stays clean of
+// test hooks): when g_mmap_debug_fail_after is armed, the Nth allocation
+// here fails.
+[[nodiscard]] static void *mmap_alloc_frame_checked()
+{
+#ifdef DEBUG
+    if (g_mmap_debug_fail_after > 0 && --g_mmap_debug_fail_after == 0)
+        return nullptr;
+#endif
+    return pmm_alloc_frame();
+}
+
+#ifdef DEBUG
+// ktest arming API for the fault hook above.
+extern "C" void sys_mmap_debug_fail_after(uint64_t n)
+{
+    g_mmap_debug_fail_after = n;
+}
+#endif
+
+// Tear down a half-installed mapping whose install loop stopped after
+// journal->total pages. Runs while the caller still holds vma_lock_ptr:
+// clearing the freshly-installed PTEs and removing the VMA must be atomic
+// against fork's clone (which refcounts present leaves under this lock)
+// and against a racing mmap re-using the range. NO TLB flush happens under
+// the lock: vmm_invalidate_tlb_range blocks on cross-core acks, and a
+// sibling spinning on this very lock with IRQs off can never service the
+// shootdown IPI - the 40-round timeout panic (finding C1). After the
+// release the order is fixed: ONE batched invalidate, then the futex
+// notify (a waiter that wakes and re-reads its word must observe the
+// unmapped state, and a recycled frame must not inherit stale waiters),
+// then the frame release - freeing before the flush would let a
+// reallocated frame be re-mapped while a stale translation lingers.
+static void mmap_rollback_half_mapping(Process *p, uint64_t *pml4, uint64_t virt_start, uint64_t virt_end,
+                                       MmapRollbackJournal *journal, uint64_t lock_flags, VNode *memfd_node)
+{
+    for (size_t j = 0; j < journal->total; j++)
+        vmm_unmap_page_no_flush(pml4, virt_start + (j * 4096));
+    vma_remove(&p->vmalist->head, virt_start, virt_end);
+#ifdef DEBUG
+    g_mmap_debug_rollback_seq = 1;
+#endif
+    spinlock_release_irqrestore(p->vma_lock_ptr, lock_flags);
+
+    vmm_invalidate_tlb_range(virt_start, journal->total);
+#ifdef DEBUG
+    g_mmap_debug_rollback_seq = 2;
+#endif
+
+    // Notify and release per chunk run (entries inside a chunk are
+    // contiguous): every frame is notified before it is freed, and no
+    // frame returns to the PMM before the flush above completed.
+    uint64_t chunk = journal->head_phys;
+    size_t remaining = journal->total;
+    while (chunk && remaining > 0) {
+        uint64_t *entries = reinterpret_cast<uint64_t *>(vmm_phys_to_virt(chunk));
+        const size_t count = remaining < k_journal_chunk_entries ? remaining : k_journal_chunk_entries;
+        futex_notify_freed_frames(entries, count);
+#ifdef DEBUG
+        g_mmap_debug_notify_frames += count;
+        g_mmap_debug_rollback_seq = 3;
+#endif
+        for (size_t i = 0; i < count; i++)
+            pmm_free_frame(reinterpret_cast<void *>(entries[i]));
+        remaining -= count;
+        chunk = entries[k_journal_chunk_entries];
+    }
+    mmap_journal_release_chunks(journal);
+#ifdef DEBUG
+    g_mmap_debug_rollback_seq = 4;
+#endif
+    if (memfd_node)
+        vfs_close_vnode(memfd_node);
+}
+
+extern "C" uint64_t sys_mmap_impl(uint64_t length_raw, uint64_t prot, uint64_t map_flags, int fd, uint64_t offset)
+{
+    size_t length = 0;
+    if (!round_up_page_size(length_raw, &length))
+        return static_cast<uint64_t>(-1);
+
+    Process *p = process_get_current();
+    if (!p)
+        return static_cast<uint64_t>(-1);
+    size_t num_pages = length / 4096;
+
+    if ((offset & 0xFFFULL) != 0)
+        return static_cast<uint64_t>(-1);
+    size_t page_offset = offset / 4096;
+
+    uint64_t virt_start = 0x100000000ULL;
+
+    VNode *memfd_node = nullptr;
+    if (fd >= 0 && fd < MAX_OPEN_FILES) {
+        uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
+        if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode && is_memfd_vnode(p->fdtab->fds[fd].vnode)) {
+            memfd_node = p->fdtab->fds[fd].vnode;
+            __sync_fetch_and_add(&memfd_node->ref_count, 1);
+        }
+        spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
+    }
+
+    uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
+
+    // Address selection, VMA publication, PTE installation and rollback
+    // bookkeeping run under ONE continuous vma-lock hold: munmap clears
+    // PTEs and fork's clone snapshots them under this same lock, so a
+    // racing unmap can never steal the frames of a half-installed mapping
+    // and the clone can never refcount a page the rollback is freeing. The
+    // journal records every published PTE's frame so the rollback can drop
+    // the lock BEFORE its single batched shootdown - never under it.
+    MmapRollbackJournal journal = {};
+    uint64_t vma_flags_lock = spinlock_acquire_irqsave(p->vma_lock_ptr);
+    bool overlap_found;
+    do {
+        overlap_found = false;
+        for (VMA *curr = p->vmalist->head; curr; curr = curr->next) {
+            uint64_t probe_end = 0;
+            if (!checked_add_u64(virt_start, length, &probe_end)) {
+                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+                if (memfd_node)
+                    vfs_close_vnode(memfd_node);
+                return static_cast<uint64_t>(-1);
+            }
+            // Check if [virt_start, virt_start + length) overlaps with curr
+            if (virt_start < curr->end && probe_end > curr->start) {
+                if (curr->end > UINT64_MAX - 0xFFFULL) {
+                    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+                    if (memfd_node)
+                        vfs_close_vnode(memfd_node);
+                    return static_cast<uint64_t>(-1);
+                }
+                virt_start = (curr->end + 0xFFFULL) & ~0xFFFULL;
+                overlap_found = true;
+                break; // Break and restart check from the new virt_start
+            }
+        }
+    } while (overlap_found);
+
+    uint64_t virt_end = 0;
+    if (!checked_add_u64(virt_start, length, &virt_end) || virt_end >= USER_STACK_TOP) {
+        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+        if (memfd_node)
+            vfs_close_vnode(memfd_node);
+        return static_cast<uint64_t>(-1);
+    }
+
+    uint64_t flags = PTE_PRESENT | PTE_USER;
+    if (prot & 2)
+        flags |= PTE_WRITABLE;
+    // PROT_EXEC is opt-in like in sys_mprotect: without it every anonymous
+    // mapping would be RWX, turning any userspace memory bug into a
+    // code-reuse primitive.
+    if (!(prot & 4))
+        flags |= PTE_NX;
+
+    // Publish the metadata before the PTEs: every rollback below removes
+    // it again, and no other lock is held while we hold this one
+    // (fd/memfd/pmm are leaves taken underneath).
+    VMAType vma_type = VMAType::Data;
+    if (memfd_node && (map_flags & MAP_SHARED)) {
+        flags |= PTE_SHARED;
+        vma_type = VMAType::Shared;
+    }
+    if (!vma_add(&p->vmalist->head, virt_start, virt_end, flags, vma_type)) {
+        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+        if (memfd_node)
+            vfs_close_vnode(memfd_node);
+        return static_cast<uint64_t>(-1);
+    }
+
+    if (memfd_node) {
+        const bool is_shared = (map_flags & MAP_SHARED) != 0;
+
+        for (size_t i = 0; i < num_pages; i++) {
+            void *frame_ptr = nullptr;
+            if (is_shared) {
+                frame_ptr = memfd_get_page(memfd_node, page_offset + i);
+                if (!frame_ptr)
+                    goto rollback_memfd;
+                pmm_refcount_inc(frame_ptr);
+            } else {
+                frame_ptr = mmap_alloc_frame_checked();
+                if (!frame_ptr)
+                    goto rollback_memfd;
+                void *src_page = memfd_get_page(memfd_node, page_offset + i);
+                if (src_page) {
+                    kstring::memcpy(
+                        reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
+                        reinterpret_cast<const void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(src_page))), 4096);
+                } else {
+                    kstring::zero_memory(
+                        reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))), 4096);
+                }
+            }
+
+            if (!mmap_journal_append(&journal, reinterpret_cast<uint64_t>(frame_ptr))) {
+                // Journal chunk unavailable: frame_ptr is not mapped yet,
+                // so no translation exists anywhere - releasing it under
+                // this leaf-only hold is safe.
+                pmm_free_frame(frame_ptr);
+                goto rollback_memfd;
+            }
+
+            if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(frame_ptr), flags)
+                     .ok()) {
+                // The PTE was never written; the journal already holds
+                // frame_ptr, so the rollback releases it with the rest
+                // once the batched shootdown completed.
+                goto rollback_memfd;
+            }
+        }
+
+        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+        vfs_close_vnode(memfd_node);
+        mmap_journal_release_chunks(&journal);
+        asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+        return virt_start;
+
+    rollback_memfd:
+        mmap_rollback_half_mapping(p, target_pml4, virt_start, virt_end, &journal, vma_flags_lock, memfd_node);
+        return static_cast<uint64_t>(-1);
+    }
+
+    for (size_t i = 0; i < num_pages; i++) {
+        void *new_frame = mmap_alloc_frame_checked();
+        if (!new_frame)
+            goto rollback_anon;
+        if (!mmap_journal_append(&journal, reinterpret_cast<uint64_t>(new_frame))) {
+            // Not mapped yet - safe to release under the leaf-only hold.
+            pmm_free_frame(new_frame);
+            goto rollback_anon;
+        }
+        if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(new_frame), flags).ok()) {
+            goto rollback_anon;
+        }
+        kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame))), 4096);
+    }
+
+    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
+    mmap_journal_release_chunks(&journal);
+    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+    return virt_start;
+
+rollback_anon:
+    mmap_rollback_half_mapping(p, target_pml4, virt_start, virt_end, &journal, vma_flags_lock, nullptr);
+    return static_cast<uint64_t>(-1);
+}
+
 extern "C" int64_t sys_memfd_create(const char *name, unsigned int flags)
 {
     (void)flags;
@@ -2095,214 +2461,8 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             return sys_set_quiet(arg1 != 0);
         case SYS_GETSYSINFO:
             return sys_getsysinfo(reinterpret_cast<SystemProfile *>(arg1));
-        case SYS_MMAP: {
-            size_t length = 0;
-            if (!round_up_page_size(arg2, &length))
-                return static_cast<uint64_t>(-1);
-
-            Process *p = process_get_current();
-            if (!p)
-                return static_cast<uint64_t>(-1);
-            size_t num_pages = length / 4096;
-
-            uint64_t offset = frame->arg6;
-            if ((offset & 0xFFFULL) != 0)
-                return static_cast<uint64_t>(-1);
-            size_t page_offset = offset / 4096;
-
-            uint64_t virt_start = 0x100000000ULL;
-
-            int fd = static_cast<int>(frame->arg5);
-            uint64_t mmap_flags = frame->arg4;
-
-            VNode *memfd_node = nullptr;
-            if (fd >= 0 && fd < MAX_OPEN_FILES) {
-                uint64_t sl_flags = spinlock_acquire_irqsave(&p->fdtab->lock);
-                if (p->fdtab->fds[fd].used && p->fdtab->fds[fd].vnode && is_memfd_vnode(p->fdtab->fds[fd].vnode)) {
-                    memfd_node = p->fdtab->fds[fd].vnode;
-                    __sync_fetch_and_add(&memfd_node->ref_count, 1);
-                }
-                spinlock_release_irqrestore(&p->fdtab->lock, sl_flags);
-            }
-
-            uint64_t *target_pml4 = p->page_table ? p->page_table : vmm_get_kernel_pml4();
-
-            // Address selection, VMA publication and PTE installation run
-            // under ONE continuous vma-lock hold: munmap clears PTEs and
-            // fork's clone snapshots them under this same lock, so a racing
-            // unmap can never steal the frames of a half-installed mapping
-            // and the clone can never refcount a page munmap is freeing.
-            uint64_t vma_flags_lock = spinlock_acquire_irqsave(p->vma_lock_ptr);
-            bool overlap_found;
-            do {
-                overlap_found = false;
-                for (VMA *curr = p->vmalist->head; curr; curr = curr->next) {
-                    uint64_t probe_end = 0;
-                    if (!checked_add_u64(virt_start, length, &probe_end)) {
-                        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                        return static_cast<uint64_t>(-1);
-                    }
-                    // Check if [virt_start, virt_start + length) overlaps with curr
-                    if (virt_start < curr->end && probe_end > curr->start) {
-                        if (curr->end > UINT64_MAX - 0xFFFULL) {
-                            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                            return static_cast<uint64_t>(-1);
-                        }
-                        virt_start = (curr->end + 0xFFFULL) & ~0xFFFULL;
-                        overlap_found = true;
-                        break; // Break and restart check from the new virt_start
-                    }
-                }
-            } while (overlap_found);
-
-            uint64_t virt_end = 0;
-            if (!checked_add_u64(virt_start, length, &virt_end) || virt_end >= USER_STACK_TOP) {
-                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                return static_cast<uint64_t>(-1);
-            }
-
-            uint64_t flags = PTE_PRESENT | PTE_USER;
-            if (arg3 & 2)
-                flags |= PTE_WRITABLE;
-            // PROT_EXEC is opt-in like in sys_mprotect: without it every
-            // anonymous mapping would be RWX, turning any userspace memory
-            // bug into a code-reuse primitive.
-            if (!(arg3 & 4))
-                flags |= PTE_NX;
-
-            // Publish the metadata before the PTEs: every rollback below
-            // removes it again, and no other lock is held while we hold this
-            // one (fd/memfd/pmm are leaves taken underneath).
-            VMAType vma_type = VMAType::Data;
-            if (memfd_node && (mmap_flags & MAP_SHARED)) {
-                flags |= PTE_SHARED;
-                vma_type = VMAType::Shared;
-            }
-            if (!vma_add(&p->vmalist->head, virt_start, virt_end, flags, vma_type)) {
-                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                if (memfd_node)
-                    vfs_close_vnode(memfd_node);
-                return static_cast<uint64_t>(-1);
-            }
-
-            if (memfd_node) {
-                const bool is_shared = (mmap_flags & MAP_SHARED) != 0;
-
-                for (size_t i = 0; i < num_pages; i++) {
-                    void *frame_ptr = nullptr;
-                    if (is_shared) {
-                        frame_ptr = memfd_get_page(memfd_node, page_offset + i);
-                        if (!frame_ptr) {
-                            for (size_t j = 0; j < i; j++) {
-                                uint64_t vaddr = virt_start + (j * 4096);
-                                uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                                vmm_unmap_page_in(target_pml4, vaddr);
-                                if (phys)
-                                    pmm_refcount_dec(reinterpret_cast<void *>(phys));
-                            }
-                            vma_remove(&p->vmalist->head, virt_start, virt_end);
-                            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                            vfs_close_vnode(memfd_node);
-                            return static_cast<uint64_t>(-1);
-                        }
-                        pmm_refcount_inc(frame_ptr);
-                    } else {
-                        frame_ptr = pmm_alloc_frame();
-                        if (!frame_ptr) {
-                            for (size_t j = 0; j < i; j++) {
-                                uint64_t vaddr = virt_start + (j * 4096);
-                                uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                                vmm_unmap_page_in(target_pml4, vaddr);
-                                if (phys)
-                                    pmm_free_frame(reinterpret_cast<void *>(phys));
-                            }
-                            vma_remove(&p->vmalist->head, virt_start, virt_end);
-                            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                            vfs_close_vnode(memfd_node);
-                            return static_cast<uint64_t>(-1);
-                        }
-                        void *src_page = memfd_get_page(memfd_node, page_offset + i);
-                        if (src_page) {
-                            kstring::memcpy(
-                                reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
-                                reinterpret_cast<const void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(src_page))),
-                                4096);
-                        } else {
-                            kstring::zero_memory(
-                                reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(frame_ptr))),
-                                4096);
-                        }
-                    }
-
-                    if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(frame_ptr),
-                                         flags)
-                             .ok()) {
-                        if (is_shared) {
-                            pmm_refcount_dec(frame_ptr);
-                        } else {
-                            pmm_free_frame(frame_ptr);
-                        }
-                        for (size_t j = 0; j < i; j++) {
-                            uint64_t vaddr = virt_start + (j * 4096);
-                            uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                            vmm_unmap_page_in(target_pml4, vaddr);
-                            if (phys) {
-                                if (is_shared) {
-                                    pmm_refcount_dec(reinterpret_cast<void *>(phys));
-                                } else {
-                                    pmm_free_frame(reinterpret_cast<void *>(phys));
-                                }
-                            }
-                        }
-                        vma_remove(&p->vmalist->head, virt_start, virt_end);
-                        spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                        vfs_close_vnode(memfd_node);
-                        return static_cast<uint64_t>(-1);
-                    }
-                }
-
-                vfs_close_vnode(memfd_node);
-                spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-                return virt_start;
-            }
-
-            for (size_t i = 0; i < num_pages; i++) {
-                void *new_frame = pmm_alloc_frame();
-                if (!new_frame) {
-                    for (size_t j = 0; j < i; j++) {
-                        uint64_t vaddr = virt_start + (j * 4096);
-                        uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                        vmm_unmap_page_in(target_pml4, vaddr);
-                        if (phys)
-                            pmm_free_frame(reinterpret_cast<void *>(phys));
-                    }
-                    vma_remove(&p->vmalist->head, virt_start, virt_end);
-                    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                    return static_cast<uint64_t>(-1);
-                }
-                if (!vmm_map_page_in(target_pml4, virt_start + (i * 4096), reinterpret_cast<uint64_t>(new_frame), flags)
-                         .ok()) {
-                    pmm_free_frame(new_frame);
-                    for (size_t j = 0; j < i; j++) {
-                        uint64_t vaddr = virt_start + (j * 4096);
-                        uint64_t phys = vmm_virt_to_phys_in(target_pml4, vaddr);
-                        vmm_unmap_page_in(target_pml4, vaddr);
-                        if (phys)
-                            pmm_free_frame(reinterpret_cast<void *>(phys));
-                    }
-                    vma_remove(&p->vmalist->head, virt_start, virt_end);
-                    spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-                    return static_cast<uint64_t>(-1);
-                }
-                kstring::zero_memory(reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(new_frame))),
-                                     4096);
-            }
-
-            spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags_lock);
-            asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-            return virt_start;
-        }
+        case SYS_MMAP:
+            return sys_mmap_impl(arg2, arg3, frame->arg4, static_cast<int>(frame->arg5), frame->arg6);
         case SYS_MUNMAP: {
             Process *p = process_get_current();
             if (!p)
@@ -2608,12 +2768,17 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
                 if (phys) {
                     if (!vmm_map_page_in(p->page_table, virt_start + (i * 0x1000), phys, flags).ok()) {
                         // Roll back the pages already installed so a retry can
-                        // start from a clean slate.
+                        // start from a clean slate. Clear under the lock with
+                        // no flush, then ONE batched invalidate after the
+                        // release - never a shootdown under vma_lock_ptr
+                        // (finding C1). No frames are released here: the FB
+                        // phys belongs to the device, not the PMM.
                         for (size_t j = 0; j < i; j++) {
-                            vmm_unmap_page_in(p->page_table, virt_start + (j * 0x1000));
+                            vmm_unmap_page_no_flush(p->page_table, virt_start + (j * 0x1000));
                         }
                         vma_remove(&p->vmalist->head, virt_start, virt_start + size);
                         spinlock_release_irqrestore(p->vma_lock_ptr, chk_flags);
+                        vmm_invalidate_tlb_range(virt_start, i);
                         return static_cast<uint64_t>(-1);
                     }
                 }
@@ -3295,14 +3460,26 @@ extern "C" uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_
             for (; mapped < size; mapped += 4096) {
                 pmm_refcount_inc(reinterpret_cast<void *>(phys_start + mapped));
                 if (!vmm_map_page_in(p->page_table, virt_start + mapped, phys_start + mapped, flags).ok()) {
-                    pmm_refcount_dec(reinterpret_cast<void *>(phys_start + mapped));
-                    vma_remove(&p->vmalist->head, virt_start, virt_start + size);
+                    // The failed page's PTE was never written; its refcount
+                    // bump is dropped below together with the mapped ones.
+                    // Clear without flushing under the lock, then after the
+                    // release ONE batched invalidate, the futex notify, and
+                    // the refcount drops - never a shootdown or a frame
+                    // release under vma_lock_ptr (finding C1).
                     for (uint64_t rollback = 0; rollback < mapped; rollback += 4096) {
-                        vmm_unmap_page_in(p->page_table, virt_start + rollback);
-                        pmm_refcount_dec(reinterpret_cast<void *>(phys_start + rollback));
+                        vmm_unmap_page_no_flush(p->page_table, virt_start + rollback);
                     }
+                    vma_remove(&p->vmalist->head, virt_start, virt_start + size);
                     spinlock_release_irqrestore(p->vma_lock_ptr, vma_flags);
-                    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+                    vmm_invalidate_tlb_range(virt_start, mapped / 4096);
+                    for (uint64_t off = 0; off <= mapped; off += 4096) {
+                        uint64_t shm_frame = phys_start + off;
+                        futex_notify_freed_frames(&shm_frame, 1);
+#ifdef DEBUG
+                        g_mmap_debug_notify_frames++;
+#endif
+                        pmm_refcount_dec(reinterpret_cast<void *>(shm_frame));
+                    }
                     return static_cast<uint64_t>(-1);
                 }
             }

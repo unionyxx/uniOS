@@ -44,23 +44,40 @@ static Process *g_proc_tail = nullptr;
 static uint64_t g_next_pid = 1;
 static volatile uint32_t g_shutdown_action = 0;
 WaitQueue g_epoll_wait_queue = {nullptr, nullptr};
-// Earliest absolute tick at which some epoll waiter's timeout expires,
-// UINT64_MAX when none is armed. Updated lock-free (monotonic min); fired
-// from the tick path under g_sched_lock.
-static volatile uint64_t g_epoll_wake_deadline = UINT64_MAX;
 
-// Timed waits on leaf wait queues (futex timeouts): unlike epoll's single
-// global queue there is no one queue to wake, so each waiter registers
-// itself. The walker wakes entries whose deadline passed AND that are still
-// parked (Blocked/Waiting): a waiter woken by its leaf (futex WAKE) is
-// already Running/Ready and is skipped, so a genuine wake is never misread
-// as a timeout.
+// Unified timed-wait registry (futex timeouts, sys_epoll_wait timeouts):
+// neither the futex buckets' wait queues nor the global epoll wait queue
+// have a native timeout, so each waiter registers its own absolute
+// deadline before parking. Keyed by Process* in a heap-allocated hash
+// table (separate chaining through the intrusive hash_next, 64 buckets
+// initially, doubling at 70% load) — a registration never fails for
+// capacity, the way the old fixed 16-entry table's -ENOSPC did. The
+// walker (tick path, under g_sched_lock) wakes waiters whose deadline
+// passed AND that are parked — for epoll entries, parked on
+// g_epoll_wait_queue specifically — and frees the entry; a waiter woken
+// by its leaf (futex WAKE, pipe/event wake, signal) is already
+// Running/Ready and clears the entry itself on its wait's exit path.
+// Entries whose waiter is not yet parked are KEPT and re-checked next
+// tick: the arm happens before the queue push, so dropping them there
+// would lose the timeout entirely (the waiter parks with no deadline
+// left armed — the lost-timeout class this registry replaces).
 struct TimedWaitEntry
 {
     Process *proc;
     uint64_t deadline;
+    bool is_epoll;
+    bool timed_wake; // deadline observed expired; the wake pends on the park
+    TimedWaitEntry *hash_next;
 };
-static TimedWaitEntry g_timed_waits[16];
+
+static constexpr size_t k_timed_wait_initial_buckets = 64;
+static constexpr unsigned k_timed_wait_grow_percent = 70;
+// Fibonacci-spread multiplier for pointer hashing (bucket counts stay
+// powers of two).
+static constexpr uint64_t k_timed_wait_ptr_hash_mult = 0x9E3779B97F4A7C15ULL;
+static TimedWaitEntry **g_timed_wait_buckets = nullptr;
+static size_t g_timed_wait_bucket_count = 0;
+static size_t g_timed_wait_entry_count = 0;
 static volatile uint64_t g_timed_wake_deadline = UINT64_MAX;
 static void wake_expired_timed_waits(uint64_t now);
 
@@ -204,6 +221,52 @@ static bool process_reap_classify_locked(Process *target)
     return true;
 }
 
+// Kernel stacks live in the VMM's dedicated guard region (vmm.h): one
+// non-present guard page below the 16 PMM frames. stack_base points at the
+// lowest PRESENT page, so rsp0 = stack_base + KERNEL_STACK_SIZE and the
+// canary/bootstrap math are exactly what they were on the old HHDM-mapped
+// stacks. A kernel-mode access below the base faults into the region's
+// #PF check and panics as "kernel stack overflow" (C12).
+//
+// task_kernel_stack_alloc: takes 16 frames from the PMM, maps them into a
+// fresh region slot, and stamps the canary words at stack_base[0..7]
+// (defense in depth behind the guard page). Returns false with nothing
+// taken on failure.
+[[nodiscard]] static bool task_kernel_stack_alloc(Process *proc)
+{
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    void *frames = pmm_alloc_frames(stack_pages);
+    if (!frames)
+        return false;
+    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
+
+    const uint64_t stack_base = vmm_map_kernel_stack(proc->stack_phys);
+    if (stack_base == 0) {
+        for (size_t i = 0; i < stack_pages; i++)
+            pmm_free_frame(reinterpret_cast<void *>(proc->stack_phys + i * 4096));
+        proc->stack_phys = 0;
+        return false;
+    }
+
+    proc->stack_base = reinterpret_cast<uint64_t *>(stack_base);
+    for (size_t i = 0; i < 8; i++)
+        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+    return true;
+}
+
+// Unmaps the region slot (the flush inside completes on every core before
+// the frames return to the PMM — the vmm_free_dma contract) and frees the
+// 16 backing frames.
+static void task_kernel_stack_free(Process *proc)
+{
+    if (!proc->stack_phys)
+        return;
+    vmm_unmap_kernel_stack(reinterpret_cast<uint64_t>(proc->stack_base));
+    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
+    for (size_t i = 0; i < stack_pages; i++)
+        pmm_free_frame(reinterpret_cast<void *>(proc->stack_phys + i * 4096));
+}
+
 // Free a classified-unshared reaped target. Runs with no scheduler lock.
 // Non-owners (threads) release only their kernel stack and struct: the
 // page table and VMA list object belong to the group leader.
@@ -211,15 +274,9 @@ static void process_free_now(Process *target)
 {
     const bool owns_address_space = target->vma_lock_ptr == &target->vma_lock;
 
-    if (target->stack_phys) {
-        uintptr_t stack_ptr = target->stack_phys;
-        size_t num_pages = KERNEL_STACK_SIZE / 4096;
-
-        for (size_t i = 0; i < num_pages; i++) {
-            pmm_free_frame(reinterpret_cast<void *>(stack_ptr));
-            stack_ptr += 4096; // Move to the next page frame
-        }
-    }
+    // Guarded by stack_phys: the boot kernel task (pid 0) still runs on the
+    // bootloader's HHDM stack and has no region slot to unmap.
+    task_kernel_stack_free(target);
 
     if (owns_address_space) {
         if (target->page_table)
@@ -943,32 +1000,34 @@ Process *process_find_by_pid_locked(uint64_t pid)
     return nullptr;
 }
 
-static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 1)
+static void scheduler_schedule_internal(uint32_t elapsed_jiffies = 0)
 {
     Process *cur = current_proc();
     // This core's private idle task: never queued, never demoted.
     const bool cur_is_idle = (cur == cpu_get_local()->idle);
 
-    if (elapsed_jiffies == 0)
-        elapsed_jiffies = 1;
-    cur->cpu_time += elapsed_jiffies;
-    cur->time_slice += elapsed_jiffies;
+    // Elapsed-time gating: elapsed > 0 (a real timer tick) advances CPU-time
+    // and slice accounting/demotion only; crediting zero-elapsed passes
+    // (resched IPI, yield, park) a phantom jiffy inflated cpu_time and burned
+    // slices. The wake walkers run on EVERY pass: they are cheap no-ops when
+    // ticks did not advance, and on IRQ-less passes they are the only
+    // mechanism that converts tick progress (from any source) into wakes.
+    // Jiffies themselves advance in timer_handler() regardless of this gate.
+    const uint64_t now = timer_get_ticks();
+    if (elapsed_jiffies > 0) {
+        cur->cpu_time += elapsed_jiffies;
+        cur->time_slice += elapsed_jiffies;
+    }
 
     wake_sleeping_processes();
 
-    const uint64_t now = timer_get_ticks();
-
-    // Timed epoll waits: g_epoll_wait_queue has no native timeout, so the
-    // tick path here is what enforces sys_epoll_wait's timeout argument.
-    if (g_epoll_wait_queue.head && now >= g_epoll_wake_deadline) {
-        g_epoll_wake_deadline = UINT64_MAX;
-        wait_queue_wake_all(&g_epoll_wait_queue);
-    }
+    // Futex and epoll timeouts: their wait queues have no native timeout,
+    // so the tick path here enforces them through the timed-wait registry.
     wake_expired_timed_waits(now);
 
     if (cur->state == ProcessState_Running) {
         uint32_t max_slice = (cur->priority == 0) ? 5 : (cur->priority == 1) ? 20 : 50;
-        if (cur->time_slice >= max_slice) {
+        if (elapsed_jiffies > 0 && cur->time_slice >= max_slice) {
             if (cur->priority < NUM_PRIORITY_LEVELS - 1 && cur->pid != 0) {
                 cur->priority++;
             }
@@ -1503,6 +1562,8 @@ void scheduler_init()
     kproc->priority = 2;
     kproc->fdtab = fd_table_alloc();
     kproc->vmalist = vma_list_alloc();
+    if (!kproc->fdtab || !kproc->vmalist)
+        panic("scheduler: kernel task fd/vma allocation failed at boot");
     spinlock_init(&kproc->vma_lock);
     kproc->vma_lock_ptr = &kproc->vma_lock;
 
@@ -1558,28 +1619,34 @@ Process *scheduler_create_task(void (*entry)(), const char *name)
     proc->cwd[1] = '\0';
     proc->fdtab = fd_table_alloc();
     proc->vmalist = vma_list_alloc();
+    if (!proc->fdtab || !proc->vmalist) {
+        // Heap exhaustion: fail creation cleanly instead of running a task
+        // with a null fd table or VMA list.
+        process_release_private_fds(proc);
+        vma_list_free(proc->vmalist);
+        aligned_free(proc);
+        interrupts_restore(flags);
+        return nullptr;
+    }
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
 
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *frames = pmm_alloc_frames(stack_pages);
-    if (!frames) {
+    if (!task_kernel_stack_alloc(proc)) {
+        // Roll back the fd table and VMA list object taken above along
+        // with the struct, mirroring process_fork's partial-clone
+        // rollback.
+        process_release_private_fds(proc);
+        vma_list_free(proc->vmalist);
         aligned_free(proc);
         interrupts_restore(flags);
         return nullptr;
     }
 
-    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
-    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
-    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
-
-    for (size_t i = 0; i < 8; i++)
-        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
-
-    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+    uint64_t *stack_top =
+        reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(proc->stack_base) + KERNEL_STACK_SIZE);
 
     *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
     *(--stack_top) = reinterpret_cast<uint64_t>(entry);
@@ -1643,28 +1710,34 @@ Process *scheduler_create_task_deferred(void (*entry)(), const char *name)
     proc->cwd[1] = '\0';
     proc->fdtab = fd_table_alloc();
     proc->vmalist = vma_list_alloc();
+    if (!proc->fdtab || !proc->vmalist) {
+        // Heap exhaustion: fail creation cleanly instead of running a task
+        // with a null fd table or VMA list.
+        process_release_private_fds(proc);
+        vma_list_free(proc->vmalist);
+        aligned_free(proc);
+        interrupts_restore(flags);
+        return nullptr;
+    }
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
 
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *frames = pmm_alloc_frames(stack_pages);
-    if (!frames) {
+    if (!task_kernel_stack_alloc(proc)) {
+        // Roll back the fd table and VMA list object taken above along
+        // with the struct, mirroring process_fork's partial-clone
+        // rollback.
+        process_release_private_fds(proc);
+        vma_list_free(proc->vmalist);
         aligned_free(proc);
         interrupts_restore(flags);
         return nullptr;
     }
 
-    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
-    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
-    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
-
-    for (size_t i = 0; i < 8; i++)
-        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
-
-    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+    uint64_t *stack_top =
+        reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(proc->stack_base) + KERNEL_STACK_SIZE);
 
     *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
     *(--stack_top) = reinterpret_cast<uint64_t>(entry);
@@ -1735,29 +1808,37 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     proc->time_slice = 0;
     proc->fdtab = fd_table_alloc(false);
     proc->vmalist = vma_list_alloc();
+    if (!proc->fdtab || !proc->vmalist) {
+        // Heap exhaustion: fail creation cleanly instead of running a task
+        // with a null fd table or VMA list.
+        process_release_private_fds(proc);
+        vma_list_free(proc->vmalist);
+        aligned_free(proc);
+        interrupts_restore(flags);
+        return nullptr;
+    }
     spinlock_init(&proc->vma_lock);
     proc->vma_lock_ptr = &proc->vma_lock;
     init_fpu_state(proc->fpu_state);
     proc->fpu_initialized = true;
     proc->next = proc;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *frames = pmm_alloc_frames(stack_pages);
-    if (!frames) {
+    if (!task_kernel_stack_alloc(proc)) {
+        // Roll back the fd table and VMA list object taken above along
+        // with the struct, mirroring process_fork's partial-clone
+        // rollback.
+        process_release_private_fds(proc);
+        vma_list_free(proc->vmalist);
         aligned_free(proc);
         interrupts_restore(flags);
         return nullptr;
     }
-    proc->stack_phys = reinterpret_cast<uint64_t>(frames);
-    uint64_t virt_base = vmm_phys_to_virt(proc->stack_phys);
-    proc->stack_base = reinterpret_cast<uint64_t *>(virt_base);
-    for (size_t i = 0; i < 8; i++)
-        proc->stack_base[i] = 0xDEADBEEFDEADBEEFULL;
 
     // Same bootstrap frame as regular tasks: the first switch into the idle
     // task lands in kernel_thread_entry -> kernel_task_wrapper(entry); the
     // idle body never returns.
-    uint64_t *stack_top = reinterpret_cast<uint64_t *>(virt_base + KERNEL_STACK_SIZE);
+    uint64_t *stack_top =
+        reinterpret_cast<uint64_t *>(reinterpret_cast<uint64_t>(proc->stack_base) + KERNEL_STACK_SIZE);
     *(--stack_top) = reinterpret_cast<uint64_t>(kernel_thread_entry);
     *(--stack_top) = reinterpret_cast<uint64_t>(entry);
     for (int i = 0; i < 5; i++)
@@ -1768,76 +1849,148 @@ Process *scheduler_create_idle_task(void (*entry)(), const char *name)
     return proc;
 }
 
-void scheduler_note_epoll_deadline(uint64_t deadline_ticks)
+static size_t timed_wait_bucket_index(Process *p, size_t bucket_count)
 {
-    uint64_t cur = __atomic_load_n(&g_epoll_wake_deadline, __ATOMIC_RELAXED);
-    while (deadline_ticks < cur) {
-        if (__sync_bool_compare_and_swap(&g_epoll_wake_deadline, cur, deadline_ticks))
-            return;
-        cur = __atomic_load_n(&g_epoll_wake_deadline, __ATOMIC_RELAXED);
-    }
+    // Process structs are 64-byte aligned: drop the redundant low bits,
+    // Fibonacci-spread, and fold the high product bits down so the modulo
+    // against a power-of-two bucket count sees well-mixed bits.
+    uint64_t h = (reinterpret_cast<uintptr_t>(p) >> 6) * k_timed_wait_ptr_hash_mult;
+    h ^= h >> 32;
+    return static_cast<size_t>(h % bucket_count);
 }
 
-bool scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks)
+// Caller MUST hold g_sched_lock. Allocates (or doubles) the bucket array
+// and rehashes every live entry into it. A failed allocation keeps the
+// current array: only the load factor degrades, correctness is unaffected
+// (chaining has no capacity limit).
+static void timed_wait_grow_locked()
+{
+    const size_t new_count = g_timed_wait_bucket_count ? g_timed_wait_bucket_count * 2 : k_timed_wait_initial_buckets;
+    auto *fresh = static_cast<TimedWaitEntry **>(malloc(new_count * sizeof(TimedWaitEntry *)));
+    if (!fresh) {
+        DEBUG_WARN("timed-wait registry cannot grow past %zu buckets", g_timed_wait_bucket_count);
+        return;
+    }
+    kstring::zero_memory(fresh, new_count * sizeof(TimedWaitEntry *));
+    for (size_t i = 0; i < g_timed_wait_bucket_count; i++) {
+        TimedWaitEntry *e = g_timed_wait_buckets[i];
+        while (e) {
+            TimedWaitEntry *next = e->hash_next;
+            const size_t idx = timed_wait_bucket_index(e->proc, new_count);
+            e->hash_next = fresh[idx];
+            fresh[idx] = e;
+            e = next;
+        }
+    }
+    free(g_timed_wait_buckets);
+    g_timed_wait_buckets = fresh;
+    g_timed_wait_bucket_count = new_count;
+}
+
+bool scheduler_note_epoll_deadline(Process *p, uint64_t deadline_ticks)
+{
+    // Thin wrapper: an epoll-wait registration in the unified registry.
+    // The return value must be honored: a refused registration (entry
+    // allocation failure or a duplicate from a missed clear) leaves the
+    // waiter without a timeout, so sys_epoll_wait fails the wait instead
+    // of parking unbounded.
+    return scheduler_note_wake_deadline(p, deadline_ticks, true);
+}
+
+bool scheduler_note_wake_deadline(Process *p, uint64_t deadline_ticks, bool is_epoll)
 {
     if (!p)
         return true;
+
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
+
+    if (!g_timed_wait_buckets ||
+        g_timed_wait_entry_count * 100 >= g_timed_wait_bucket_count * k_timed_wait_grow_percent)
+        timed_wait_grow_locked();
+
     bool placed = false;
-    uint64_t earliest = UINT64_MAX;
-    for (auto &e : g_timed_waits) {
-        if (!placed && e.proc == nullptr) {
-            e.proc = p;
-            e.deadline = deadline_ticks;
-            placed = true;
+    if (g_timed_wait_buckets) {
+        const size_t idx = timed_wait_bucket_index(p, g_timed_wait_bucket_count);
+        bool duplicate = false;
+        for (TimedWaitEntry *e = g_timed_wait_buckets[idx]; e; e = e->hash_next) {
+            if (e->proc == p) {
+                duplicate = true;
+                break;
+            }
         }
-        if (e.proc)
-            earliest = (e.deadline < earliest) ? e.deadline : earliest;
+        if (duplicate) {
+            // A live registration for this process exists: the previous
+            // wait's exit path missed its clear. Arming over it could
+            // mis-timeout the earlier wait; refuse and let the caller
+            // surface the error instead of degrading silently.
+            DEBUG_ERROR("process %p already holds a timed-wait registration (missing clear on an exit path)",
+                        (void *)p);
+        } else {
+            TimedWaitEntry *e = static_cast<TimedWaitEntry *>(malloc(sizeof(TimedWaitEntry)));
+            if (!e) {
+                DEBUG_ERROR("timed-wait entry allocation failed for process %p", (void *)p);
+            } else {
+                e->proc = p;
+                e->deadline = deadline_ticks;
+                e->is_epoll = is_epoll;
+                e->timed_wake = false;
+                e->hash_next = g_timed_wait_buckets[idx];
+                g_timed_wait_buckets[idx] = e;
+                g_timed_wait_entry_count++;
+                placed = true;
+            }
+        }
     }
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
 
     if (placed) {
         uint64_t cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
-        while (earliest < cur) {
-            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, earliest))
+        while (deadline_ticks < cur) {
+            if (__sync_bool_compare_and_swap(&g_timed_wake_deadline, cur, deadline_ticks))
                 break;
             cur = __atomic_load_n(&g_timed_wake_deadline, __ATOMIC_RELAXED);
         }
-        return true;
     }
-
-    // No free slot: report it so the caller can fail the wait instead of
-    // silently degrading to an infinite sleep. Loud in debug as well.
-    DEBUG_WARN("timed wait table full: pid %lu timeout dropped", p->pid);
-    return false;
+    return placed;
 }
 
 // Caller MUST hold g_sched_lock. Removing entries can only raise the
-// table's true minimum, so the global deadline (<= that minimum by
+// registry's true minimum, so the global deadline (<= that minimum by
 // construction) stays valid: it may fire early and re-arm from the
 // survivors.
-static void clear_timed_wait_entries_locked(Process *p)
+static void timed_wait_remove_all_locked(Process *p)
 {
-    for (auto &e : g_timed_waits) {
-        if (e.proc == p)
-            e.proc = nullptr;
+    if (!g_timed_wait_buckets)
+        return;
+    const size_t idx = timed_wait_bucket_index(p, g_timed_wait_bucket_count);
+    TimedWaitEntry **link = &g_timed_wait_buckets[idx];
+    while (*link) {
+        TimedWaitEntry *e = *link;
+        if (e->proc == p) {
+            *link = e->hash_next;
+            free(e);
+            g_timed_wait_entry_count--;
+        } else {
+            link = &e->hash_next;
+        }
     }
 }
 
 // A timed-wait registration must never outlive the wait that armed it:
-// when the wait ends by wake, signal or expiry, drop the entry. A
-// lingering entry makes the walker mark the process's next (unrelated)
-// blocked wait as timed out, and a freed-then-recycled Process at the
-// same address turns the liveness check into a false positive.
+// when the wait ends by wake, signal, timeout or thread exit, drop every
+// entry it armed. A lingering entry makes the walker mark the process's
+// next (unrelated) blocked wait as timed out, and a freed-then-recycled
+// Process at the same address turns the liveness check into a false
+// positive.
 void scheduler_clear_wake_deadline(Process *p)
 {
     if (!p)
         return;
     const uint64_t flags = interrupts_save_disable();
     spinlock_acquire(&g_sched_lock);
-    clear_timed_wait_entries_locked(p);
+    timed_wait_remove_all_locked(p);
     spinlock_release(&g_sched_lock);
     interrupts_restore(flags);
 }
@@ -1861,42 +2014,66 @@ static bool timed_wait_target_live(Process *target)
 }
 
 // Caller MUST hold g_sched_lock: this runs from scheduler_schedule_internal
-// (the tick path that also drives the epoll deadline). The wake path is
-// scheduler_wake_process_locked, which requires exactly that.
+// (the tick path). The wake path is scheduler_wake_process_locked, which
+// requires exactly that.
 static void wake_expired_timed_waits(uint64_t now)
 {
     if (g_timed_wake_deadline == UINT64_MAX || now < g_timed_wake_deadline)
+        return;
+    if (!g_timed_wait_buckets)
         return;
 
     g_timed_wake_deadline = UINT64_MAX;
     uint64_t earliest = UINT64_MAX;
     bool unparked = false;
-    for (auto &e : g_timed_waits) {
-        if (!e.proc)
-            continue;
-        if (now < e.deadline) {
-            earliest = (e.deadline < earliest) ? e.deadline : earliest;
-            continue;
-        }
-        Process *target = e.proc;
-        if (timed_wait_target_live(target)) {
-            if (target->state == ProcessState_Blocked || target->state == ProcessState_Waiting) {
-                e.proc = nullptr;
-                target->timed_wake = true;
-                scheduler_wake_process_locked(target);
-            } else {
-                // Live but not parked: either still between registration
-                // and its scheduler_wait push, or already woken by its
-                // futex wake and returning (it deregisters itself).
-                // Dropping the entry here would lose a not-yet-parked
-                // waiter's timeout — an unbounded hang. Keep it and look
-                // again next tick.
-                unparked = true;
+    for (size_t i = 0; i < g_timed_wait_bucket_count; i++) {
+        TimedWaitEntry **link = &g_timed_wait_buckets[i];
+        while (*link) {
+            TimedWaitEntry *e = *link;
+            if (!e->timed_wake && now < e->deadline) {
+                earliest = (e->deadline < earliest) ? e->deadline : earliest;
+                link = &e->hash_next;
+                continue;
             }
-        } else {
-            // The waiter died before its deadline; exit deregisters it,
-            // so this is a backstop for a missed path.
-            e.proc = nullptr;
+            e->timed_wake = true; // expired; the wake below pends on the park
+            Process *target = e->proc;
+            const bool is_epoll = e->is_epoll;
+            if (!timed_wait_target_live(target)) {
+                // The waiter died before its deadline; exit deregisters it,
+                // so this is a backstop for a missed path.
+                *link = e->hash_next;
+                free(e);
+                g_timed_wait_entry_count--;
+                continue;
+            }
+            const bool parked = target->state == ProcessState_Blocked || target->state == ProcessState_Waiting;
+            // Epoll entries only count as parked on the epoll queue itself:
+            // a registration must never fire against a later, unrelated
+            // park of the same process.
+            const bool fire = parked && (!is_epoll || target->waiting_queue == &g_epoll_wait_queue);
+            if (fire) {
+                // "Woke" = the wake actually removed the target from its
+                // wait queue (scheduler_wake_process_locked). Only futex
+                // entries mark Proc::timed_wake: sys_futex reads it to
+                // report -ETIMEDOUT, and a stale flag from an epoll timeout
+                // would turn the next futex wait's genuine wake into a
+                // bogus timeout. sys_epoll_wait detects its timeout by
+                // re-checking elapsed ticks after the park.
+                *link = e->hash_next;
+                free(e);
+                g_timed_wait_entry_count--;
+                if (!is_epoll)
+                    target->timed_wake = true;
+                scheduler_wake_process_locked(target);
+                continue;
+            }
+            // Live but not parked: either still between registration
+            // and its queue push, or already woken by its leaf and
+            // returning (it deregisters itself). Dropping the entry
+            // here would lose a not-yet-parked waiter's timeout — an
+            // unbounded hang. Keep it and look again next tick.
+            unparked = true;
+            link = &e->hash_next;
         }
     }
 
@@ -1963,7 +2140,7 @@ void scheduler_schedule_elapsed(uint32_t elapsed_jiffies)
 
 void scheduler_schedule()
 {
-    scheduler_schedule_elapsed(1);
+    scheduler_schedule_elapsed(0);
 }
 
 void scheduler_yield()
@@ -2103,9 +2280,7 @@ bool g_ktest_fail_vma_list_alloc = false;
         return static_cast<uint64_t>(-1);
     }
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *stack_phys = pmm_alloc_frames(stack_pages);
-    if (!stack_phys) {
+    if (!task_kernel_stack_alloc(child)) {
         process_release_private_fds(child);
         if (child->vmalist->head)
             vma_free_all(child->vmalist->head);
@@ -2113,29 +2288,23 @@ bool g_ktest_fail_vma_list_alloc = false;
         aligned_free(child);
         return static_cast<uint64_t>(-1);
     }
-    child->stack_phys = reinterpret_cast<uint64_t>(stack_phys);
 
-    uint64_t virt_base = vmm_phys_to_virt(child->stack_phys);
-    child->stack_base = reinterpret_cast<uint64_t *>(virt_base);
+    // The bootstrap writes go through the region VA of the freshly mapped
+    // slot (the frames are the PMM's contiguous stack_phys range).
+    uint64_t stack_top_va = reinterpret_cast<uint64_t>(child->stack_base) + KERNEL_STACK_SIZE;
 
-    uint64_t *hhdm_stack_base = reinterpret_cast<uint64_t *>(virt_base);
-    for (size_t i = 0; i < 8; i++)
-        hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+    stack_top_va -= sizeof(SyscallFrame);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_va);
 
-    uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
-
-    stack_top_hhdm -= sizeof(SyscallFrame);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
-    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm);
-
-    stack_top_hhdm -= sizeof(Context);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(Context) - 1);
-    Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
+    stack_top_va -= sizeof(Context);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(Context) - 1);
+    Context *child_context = reinterpret_cast<Context *>(stack_top_va);
 
     *child_frame = *frame;
     kstring::zero_memory(child_context, sizeof(Context));
     child_context->rip = reinterpret_cast<uint64_t>(fork_ret);
-    child->sp = stack_top_hhdm;
+    child->sp = stack_top_va;
 
     // Capture before publishing: once the child is queued another core can
     // run and exit it (and reap can free the struct) before we return.
@@ -2276,10 +2445,10 @@ void sys_thread_exit(int64_t status)
     (void)flags;
     spinlock_acquire(&g_sched_lock);
 
-    // A timed futex wait this thread abandoned by exiting must not leave
-    // its registration behind: the walker would otherwise mark a recycled
+    // A timed wait this thread abandoned by exiting must not leave its
+    // registration behind: the walker would otherwise mark a recycled
     // Process at this address.
-    clear_timed_wait_entries_locked(current_proc());
+    timed_wait_remove_all_locked(current_proc());
 
     current_proc()->state = ProcessState_Zombie;
     current_proc()->exit_status = status;
@@ -2546,16 +2715,12 @@ void scheduler_sleep_ms(uint64_t ms)
 extern "C" void thread_ret();
 
 // Unwind a half-built thread before its publication: release the fd-table
-// reference, return the kernel stack frames, free the struct.
+// reference, return the kernel stack (region unmap + frames), free the
+// struct. Never called under g_sched_lock.
 static void thread_create_unwind(Process *thread)
 {
     process_release_private_fds(thread);
-    uintptr_t frame_addr = thread->stack_phys;
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    for (size_t i = 0; i < stack_pages; i++) {
-        pmm_free_frame(reinterpret_cast<void *>(frame_addr));
-        frame_addr += 4096;
-    }
+    task_kernel_stack_free(thread);
     aligned_free(thread);
 }
 
@@ -2613,30 +2778,23 @@ static void thread_create_unwind(Process *thread)
     spinlock_init(&thread->vma_lock);
     thread->vma_lock_ptr = parent->vma_lock_ptr;
 
-    const size_t stack_pages = KERNEL_STACK_SIZE / 4096;
-    void *kstack_phys = pmm_alloc_frames(stack_pages);
-    if (!kstack_phys) {
+    if (!task_kernel_stack_alloc(thread)) {
         process_release_private_fds(thread);
         aligned_free(thread);
         return -1;
     }
-    thread->stack_phys = reinterpret_cast<uint64_t>(kstack_phys);
-    uint64_t virt_base = vmm_phys_to_virt(thread->stack_phys);
-    thread->stack_base = reinterpret_cast<uint64_t *>(virt_base);
 
-    uint64_t *hhdm_stack_base = reinterpret_cast<uint64_t *>(virt_base);
-    for (size_t i = 0; i < 8; i++)
-        hhdm_stack_base[i] = 0xDEADBEEFDEADBEEFULL;
+    // The bootstrap writes go through the region VA of the freshly mapped
+    // slot (the frames are the PMM's contiguous stack_phys range).
+    uint64_t stack_top_va = reinterpret_cast<uint64_t>(thread->stack_base) + KERNEL_STACK_SIZE;
 
-    uint64_t stack_top_hhdm = virt_base + KERNEL_STACK_SIZE;
+    stack_top_va -= sizeof(SyscallFrame);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
+    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_va);
 
-    stack_top_hhdm -= sizeof(SyscallFrame);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(SyscallFrame) - 1);
-    SyscallFrame *child_frame = reinterpret_cast<SyscallFrame *>(stack_top_hhdm);
-
-    stack_top_hhdm -= sizeof(Context);
-    stack_top_hhdm &= ~static_cast<uint64_t>(alignof(Context) - 1);
-    Context *child_context = reinterpret_cast<Context *>(stack_top_hhdm);
+    stack_top_va -= sizeof(Context);
+    stack_top_va &= ~static_cast<uint64_t>(alignof(Context) - 1);
+    Context *child_context = reinterpret_cast<Context *>(stack_top_va);
 
     kstring::zero_memory(child_frame, sizeof(SyscallFrame));
     child_frame->rip = reinterpret_cast<uint64_t>(entry);
@@ -2648,7 +2806,7 @@ static void thread_create_unwind(Process *thread)
 
     kstring::zero_memory(child_context, sizeof(Context));
     child_context->rip = reinterpret_cast<uint64_t>(thread_ret);
-    thread->sp = stack_top_hhdm;
+    thread->sp = stack_top_va;
 
     // Clone the group's TLS template into the new thread's own block. The
     // template bytes cross the user boundary only through the safe walk

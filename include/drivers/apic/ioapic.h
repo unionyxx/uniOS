@@ -66,5 +66,9 @@ void ioapic_init();
 bool ioapic_is_ready();
 void ioapic_set_entry(uint8_t irq, uint8_t vector);
 uint32_t ioapic_irq_to_gsi(uint8_t irq);
+// IRQ destination policy: returns the 8-bit physical APIC ID of the next
+// CPU that is online at call time, in round-robin order. IOAPIC entries and
+// MSI/MSI-X messages alike source their destination through this.
+uint32_t irq_next_destination_apic();
 uint32_t apic_get_current_id();
 void apic_send_eoi();

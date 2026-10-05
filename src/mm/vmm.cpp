@@ -362,6 +362,14 @@ void vmm_init()
             panic("vmm: failed to pre-create MMIO window page tables");
     }
 
+    // Same constraint for the kernel-stack guard region (PML4 slot 507, one
+    // entry below the MMIO window's slot 508): pre-create the PML4 entry and
+    // its PDPT before the first address space can snapshot the kernel half.
+    // The PD/PT tables inside the region appear on demand as stacks are
+    // mapped.
+    if (!get_next_level(g_pml4, (VMM_KSTACK_REGION_START >> 39) & 0x1FF, 4, true, VMM_KSTACK_REGION_START))
+        panic("vmm: failed to pre-create kernel-stack region page tables");
+
     // Initialize TLB shootdown interrupt handler
     g_tlb_shootdown_vector = idt_allocate_free_vector();
     if (g_tlb_shootdown_vector != 0) {
@@ -968,7 +976,11 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
     if (pages == 0)
         return alloc;
 
-    void *phys_ptr = pmm_alloc_frames(pages);
+    // VMM_DMA_32BIT is an allocation policy bit, never part of a PTE entry.
+    const bool dma32 = (flags & VMM_DMA_32BIT) != 0;
+    const uint64_t pte_flags = flags & ~VMM_DMA_32BIT;
+
+    void *phys_ptr = dma32 ? pmm_alloc_frames_dma32(pages) : pmm_alloc_frames(pages);
     if (!phys_ptr)
         return alloc;
 
@@ -984,7 +996,7 @@ DMAAllocation vmm_alloc_dma_with_flags(size_t pages, uint64_t flags)
     uint64_t virt_base = dma_alloc_virt_range(size);
 
     for (size_t i = 0; i < pages; i++) {
-        if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys + i * 0x1000, flags)) {
+        if (!vmm_map_page_no_flush_in(g_pml4, virt_base + i * 0x1000, phys + i * 0x1000, pte_flags)) {
             for (size_t j = 0; j < i; j++) {
                 vmm_unmap_page_no_flush_in(g_pml4, virt_base + j * 0x1000);
             }
@@ -1067,6 +1079,147 @@ void vmm_free_dma(const DMAAllocation &alloc)
     dma_free_virt_range(alloc.virt, alloc.size);
 }
 
+// ---------------------------------------------------------------------------
+// Kernel-stack guard region
+// ---------------------------------------------------------------------------
+
+static_assert(VMM_KSTACK_REGION_START < VMM_KSTACK_REGION_END, "stack region must be non-empty");
+static_assert((VMM_KSTACK_REGION_START & 0x3FFFFFFFULL) == 0, "stack region must be 1 GiB-aligned (one PDPT entry)");
+static_assert(VMM_KSTACK_REGION_END == 0xFFFFFE0000000000ULL, "stack region must end where the MMIO window begins");
+static_assert(VMM_KSTACK_PAGES == 17, "16 stack pages plus one guard page per slot");
+static_assert(VMM_KSTACK_REGION_CAPACITY >= 4096, "stack region must hold at least the design's 4096 stacks");
+
+// Slot registry for the kernel-stack region. A leaf lock exactly like the
+// DMA window's g_dma_lock: taken only from task context (the scheduler's
+// stack create/free paths), never under g_sched_lock — creation paths take
+// the scheduler lock strictly after a stack is mapped, and every free path
+// (process_free_now, thread_create_unwind) runs strictly after it is
+// released.
+static Spinlock g_kstack_lock = SPINLOCK_INIT;
+static uint64_t g_kstack_next_slot = 0; // bump cursor, in slots
+// LIFO of freed slot indices. A push implies that slot is currently live,
+// so the count can never exceed VMM_KSTACK_REGION_CAPACITY: free slots +
+// live slots + un-bumped slots == capacity at all times.
+static uint32_t g_kstack_free_count = 0;
+static uint32_t g_kstack_free_list[VMM_KSTACK_REGION_CAPACITY];
+
+// Returns a slot to the registry (caller must have cleared the slot's PTEs
+// and completed the range flush first).
+static void vmm_kstack_slot_release(uint64_t slot)
+{
+    const uint64_t sl_flags = spinlock_acquire_irqsave(&g_kstack_lock);
+    g_kstack_free_list[g_kstack_free_count++] = static_cast<uint32_t>(slot);
+    spinlock_release_irqrestore(&g_kstack_lock, sl_flags);
+}
+
+bool vmm_is_kernel_stack_region(uint64_t addr)
+{
+    return addr >= VMM_KSTACK_REGION_START && addr < VMM_KSTACK_REGION_END;
+}
+
+uint64_t vmm_map_kernel_stack(uint64_t stack_phys)
+{
+    if (!stack_phys)
+        return 0;
+
+    const uint64_t sl_flags = spinlock_acquire_irqsave(&g_kstack_lock);
+    uint64_t slot;
+    if (g_kstack_free_count != 0) {
+        slot = g_kstack_free_list[--g_kstack_free_count];
+    } else if (g_kstack_next_slot < VMM_KSTACK_REGION_CAPACITY) {
+        slot = g_kstack_next_slot++;
+    } else {
+        spinlock_release_irqrestore(&g_kstack_lock, sl_flags);
+        DEBUG_ERROR("vmm: kernel-stack region exhausted (%llu stacks live)",
+                    (unsigned long long)VMM_KSTACK_REGION_CAPACITY);
+        return 0;
+    }
+    spinlock_release_irqrestore(&g_kstack_lock, sl_flags);
+
+    const uint64_t guard_va = VMM_KSTACK_REGION_START + slot * VMM_KSTACK_SLOT_SIZE;
+    const uint64_t stack_base = guard_va + 0x1000;
+    const uint64_t stack_pages = KERNEL_STACK_SIZE / 4096;
+
+    // Guard first: the slot's lowest page is deliberately non-present, so a
+    // kernel-mode access below a mapped stack's base faults into
+    // vmm_handle_page_fault's overflow panic instead of silently corrupting
+    // whatever lives below the stack.
+    if (!vmm_map_page_no_flush_in(g_pml4, guard_va, 0, PTE_KSTACK_GUARD)) {
+        vmm_kstack_slot_release(slot);
+        return 0;
+    }
+    for (uint64_t i = 0; i < stack_pages; i++) {
+        if (!vmm_map_page_no_flush_in(g_pml4, stack_base + i * 0x1000, stack_phys + i * 0x1000,
+                                      PTE_PRESENT | PTE_WRITABLE)) {
+            vmm_unmap_page_no_flush_in(g_pml4, guard_va);
+            for (uint64_t j = 0; j < i; j++) {
+                vmm_unmap_page_no_flush_in(g_pml4, stack_base + j * 0x1000);
+            }
+            vmm_invalidate_tlb_range(guard_va, i + 1);
+            vmm_kstack_slot_release(slot);
+            return 0;
+        }
+    }
+
+    // Fresh translations, but a remote core may have cached a non-present
+    // paging-structure entry for this range (a failed walk of the region),
+    // so complete the flush like the DMA map path before any task switch
+    // can touch the new VAs.
+    vmm_invalidate_tlb_range(guard_va, VMM_KSTACK_PAGES);
+    return stack_base;
+}
+
+void vmm_unmap_kernel_stack(uint64_t stack_base)
+{
+    if (!vmm_is_kernel_stack_region(stack_base) ||
+        ((stack_base - VMM_KSTACK_REGION_START - 0x1000) % VMM_KSTACK_SLOT_SIZE) != 0) {
+        DEBUG_ERROR("vmm: kernel stack unmap of non-region base 0x%lx", stack_base);
+        return;
+    }
+
+    const uint64_t slot = (stack_base - VMM_KSTACK_REGION_START - 0x1000) / VMM_KSTACK_SLOT_SIZE;
+    const uint64_t guard_va = stack_base - 0x1000;
+    const uint64_t stack_pages = KERNEL_STACK_SIZE / 4096;
+
+    for (uint64_t i = 0; i < stack_pages; i++) {
+        vmm_unmap_page_no_flush_in(g_pml4, stack_base + i * 0x1000);
+    }
+    vmm_unmap_page_no_flush_in(g_pml4, guard_va);
+
+    // Flush-before-free invariant (mirrors vmm_free_dma): every core must
+    // drop the translations BEFORE the caller returns the frames to the PMM,
+    // or a stale remote entry can write into a frame another subsystem now
+    // owns. The VA range is private to one dead task, so nothing faults on
+    // it meanwhile.
+    vmm_invalidate_tlb_range(guard_va, VMM_KSTACK_PAGES);
+
+    vmm_kstack_slot_release(slot);
+}
+
+uint64_t vmm_get_pte_in(const uint64_t *pml4, uint64_t virt)
+{
+    if (!pml4)
+        return 0;
+
+    uint64_t pml4_index = (virt >> 39) & 0x1FF;
+    if (!(pml4[pml4_index] & PTE_PRESENT))
+        return 0;
+
+    const uint64_t *pdpt =
+        reinterpret_cast<const uint64_t *>((pml4[pml4_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pdpt_index = (virt >> 30) & 0x1FF;
+    if (!(pdpt[pdpt_index] & PTE_PRESENT) || (pdpt[pdpt_index] & (1ULL << 7)))
+        return 0;
+
+    const uint64_t *pd = reinterpret_cast<const uint64_t *>((pdpt[pdpt_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    uint64_t pd_index = (virt >> 21) & 0x1FF;
+    if (!(pd[pd_index] & PTE_PRESENT) || (pd[pd_index] & (1ULL << 7)))
+        return 0;
+
+    const uint64_t *pt = reinterpret_cast<const uint64_t *>((pd[pd_index] & 0x000FFFFFFFFFF000ULL) + g_hhdm_offset);
+    return pt[(virt >> 12) & 0x1FF];
+}
+
 bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 {
     // A fault taken while already handling one (bad IST reuse, allocation
@@ -1079,6 +1232,26 @@ bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code)
 
     const bool present_fault = (error_code & 0x1) != 0;
     const bool write_fault = (error_code & 0x2) != 0;
+    // U/S (bit 2): the faulting access originated from CPL3.
+    const bool user_mode = (error_code & 0x4) != 0;
+
+    // Kernel-stack guard region: the only deliberately non-present pages in
+    // there are stack guards, and the faulting task is the one running on
+    // the stack it just pushed below. A kernel-mode non-present fault inside
+    // the region is fatal either way — report it as the overflow it almost
+    // certainly is, with the task identity, instead of returning into the
+    // generic kernel-fault print (which has no task context).
+    if (!user_mode && !present_fault && vmm_is_kernel_stack_region(fault_addr)) {
+        Process *overflowing = process_get_current();
+        if (overflowing) {
+            KLOG(LogModule::Mem, LogLevel::Fatal, "kernel stack overflow: pid %llu (%s), fault 0x%lx, stack base 0x%lx",
+                 (unsigned long long)overflowing->pid, overflowing->name, fault_addr,
+                 reinterpret_cast<uint64_t>(overflowing->stack_base));
+        } else {
+            KLOG(LogModule::Mem, LogLevel::Fatal, "kernel stack overflow: fault 0x%lx (no current task)", fault_addr);
+        }
+        panic("kernel stack overflow");
+    }
 
     Process *curr = process_get_current();
     if (!curr || !curr->vmalist->head || !curr->page_table) {

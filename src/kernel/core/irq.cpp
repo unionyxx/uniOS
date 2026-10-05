@@ -130,6 +130,64 @@ static bool dispatch_vector_handler(uint8_t vector)
     return true;
 }
 
+// ICR delivery-status polls (bit 12 of ICR_LO): every send is bounded, but a
+// poll that runs past the loud threshold means a wedged or pathologically
+// slow LAPIC — log once per send instead of spinning silently for the full
+// bound. Phase 2 replaces these ad-hoc bounds with the per-vector IPI policy.
+constexpr uint32_t kIcrMaxStatusPolls = 100000000u;
+constexpr uint32_t kIcrLoudPollIterations = 100000u;
+
+inline uint64_t read_tsc()
+{
+    uint32_t lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+// Polls the ICR delivery-status bit until it clears or `max_polls` iterations
+// elapse; returns the number of iterations spent.
+[[nodiscard]] uint32_t icr_wait_delivery_status(uint32_t max_polls)
+{
+    for (uint32_t i = 0; i < max_polls; i++) {
+        if ((lapic_read(LAPIC_ICR_LO) & (1u << 12)) == 0)
+            return i;
+        asm volatile("pause");
+    }
+    return max_polls;
+}
+
+// TSC-deadlined variant for the resched broadcast: each wait is capped at
+// `tsc_budget` ticks (~1 ms) instead of the INIT/SIPI iteration bound. A
+// resched IPI is advisory, so an over-budget send logs (once per send, via
+// the shared flag) and gives up: a late or dropped broadcast costs wake
+// latency — idle cores re-run schedule() at their next tick — never
+// correctness. The budget check itself is OUTSIDE the once-per-send loud
+// guard: a send whose first wait already logged must still bail out of the
+// second wait at the budget, not spin the full iteration bound. A zero
+// budget (uncalibrated TSC) degrades to the iteration bound with the same
+// loud threshold as every other ICR poll.
+bool icr_wait_delivery_status_deadline(uint8_t vector, uint64_t tsc_budget, bool *loud_logged)
+{
+    const uint64_t start = read_tsc();
+    for (uint32_t i = 0; i < kIcrMaxStatusPolls; i++) {
+        if ((lapic_read(LAPIC_ICR_LO) & (1u << 12)) == 0)
+            return true;
+        if (tsc_budget != 0 && read_tsc() - start >= tsc_budget) {
+            if (!*loud_logged) {
+                DEBUG_ERROR("APIC: ICR wait exceeded ~1ms TSC budget (vector %u, polls %u)", vector, i);
+                *loud_logged = true;
+            }
+            return false;
+        }
+        if (!*loud_logged && tsc_budget == 0 && i > kIcrLoudPollIterations) {
+            DEBUG_ERROR("APIC: ICR wait stalled %u polls with no TSC budget (vector %u)", i, vector);
+            *loud_logged = true;
+        }
+        asm volatile("pause");
+    }
+    return (lapic_read(LAPIC_ICR_LO) & (1u << 12)) == 0;
+}
+
 } // namespace
 
 // cppcheck-suppress arrayIndexOutOfBoundsCond
@@ -183,6 +241,9 @@ bool irq_register_isa_handler(uint8_t irq, IrqVectorHandler handler, void *ctx)
         // GSI to 8 bits: on chipsets whose ISO chain maps IRQ0->GSI2 and
         // IRQ2->GSI9, registering IRQ 0 re-resolved GSI 2 back to GSI 9 and
         // programmed the wrong pin.
+        // Destination-CPU selection also lives inside ioapic_set_entry:
+        // round-robin over CPUs online at registration time, with ISA IRQ 0
+        // (PIT) and IRQ 2 (cascade) pinned to the BSP.
         ioapic_set_entry(irq, vector);
         return true;
     }
@@ -324,6 +385,14 @@ void apic_enable_this_core()
 // transition back to xAPIC mode (disable the APIC, clear the EXT bit, then
 // re-enable). Some CPUs only allow this via reset, so treat it as best-effort
 // and warn loudly if x2APIC stays on.
+//
+// Device-IRQ destinations (IOAPIC redirection high dwords, MSI/MSI-X
+// addresses) are 8-bit physical APIC IDs sourced from PerCpu::apic_id
+// (CPUID/MADT; cpu_init fills the BSP slot, smp start_ap the AP slots) — the
+// round-robin policy in ioapic.cpp writes them into the physical-destination
+// fields. This forced downgrade to xAPIC mode is what keeps those encodings
+// valid, so it must run before any IOAPIC/MSI programming (it is the first
+// thing apic_init does).
 static void apic_force_xapic_mode()
 {
     constexpr uint32_t kIa32ApicBase = 0x1B;
@@ -440,11 +509,34 @@ void apic_init()
         g_stop_vector = idt_allocate_free_vector();
 }
 
-// Wakes every other core so idle ones re-run schedule() and pull work.
+// Wakes every other core so idle ones re-run schedule() and pull work. The
+// send uses the tight TSC-deadlined ICR waits (spec decision 6, resched send
+// bound): each delivery-status wait is capped at ~1 ms and an over-budget
+// send logs and moves on — phase 2 installs the full per-vector policy.
 void apic_send_resched_ipi_to_others()
 {
-    if (g_resched_vector != 0)
-        apic_send_ipi_all_excluding_self(g_resched_vector);
+    if (g_resched_vector == 0 || !g_apic_enabled || !g_lapic_base)
+        return;
+
+    // ~1 ms in TSC ticks; 0 = TSC uncalibrated (falls back to the iteration
+    // bound inside the deadline helper).
+    const uint64_t tsc_budget = timer_tsc_freq_hz() / 1000u;
+    bool loud_logged = false;
+
+    // A previous IPI from this core still in flight would be dropped by the
+    // ICR write below — harmless for resched, the new broadcast subsumes the
+    // stale one (both just say "re-run schedule()"). Stop-IPIs keep the
+    // generous bound in apic_send_ipi_all_excluding_self for exactly this
+    // reason.
+    icr_wait_delivery_status_deadline(g_resched_vector, tsc_budget, &loud_logged);
+
+    // Destination Shorthand: All Excluding Self (0xC0000), Fixed delivery,
+    // destination field cleared. The Level bit only applies to INIT delivery
+    // and must stay 0 on Fixed IPIs.
+    lapic_write(LAPIC_ICR_HI, 0);
+    lapic_write(LAPIC_ICR_LO, 0x000C0000 | g_resched_vector);
+
+    icr_wait_delivery_status_deadline(g_resched_vector, tsc_budget, &loud_logged);
 }
 
 void apic_stop_other_cpus()
@@ -467,6 +559,9 @@ void apic_stop_other_cpus()
             break;
         asm volatile("pause");
     }
+    const int stopped = __atomic_load_n(&g_cpu_stopped_count, __ATOMIC_ACQUIRE);
+    if (stopped < target)
+        DEBUG_ERROR("apic: stop IPI gave up: %d/%d CPUs halted", stopped, target);
 }
 
 extern "C" void irq_handler(void *stack_frame)
@@ -506,7 +601,14 @@ extern "C" void irq_handler(void *stack_frame)
         if (curr && curr->preempt_count > 0) {
             curr->preempt_pending = 1;
         } else {
-            scheduler_schedule();
+            // elapsed = 0: a resched IPI is a preemption event, not a tick —
+            // the old scheduler_schedule() call passed elapsed=1, adding a
+            // phantom jiffy of cpu_time/time_slice per IPI (C8). In
+            // scheduler_schedule_elapsed, elapsed > 0 gates CPU-time and
+            // slice accounting/demotion; the wake walkers stay unconditional
+            // (cheap no-ops when ticks did not advance); queue requeue/pop
+            // and preemption are unconditional.
+            scheduler_schedule_elapsed(0);
         }
         return;
     }
@@ -563,19 +665,24 @@ static bool icr_send_to(uint8_t dest_apic_id, uint32_t icr_low)
         return false;
 
     // Bounded waits: some virtual LAPICs keep the delivery-status bit sticky
-    // for INIT/SIPI, so an unbounded spin here would wedge the BSP.
-    constexpr uint32_t kMaxStatusPolls = 100000000u;
+    // for INIT/SIPI, so an unbounded spin here would wedge the BSP. A poll
+    // past kIcrLoudPollIterations logs once per send (vector, target, count);
+    // the bound and the return semantics are unchanged.
+    const uint8_t vector = static_cast<uint8_t>(icr_low & 0xFFu);
+    bool loud_logged = false;
 
     // Wait for any previous IPI to clear
-    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
-        asm volatile("pause");
+    const uint32_t pre_polls = icr_wait_delivery_status(kIcrMaxStatusPolls);
+    if (pre_polls > kIcrLoudPollIterations) {
+        DEBUG_ERROR("APIC: ICR idle wait stalled %u polls (vector %u, apic %u)", pre_polls, vector, dest_apic_id);
+        loud_logged = true;
     }
 
     lapic_write(LAPIC_ICR_HI, static_cast<uint32_t>(dest_apic_id) << 24);
     lapic_write(LAPIC_ICR_LO, icr_low);
-    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
-        asm volatile("pause");
-    }
+    const uint32_t post_polls = icr_wait_delivery_status(kIcrMaxStatusPolls);
+    if (post_polls > kIcrLoudPollIterations && !loud_logged)
+        DEBUG_ERROR("APIC: ICR delivery wait stalled %u polls (vector %u, apic %u)", post_polls, vector, dest_apic_id);
     return (lapic_read(LAPIC_ICR_LO) & (1u << 12)) == 0;
 }
 
@@ -605,13 +712,17 @@ void apic_send_ipi_all_excluding_self(uint8_t vector)
         return;
 
     // Bound the waits: panic/shutdown must never wedge forever on a virtual
-    // or faulty LAPIC with sticky delivery status.
-    constexpr uint32_t kMaxStatusPolls = 100000000u;
+    // or faulty LAPIC with sticky delivery status. A poll past
+    // kIcrLoudPollIterations logs once per send; the bound is unchanged.
+    bool loud_logged = false;
 
     // Writing the ICR while a previous IPI is still in flight drops that IPI;
-    // wait it out first (this path carries stop-IPIs and resched broadcasts).
-    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
-        asm volatile("pause");
+    // wait it out first (this path carries stop-IPIs; resched broadcasts use
+    // the tight TSC-deadlined send in apic_send_resched_ipi_to_others).
+    const uint32_t pre_polls = icr_wait_delivery_status(kIcrMaxStatusPolls);
+    if (pre_polls > kIcrLoudPollIterations) {
+        DEBUG_ERROR("APIC: broadcast ICR idle wait stalled %u polls (vector %u)", pre_polls, vector);
+        loud_logged = true;
     }
 
     // Clear Destination Field in ICR High
@@ -622,7 +733,7 @@ void apic_send_ipi_all_excluding_self(uint8_t vector)
     // LAPIC implementations flag it on Fixed IPIs.
     lapic_write(LAPIC_ICR_LO, 0x000C0000 | vector);
 
-    for (uint32_t i = 0; i < kMaxStatusPolls && (lapic_read(LAPIC_ICR_LO) & (1u << 12)); i++) {
-        asm volatile("pause");
-    }
+    const uint32_t post_polls = icr_wait_delivery_status(kIcrMaxStatusPolls);
+    if (post_polls > kIcrLoudPollIterations && !loud_logged)
+        DEBUG_ERROR("APIC: broadcast ICR delivery wait stalled %u polls (vector %u)", post_polls, vector);
 }

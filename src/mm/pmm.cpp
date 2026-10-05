@@ -20,11 +20,28 @@ static size_t g_bitmap_bits = 0;
 static uint64_t *g_pmm_owners = nullptr;
 #endif
 
+// Zone descriptors: a frame-range classification over the whole bitmap.
+// ZONE_DMA32 = frames below 4 GiB (the only memory 32-bit-only DMA devices
+// can reach), ZONE_NORMAL = the rest. Multiple USABLE boot regions can each
+// contribute parts of both zones; reserved frames inside a range stay marked
+// in-use in the bitmap and are simply never allocated. Phase 4 extends these
+// with per-zone locks and per-CPU magazines.
+PmmZone g_pmm_zone_dma32 = {0, 0, "ZONE_DMA32"};
+PmmZone g_pmm_zone_normal = {0, 0, "ZONE_NORMAL"};
+
+// Bottom-up first-fit cursors, one per zone. Bits below a zone's cursor are
+// (mostly) in-use; a freed frame lowers its zone's cursor so the hole is the
+// first candidate of the next scan in that zone.
+static size_t g_dma32_cursor = 1; // frame 0 is permanently reserved
+static size_t g_normal_cursor = 0;
+
 static uint64_t g_total_memory = 0;
 static uint64_t g_free_memory = 0;
 static uint64_t g_highest_page = 0;
 
 static constexpr uint64_t k_frame_size = 4096;
+static constexpr uint64_t k_dma32_limit_frame = 0x100000; // 4 GiB / 4096
+static constexpr size_t k_not_found = static_cast<size_t>(-1);
 
 static void reserve_frame_permanently(size_t frame_idx)
 {
@@ -167,15 +184,10 @@ void pmm_init()
 
     g_pmm_bitmap.set_range(0, g_bitmap_bits, true);
 
-    uint64_t usable_memory = 0;
-    uint64_t reserved_memory = 0;
-
     for (uint64_t i = 0; i < boot_info->memory_map_count; i++) {
         const BootMemoryMapEntry *entry = &boot_info->memory_map[i];
 
         if (entry->type == BOOT_MEM_USABLE) {
-            usable_memory += entry->length;
-
             uint64_t base, length;
             if (!get_aligned_usable_range(entry, &base, &length))
                 continue;
@@ -195,10 +207,24 @@ void pmm_init()
                     g_highest_page = start_frame + frames - 1;
                 }
             }
-        } else {
-            reserved_memory += entry->length;
         }
     }
+
+    // Derive the zones from the same walk: every USABLE region contributes its
+    // below-4-GiB frames to ZONE_DMA32 and the rest to ZONE_NORMAL, so a zone
+    // is a range over the whole bitmap rather than a per-region structure.
+    const uint64_t dma32_frames = (static_cast<uint64_t>(g_bitmap_bits) < k_dma32_limit_frame)
+                                      ? static_cast<uint64_t>(g_bitmap_bits)
+                                      : k_dma32_limit_frame;
+    g_pmm_zone_dma32 = PmmZone{0, dma32_frames, "ZONE_DMA32"};
+    g_pmm_zone_normal =
+        PmmZone{k_dma32_limit_frame, static_cast<uint64_t>(g_bitmap_bits) - dma32_frames, "ZONE_NORMAL"};
+    g_dma32_cursor = 1;
+    g_normal_cursor = static_cast<size_t>(g_pmm_zone_normal.base_frame);
+    DEBUG_INFO("pmm: %s frames [0x%lx, 0x%lx), %s frames [0x%lx, 0x%lx)", g_pmm_zone_dma32.name,
+               g_pmm_zone_dma32.base_frame, g_pmm_zone_dma32.base_frame + g_pmm_zone_dma32.frame_count,
+               g_pmm_zone_normal.name, g_pmm_zone_normal.base_frame,
+               g_pmm_zone_normal.base_frame + g_pmm_zone_normal.frame_count);
 
     uint64_t bitmap_start_frame = bitmap_phys_addr / k_frame_size;
     uint64_t bitmap_frame_count = bitmap_size_bytes / k_frame_size;
@@ -224,46 +250,144 @@ void pmm_init()
 #endif
 
     reserve_frame_permanently(0);
-    if (g_bitmap_bits > 1 && g_pmm_bitmap.get_hint() == 0) {
-        g_pmm_bitmap.update_hint(1);
+}
+
+// Bottom-up first-fit scan inside one zone, honoring (and advancing) the
+// zone's cursor with a zone-local wraparound. Returns k_not_found when the
+// zone holds no free frame. g_pmm_lock must be held.
+[[nodiscard]] static size_t zone_scan_single(const PmmZone &zone, size_t &cursor)
+{
+    const size_t base = static_cast<size_t>(zone.base_frame);
+    const size_t end = static_cast<size_t>(zone.base_frame + zone.frame_count);
+
+    size_t start = cursor;
+    if (start < base || start > end)
+        start = base;
+
+    size_t idx = g_pmm_bitmap.find_first_free(start, end);
+    if (idx == k_not_found && start != base)
+        idx = g_pmm_bitmap.find_first_free(base, start);
+    if (idx == k_not_found)
+        return k_not_found;
+
+    if (idx == 0) {
+        // Physical frame 0 is never handed out: a stray free of it must not
+        // turn into an allocation of physical address zero.
+        reserve_frame_permanently(0);
+        idx = g_pmm_bitmap.find_first_free(1, end);
+        if (idx == k_not_found)
+            return k_not_found;
     }
+
+    cursor = idx + 1;
+    return idx;
+}
+
+// Claims one frame after a successful zone scan: owners ledger, bitmap bit,
+// refcount, free counter, then lock release and zeroing outside the lock.
+// g_pmm_lock must be held; it is released before returning.
+[[nodiscard]] static void *commit_single_frame(size_t frame_idx, uint64_t irq_flags)
+{
+#ifdef DEBUG
+    if (g_pmm_owners && g_pmm_owners[frame_idx] != 0) {
+        uint64_t held_by = g_pmm_owners[frame_idx];
+        spinlock_release_irqrestore(&g_pmm_lock, irq_flags);
+        KLOG(LogModule::Mem, LogLevel::Fatal, "pmm: double-alloc of frame 0x%lx (held by %p, re-requested by %p)",
+             frame_idx * k_frame_size, reinterpret_cast<void *>(held_by), __builtin_return_address(0));
+        panic("pmm: double-alloc of frame (details in log)");
+    }
+    if (g_pmm_owners)
+        g_pmm_owners[frame_idx] = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+#endif
+    g_pmm_bitmap.set(frame_idx, true);
+    g_pmm_refcounts[frame_idx] = 1;
+    g_free_memory -= k_frame_size;
+    spinlock_release_irqrestore(&g_pmm_lock, irq_flags);
+
+    void *phys_ptr = reinterpret_cast<void *>(frame_idx * k_frame_size);
+    void *virt_ptr = reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(phys_ptr)));
+    kstring::zero_memory(virt_ptr, k_frame_size);
+    return phys_ptr;
+}
+
+// Claims a contiguous run after a successful zone scan. g_pmm_lock must be
+// held; it is released before returning. Zeroing happens outside the lock,
+// matching commit_single_frame(): callers (kernel stacks, DMA buffers handed
+// to devices) must never observe stale contents from a previous owner.
+[[nodiscard]] static void *commit_frame_range(size_t frame_idx, size_t count, uint64_t irq_flags)
+{
+#ifdef DEBUG
+    if (g_pmm_owners) {
+        for (size_t i = 0; i < count; i++) {
+            if (g_pmm_owners[frame_idx + i] != 0) {
+                uint64_t held_by = g_pmm_owners[frame_idx + i];
+                spinlock_release_irqrestore(&g_pmm_lock, irq_flags);
+                KLOG(LogModule::Mem, LogLevel::Fatal,
+                     "pmm: double-alloc of frame 0x%lx in range (held by %p, re-requested by %p)",
+                     (frame_idx + i) * k_frame_size, reinterpret_cast<void *>(held_by), __builtin_return_address(0));
+                panic("pmm: double-alloc of frame in range (details in log)");
+            }
+        }
+        for (size_t i = 0; i < count; i++)
+            g_pmm_owners[frame_idx + i] = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+    }
+#endif
+    g_pmm_bitmap.set_range(frame_idx, count, true);
+    for (size_t i = 0; i < count; i++) {
+        g_pmm_refcounts[frame_idx + i] = 1;
+    }
+    g_free_memory -= (k_frame_size * count);
+
+    spinlock_release_irqrestore(&g_pmm_lock, irq_flags);
+
+    void *phys_ptr = reinterpret_cast<void *>(frame_idx * k_frame_size);
+    void *virt_ptr = reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(phys_ptr)));
+    kstring::zero_memory(virt_ptr, count * k_frame_size);
+    return phys_ptr;
+}
+
+// Pushes a zone cursor past a freshly allocated range so the next bottom-up
+// scan in that zone does not re-walk the frames the range just consumed.
+static void advance_cursor_over(size_t &cursor, size_t frame_idx, size_t count)
+{
+    if (cursor >= frame_idx && cursor < frame_idx + count)
+        cursor = frame_idx + count;
 }
 
 void *pmm_alloc_frame()
 {
     uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
-    size_t frame_idx = g_pmm_bitmap.find_first_free();
-    if (frame_idx == 0) {
-        reserve_frame_permanently(0);
-        frame_idx = g_pmm_bitmap.find_first_free(1);
+    size_t frame_idx = zone_scan_single(g_pmm_zone_normal, g_normal_cursor);
+    if (frame_idx == k_not_found) {
+        // Order-0 only: a single frame may borrow from ZONE_DMA32 when NORMAL
+        // is exhausted; contiguous allocation may not (pmm_alloc_frames).
+        frame_idx = zone_scan_single(g_pmm_zone_dma32, g_dma32_cursor);
     }
 
-    if (frame_idx != static_cast<size_t>(-1) && frame_idx < g_bitmap_bits) {
-#ifdef DEBUG
-        if (g_pmm_owners && g_pmm_owners[frame_idx] != 0) {
-            uint64_t held_by = g_pmm_owners[frame_idx];
-            spinlock_release_irqrestore(&g_pmm_lock, flags);
-            KLOG(LogModule::Mem, LogLevel::Fatal, "pmm: double-alloc of frame 0x%lx (held by %p, re-requested by %p)",
-                 frame_idx * k_frame_size, reinterpret_cast<void *>(held_by), __builtin_return_address(0));
-            panic("pmm: double-alloc of frame (details in log)");
-        }
-        if (g_pmm_owners)
-            g_pmm_owners[frame_idx] = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-#endif
-        g_pmm_bitmap.set(frame_idx, true);
-        g_pmm_refcounts[frame_idx] = 1;
-        g_free_memory -= k_frame_size;
+    if (frame_idx == k_not_found) {
         spinlock_release_irqrestore(&g_pmm_lock, flags);
-
-        void *phys_ptr = reinterpret_cast<void *>(frame_idx * k_frame_size);
-        void *virt_ptr = reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(phys_ptr)));
-        kstring::zero_memory(virt_ptr, k_frame_size);
-        return phys_ptr;
+        return nullptr;
     }
 
-    spinlock_release_irqrestore(&g_pmm_lock, flags);
-    return nullptr;
+    return commit_single_frame(frame_idx, flags);
+}
+
+void *pmm_alloc_frame_dma32()
+{
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
+
+    size_t frame_idx = zone_scan_single(g_pmm_zone_dma32, g_dma32_cursor);
+
+    if (frame_idx == k_not_found) {
+        // ZONE_DMA32 is a scarce resource owned by 32-bit-only devices:
+        // exhaustion is reported to the caller, never papered over with
+        // memory the device cannot address.
+        spinlock_release_irqrestore(&g_pmm_lock, flags);
+        return nullptr;
+    }
+
+    return commit_single_frame(frame_idx, flags);
 }
 
 void *pmm_alloc_frames(size_t count)
@@ -275,50 +399,55 @@ void *pmm_alloc_frames(size_t count)
 
     uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
 
-    size_t frame_idx = g_pmm_bitmap.find_last_free_sequence(count);
+    // Contiguous allocation is ZONE_NORMAL's job: while RAM above 4 GiB
+    // exists, DMA32 is never a fallback for multi-frame kernel requests
+    // (kernel stacks, heap growth) - it stays reserved for 32-bit DMA
+    // devices. On a machine with no RAM above 4 GiB NORMAL is empty and
+    // DMA32 is the entire zone set, so scanning it is not a fallback.
+    const bool from_normal = g_pmm_zone_normal.frame_count != 0;
+    const PmmZone &zone = from_normal ? g_pmm_zone_normal : g_pmm_zone_dma32;
+    const size_t zone_base = static_cast<size_t>(zone.base_frame);
+    const size_t zone_end = static_cast<size_t>(zone.base_frame + zone.frame_count);
 
-    if (frame_idx != static_cast<size_t>(-1) && count <= g_bitmap_bits - frame_idx &&
-        (static_cast<uint64_t>(frame_idx) + count - 1) <= g_highest_page) {
-#ifdef DEBUG
-        if (g_pmm_owners) {
-            for (size_t i = 0; i < count; i++) {
-                if (g_pmm_owners[frame_idx + i] != 0) {
-                    uint64_t held_by = g_pmm_owners[frame_idx + i];
-                    spinlock_release_irqrestore(&g_pmm_lock, flags);
-                    KLOG(LogModule::Mem, LogLevel::Fatal,
-                         "pmm: double-alloc of frame 0x%lx in range (held by %p, re-requested by %p)",
-                         (frame_idx + i) * k_frame_size, reinterpret_cast<void *>(held_by),
-                         __builtin_return_address(0));
-                    panic("pmm: double-alloc of frame in range (details in log)");
-                }
-            }
-            for (size_t i = 0; i < count; i++)
-                g_pmm_owners[frame_idx + i] = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-        }
-#endif
-        g_pmm_bitmap.set_range(frame_idx, count, true);
-        for (size_t i = 0; i < count; i++) {
-            g_pmm_refcounts[frame_idx + i] = 1;
-        }
-        g_free_memory -= (k_frame_size * count);
+    size_t frame_idx = g_pmm_bitmap.find_last_free_sequence(count, zone_base, zone_end);
 
-        if (frame_idx <= g_pmm_bitmap.get_hint() && (frame_idx + count) > g_pmm_bitmap.get_hint()) {
-            g_pmm_bitmap.update_hint(frame_idx + count);
-        }
-
+    if (frame_idx == k_not_found || count > g_bitmap_bits - frame_idx ||
+        (static_cast<uint64_t>(frame_idx) + count - 1) > g_highest_page) {
         spinlock_release_irqrestore(&g_pmm_lock, flags);
-
-        // Zero outside the lock, matching pmm_alloc_frame(): callers (kernel
-        // stacks, DMA buffers handed to devices) must never observe stale
-        // contents from a previous owner.
-        void *phys_ptr = reinterpret_cast<void *>(frame_idx * k_frame_size);
-        void *virt_ptr = reinterpret_cast<void *>(vmm_phys_to_virt(reinterpret_cast<uint64_t>(phys_ptr)));
-        kstring::zero_memory(virt_ptr, count * k_frame_size);
-        return phys_ptr;
+        if (from_normal) {
+            DEBUG_ERROR("pmm: no contiguous run of %zu frames in ZONE_NORMAL; refusing ZONE_DMA32 fallback", count);
+        }
+        return nullptr;
     }
 
-    spinlock_release_irqrestore(&g_pmm_lock, flags);
-    return nullptr;
+    advance_cursor_over(from_normal ? g_normal_cursor : g_dma32_cursor, frame_idx, count);
+
+    return commit_frame_range(frame_idx, count, flags);
+}
+
+void *pmm_alloc_frames_dma32(size_t count)
+{
+    if (count == 0 || count > (static_cast<uint64_t>(SIZE_MAX) / k_frame_size))
+        return nullptr;
+    if (count == 1)
+        return pmm_alloc_frame_dma32();
+
+    uint64_t flags = spinlock_acquire_irqsave(&g_pmm_lock);
+
+    const size_t zone_base = static_cast<size_t>(g_pmm_zone_dma32.base_frame);
+    const size_t zone_end = static_cast<size_t>(g_pmm_zone_dma32.base_frame + g_pmm_zone_dma32.frame_count);
+
+    size_t frame_idx = g_pmm_bitmap.find_first_free_sequence(count, zone_base, zone_end);
+
+    if (frame_idx == k_not_found || count > g_bitmap_bits - frame_idx ||
+        (static_cast<uint64_t>(frame_idx) + count - 1) > g_highest_page) {
+        spinlock_release_irqrestore(&g_pmm_lock, flags);
+        return nullptr;
+    }
+
+    advance_cursor_over(g_dma32_cursor, frame_idx, count);
+
+    return commit_frame_range(frame_idx, count, flags);
 }
 
 bool pmm_reserve_range(uint64_t phys, size_t pages)
@@ -401,7 +530,15 @@ void pmm_refcount_dec(void *frame)
 
     if (--g_pmm_refcounts[frame_idx] == 0) {
         g_pmm_bitmap.set(frame_idx, false);
-        g_pmm_bitmap.update_hint(frame_idx);
+        // Lower the freed frame's zone cursor (by physical zone boundary,
+        // independent of any test-time zone override) so the hole is the
+        // first candidate of the next bottom-up scan in that zone.
+        if (frame_idx < k_dma32_limit_frame) {
+            if (frame_idx < g_dma32_cursor)
+                g_dma32_cursor = static_cast<size_t>(frame_idx);
+        } else if (frame_idx < g_normal_cursor) {
+            g_normal_cursor = static_cast<size_t>(frame_idx);
+        }
         g_free_memory += k_frame_size;
 #ifdef DEBUG
         if (g_pmm_owners)

@@ -19,16 +19,18 @@ static volatile uint16_t g_usb_enabled_mask = 0xFFFFu;
 
 void input_poll()
 {
-    static bool in_poll = false;
-    if (in_poll)
+    // Re-entrancy guard: a plain bool test-and-set can be passed by two cores
+    // simultaneously, so entry must be an atomic exchange (single winner) and
+    // exit a release store pairing with the acquire on entry.
+    static bool in_input_poll = false;
+    if (__atomic_exchange_n(&in_input_poll, true, __ATOMIC_ACQUIRE))
         return;
-    in_poll = true;
 
     // Full USB polling can sleep and enumerate devices, so it must not run
     // from timer/IRQ-driven input paths.
     usb_hid_update();
 
-    in_poll = false;
+    __atomic_store_n(&in_input_poll, false, __ATOMIC_RELEASE);
 }
 
 bool input_keyboard_has_char()

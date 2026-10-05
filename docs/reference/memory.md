@@ -23,8 +23,10 @@ Memory management lives in `src/mm/` and `src/arch/x86_64/mm/`. The kernel runs 
 
 - 4 KiB frames, 1 bit per frame (set = used), plus a `uint16_t` refcount per frame.
 - All frames start reserved; `USABLE` ranges are freed, then the bitmap/refcount frames and frame 0 are re-reserved.
-- `pmm_alloc_frame()` returns a **zeroed** physical frame (zeroing happens through the HHDM mapping).
-- `pmm_alloc_frames(count)` allocates physically contiguous frames from the top of memory downward, keeping low RAM free for DMA-sensitive uses.
+- Frames are classified into two zones derived at init: `ZONE_DMA32` (below 4 GiB) and `ZONE_NORMAL` (the rest). The single bitmap/refcount arrays still back both (per-zone locks and magazines are future work).
+- `pmm_alloc_frame()` returns a **zeroed** physical frame from ZONE_NORMAL, falling back to ZONE_DMA32 when NORMAL is exhausted (order-0 only).
+- `pmm_alloc_frames(count)` allocates physically contiguous frames top-down from ZONE_NORMAL; while NORMAL exists it never falls back to DMA32 (contiguous DMA32 runs are protected for 32-bit devices) and failure logs and returns null. On machines with no RAM above 4 GiB, DMA32 is the only zone and is scanned.
+- `pmm_alloc_frame_dma32()` / `pmm_alloc_frames_dma32(count)` allocate strictly below 4 GiB and never fall back to high memory; 32-bit-only devices (RTL8139, AC97) must use these via `vmm_alloc_dma_with_flags(..., VMM_DMA_32BIT)`, and attach fails when the zone cannot satisfy the request.
 - Refcounts power copy-on-write and shared mappings: `pmm_refcount_inc` panics on a free frame; `pmm_refcount_dec` frees at zero; invalid frees are reported, not silent.
 - Stats: `pmm_get_free_memory()`, `pmm_get_total_memory()` feed the `mem` shell command and `SYS_GETMEMINFO`.
 
@@ -41,8 +43,10 @@ Key operations:
 
 - `vmm_create_address_space`: fresh PML4 with kernel entries 256-511 copied.
 - `vmm_clone_address_space` (fork): kernel half shared, user half deep-copied with leaf refcount bumps; writable non-shared pages are write-protected in **both** spaces (copy-on-write).
-- `vmm_map_mmio` / `vmm_alloc_dma`: mappings from the MMIO/DMA window with batched invalidation. `vmm_free_dma` performs a full TLB shootdown **before** frames return to the pool, so no remote core can keep DMAing into a reused frame.
+- `vmm_map_mmio` / `vmm_alloc_dma` / `vmm_alloc_dma_with_flags`: mappings from the MMIO/DMA window with batched invalidation; `VMM_DMA_32BIT` routes the frame allocation to ZONE_DMA32 for 32-bit-only devices. `vmm_free_dma` performs a full TLB shootdown **before** frames return to the pool, so no remote core can keep DMAing into a reused frame.
+- Unmap/rollback ordering invariant: PTEs are cleared under the per-mm VMA lock with no flush; the lock is dropped first, then one batched `vmm_invalidate_tlb_range` runs, then futex waiters on freed frames are notified, then frames return to the PMM. No cross-core shootdown ever runs under the VMA lock — a sibling thread faulting on the range spins on that lock with IRQs off and could never take the shootdown IPI.
 - `vmm_remap_framebuffer`: replaces the loader's WB mappings in place with WC+shared.
+- Kernel stacks live in a dedicated region `[0xFFFFFD8000000000, 0xFFFFFE0000000000)` (PML4 slot 507, pre-created at init like the MMIO window so every address space sees it): each task gets 17 pages — one non-present guard page below 16 RW pages mapped from PMM frames via `vmm_map_kernel_stack`. A kernel-mode #PF in the region panics with the task's pid/name and fault address ("kernel stack overflow"). Unmapping flushes before frames return, preserving flush-before-free; slots recycle LIFO (capacity ~15k concurrent stacks).
 - `vmm_protect_kernel`: `.text` read+execute, `.rodata`/`.requests` read-only+NX, `.data` through `__kernel_end` writable+NX.
 - `vmm_handle_page_fault`: demand paging for VMA-covered addresses, copy-on-write resolution (copy when refcount > 1, in-place permission upgrade otherwise), shared-page flag fixup. PTE installation happens under the VMA lock, but the TLB invalidation runs **after** the lock is released: `vmm_invalidate_tlb` waits for every core to acknowledge the shootdown IPI, and a sibling core spinning on the VMA lock with interrupts disabled can never take that IPI — flushing under the lock deadlocks into the shootdown timeout panic.
 
@@ -68,6 +72,7 @@ Cross-core invalidation uses an IPI with monotonic sequence acknowledgements (`s
 
 - 8 buckets: 32, 64, 128, 256, 512, 1024, 2048, 4096 bytes. Free blocks live in per-bucket lists; slab pages are tracked in an open-addressed table (65536 slots). When a page's blocks are all free, the page returns to the PMM.
 - Allocations carry a header with size and magic (`0xC0FFEE1234567890`); `free` and `realloc` validate it.
+- `aligned_alloc` plants a 24-byte inner header `{aligned_offset, base, magic}` in the over-allocation; `free` trusts an aligned back-pointer only after a full validation chain (magic, base sanity, exact offset round-trip, live base magic, size spanning) and scrubs the base magic with a freed sentinel on release — recycled blocks can never fake aligned metadata. Any corruption aborts loudly (panic in debug, logged refusal in release), never a misdirected free.
 - Requests larger than one page go straight to contiguous PMM frames at their HHDM address.
 - `heap_init` only zeroes metadata; the heap grows on demand. Global `operator new`/`delete` forward to it.
 - `heap_dump_stats()` walks the free lists and tracked-page table for debugging.

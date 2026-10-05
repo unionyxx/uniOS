@@ -68,7 +68,7 @@ Thread syscalls: `SYS_THREAD_CREATE(entry, arg, stack_top, flags, stack_lo, stac
 | 275 | `SYS_MPROTECT` | Change protections on mapped pages |
 | 276 | `SYS_MEMFD_CREATE` | Anonymous memory-file fd (max 16 MiB) |
 
-Futex: `FUTEX_WAIT(uaddr, expected, timeout_ms)` takes a relative timeout in milliseconds (arg4; 0 = infinite, sub-tick timeouts round up to one timer tick) and returns `-11` when the word holds a different value, `-110` on expiry, `-28` when the fixed 16-entry timed-wait table is full, and `-4` when a fatal signal interrupts the wait (both the timed and untimed waits recheck fatal signals right before parking). `FUTEX_WAKE(uaddr, count)` wakes up to `count` waiters parked on that exact word — the count is literal, POSIX-style, so 0 wakes none — and returns how many it woke; the word is keyed by physical address, so the same shared frame mapped at different virtual addresses — cross-process shared memfd pages — still matches.
+Futex: `FUTEX_WAIT(uaddr, expected, timeout_ms)` takes a relative timeout in milliseconds (arg4; 0 = infinite, sub-tick timeouts round up to one timer tick) and returns `-11` when the word holds a different value, `-110` on expiry, `-12` when the timed-wait registration cannot be allocated, and `-4` when a fatal signal interrupts the wait (both the timed and untimed waits recheck fatal signals right before parking). `FUTEX_WAKE(uaddr, count)` wakes up to `count` waiters parked on that exact word — the count is literal, POSIX-style, so 0 wakes none — and returns how many it woke; the word is keyed by physical address, so the same shared frame mapped at different virtual addresses — cross-process shared memfd pages — still matches.
 
 ## Display, GUI, Input, Sound
 

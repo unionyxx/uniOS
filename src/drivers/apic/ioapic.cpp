@@ -1,5 +1,6 @@
 #include <drivers/apic/ioapic.h>
 #include <kernel/arch/x86_64/pic.h>
+#include <kernel/cpu.h>
 #include <kernel/debug.h>
 #include <kernel/mm/vmm.h>
 #include <stdint.h>
@@ -203,6 +204,69 @@ uint32_t ioapic_irq_to_gsi(uint8_t irq)
     return irq;
 }
 
+// ---------------------------------------------------------------------------
+// IRQ destination policy (spec: scheduler modernization, phase 2 — "IRQ
+// distribution").
+//
+// Device-IRQ destinations are picked at registration time by a round-robin
+// over the CPUs that are online *at registration time*. Every registration
+// site today (PS/2 keyboard/mouse, xHCI legacy line, MSI/MSI-X setup) runs
+// on the BSP during the boot critical path, before smp_init() starts the
+// APs — so the online set at registration is {BSP} and every entry still
+// lands on the BSP. That is the accepted behavior: the spread engages
+// unchanged for anything that registers after SMP bring-up (e.g. phase-4
+// IRQ-mode NICs) or when the boot order moves registration later. There is
+// no CPU hotplug, so a CPU that is online stays online.
+//
+// Pinned carve-out: ISA IRQ 0 (PIT legacy line) and ISA IRQ 2 (PIC cascade)
+// are routed explicitly to the BSP instead of round-robining — the legacy
+// timer path must never migrate off the BSP. Per-CPU local vectors (LAPIC
+// timer, spurious, error, thermal) are LVT entries programmed in irq.cpp
+// (apic_timer_init / apic_enable_this_core) and never pass through the
+// IOAPIC at all.
+//
+// Destination IDs are 8-bit *physical* APIC IDs taken from PerCpu::apic_id
+// (CPUID/MADT-sourced: cpu_init fills slot 0, start_ap fills AP slots).
+// irq.cpp forces xAPIC mode (apic_force_xapic_mode) before the IOAPIC is
+// programmed, so the physical-destination encodings here and in MSI/MSI-X
+// addresses stay valid; x2APIC IDs wider than 8 bits would not fit, which
+// the CONFIG_SMP_MAX_CPUS design point precludes.
+// ---------------------------------------------------------------------------
+
+// ISA lines that must not round-robin. Everything else registered through
+// ioapic_set_entry takes the next online CPU.
+constexpr uint8_t kIsaIrqPit = 0;
+constexpr uint8_t kIsaIrqCascade = 2;
+
+// Round-robin cursor over g_cpus[] slots. Registration is boot-time BSP
+// code (interrupts off, APs parked), so an unsynchronized counter is
+// race-free today; if a post-SMP registration path ever appears, a race can
+// only skew the distribution (two registrations sharing a CPU), never route
+// to an offline one — the returned slot is always observed online under the
+// acquire load below.
+static uint32_t g_irq_dest_cursor = 0;
+
+// Returns the g_cpus[] slot of the next online CPU after the cursor.
+static uint32_t irq_next_destination_slot()
+{
+    for (uint32_t step = 0; step < CONFIG_SMP_MAX_CPUS; ++step) {
+        const uint32_t slot = (g_irq_dest_cursor + 1u + step) % CONFIG_SMP_MAX_CPUS;
+        // Acquire pairs with the release store in scheduler_enter_idle():
+        // once online is observed set, this slot's apic_id (written by
+        // start_ap on the BSP before the release) is visible here.
+        if (__atomic_load_n(&g_cpus[slot].online, __ATOMIC_ACQUIRE)) {
+            g_irq_dest_cursor = slot;
+            return slot;
+        }
+    }
+    return 0; // Unreachable: the BSP is online from cpu_init() onward.
+}
+
+uint32_t irq_next_destination_apic()
+{
+    return g_cpus[irq_next_destination_slot()].apic_id;
+}
+
 void ioapic_set_entry(uint8_t irq, uint8_t vector)
 {
     const Iso *iso = ioapic_lookup_iso(irq);
@@ -227,8 +291,21 @@ void ioapic_set_entry(uint8_t irq, uint8_t vector)
             low |= IOAPIC_REDIR_LEVEL;
     }
 
+    // Destination: pinned legacy lines stay on the BSP (g_cpus[0] is the BSP
+    // by the PerCpu ABI); every other line takes the round-robin above.
+    uint32_t dest_slot = 0;
+    bool bsp_pinned = true;
+    if (irq != kIsaIrqPit && irq != kIsaIrqCascade) {
+        dest_slot = irq_next_destination_slot();
+        bsp_pinned = false;
+    }
+    const uint32_t dest_apic = g_cpus[dest_slot].apic_id;
+
     ioapic_mask_redir(*target, relative_gsi);
 
-    ioapic_write(target->base, high_index, apic_get_current_id() << 24);
+    ioapic_write(target->base, high_index, dest_apic << 24);
     ioapic_write(target->base, low_index, low);
+
+    BOOT_LOG("IOAPIC: IRQ %u (GSI %u) vector %u -> cpu %u (APIC %u)%s", irq, gsi, vector, dest_slot, dest_apic,
+             bsp_pinned ? " [BSP-pinned]" : "");
 }

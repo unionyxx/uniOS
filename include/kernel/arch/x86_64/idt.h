@@ -34,4 +34,5 @@ void idt_init();
 // Re-loads the (shared) IDT on the current core; used by AP bring-up.
 void idt_load();
 uint8_t idt_allocate_free_vector();
+void idt_free_vector(uint8_t vector);
 void idt_set_descriptor(uint8_t vector, const void *isr, uint8_t flags);

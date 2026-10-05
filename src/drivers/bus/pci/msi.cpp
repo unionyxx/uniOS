@@ -228,6 +228,10 @@ void pci_disable_msix(const PciDevice *dev, MsixState *state)
     DEBUG_INFO("MSI-X disabled for device %x:%x.%x", dev->bus, dev->device, dev->function);
 }
 
+// Programs one MSI-X table entry (masked; callers unmask via
+// msix_unmask_vector). `dest_apic_id` is chosen by the caller: drivers
+// should source it from irq_next_destination_apic() so MSI-X vectors spread
+// across online CPUs the same way IOAPIC lines do.
 void msix_set_entry(MsixState *state, uint32_t index, uint8_t vector, uint8_t dest_apic_id)
 {
     if (!state || !state->enabled || index >= state->table_size) {
@@ -328,8 +332,12 @@ bool pci_enable_msi(const PciDevice *dev, uint8_t *out_vector)
 
     pci_disable_msix_if_present(dev);
 
-    uint32_t lapic_id = apic_get_current_id();
-    uint32_t msg_addr = msix_make_address((uint8_t)lapic_id);
+    // Destination: the same registration-time round-robin the IOAPIC path
+    // uses (ioapic.cpp), so each MSI-capable device lands on the next online
+    // CPU instead of on whichever core ran the registration. The ID is an
+    // 8-bit physical APIC ID; see the policy comment in ioapic.cpp.
+    const uint32_t dest_apic = irq_next_destination_apic();
+    uint32_t msg_addr = msix_make_address(static_cast<uint8_t>(dest_apic));
     uint16_t msg_data = (uint16_t)msix_make_data(allocated_vector, 0);
 
     pci_config_write32(dev->bus, dev->device, dev->function, (uint8_t)(cap_offset + 4u), msg_addr);
@@ -347,7 +355,7 @@ bool pci_enable_msi(const PciDevice *dev, uint8_t *out_vector)
     pci_disable_interrupts(dev);
 
     *out_vector = allocated_vector;
-    DEBUG_INFO("Standard MSI enabled for device %x:%x.%x on vector %u", dev->bus, dev->device, dev->function,
-               allocated_vector);
+    DEBUG_INFO("Standard MSI enabled for device %x:%x.%x on vector %u (dest APIC %u)", dev->bus, dev->device,
+               dev->function, allocated_vector, dest_apic);
     return true;
 }

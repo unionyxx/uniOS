@@ -6,6 +6,7 @@
 #include <kernel/irq.h>
 #include <kernel/process.h>
 #include <kernel/scheduler.h>
+#include <kernel/time/timekeeping.h>
 #include <kernel/time/timer.h>
 
 static volatile uint64_t ticks = 0;
@@ -16,7 +17,6 @@ namespace {
 constexpr uint16_t PIT_CHANNEL2_DATA = 0x42;
 constexpr uint16_t PIT_SPEAKER_PORT = 0x61;
 constexpr uint32_t PIT_BASE_HZ = 1193182u;
-constexpr uint32_t PM_TIMER_HZ = 3579545u;
 
 uint64_t g_tsc_freq_hz = 0;
 uint64_t g_tsc_base = 0;
@@ -69,7 +69,7 @@ static void pit_channel2_wait_ticks(uint16_t reload)
     if (pm_blk == 0)
         return false;
 
-    const uint64_t target = (us * PM_TIMER_HZ + 999999ULL) / 1000000ULL;
+    const uint64_t target = (us * TIMER_PM_TIMER_HZ + 999999ULL) / 1000000ULL;
     uint32_t last = inl(pm_blk);
     uint64_t elapsed = 0;
     for (uint64_t guard = 0; guard < 100000000ULL; guard++) {
@@ -126,6 +126,14 @@ void timer_tsc_calibrate()
         BOOT_LOG("Timer: TSC calibrated at %llu.%03llu MHz", g_tsc_freq_hz / 1000000ULL,
                  (g_tsc_freq_hz / 1000ULL) % 1000ULL);
     }
+
+    // Timekeeping (phase 2, locked decision 2) piggybacks here: kmain
+    // already calls timer_tsc_calibrate() at the one right point (after
+    // timer_init() published the tick rate, after acpi_init() exposed the PM
+    // timer, after cpu_init() installed the GS base), so the tail doubles as
+    // the timekeeping_init() entry point and kmain.cpp needs no edit.
+    // Idempotent; timekeeping reads made before this run tick-derived.
+    timekeeping_init();
 }
 
 uint64_t timer_tsc_freq_hz()
@@ -252,6 +260,9 @@ uint32_t timer_handler()
     // cadence via the returned jiffy count.
     if (cpu_get_local()->cpu_id != 0)
         return apic_is_enabled() ? apic_timer_ap_divisor() : 1;
+    // Refreshes the {TSC, PM-timer} pair that APs calibrate against on the
+    // unsynced-TSC tier; no-op on every other tier.
+    timekeeping_publish_reference();
     __sync_add_and_fetch(&ticks, 1);
     return 1;
 }
