@@ -848,8 +848,7 @@ void xhci_free_device_resources(uint8_t slot_id)
         g_intr_recovery_needed[slot_id][i] = false;
     }
     if (g_xhci.input_contexts[slot_id]) {
-        pending_input = {g_xhci.input_context_phys[slot_id],
-                         reinterpret_cast<uint64_t>(g_xhci.input_contexts[slot_id]),
+        pending_input = {g_xhci.input_context_phys[slot_id], reinterpret_cast<uint64_t>(g_xhci.input_contexts[slot_id]),
                          (g_xhci.context_size_64 ? 64ULL : 32ULL) * 33 / 4096 + 1};
         g_xhci.input_contexts[slot_id] = nullptr;
     }
