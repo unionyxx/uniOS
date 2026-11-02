@@ -290,1285 +290,1303 @@ void cmd_touch(const char *filename)
 
 void cmd_rm(const char *filename)
 {
-    filename = skip_spaces(filename);
-    if (!filename || filename[0] == '\0') {
-        printf("rm: missing file operand\n");
-        set_status(1);
-        return;
-    }
-    char resolved[256];
-    shell_resolve_path(filename, resolved);
-    if (unlink(resolved) != 0) {
-        printf("rm: failed to delete '%s'\n", filename);
-        set_status(1);
-    }
+	filename = skip_spaces(filename);
+	if (!filename || filename[0] == '\0') {
+			printf("rm: missing file operand\n");
+			set_status(1);
+			return;
+	}
+	char resolved[256];
+	shell_resolve_path(filename, resolved);
+	if (unlink(resolved) != 0) {
+			printf("rm: failed to delete '%s'\n", filename);
+			set_status(1);
+	}
 }
 
 void cmd_mkdir(const char *dirname)
 {
-    dirname = skip_spaces(dirname);
-    if (!dirname || dirname[0] == '\0') {
-        printf("mkdir: missing directory operand\n");
-        set_status(1);
-        return;
-    }
-    char resolved[256];
-    shell_resolve_path(dirname, resolved);
-    if (mkdir(resolved) != 0) {
-        printf("mkdir: failed to create directory '%s'\n", dirname);
-        set_status(1);
-    }
+	dirname = skip_spaces(dirname);
+	if (!dirname || dirname[0] == '\0') {
+			printf("mkdir: missing directory operand\n");
+			set_status(1);
+			return;
+	}
+	char resolved[256];
+	shell_resolve_path(dirname, resolved);
+	if (mkdir(resolved) != 0) {
+			printf("mkdir: failed to create directory '%s'\n", dirname);
+			set_status(1);
+	}
 }
 
 void cmd_rmdir(const char *dirname)
 {
-    dirname = skip_spaces(dirname);
-    if (!dirname || dirname[0] == '\0') {
-        printf("rmdir: missing directory operand\n");
-        set_status(1);
-        return;
-    }
-    char resolved[256];
-    shell_resolve_path(dirname, resolved);
-    if (rmdir(resolved) != 0) {
-        printf("rmdir: failed to remove '%s'\n", dirname);
-        set_status(1);
-    }
+	dirname = skip_spaces(dirname);
+	if (!dirname || dirname[0] == '\0') {
+			printf("rmdir: missing directory operand\n");
+			set_status(1);
+			return;
+	}
+	char resolved[256];
+	shell_resolve_path(dirname, resolved);
+	if (rmdir(resolved) != 0) {
+			printf("rmdir: failed to remove '%s'\n", dirname);
+			set_status(1);
+	}
 }
 
 void cmd_cp(const char *args)
 {
-    char src[256], dst[256];
-    if (!read_arg2(args, src, sizeof(src), dst, sizeof(dst), nullptr)) {
-        printf("Usage: cp <src> <dst>\n");
-        set_status(1);
-        return;
-    }
+	char src[256], dst[256];
+	if (!read_arg2(args, src, sizeof(src), dst, sizeof(dst), nullptr)) {
+			printf("Usage: cp <src> <dst>\n");
+			set_status(1);
+			return;
+	}
 
-    char resolved_src[256], resolved_dst[256];
-    shell_resolve_path(src, resolved_src);
-    shell_resolve_path(dst, resolved_dst);
+	char resolved_src[256], resolved_dst[256];
+	shell_resolve_path(src, resolved_src);
+	shell_resolve_path(dst, resolved_dst);
 
-    int in = open(resolved_src, O_RDONLY);
-    if (in < 0) {
-        printf("cp: cannot stat '%s'\n", src);
-        set_status(1);
-        return;
-    }
+	int in = open(resolved_src, O_RDONLY);
+	if (in < 0) {
+			printf("cp: cannot stat '%s'\n", src);
+			set_status(1);
+			return;
+	}
 
-    struct VNodeStat st;
-    if (stat(resolved_src, &st) < 0 || st.is_dir) {
-        close(in);
-        printf("cp: cannot stat '%s'\n", src);
-        set_status(1);
-        return;
-    }
-    int out = open(resolved_dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (out < 0) {
-        close(in);
-        printf("cp: cannot create '%s'\n", dst);
-        set_status(1);
-        return;
-    }
+	struct VNodeStat st;
+	if (stat(resolved_src, &st) < 0 || st.is_dir) {
+			close(in);
+			printf("cp: cannot stat '%s'\n", src);
+			set_status(1);
+			return;
+	}
+	int out = open(resolved_dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (out < 0) {
+			close(in);
+			printf("cp: cannot create '%s'\n", dst);
+			set_status(1);
+			return;
+	}
 
-    char buffer[1024];
-    int n;
-    while ((n = read(in, buffer, sizeof(buffer))) > 0) {
-        if (write(out, buffer, (size_t)n) != n) {
-            printf("cp: write failed\n");
-            set_status(1);
-            break;
-        }
-    }
-    close(in);
-    close(out);
+	char buffer[1024];
+	int n;
+	while ((n = read(in, buffer, sizeof(buffer))) > 0) {
+			if (write(out, buffer, (size_t)n) != n) {
+					printf("cp: write failed\n");
+					set_status(1);
+					break;
+			}
+	}
+	close(in);
+	close(out);
 }
 
 void cmd_mv(const char *args)
 {
-    char src[256], dst[256];
-    if (!read_arg2(args, src, sizeof(src), dst, sizeof(dst), nullptr)) {
-        printf("Usage: mv <src> <dst>\n");
-        set_status(1);
-        return;
-    }
+	char src[256], dst[256];
+	if (!read_arg2(args, src, sizeof(src), dst, sizeof(dst), nullptr)) {
+			printf("Usage: mv <src> <dst>\n");
+			set_status(1);
+			return;
+	}
 
-    char resolved_src[256], resolved_dst[256];
-    shell_resolve_path(src, resolved_src);
-    shell_resolve_path(dst, resolved_dst);
-    if (rename(resolved_src, resolved_dst) != 0) {
-        printf("mv: failed to move '%s' to '%s'\n", src, dst);
-        set_status(1);
-    }
+	char resolved_src[256], resolved_dst[256];
+	shell_resolve_path(src, resolved_src);
+	shell_resolve_path(dst, resolved_dst);
+	if (rename(resolved_src, resolved_dst) != 0) {
+			printf("mv: failed to move '%s' to '%s'\n", src, dst);
+			set_status(1);
+	}
 }
 
 void cmd_df()
 {
-    VolumeInfo vols[16];
-    int count = get_volumes(vols, 16);
-    if (count < 0) {
-        printf("df: failed to get volumes\n");
-        set_status(1);
-        return;
-    }
-    printf("SOURCE        FLAGS       MOUNT  NAME\n");
-    for (int i = 0; i < count; i++) {
-        char flags[5];
-        flags[0] = (vols[i].flags & VOLUME_FLAG_MOUNTED) ? 'm' : '-';
-        flags[1] = (vols[i].flags & VOLUME_FLAG_WRITABLE) ? 'w' : 'r';
-        flags[2] = (vols[i].flags & VOLUME_FLAG_SYSTEM_DATA) ? 's' : '-';
-        flags[3] = (vols[i].flags & VOLUME_FLAG_STORAGE_DEVICE) ? 'd' : '-';
-        flags[4] = '\0';
-        printf("%-13s %-10s %-6s %s\n", vols[i].source_device, flags, vols[i].mount_path, vols[i].display_name);
-    }
+	VolumeInfo vols[16];
+	int count = get_volumes(vols, 16);
+	if (count < 0) {
+			printf("df: failed to get volumes\n");
+			set_status(1);
+			return;
+	}
+	printf("SOURCE        FLAGS       MOUNT  NAME\n");
+	for (int i = 0; i < count; i++) {
+			char flags[5];
+			flags[0] = (vols[i].flags & VOLUME_FLAG_MOUNTED) ? 'm' : '-';
+			flags[1] = (vols[i].flags & VOLUME_FLAG_WRITABLE) ? 'w' : 'r';
+			flags[2] = (vols[i].flags & VOLUME_FLAG_SYSTEM_DATA) ? 's' : '-';
+			flags[3] = (vols[i].flags & VOLUME_FLAG_STORAGE_DEVICE) ? 'd' : '-';
+			flags[4] = '\0';
+			printf("%-13s %-10s %-6s %s\n", vols[i].source_device, flags, vols[i].mount_path, vols[i].display_name);
+	}
 }
 
 void cmd_mount()
 {
-    cmd_df();
+	cmd_df();
 }
 
 void cmd_storage(const char *args)
 {
-    const char *mode = skip_spaces(args);
-    if (!mode || mode[0] == '\0') {
-        int current = get_storage_mode();
-        const char *name = current == STORAGE_MODE_OFF ? "off" : current == STORAGE_MODE_WRITABLE ? "rw" : "ro";
-        printf("storage: %s\n", name);
-        return;
-    }
+	const char *mode = skip_spaces(args);
+	if (!mode || mode[0] == '\0') {
+			int current = get_storage_mode();
+			const char *name = current == STORAGE_MODE_OFF ? "off" : current == STORAGE_MODE_WRITABLE ? "rw" : "ro";
+			printf("storage: %s\n", name);
+			return;
+	}
 
-    int next = -1;
-    if (strcmp(mode, "off") == 0)
-        next = STORAGE_MODE_OFF;
-    else if (strcmp(mode, "ro") == 0 || strcmp(mode, "read-only") == 0)
-        next = STORAGE_MODE_READ_ONLY;
-    else if (strcmp(mode, "rw") == 0 || strcmp(mode, "writable") == 0)
-        next = STORAGE_MODE_WRITABLE;
+	int next = -1;
+	if (strcmp(mode, "off") == 0)
+			next = STORAGE_MODE_OFF;
+	else if (strcmp(mode, "ro") == 0 || strcmp(mode, "read-only") == 0)
+			next = STORAGE_MODE_READ_ONLY;
+	else if (strcmp(mode, "rw") == 0 || strcmp(mode, "writable") == 0)
+			next = STORAGE_MODE_WRITABLE;
 
-    if (next < 0) {
-        printf("Usage: storage [off|ro|rw]\n");
-        set_status(1);
-        return;
-    }
+	if (next < 0) {
+			printf("Usage: storage [off|ro|rw]\n");
+			set_status(1);
+			return;
+	}
 
-    if (set_storage_mode(next) != 0) {
-        printf("storage: mode changes are owned by the desktop storage guard\n");
-        set_status(1);
-    }
+	if (set_storage_mode(next) != 0) {
+			printf("storage: mode changes are owned by the desktop storage guard\n");
+			set_status(1);
+	}
 }
 
 void cmd_echo(const char *text)
 {
-    printf("%s\n", text);
+	printf("%s\n", text);
 }
 
 void cmd_version()
 {
-    printf("uniOS @ %s\n", GIT_COMMIT);
+	printf("uniOS @ %s\n", GIT_COMMIT);
 }
 
 void cmd_uname()
 {
-    printf("uniOS %s x86_64\n", GIT_COMMIT);
+	printf("uniOS %s x86_64\n", GIT_COMMIT);
 }
 
 void cmd_exec(const char *args)
 {
-    while (*args == ' ')
-        args++;
-    if (args[0] == '\0')
-        return;
+	while (*args == ' ')
+			args++;
+	if (args[0] == '\0')
+			return;
 
-    char res[256];
-    shell_resolve_path(args, res);
+	char res[256];
+	shell_resolve_path(args, res);
 
-    int pid = fork();
-    if (pid == 0) {
-        exec(res);
-        printf("exec: failed to run %s\n", res);
-        exit(-1);
-    } else if (pid > 0) {
-        int status;
-        waitpid(pid, &status);
-    } else {
-        printf("fork failed\n");
-    }
+	int pid = fork();
+	if (pid == 0) {
+			exec(res);
+			printf("exec: failed to run %s\n", res);
+			exit(-1);
+	} else if (pid > 0) {
+			int status;
+			waitpid(pid, &status);
+	} else {
+			printf("fork failed\n");
+	}
 }
 
 static uint64_t du_path(const char *path, int depth, bool print_each)
 {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+			return 0;
 
-    struct VNodeStat st;
-    if (stat(path, &st) < 0) {
-        close(fd);
-        return 0;
-    }
-    if (!st.is_dir) {
-        close(fd);
-        if (print_each) {
-            printf("%llu\t%s\n", (unsigned long long)st.size, path);
-        }
-        return st.size;
-    }
+	struct VNodeStat st;
+	if (stat(path, &st) < 0) {
+			close(fd);
+			return 0;
+	}
+	if (!st.is_dir) {
+			close(fd);
+			if (print_each) {
+					printf("%llu\t%s\n", (unsigned long long)st.size, path);
+			}
+			return st.size;
+	}
 
-    uint64_t total = 0;
-    char name[256];
-    while (depth < 16 && syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-            continue;
-        char child[512];
-        join_path(path, name, child, sizeof(child));
-        total += du_path(child, depth + 1, print_each);
-    }
-    close(fd);
-    if (print_each)
-        printf("%llu\t%s\n", (unsigned long long)total, path);
-    return total;
+	uint64_t total = 0;
+	char name[256];
+	while (depth < 16 && syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
+			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+					continue;
+			char child[512];
+			join_path(path, name, child, sizeof(child));
+			total += du_path(child, depth + 1, print_each);
+	}
+	close(fd);
+	if (print_each)
+			printf("%llu\t%s\n", (unsigned long long)total, path);
+	return total;
 }
 
 static void tree_path(const char *path, int depth)
 {
-    if (depth > 8)
-        return;
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return;
+	if (depth > 8)
+			return;
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+			return;
 
-    char name[256];
-    while (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-            continue;
+	char name[256];
+	while (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
+			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+					continue;
 
-        char child[512];
-        join_path(path, name, child, sizeof(child));
-        struct VNodeStat st;
-        bool is_dir = stat(child, &st) == 0 && st.is_dir;
-        for (int i = 0; i < depth; i++)
-            printf("  ");
-        printf("%s%s\n", name, is_dir ? "/" : "");
-        if (is_dir)
-            tree_path(child, depth + 1);
-    }
-    close(fd);
+			char child[512];
+			join_path(path, name, child, sizeof(child));
+			struct VNodeStat st;
+			bool is_dir = stat(child, &st) == 0 && st.is_dir;
+			for (int i = 0; i < depth; i++)
+					printf("  ");
+			printf("%s%s\n", name, is_dir ? "/" : "");
+			if (is_dir)
+					tree_path(child, depth + 1);
+	}
+	close(fd);
 }
 
 void cmd_tree(const char *path)
 {
-    const char *target = skip_spaces(path);
-    char resolved[256];
-    shell_resolve_path((target && target[0]) ? target : ".", resolved);
-    printf("%s\n", resolved);
-    tree_path(resolved, 1);
+	const char *target = skip_spaces(path);
+	char resolved[256];
+	shell_resolve_path((target && target[0]) ? target : ".", resolved);
+	printf("%s\n", resolved);
+	tree_path(resolved, 1);
 }
 
 static void find_path(const char *path, const char *pattern, int depth)
 {
-    if (depth > 12)
-        return;
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return;
+	if (depth > 12)
+			return;
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+			return;
 
-    char name[256];
-    while (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-            continue;
-        char child[512];
-        join_path(path, name, child, sizeof(child));
-        if (!pattern || pattern[0] == '\0' || strstr(name, pattern))
-            printf("%s\n", child);
-        struct VNodeStat st;
-        if (stat(child, &st) == 0 && st.is_dir)
-            find_path(child, pattern, depth + 1);
-    }
-    close(fd);
+	char name[256];
+	while (syscall3(SYS_GETDENTS, (uint64_t)fd, (uint64_t)name, 0) == 0) {
+			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+					continue;
+			char child[512];
+			join_path(path, name, child, sizeof(child));
+			if (!pattern || pattern[0] == '\0' || strstr(name, pattern))
+					printf("%s\n", child);
+			struct VNodeStat st;
+			if (stat(child, &st) == 0 && st.is_dir)
+					find_path(child, pattern, depth + 1);
+	}
+	close(fd);
 }
 
 void cmd_find(const char *args)
 {
-    char dir[256] = ".";
-    char pattern[128] = "";
-    const char *p = skip_spaces(args);
-    if (*p) {
-        p = parse_token(p, dir, sizeof(dir));
-        if (*p)
-            parse_token(p, pattern, sizeof(pattern));
-    }
-    char resolved[256];
-    shell_resolve_path(dir, resolved);
-    find_path(resolved, pattern, 0);
+	char dir[256] = ".";
+	char pattern[128] = "";
+	const char *p = skip_spaces(args);
+	if (*p) {
+			p = parse_token(p, dir, sizeof(dir));
+			if (*p)
+					parse_token(p, pattern, sizeof(pattern));
+	}
+	char resolved[256];
+	shell_resolve_path(dir, resolved);
+	find_path(resolved, pattern, 0);
 }
 
 void cmd_du(const char *path)
 {
-    const char *target = skip_spaces(path);
-    char resolved[256];
-    shell_resolve_path((target && target[0]) ? target : ".", resolved);
-    uint64_t total = du_path(resolved, 0, false);
-    printf("%llu\t%s\n", (unsigned long long)total, resolved);
+	const char *target = skip_spaces(path);
+	char resolved[256];
+	shell_resolve_path((target && target[0]) ? target : ".", resolved);
+	uint64_t total = du_path(resolved, 0, false);
+	printf("%llu\t%s\n", (unsigned long long)total, resolved);
 }
 
 void cmd_which(const char *name)
 {
-    name = skip_spaces(name);
-    if (!name || name[0] == '\0') {
-        printf("which: missing command name\n");
-        set_status(1);
-        return;
-    }
-    if (shell_find_command(name)) {
-        printf("%s: shell builtin\n", name);
-        return;
-    }
+	name = skip_spaces(name);
+	if (!name || name[0] == '\0') {
+			printf("which: missing command name\n");
+			set_status(1);
+			return;
+	}
+	if (shell_find_command(name)) {
+			printf("%s: shell builtin\n", name);
+			return;
+	}
 
-    char candidate[256];
-    snprintf(candidate, sizeof(candidate), "/bin/%s.elf", name);
-    if (shell_path_exists(candidate, nullptr)) {
-        printf("%s\n", candidate);
-        return;
-    }
-    snprintf(candidate, sizeof(candidate), "/bin/%s", name);
-    if (shell_path_exists(candidate, nullptr)) {
-        printf("%s\n", candidate);
-        return;
-    }
-    set_status(1);
+	char candidate[256];
+	snprintf(candidate, sizeof(candidate), "/bin/%s.elf", name);
+	if (shell_path_exists(candidate, nullptr)) {
+			printf("%s\n", candidate);
+			return;
+	}
+	snprintf(candidate, sizeof(candidate), "/bin/%s", name);
+	if (shell_path_exists(candidate, nullptr)) {
+			printf("%s\n", candidate);
+			return;
+	}
+	set_status(1);
 }
 
 void cmd_type(const char *name)
 {
-    name = skip_spaces(name);
-    if (shell_find_command(name)) {
-        printf("%s is a shell builtin\n", name);
-        return;
-    }
-    cmd_which(name);
+	name = skip_spaces(name);
+	if (shell_find_command(name)) {
+			printf("%s is a shell builtin\n", name);
+			return;
+	}
+	cmd_which(name);
 }
 
 static void write_text_to_file(const char *args, bool append)
 {
-    char path[256];
-    const char *text = parse_token(args, path, sizeof(path));
-    if (path[0] == '\0') {
-        printf("Usage: %s <file> <text>\n", append ? "append" : "write");
-        set_status(1);
-        return;
-    }
+	char path[256];
+	const char *text = parse_token(args, path, sizeof(path));
+	if (path[0] == '\0') {
+			printf("Usage: %s <file> <text>\n", append ? "append" : "write");
+			set_status(1);
+			return;
+	}
 
-    char resolved[256];
-    shell_resolve_path(path, resolved);
-    int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-    int fd = open(resolved, flags, 0644);
-    if (fd < 0) {
-        printf("%s: cannot open '%s'\n", append ? "append" : "write", path);
-        set_status(1);
-        return;
-    }
-    write(fd, text, strlen(text));
-    close(fd);
+	char resolved[256];
+	shell_resolve_path(path, resolved);
+	int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+	int fd = open(resolved, flags, 0644);
+	if (fd < 0) {
+			printf("%s: cannot open '%s'\n", append ? "append" : "write", path);
+			set_status(1);
+			return;
+	}
+	write(fd, text, strlen(text));
+	close(fd);
 }
 
 void cmd_write(const char *args)
 {
-    write_text_to_file(args, false);
+	write_text_to_file(args, false);
 }
 
 void cmd_append(const char *args)
 {
-    write_text_to_file(args, true);
+	write_text_to_file(args, true);
 }
 
 void cmd_hexdump(const char *filename)
 {
-    filename = skip_spaces(filename);
-    if (!filename || filename[0] == '\0') {
-        printf("Usage: hexdump <file>\n");
-        set_status(1);
-        return;
-    }
+	filename = skip_spaces(filename);
+	if (!filename || filename[0] == '\0') {
+			printf("Usage: hexdump <file>\n");
+			set_status(1);
+			return;
+	}
 
-    char resolved[256];
-    shell_resolve_path(filename, resolved);
-    int fd = open(resolved, O_RDONLY);
-    if (fd < 0) {
-        printf("hexdump: cannot open '%s'\n", filename);
-        set_status(1);
-        return;
-    }
+	char resolved[256];
+	shell_resolve_path(filename, resolved);
+	int fd = open(resolved, O_RDONLY);
+	if (fd < 0) {
+			printf("hexdump: cannot open '%s'\n", filename);
+			set_status(1);
+			return;
+	}
 
-    uint8_t bytes[16];
-    uint64_t offset = 0;
-    int n;
-    while ((n = read(fd, bytes, sizeof(bytes))) > 0) {
-        printf("%08llx  ", (unsigned long long)offset);
-        for (int i = 0; i < 16; i++) {
-            if (i < n)
-                printf("%02x ", bytes[i]);
-            else
-                printf("   ");
-            if (i == 7)
-                putchar(' ');
-        }
-        printf(" |");
-        for (int i = 0; i < n; i++)
-            putchar(bytes[i] >= 32 && bytes[i] <= 126 ? (char)bytes[i] : '.');
-        printf("|\n");
-        offset += (uint64_t)n;
-    }
-    close(fd);
+	uint8_t bytes[16];
+	uint64_t offset = 0;
+	int n;
+	while ((n = read(fd, bytes, sizeof(bytes))) > 0) {
+			printf("%08llx  ", (unsigned long long)offset);
+			for (int i = 0; i < 16; i++) {
+					if (i < n)
+							printf("%02x ", bytes[i]);
+					else
+							printf("   ");
+					if (i == 7)
+							putchar(' ');
+			}
+			printf(" |");
+			for (int i = 0; i < n; i++)
+					putchar(bytes[i] >= 32 && bytes[i] <= 126 ? (char)bytes[i] : '.');
+			printf("|\n");
+			offset += (uint64_t)n;
+	}
+	close(fd);
 }
 
 void cmd_mem()
 {
-    struct MemInfo info;
-    if (get_meminfo(&info) == 0) {
-        printf("Memory Status:\n");
-        printf("  Total: %llu KB\n", (unsigned long long)info.total_kb);
-        printf("  Used:  %llu KB\n", (unsigned long long)info.used_kb);
-        printf("  Free:  %llu KB\n", (unsigned long long)info.free_kb);
-    } else {
-        printf("mem: failed to get memory info\n");
-    }
+	struct MemInfo info;
+	if (get_meminfo(&info) == 0) {
+			printf("Memory Status:\n");
+			printf("  Total: %llu KB\n", (unsigned long long)info.total_kb);
+			printf("  Used:  %llu KB\n", (unsigned long long)info.used_kb);
+			printf("  Free:  %llu KB\n", (unsigned long long)info.free_kb);
+	} else {
+			printf("mem: failed to get memory info\n");
+	}
 }
 
 void cmd_ps()
 {
-    ProcessInfo procs[32];
-    int count = get_procs(procs, 32);
-    if (count < 0) {
-        printf("ps: error retrieving process list\n");
-        return;
-    }
+	ProcessInfo procs[32];
+	int count = get_procs(procs, 32);
+	if (count < 0) {
+			printf("ps: error retrieving process list\n");
+			return;
+	}
 
-    printf("\x1b[90m  PID  PARENT  STATE     PRI  UID   NAME\x1b[0m\n");
-    for (int i = 0; i < count; i++) {
-        const char *state_str = "READY";
-        switch ((int)procs[i].state) {
-            case ProcessState_Ready:
-                state_str = "READY ";
-                break;
-            case ProcessState_Running:
-                state_str = "RUN   ";
-                break;
-            case ProcessState_Blocked:
-                state_str = "BLOCK ";
-                break;
-            case ProcessState_Sleeping:
-                state_str = "SLEEP ";
-                break;
-            case ProcessState_Zombie:
-                state_str = "ZOMBIE";
-                break;
-            case ProcessState_Waiting:
-                state_str = "WAIT  ";
-                break;
-        }
-        printf("  %-3d  %-6d  %s  %-3d  %-3d   %s\n", (int)procs[i].pid, (int)procs[i].parent_pid, state_str,
-               (int)procs[i].priority, (int)procs[i].uid, procs[i].name);
-    }
+	printf("\x1b[90m  PID  PARENT  STATE     PRI  UID   NAME\x1b[0m\n");
+	for (int i = 0; i < count; i++) {
+			const char *state_str = "READY";
+			switch ((int)procs[i].state) {
+					case ProcessState_Ready:
+							state_str = "READY ";
+							break;
+					case ProcessState_Running:
+							state_str = "RUN   ";
+							break;
+					case ProcessState_Blocked:
+							state_str = "BLOCK ";
+							break;
+					case ProcessState_Sleeping:
+							state_str = "SLEEP ";
+							break;
+					case ProcessState_Zombie:
+							state_str = "ZOMBIE";
+							break;
+					case ProcessState_Waiting:
+							state_str = "WAIT  ";
+							break;
+			}
+			printf("  %-3d  %-6d  %s  %-3d  %-3d   %s\n", (int)procs[i].pid, (int)procs[i].parent_pid, state_str,
+						 (int)procs[i].priority, (int)procs[i].uid, procs[i].name);
+	}
 }
 
 void cmd_date()
 {
-    struct SysTime t;
-    if (get_time(&t) == 0) {
-        printf("%04d-%02d-%02d %02d:%02d:%02d\n", t.year, t.month, t.day, t.hour, t.minute, t.second);
-    } else {
-        printf("date: failed to get time\n");
-    }
+	struct SysTime t;
+	if (get_time(&t) == 0) {
+			printf("%04d-%02d-%02d %02d:%02d:%02d\n", t.year, t.month, t.day, t.hour, t.minute, t.second);
+	} else {
+			printf("date: failed to get time\n");
+	}
 }
 
 void cmd_uptime()
 {
-    uint64_t up = get_uptime();
-    uint64_t s = up % 60;
-    uint64_t m = (up / 60) % 60;
-    uint64_t h = (up / 3600);
-    printf("up %02llu:%02llu:%02llu\n", (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
+	uint64_t up = get_uptime();
+	uint64_t s = up % 60;
+	uint64_t m = (up / 60) % 60;
+	uint64_t h = (up / 3600);
+	printf("up %02llu:%02llu:%02llu\n", (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
 }
 
 char *get_file_data(const char *filename, const char *piped_input, uint64_t *out_len)
 {
-    if (filename && filename[0]) {
-        char resolved[256];
-        shell_resolve_path(filename, resolved);
-        int fd = open(resolved, O_RDONLY);
-        if (fd < 0)
-            return nullptr;
-        int64_t file_size = fsize(fd);
-        if (file_size < 0) {
-            close(fd);
-            return nullptr;
-        }
-        char *data = (char *)malloc((size_t)file_size + 1);
-        if (!data) {
-            close(fd);
-            return nullptr;
-        }
-        int64_t bytes_read = read(fd, data, (size_t)file_size);
-        close(fd);
-        if (bytes_read < 0) {
-            free(data);
-            return nullptr;
-        }
-        data[bytes_read] = '\0';
-        *out_len = (uint64_t)bytes_read;
-        return data;
-    } else if (piped_input) {
-        size_t len = strlen(piped_input);
-        char *data = (char *)malloc(len + 1);
-        if (!data)
-            return nullptr;
-        strncpy(data, piped_input, len);
-        data[len] = '\0';
-        *out_len = len;
-        return data;
-    } else {
-        // Read from stdin (fd 0) until EOF - useful for pipes
-        uint32_t max_size = 65536;
-        char *data = (char *)malloc(max_size + 1);
-        if (!data)
-            return nullptr;
+	if (filename && filename[0]) {
+			char resolved[256];
+			shell_resolve_path(filename, resolved);
+			int fd = open(resolved, O_RDONLY);
+			if (fd < 0)
+					return nullptr;
+			int64_t file_size = fsize(fd);
+			if (file_size < 0) {
+					close(fd);
+					return nullptr;
+			}
+			char *data = (char *)malloc((size_t)file_size + 1);
+			if (!data) {
+					close(fd);
+					return nullptr;
+			}
+			int64_t bytes_read = read(fd, data, (size_t)file_size);
+			close(fd);
+			if (bytes_read < 0) {
+					free(data);
+					return nullptr;
+			}
+			data[bytes_read] = '\0';
+			*out_len = (uint64_t)bytes_read;
+			return data;
+	} else if (piped_input) {
+			size_t len = strlen(piped_input);
+			char *data = (char *)malloc(len + 1);
+			if (!data)
+					return nullptr;
+			strncpy(data, piped_input, len);
+			data[len] = '\0';
+			*out_len = len;
+			return data;
+	} else {
+			// Read from stdin (fd 0) until EOF - useful for pipes
+			uint32_t max_size = 65536;
+			char *data = (char *)malloc(max_size + 1);
+			if (!data)
+					return nullptr;
 
-        uint32_t total_read = 0;
-        while (total_read < max_size) {
-            int64_t n = read(0, data + total_read, max_size - total_read);
-            if (n <= 0)
-                break;
-            total_read += (uint32_t)n;
-        }
-        data[total_read] = '\0';
-        *out_len = (uint64_t)total_read;
-        return data;
-    }
-    return nullptr;
+			uint32_t total_read = 0;
+			while (total_read < max_size) {
+					int64_t n = read(0, data + total_read, max_size - total_read);
+					if (n <= 0)
+							break;
+					total_read += (uint32_t)n;
+			}
+			data[total_read] = '\0';
+			*out_len = (uint64_t)total_read;
+			return data;
+	}
+	return nullptr;
 }
 
 void cmd_wc(const char *filename, const char *piped_input)
 {
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    uint64_t lines = 0, words = 0, chars = 0;
-    bool in_word = false;
-    for (uint64_t i = 0; i < data_len; i++) {
-        char c = data[i];
-        chars++;
-        if (c == '\n')
-            lines++;
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
-            in_word = false;
-        else if (!in_word) {
-            in_word = true;
-            words++;
-        }
-    }
-    if (data_len > 0 && data[data_len - 1] != '\n')
-        lines++;
-    printf("  Lines: %llu\n  Words: %llu\n  Chars: %llu\n", (unsigned long long)lines, (unsigned long long)words,
-           (unsigned long long)chars);
-    free(data);
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	uint64_t lines = 0, words = 0, chars = 0;
+	bool in_word = false;
+	for (uint64_t i = 0; i < data_len; i++) {
+			char c = data[i];
+			chars++;
+			if (c == '\n')
+					lines++;
+			if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+					in_word = false;
+			else if (!in_word) {
+					in_word = true;
+					words++;
+			}
+	}
+	if (data_len > 0 && data[data_len - 1] != '\n')
+			lines++;
+	printf("  Lines: %llu\n  Words: %llu\n  Chars: %llu\n", (unsigned long long)lines, (unsigned long long)words,
+				 (unsigned long long)chars);
+	free(data);
 }
 
 static const char *parse_line_count_arg(const char *args, int *line_count)
 {
-    *line_count = 10;
-    const char *p = skip_spaces(args);
-    if (strncmp(p, "-n", 2) == 0) {
-        p += 2;
-        p = skip_spaces(p);
-        *line_count = atoi(p);
-        while (*p && !is_space(*p))
-            p++;
-        return skip_spaces(p);
-    }
-    if (*p == '-' && p[1] >= '0' && p[1] <= '9') {
-        *line_count = atoi(p + 1);
-        while (*p && !is_space(*p))
-            p++;
-        return skip_spaces(p);
-    }
-    return p;
+	*line_count = 10;
+	const char *p = skip_spaces(args);
+	if (strncmp(p, "-n", 2) == 0) {
+			p += 2;
+			p = skip_spaces(p);
+			*line_count = atoi(p);
+			while (*p && !is_space(*p))
+					p++;
+			return skip_spaces(p);
+	}
+	if (*p == '-' && p[1] >= '0' && p[1] <= '9') {
+			*line_count = atoi(p + 1);
+			while (*p && !is_space(*p))
+					p++;
+			return skip_spaces(p);
+	}
+	return p;
 }
 
 void cmd_head(const char *args, const char *piped_input)
 {
-    int wanted = 10;
-    const char *filename = parse_line_count_arg(args, &wanted);
-    if (wanted < 0)
-        wanted = 0;
+	int wanted = 10;
+	const char *filename = parse_line_count_arg(args, &wanted);
+	if (wanted < 0)
+			wanted = 0;
 
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
 
-    int lines = 0;
-    for (uint64_t i = 0; i < data_len; i++) {
-        putchar(data[i]);
-        if (data[i] == '\n' && ++lines >= wanted)
-            break;
-    }
-    free(data);
+	int lines = 0;
+	for (uint64_t i = 0; i < data_len; i++) {
+			putchar(data[i]);
+			if (data[i] == '\n' && ++lines >= wanted)
+					break;
+	}
+	free(data);
 }
 
 void cmd_tail(const char *args, const char *piped_input)
 {
-    int wanted = 10;
-    const char *filename = parse_line_count_arg(args, &wanted);
-    if (wanted < 0)
-        wanted = 0;
+	int wanted = 10;
+	const char *filename = parse_line_count_arg(args, &wanted);
+	if (wanted < 0)
+			wanted = 0;
 
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
 
-    uint64_t start = 0;
-    int lines = 0;
-    for (int64_t i = (int64_t)data_len - 1; i >= 0; i--) {
-        if (data[i] == '\n' && i != (int64_t)data_len - 1) {
-            lines++;
-            if (lines >= wanted) {
-                start = (uint64_t)i + 1;
-                break;
-            }
-        }
-    }
-    for (uint64_t i = start; i < data_len; i++)
-        putchar(data[i]);
-    free(data);
+	uint64_t start = 0;
+	int lines = 0;
+	for (int64_t i = (int64_t)data_len - 1; i >= 0; i--) {
+			if (data[i] == '\n' && i != (int64_t)data_len - 1) {
+					lines++;
+					if (lines >= wanted) {
+							start = (uint64_t)i + 1;
+							break;
+					}
+			}
+	}
+	for (uint64_t i = start; i < data_len; i++)
+			putchar(data[i]);
+	free(data);
 }
 
 void cmd_grep(const char *args, const char *piped_input)
 {
-    if (!args || !args[0])
-        return;
-    char pattern[64];
-    const char *p = args;
-    int pi = 0;
-    while (*p && *p != ' ' && pi < 63) {
-        pattern[pi++] = *p++;
-    }
-    pattern[pi] = '\0';
-    while (*p == ' ')
-        p++;
-    const char *filename = (*p) ? p : nullptr;
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    char *line = data;
-    while (line && *line) {
-        char *next_line = line;
-        while (*next_line && *next_line != '\n')
-            next_line++;
-        char saved = *next_line;
-        *next_line = '\0';
-        bool found = false;
-        for (int i = 0; line[i]; i++) {
-            bool match = true;
-            for (int j = 0; pattern[j]; j++) {
-                if (line[i + j] != pattern[j]) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) {
-                found = true;
-                break;
-            }
-        }
-        if (found)
-            printf("%s\n", line);
-        *next_line = saved;
-        if (saved == '\n')
-            line = next_line + 1;
-        else
-            line = nullptr;
-    }
-    free(data);
+	if (!args || !args[0])
+			return;
+	char pattern[64];
+	const char *p = args;
+	int pi = 0;
+	while (*p && *p != ' ' && pi < 63) {
+			pattern[pi++] = *p++;
+	}
+	pattern[pi] = '\0';
+	while (*p == ' ')
+			p++;
+	const char *filename = (*p) ? p : nullptr;
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	char *line = data;
+	while (line && *line) {
+			char *next_line = line;
+			while (*next_line && *next_line != '\n')
+					next_line++;
+			char saved = *next_line;
+			*next_line = '\0';
+			bool found = false;
+			for (int i = 0; line[i]; i++) {
+					bool match = true;
+					for (int j = 0; pattern[j]; j++) {
+							if (line[i + j] != pattern[j]) {
+									match = false;
+									break;
+							}
+					}
+					if (match) {
+							found = true;
+							break;
+					}
+			}
+			if (found)
+					printf("%s\n", line);
+			*next_line = saved;
+			if (saved == '\n')
+					line = next_line + 1;
+			else
+					line = nullptr;
+	}
+	free(data);
 }
 
 void cmd_sort(const char *filename, const char *piped_input)
 {
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    const int MAX_LINES = 256;
-    const char *lines[MAX_LINES];
-    int line_lens[MAX_LINES];
-    int line_count = 0;
-    uint64_t line_start = 0;
-    for (uint64_t i = 0; i <= data_len && line_count < MAX_LINES; i++) {
-        if (i == data_len || data[i] == '\n') {
-            if (i > line_start) {
-                lines[line_count] = data + line_start;
-                line_lens[line_count] = (int)(i - line_start);
-                line_count++;
-            }
-            line_start = i + 1;
-        }
-    }
-    for (int i = 0; i < line_count - 1; i++) {
-        for (int j = 0; j < line_count - i - 1; j++) {
-            int min_len = (line_lens[j] < line_lens[j + 1]) ? line_lens[j] : line_lens[j + 1];
-            bool swap = false;
-            for (int k = 0; k < min_len; k++) {
-                if (lines[j][k] > lines[j + 1][k]) {
-                    swap = true;
-                    break;
-                }
-                if (lines[j][k] < lines[j + 1][k])
-                    break;
-            }
-            if (!swap && line_lens[j] > line_lens[j + 1])
-                swap = true;
-            if (swap) {
-                const char *tmp = lines[j];
-                lines[j] = lines[j + 1];
-                lines[j + 1] = tmp;
-                int tmp_len = line_lens[j];
-                line_lens[j] = line_lens[j + 1];
-                line_lens[j + 1] = tmp_len;
-            }
-        }
-    }
-    for (int i = 0; i < line_count; i++) {
-        for (int j = 0; j < line_lens[i]; j++)
-            putchar(lines[i][j]);
-        putchar('\n');
-    }
-    free(data);
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	const int MAX_LINES = 256;
+	const char *lines[MAX_LINES];
+	int line_lens[MAX_LINES];
+	int line_count = 0;
+	uint64_t line_start = 0;
+	for (uint64_t i = 0; i <= data_len && line_count < MAX_LINES; i++) {
+			if (i == data_len || data[i] == '\n') {
+					if (i > line_start) {
+							lines[line_count] = data + line_start;
+							line_lens[line_count] = (int)(i - line_start);
+							line_count++;
+					}
+					line_start = i + 1;
+			}
+	}
+	for (int i = 0; i < line_count - 1; i++) {
+			for (int j = 0; j < line_count - i - 1; j++) {
+					int min_len = (line_lens[j] < line_lens[j + 1]) ? line_lens[j] : line_lens[j + 1];
+					bool swap = false;
+					for (int k = 0; k < min_len; k++) {
+							if (lines[j][k] > lines[j + 1][k]) {
+									swap = true;
+									break;
+							}
+							if (lines[j][k] < lines[j + 1][k])
+									break;
+					}
+					if (!swap && line_lens[j] > line_lens[j + 1])
+							swap = true;
+					if (swap) {
+							const char *tmp = lines[j];
+							lines[j] = lines[j + 1];
+							lines[j + 1] = tmp;
+							int tmp_len = line_lens[j];
+							line_lens[j] = line_lens[j + 1];
+							line_lens[j + 1] = tmp_len;
+					}
+			}
+	}
+	for (int i = 0; i < line_count; i++) {
+			for (int j = 0; j < line_lens[i]; j++)
+					putchar(lines[i][j]);
+			putchar('\n');
+	}
+	free(data);
 }
 
 void cmd_uniq(const char *filename, const char *piped_input)
 {
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    const char *prev_line = nullptr;
-    int prev_len = 0;
-    uint64_t line_start = 0;
-    for (uint64_t i = 0; i <= data_len; i++) {
-        if (i == data_len || data[i] == '\n') {
-            const char *curr_line = data + line_start;
-            int curr_len = (int)(i - line_start);
-            bool is_dup = (prev_line && curr_len == prev_len);
-            if (is_dup)
-                for (int j = 0; j < curr_len; j++)
-                    if (curr_line[j] != prev_line[j]) {
-                        is_dup = false;
-                        break;
-                    }
-            if (!is_dup && curr_len > 0) {
-                for (int j = 0; j < curr_len; j++)
-                    putchar(curr_line[j]);
-                putchar('\n');
-            }
-            prev_line = curr_line;
-            prev_len = curr_len;
-            line_start = i + 1;
-        }
-    }
-    free(data);
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	const char *prev_line = nullptr;
+	int prev_len = 0;
+	uint64_t line_start = 0;
+	for (uint64_t i = 0; i <= data_len; i++) {
+			if (i == data_len || data[i] == '\n') {
+					const char *curr_line = data + line_start;
+					int curr_len = (int)(i - line_start);
+					bool is_dup = (prev_line && curr_len == prev_len);
+					if (is_dup)
+							for (int j = 0; j < curr_len; j++)
+									if (curr_line[j] != prev_line[j]) {
+											is_dup = false;
+											break;
+									}
+					if (!is_dup && curr_len > 0) {
+							for (int j = 0; j < curr_len; j++)
+									putchar(curr_line[j]);
+							putchar('\n');
+					}
+					prev_line = curr_line;
+					prev_len = curr_len;
+					line_start = i + 1;
+			}
+	}
+	free(data);
 }
 
 void cmd_rev(const char *filename, const char *piped_input)
 {
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    uint64_t line_start = 0;
-    for (uint64_t i = 0; i <= data_len; i++) {
-        if (i == data_len || data[i] == '\n') {
-            for (int64_t j = (int64_t)i - 1; j >= (int64_t)line_start; j--)
-                putchar(data[j]);
-            putchar('\n');
-            line_start = i + 1;
-        }
-    }
-    free(data);
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	uint64_t line_start = 0;
+	for (uint64_t i = 0; i <= data_len; i++) {
+			if (i == data_len || data[i] == '\n') {
+					for (int64_t j = (int64_t)i - 1; j >= (int64_t)line_start; j--)
+							putchar(data[j]);
+					putchar('\n');
+					line_start = i + 1;
+			}
+	}
+	free(data);
 }
 
 void cmd_tac(const char *filename, const char *piped_input)
 {
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    const int MAX_LINES = 256;
-    uint64_t line_starts[MAX_LINES];
-    uint64_t line_ends[MAX_LINES];
-    int line_count = 0;
-    uint64_t line_start = 0;
-    for (uint64_t i = 0; i <= data_len && line_count < MAX_LINES; i++) {
-        if (i == data_len || data[i] == '\n') {
-            if (i > line_start) {
-                line_starts[line_count] = line_start;
-                line_ends[line_count] = i;
-                line_count++;
-            }
-            line_start = i + 1;
-        }
-    }
-    for (int i = line_count - 1; i >= 0; i--) {
-        for (uint64_t j = line_starts[i]; j < line_ends[i]; j++)
-            putchar(data[j]);
-        putchar('\n');
-    }
-    free(data);
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	const int MAX_LINES = 256;
+	uint64_t line_starts[MAX_LINES];
+	uint64_t line_ends[MAX_LINES];
+	int line_count = 0;
+	uint64_t line_start = 0;
+	for (uint64_t i = 0; i <= data_len && line_count < MAX_LINES; i++) {
+			if (i == data_len || data[i] == '\n') {
+					if (i > line_start) {
+							line_starts[line_count] = line_start;
+							line_ends[line_count] = i;
+							line_count++;
+					}
+					line_start = i + 1;
+			}
+	}
+	for (int i = line_count - 1; i >= 0; i--) {
+			for (uint64_t j = line_starts[i]; j < line_ends[i]; j++)
+					putchar(data[j]);
+			putchar('\n');
+	}
+	free(data);
 }
 
 void cmd_nl(const char *filename, const char *piped_input)
 {
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
-    int line_num = 1;
-    uint64_t line_start = 0;
-    for (uint64_t i = 0; i <= data_len; i++) {
-        if (i == data_len || data[i] == '\n') {
-            printf("%6d  ", line_num++);
-            for (uint64_t j = line_start; j < i; j++) {
-                putchar(data[j]);
-            }
-            putchar('\n');
-            line_start = i + 1;
-        }
-    }
-    free(data);
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
+	int line_num = 1;
+	uint64_t line_start = 0;
+	for (uint64_t i = 0; i <= data_len; i++) {
+			if (i == data_len || data[i] == '\n') {
+					printf("%6d  ", line_num++);
+					for (uint64_t j = line_start; j < i; j++) {
+							putchar(data[j]);
+					}
+					putchar('\n');
+					line_start = i + 1;
+			}
+	}
+	free(data);
 }
 
 void cmd_tr(const char *args, const char *piped_input)
 {
-    char from[128], to[128];
-    const char *rest = nullptr;
-    if (!read_arg2(args, from, sizeof(from), to, sizeof(to), &rest)) {
-        printf("Usage: tr <set1> <set2> [file]\n");
-        set_status(1);
-        return;
-    }
+	char from[128], to[128];
+	const char *rest = nullptr;
+	if (!read_arg2(args, from, sizeof(from), to, sizeof(to), &rest)) {
+			printf("Usage: tr <set1> <set2> [file]\n");
+			set_status(1);
+			return;
+	}
 
-    char filename[256] = {};
-    if (rest && *rest)
-        parse_token(rest, filename, sizeof(filename));
+	char filename[256] = {};
+	if (rest && *rest)
+			parse_token(rest, filename, sizeof(filename));
 
-    uint64_t data_len = 0;
-    char *data = get_file_data(filename, piped_input, &data_len);
-    if (!data)
-        return;
+	uint64_t data_len = 0;
+	char *data = get_file_data(filename, piped_input, &data_len);
+	if (!data)
+			return;
 
-    for (uint64_t i = 0; i < data_len; i++) {
-        char c = data[i];
-        for (int j = 0; from[j]; j++) {
-            if (c == from[j]) {
-                c = to[j] ? to[j] : to[strlen(to) - 1];
-                break;
-            }
-        }
-        putchar(c);
-    }
-    free(data);
+	for (uint64_t i = 0; i < data_len; i++) {
+			char c = data[i];
+			for (int j = 0; from[j]; j++) {
+					if (c == from[j]) {
+							c = to[j] ? to[j] : to[strlen(to) - 1];
+							break;
+					}
+			}
+			putchar(c);
+	}
+	free(data);
 }
 
 void cmd_cpuinfo()
 {
-    uint32_t eax, ebx, ecx, edx;
-    asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
-    char vendor[13];
-    *reinterpret_cast<uint32_t *>(&vendor[0]) = ebx;
-    *reinterpret_cast<uint32_t *>(&vendor[4]) = edx;
-    *reinterpret_cast<uint32_t *>(&vendor[8]) = ecx;
-    vendor[12] = 0;
-    printf("Vendor: %s\n", vendor);
-    SystemProfile info;
-    if (get_sysinfo(&info) == 0)
-        printf("Cores: %u\n", info.cpu_count ? info.cpu_count : 1u);
+	uint32_t eax, ebx, ecx, edx;
+	asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
+	char vendor[13];
+	*reinterpret_cast<uint32_t *>(&vendor[0]) = ebx;
+	*reinterpret_cast<uint32_t *>(&vendor[4]) = edx;
+	*reinterpret_cast<uint32_t *>(&vendor[8]) = ecx;
+	vendor[12] = 0;
+	printf("Vendor: %s\n", vendor);
+	SystemProfile info;
+	if (get_sysinfo(&info) == 0)
+			printf("Cores: %u\n", info.cpu_count ? info.cpu_count : 1u);
 }
 
 void cmd_env()
 {
-    if (!g_current_shell)
-        return;
-    for (int i = 0; i < MAX_VARS; i++) {
-        if (g_current_shell->vars[i].in_use)
-            printf("%s=%s\n", g_current_shell->vars[i].name, g_current_shell->vars[i].value);
-    }
+	if (!g_current_shell)
+			return;
+	for (int i = 0; i < MAX_VARS; i++) {
+			if (g_current_shell->vars[i].in_use)
+					printf("%s=%s\n", g_current_shell->vars[i].name, g_current_shell->vars[i].value);
+	}
 }
 
 void cmd_history()
 {
-    if (!g_current_shell)
-        return;
-    int first = g_current_shell->history_count > HISTORY_SIZE ? g_current_shell->history_count - HISTORY_SIZE : 0;
-    for (int i = first; i < g_current_shell->history_count; i++)
-        printf("%4d  %s\n", i + 1, g_current_shell->history[i % HISTORY_SIZE]);
+	if (!g_current_shell)
+			return;
+	int first = g_current_shell->history_count > HISTORY_SIZE ? g_current_shell->history_count - HISTORY_SIZE : 0;
+	for (int i = first; i < g_current_shell->history_count; i++)
+			printf("%4d  %s\n", i + 1, g_current_shell->history[i % HISTORY_SIZE]);
 }
 
 void cmd_set(const char *args)
 {
-    args = skip_spaces(args);
-    if (!args || args[0] == '\0') {
-        cmd_env();
-        return;
-    }
+	args = skip_spaces(args);
+	if (!args || args[0] == '\0') {
+			cmd_env();
+			return;
+	}
 
-    const char *eq = strchr(args, '=');
-    if (!eq) {
-        const char *value = shell_get_var(args);
-        if (value)
-            printf("%s\n", value);
-        else
-            set_status(1);
-        return;
-    }
+	const char *eq = strchr(args, '=');
+	if (!eq) {
+			const char *value = shell_get_var(args);
+			if (value)
+					printf("%s\n", value);
+			else
+					set_status(1);
+			return;
+	}
 
-    char name[MAX_VAR_NAME];
-    int len = (int)(eq - args);
-    if (len <= 0 || len >= MAX_VAR_NAME) {
-        printf("set: invalid variable name\n");
-        set_status(1);
-        return;
-    }
-    strncpy(name, args, (size_t)len);
-    name[len] = '\0';
-    shell_set_var(name, eq + 1);
+	char name[MAX_VAR_NAME];
+	int len = (int)(eq - args);
+	if (len <= 0 || len >= MAX_VAR_NAME) {
+			printf("set: invalid variable name\n");
+			set_status(1);
+			return;
+	}
+	strncpy(name, args, (size_t)len);
+	name[len] = '\0';
+	shell_set_var(name, eq + 1);
 }
 
 void cmd_unset(const char *name)
 {
-    name = skip_spaces(name);
-    if (!name || name[0] == '\0') {
-        printf("unset: missing variable name\n");
-        set_status(1);
-        return;
-    }
-    shell_unset_var(name);
+	name = skip_spaces(name);
+	if (!name || name[0] == '\0') {
+			printf("unset: missing variable name\n");
+			set_status(1);
+			return;
+	}
+	shell_unset_var(name);
 }
 
 void cmd_read(const char *varname)
 {
-    varname = skip_spaces(varname);
-    if (!varname || varname[0] == '\0') {
-        printf("read: missing variable name\n");
-        set_status(1);
-        return;
-    }
-    char value[MAX_VAR_VALUE];
-    read_input_visible(value, sizeof(value));
-    shell_set_var(varname, value);
+	varname = skip_spaces(varname);
+	if (!varname || varname[0] == '\0') {
+			printf("read: missing variable name\n");
+			set_status(1);
+			return;
+	}
+	char value[MAX_VAR_VALUE];
+	read_input_visible(value, sizeof(value));
+	shell_set_var(varname, value);
 }
 
 void cmd_test(const char *args)
 {
-    set_status(evaluate_condition(args) ? 0 : 1);
+	set_status(evaluate_condition(args) ? 0 : 1);
 }
 
 void cmd_expr(const char *args)
 {
-    char left[32], op[8], right[32];
-    const char *p = parse_token(args, left, sizeof(left));
-    p = parse_token(p, op, sizeof(op));
-    parse_token(p, right, sizeof(right));
-    if (left[0] == '\0' || op[0] == '\0' || right[0] == '\0') {
-        printf("Usage: expr <a> <op> <b>\n");
-        set_status(1);
-        return;
-    }
+	char left[32], op[8], right[32];
+	const char *p = parse_token(args, left, sizeof(left));
+	p = parse_token(p, op, sizeof(op));
+	parse_token(p, right, sizeof(right));
+	if (left[0] == '\0' || op[0] == '\0' || right[0] == '\0') {
+			printf("Usage: expr <a> <op> <b>\n");
+			set_status(1);
+			return;
+	}
 
-    int a = atoi(left);
-    int b = atoi(right);
-    if (strcmp(op, "+") == 0)
-        printf("%d\n", a + b);
-    else if (strcmp(op, "-") == 0)
-        printf("%d\n", a - b);
-    else if (strcmp(op, "*") == 0)
-        printf("%d\n", a * b);
-    else if (strcmp(op, "/") == 0)
-        printf("%d\n", b ? a / b : 0);
-    else if (strcmp(op, "%") == 0)
-        printf("%d\n", b ? a % b : 0);
-    else if (strcmp(op, "==") == 0)
-        printf("%d\n", a == b);
-    else if (strcmp(op, "!=") == 0)
-        printf("%d\n", a != b);
-    else if (strcmp(op, "<") == 0)
-        printf("%d\n", a < b);
-    else if (strcmp(op, ">") == 0)
-        printf("%d\n", a > b);
-    else {
-        printf("expr: unknown operator '%s'\n", op);
-        set_status(1);
-    }
+	int a = atoi(left);
+	int b = atoi(right);
+	if (strcmp(op, "+") == 0)
+			printf("%d\n", a + b);
+	else if (strcmp(op, "-") == 0)
+			printf("%d\n", a - b);
+	else if (strcmp(op, "*") == 0)
+			printf("%d\n", a * b);
+	else if (strcmp(op, "/") == 0)
+			printf("%d\n", b ? a / b : 0);
+	else if (strcmp(op, "%") == 0)
+			printf("%d\n", b ? a % b : 0);
+	else if (strcmp(op, "==") == 0)
+			printf("%d\n", a == b);
+	else if (strcmp(op, "!=") == 0)
+			printf("%d\n", a != b);
+	else if (strcmp(op, "<") == 0)
+			printf("%d\n", a < b);
+	else if (strcmp(op, ">") == 0)
+			printf("%d\n", a > b);
+	else {
+			printf("expr: unknown operator '%s'\n", op);
+			set_status(1);
+	}
 }
 
 void cmd_source(const char *filename)
 {
-    cmd_run(filename);
+	cmd_run(filename);
 }
 
 void cmd_time(const char *cmd)
 {
-    cmd = skip_spaces(cmd);
-    if (!cmd || cmd[0] == '\0') {
-        printf("Usage: time <command>\n");
-        set_status(1);
-        return;
-    }
-    uint64_t start = get_ticks();
-    char copy[256];
-    strncpy(copy, cmd, sizeof(copy) - 1);
-    copy[sizeof(copy) - 1] = '\0';
-    execute_single_command(copy, nullptr);
-    uint64_t elapsed = get_ticks() - start;
-    printf("time: %llu ms\n", (unsigned long long)elapsed);
+	cmd = skip_spaces(cmd);
+	if (!cmd || cmd[0] == '\0') {
+			printf("Usage: time <command>\n");
+			set_status(1);
+			return;
+	}
+	uint64_t start = get_ticks();
+	char copy[256];
+	strncpy(copy, cmd, sizeof(copy) - 1);
+	copy[sizeof(copy) - 1] = '\0';
+	execute_single_command(copy, nullptr);
+	uint64_t elapsed = get_ticks() - start;
+	printf("time: %llu ms\n", (unsigned long long)elapsed);
 }
 
 void cmd_sleep(const char *args)
 {
-    args = skip_spaces(args);
-    if (!args || args[0] == '\0') {
-        printf("Usage: sleep <ms|Ns>\n");
-        set_status(1);
-        return;
-    }
-    int n = atoi(args);
-    size_t len = strlen(args);
-    if (len > 0 && args[len - 1] == 's')
-        n *= 1000;
-    if (n > 0)
-        sleep_ms((uint32_t)n);
+	args = skip_spaces(args);
+	if (!args || args[0] == '\0') {
+			printf("Usage: sleep <ms|Ns>\n");
+			set_status(1);
+			return;
+	}
+	int n = atoi(args);
+	size_t len = strlen(args);
+	if (len > 0 && args[len - 1] == 's')
+			n *= 1000;
+	if (n > 0)
+			sleep_ms((uint32_t)n);
 }
 
 void cmd_true()
 {
-    set_status(0);
+	set_status(0);
 }
 
 void cmd_false()
 {
-    set_status(1);
+	set_status(1);
 }
 
 void cmd_kheap()
 {
-    MemInfo info;
-    if (get_meminfo(&info) != 0) {
-        printf("kheap: failed to get memory info\n");
-        set_status(1);
-        return;
-    }
-    printf("Kernel heap: %llu KB used / %llu KB total\n", (unsigned long long)info.heap_used_kb,
-           (unsigned long long)info.heap_total_kb);
+	MemInfo info;
+	if (get_meminfo(&info) != 0) {
+			printf("kheap: failed to get memory info\n");
+			set_status(1);
+			return;
+	}
+	printf("Kernel heap: %llu KB used / %llu KB total\n", (unsigned long long)info.heap_used_kb,
+				 (unsigned long long)info.heap_total_kb);
 }
 
 void cmd_sysinfo()
 {
-    SystemProfile info;
-    if (get_sysinfo(&info) != 0) {
-        printf("sysinfo: failed to get system profile\n");
-        set_status(1);
-        return;
-    }
-    printf("kernel:     %s\n", info.kernel_commit);
-    printf("bootloader: %s %s\n", info.bootloader_name, info.bootloader_version);
-    printf("timer_hz:   %u\n", info.timer_hz);
-    printf("cpus:       %u\n", info.cpu_count ? info.cpu_count : 1u);
-    printf("debug:      %s\n", info.kernel_build_debug ? "yes" : "no");
+	SystemProfile info;
+	if (get_sysinfo(&info) != 0) {
+			printf("sysinfo: failed to get system profile\n");
+			set_status(1);
+			return;
+	}
+	printf("kernel:     %s\n", info.kernel_commit);
+	printf("bootloader: %s %s\n", info.bootloader_name, info.bootloader_version);
+	printf("timer_hz:   %u\n", info.timer_hz);
+	printf("cpus:       %u\n", info.cpu_count ? info.cpu_count : 1u);
+	printf("debug:      %s\n", info.kernel_build_debug ? "yes" : "no");
 }
 
 void cmd_random(const char *args)
 {
-    int count = atoi(skip_spaces(args));
-    if (count <= 0)
-        count = 16;
-    if (count > 256)
-        count = 256;
-    uint8_t bytes[256];
-    if (getrandom(bytes, (size_t)count) != count) {
-        printf("random: getrandom failed\n");
-        set_status(1);
-        return;
-    }
-    for (int i = 0; i < count; i++)
-        printf("%02x", bytes[i]);
-    putchar('\n');
+	int count = atoi(skip_spaces(args));
+	if (count <= 0)
+			count = 16;
+	if (count > 256)
+			count = 256;
+	uint8_t bytes[256];
+	if (getrandom(bytes, (size_t)count) != count) {
+			printf("random: getrandom failed\n");
+			set_status(1);
+			return;
+	}
+	for (int i = 0; i < count; i++)
+			printf("%02x", bytes[i]);
+	putchar('\n');
 }
 
 void cmd_kill(const char *args)
 {
-    char pid_arg[32], sig_arg[32];
-    const char *p = parse_token(args, pid_arg, sizeof(pid_arg));
-    parse_token(p, sig_arg, sizeof(sig_arg));
-    if (pid_arg[0] == '\0') {
-        printf("Usage: kill <pid> [sig]\n");
-        set_status(1);
-        return;
-    }
-    int sig = sig_arg[0] ? atoi(sig_arg) : SIGTERM;
-    if ((int)syscall2(SYS_KILL, (uint64_t)atoi(pid_arg), (uint64_t)sig) != 0) {
-        printf("kill: failed\n");
-        set_status(1);
-    }
+	char pid_arg[32], sig_arg[32];
+	const char *p = parse_token(args, pid_arg, sizeof(pid_arg));
+	parse_token(p, sig_arg, sizeof(sig_arg));
+	if (pid_arg[0] == '\0') {
+			printf("Usage: kill <pid> [sig]\n");
+			set_status(1);
+			return;
+	}
+	int sig = sig_arg[0] ? atoi(sig_arg) : SIGTERM;
+	if ((int)syscall2(SYS_KILL, (uint64_t)atoi(pid_arg), (uint64_t)sig) != 0) {
+			printf("kill: failed\n");
+			set_status(1);
+	}
 }
 
 void cmd_reboot()
 {
-    syscall0(SYS_REBOOT);
+	syscall0(SYS_REBOOT);
 }
 
 void cmd_poweroff()
 {
-    syscall0(SYS_POWEROFF);
+	syscall0(SYS_POWEROFF);
 }
 
 void cmd_quiet(const char *args)
 {
-    args = skip_spaces(args);
-    if (strcmp(args, "on") == 0 || strcmp(args, "1") == 0)
-        syscall1(SYS_SET_QUIET, 1);
-    else if (strcmp(args, "off") == 0 || strcmp(args, "0") == 0)
-        syscall1(SYS_SET_QUIET, 0);
-    else {
-        printf("Usage: quiet <on|off>\n");
-        set_status(1);
-    }
+	args = skip_spaces(args);
+	if (strcmp(args, "on") == 0 || strcmp(args, "1") == 0)
+			syscall1(SYS_SET_QUIET, 1);
+	else if (strcmp(args, "off") == 0 || strcmp(args, "0") == 0)
+			syscall1(SYS_SET_QUIET, 0);
+	else {
+			printf("Usage: quiet <on|off>\n");
+			set_status(1);
+	}
 }
 
 void cmd_dmesg()
 {
-    printf("dmesg: kernel log export is not exposed to userland yet\n");
-    set_status(1);
+	printf("dmesg: kernel log export is not exposed to userland yet\n");
+	set_status(1);
 }
 
 void cmd_resolve(const char *hostname)
 {
-    hostname = skip_spaces(hostname);
-    if (!hostname || hostname[0] == '\0') {
-        printf("Usage: resolve <host>\n");
-        set_status(1);
-        return;
-    }
-    in_addr addr;
-    if (resolve_host(hostname, &addr) != 0) {
-        printf("resolve: failed for %s\n", hostname);
-        set_status(1);
-        return;
-    }
-    uint32_t ip = addr.s_addr;
-    printf("%u.%u.%u.%u\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+	hostname = skip_spaces(hostname);
+	if (!hostname || hostname[0] == '\0') {
+			printf("Usage: resolve <host>\n");
+			set_status(1);
+			return;
+	}
+	in_addr addr;
+	if (resolve_host(hostname, &addr) != 0) {
+			printf("resolve: failed for %s\n", hostname);
+			set_status(1);
+			return;
+	}
+	uint32_t ip = addr.s_addr;
+	printf("%u.%u.%u.%u\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
 }
 
 void cmd_ping(const char *target)
 {
-    char host[128];
-    char extra[32];
-    const char *p = parse_token(skip_spaces(target), host, sizeof(host));
-    if (host[0] == '\0') {
-        printf("Usage: ping <host> [count]\n");
-        set_status(1);
-        return;
-    }
-    int count = 4;
-    parse_token(p, extra, sizeof(extra));
-    if (extra[0] != '\0') {
-        count = atoi(extra);
-        if (count < 1)
-            count = 1;
-        if (count > 16)
-            count = 16;
-    }
+	char host[128];
+	char extra[32];
+	const char *p = parse_token(skip_spaces(target), host, sizeof(host));
+	if (host[0] == '\0') {
+			printf("Usage: ping <host> [count]\n");
+			set_status(1);
+			return;
+	}
+	int count = 4;
+	parse_token(p, extra, sizeof(extra));
+	if (extra[0] != '\0') {
+			count = atoi(extra);
+			if (count < 1)
+					count = 1;
+			if (count > 16)
+					count = 16;
+	}
 
-    struct in_addr addr;
-    if (resolve_host(host, &addr) != 0) {
-        printf("ping: resolve failed for %s\n", host);
-        set_status(1);
-        return;
-    }
-    const uint32_t ip = addr.s_addr;
-    printf("PING %s (%u.%u.%u.%u), %d probes\n", host, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
-           (ip >> 24) & 0xFF, count);
+	struct in_addr addr;
+	if (resolve_host(host, &addr) != 0) {
+			printf("ping: resolve failed for %s\n", host);
+			set_status(1);
+			return;
+	}
+	const uint32_t ip = addr.s_addr;
+	printf("PING %s (%u.%u.%u.%u), %d probes\n", host, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
+				 (ip >> 24) & 0xFF, count);
 
-    uint32_t min_rtt = 0xFFFFFFFFu, max_rtt = 0;
-    uint64_t sum_rtt = 0;
-    uint32_t received = 0;
-    for (int i = 0; i < count; i++) {
-        uint32_t rtt = 0;
-        const int r = ping_host(ip, 2000, &rtt);
-        if (r == 0) {
-            received++;
-            sum_rtt += rtt;
-            if (rtt < min_rtt)
-                min_rtt = rtt;
-            if (rtt > max_rtt)
-                max_rtt = rtt;
-            printf("64 bytes from %u.%u.%u.%u: seq=%d rtt=%ums\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
-                   (ip >> 24) & 0xFF, i, rtt);
-        } else if (r == -110) {
-            printf("64 bytes from %u.%u.%u.%u: seq=%d timeout\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
-                   (ip >> 24) & 0xFF, i);
-        } else {
-            printf("ping: probe failed (errno %d)\n", -r);
-        }
-        if (i + 1 < count)
-            sleep_ms(500);
-    }
+	uint32_t min_rtt = 0xFFFFFFFFu, max_rtt = 0;
+	uint64_t sum_rtt = 0;
+	uint32_t received = 0;
+	for (int i = 0; i < count; i++) {
+			uint32_t rtt = 0;
+			const int r = ping_host(ip, 2000, &rtt);
+			if (r == 0) {
+					received++;
+					sum_rtt += rtt;
+					if (rtt < min_rtt)
+							min_rtt = rtt;
+					if (rtt > max_rtt)
+							max_rtt = rtt;
+					printf("64 bytes from %u.%u.%u.%u: seq=%d rtt=%ums\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
+								 (ip >> 24) & 0xFF, i, rtt);
+			} else if (r == -110) {
+					printf("64 bytes from %u.%u.%u.%u: seq=%d timeout\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF,
+								 (ip >> 24) & 0xFF, i);
+			} else {
+					printf("ping: probe failed (errno %d)\n", -r);
+			}
+			if (i + 1 < count)
+					sleep_ms(500);
+	}
 
-    printf("--- %s ping statistics ---\n", host);
-    printf("%d sent, %u received, %u%% loss\n", count, received, (unsigned)((count - (int)received) * 100 / count));
-    if (received > 0)
-        printf("rtt min/avg/max = %u/%u/%u ms\n", min_rtt, (uint32_t)(sum_rtt / received), max_rtt);
-    set_status(received > 0 ? 0 : 1);
+	printf("--- %s ping statistics ---\n", host);
+	printf("%d sent, %u received, %u%% loss\n", count, received, (unsigned)((count - (int)received) * 100 / count));
+	if (received > 0)
+			printf("rtt min/avg/max = %u/%u/%u ms\n", min_rtt, (uint32_t)(sum_rtt / received), max_rtt);
+	set_status(received > 0 ? 0 : 1);
 }
 
 // Case-insensitive prefix compare for HTTP header names ("Content-Length"
 // etc. arrive in any casing).
 static bool fetch_header_is(const char *line, const char *name)
 {
-    for (size_t i = 0; name[i]; i++) {
-        char c = line[i];
-        if (c >= 'A' && c <= 'Z')
-            c = (char)(c + 32);
-        if (c != name[i])
-            return false;
-    }
-    return true;
+	for (size_t i = 0; name[i]; i++) {
+			char c = line[i];
+			if (c >= 'A' && c <= 'Z')
+					c = (char)(c + 32);
+			if (c != name[i])
+					return false;
+	}
+	return true;
 }
 
 void cmd_fetch(const char *args)
 {
+    uint64_t fetch_stall_ms = 15000;
     char url[384], outfile[256];
-    const char *p = parse_token(skip_spaces(args), url, sizeof(url));
-    if (url[0] == '\0') {
-        printf("Usage: fetch <url> [outfile|-]\n");
-        set_status(1);
-        return;
-    }
-    parse_token(p, outfile, sizeof(outfile));
 
-    const char *u = url;
-    if (strncmp(u, "http://", 7) != 0) {
-        printf("fetch: only http:// URLs are supported (no TLS)\n");
-        set_status(1);
-        return;
-    }
-    u += 7;
+		char argument[384];
+		const char *p = args;
 
-    char host[128];
-    char path[256] = "/";
-    long port = 80;
-    size_t hlen = 0;
-    while (u[hlen] && u[hlen] != ':' && u[hlen] != '/' && hlen < sizeof(host) - 1) {
+		while (p[0] != '\0') {
+				p = parse_token(skip_spaces(p), argument, sizeof(argument));
+
+				if (argument[0] == '\0') {
+						printf("Usage: fetch [--timeout <timeout>] [-o <outfile>] <url>\n");
+						set_status(1);
+						return;
+				}
+
+				if (strncmp(argument, "-o", 2) == 0) {
+						p = parse_token(skip_spaces(p), outfile, sizeof(outfile));
+				}
+
+				if (strncmp(argument, "--timeout", 9) == 0) {
+						p = parse_token(skip_spaces(p), argument, sizeof(argument));
+						fetch_stall_ms = atoi(argument);
+				}
+		}
+
+		strncpy(url, argument, sizeof(url));
+
+		const char *u = url;
+		if (strncmp(u, "http://", 7) != 0) {
+				printf("fetch: only http:// URLs are supported (no TLS)\n");
+				set_status(1);
+				return;
+		}
+		u += 7;
+
+		char host[128];
+		char path[256] = "/";
+		long port = 80;
+		size_t hlen = 0;
+		while (u[hlen] && u[hlen] != ':' && u[hlen] != '/' && hlen < sizeof(host) - 1) {
         host[hlen] = u[hlen];
         hlen++;
     }
@@ -1642,9 +1660,6 @@ void cmd_fetch(const char *args)
         return;
     }
 
-    // Stall watchdog: any server that stops sending (without closing) for
-    // 15 seconds fails the fetch instead of wedging the shell forever.
-    constexpr uint64_t FETCH_STALL_MS = 15000;
     uint64_t last_progress = get_ticks();
 
     // Phase 1: accumulate the header block until \r\n\r\n. Body bytes that
@@ -1670,7 +1685,7 @@ void cmd_fetch(const char *args)
                 set_status(1);
                 return;
             }
-            if (get_ticks() - last_progress > FETCH_STALL_MS) {
+            if (get_ticks() - last_progress > fetch_stall_ms) {
                 printf("fetch: connection stalled before headers\n");
                 closesocket(sock);
                 set_status(1);
@@ -1836,7 +1851,7 @@ void cmd_fetch(const char *args)
         int st = socket_state(sock);
         if (st == NET_TCP_CLOSED || (st >= NET_TCP_FIN_WAIT_1 && st <= NET_TCP_TIME_WAIT))
             break;
-        if (get_ticks() - last_progress > FETCH_STALL_MS) {
+        if (get_ticks() - last_progress > fetch_stall_ms) {
             printf("fetch: connection stalled (%llu bytes received)\n", (unsigned long long)total);
             stalled = true;
             break;
